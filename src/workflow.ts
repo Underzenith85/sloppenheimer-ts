@@ -87,7 +87,10 @@ export const workflowDefaults = Object.freeze({
   terminalStates: ['closed'] as readonly string[],
 })
 
-/** Codex-owned policy values, aligned with the generated App Server schemas. */
+/**
+ * Codex-owned policy values, aligned with `codex app-server generate-json-schema`. The App Server's
+ * `AskForApproval` also accepts a granular object form, which this host does not expose.
+ */
 export const codexApprovalPolicies = ['untrusted', 'on-request', 'never'] as const
 export const codexSandboxModes = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
