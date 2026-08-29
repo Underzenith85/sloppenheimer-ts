@@ -177,7 +177,7 @@ export const makeOperatorBackend = (
           }
           const control: LoadedControl = {
             label,
-            issues: makeGitHubIssueControl(workflow.config.tracker.provider),
+            issues: makeGitHubIssueControl(workflow.tracker.provider),
             terminalStates: workflow.config.tracker.terminalStates,
           }
           cachedControl = { fingerprint: workflow.fingerprint, control }
