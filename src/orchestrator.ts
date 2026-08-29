@@ -1077,6 +1077,12 @@ export const startOrchestrator = (
               if (event.update.usage !== null) {
                 entry.tokens = event.update.usage
               }
+              if (event.update.event === 'session_started' && event.update.message !== null) {
+                yield* Effect.logInfo('agent session started', {
+                  ...logContext(entry.issue),
+                  session_id: event.update.message,
+                })
+              }
             }
             break
           }

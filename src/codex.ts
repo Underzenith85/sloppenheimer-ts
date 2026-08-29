@@ -105,6 +105,7 @@ class CodexConnection {
   readonly #turns = new Map<string, TurnWaiter>()
   #nextId = 1
   #closed = false
+  #turnFailure: AgentError | null = null
 
   constructor(
     command: string,
@@ -204,6 +205,10 @@ class CodexConnection {
       })
     }
     const turnId = result['turn']['id']
+    this.#emit('session_started', `${threadId}-${turnId}`)
+    if (this.#turnFailure !== null) {
+      throw this.#turnFailure
+    }
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#turns.delete(turnId)
@@ -396,6 +401,7 @@ class CodexConnection {
   }
 
   #failTurns(error: AgentError): void {
+    this.#turnFailure = error
     for (const waiter of this.#turns.values()) {
       clearTimeout(waiter.timeout)
       waiter.reject(error)
