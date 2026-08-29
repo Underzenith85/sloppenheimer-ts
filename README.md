@@ -51,7 +51,14 @@ at creation: the path must be a strict descendant of the configured root both as
 symlink resolution, and must be a real directory that still exists. The verified real path — not
 the caller-supplied one — becomes the Codex subprocess cwd and the thread and turn `cwd`, so a
 stale, forged, or substituted workspace can never be entered. Every executor, local or remote, goes
-through the same `verifyWorkspaceForLaunch` invariant.
+through the same invariant.
+
+A path string is re-resolved by the kernel at every consumer, so verification alone is not enough:
+a directory can be renamed and the path repointed between the check and the use. The host therefore
+binds the verified directory's identity. It holds an open handle on it for the whole session, which
+keeps the inode allocated so a directory deleted and recreated at the same path cannot reuse it,
+and it re-confirms the device and inode at each path-consuming boundary — after the process is
+created and before every turn — rejecting a directory whose identity changed.
 
 The configured operator console is available at `http://127.0.0.1:3000`. It shows live and retrying
 agents, session totals, and the open GitHub backlog. **Start** adds the configured orchestration label;

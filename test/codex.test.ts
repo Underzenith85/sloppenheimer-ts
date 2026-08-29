@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect } from 'effect'
@@ -7,6 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { makeCodexEnvironment, runAgent, type AgentLaunch } from '../src/codex.js'
 import { issueId, issueIdentifier, type Issue, type Workspace } from '../src/domain.js'
 import type { CodexConfig } from '../src/workflow.js'
+import {
+  assertWorkspaceIdentity,
+  openVerifiedWorkspace,
+  verifyWorkspaceForLaunch,
+} from '../src/workspace.js'
 
 describe('Codex child environment', (): void => {
   it('removes custom tracker secrets and every GitHub authentication alias', (): void => {
@@ -204,6 +209,63 @@ describe('workspace containment at the agent launch boundary', (): void => {
     expect(error.category).toBe('workspace_rejected')
     expect(error.message).toContain('escapes the configured root')
     expect(spawnCalls).toEqual([])
+  })
+
+  it('rejects a directory swapped for a symlink after verification', async (): Promise<void> => {
+    const root = await makeRoot()
+    const outside = await makeRoot()
+    const path = join(root, 'issue-13')
+    await mkdir(path)
+    const verified = await Effect.runPromise(
+      verifyWorkspaceForLaunch(root, workspaceAt(path, 'issue-13')),
+    )
+
+    // The directory is renamed away and the verified path repointed outside the root, exactly as a
+    // process started by an earlier hook could do between verification and use.
+    await rename(path, join(root, 'issue-13-moved'))
+    await symlink(outside, path, 'dir')
+    const error = await Effect.runPromise(Effect.flip(assertWorkspaceIdentity(root, verified)))
+
+    expect(error.category).toBe('invalid_path')
+  })
+
+  it('rejects a directory deleted and recreated at the same path', async (): Promise<void> => {
+    const root = await makeRoot()
+    const path = join(root, 'issue-13')
+    await mkdir(path)
+
+    // The held handle keeps the inode allocated, so the recreated directory cannot reuse it.
+    const error = await Effect.runPromise(
+      Effect.flip(
+        Effect.scoped(
+          openVerifiedWorkspace(root, workspaceAt(path, 'issue-13')).pipe(
+            Effect.tap(() =>
+              Effect.promise(async () => {
+                await rm(path, { recursive: true })
+                await mkdir(path)
+              }),
+            ),
+            Effect.flatMap((verified) => assertWorkspaceIdentity(root, verified)),
+          ),
+        ),
+      ),
+    )
+
+    expect(error.category).toBe('invalid_path')
+    expect(error.message).toContain('identity changed')
+  })
+
+  it('accepts an unchanged workspace at a later boundary', async (): Promise<void> => {
+    const root = await makeRoot()
+    const path = join(root, 'issue-13')
+    await mkdir(path)
+    const verified = await Effect.runPromise(
+      verifyWorkspaceForLaunch(root, workspaceAt(path, 'issue-13')),
+    )
+
+    await expect(
+      Effect.runPromise(assertWorkspaceIdentity(root, verified)),
+    ).resolves.toBeUndefined()
   })
 
   it('launches Codex in the verified real path for a contained workspace', async (): Promise<void> => {

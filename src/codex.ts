@@ -4,9 +4,13 @@ import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
-import { AgentError } from './errors.js'
+import { AgentError, type WorkspaceError } from './errors.js'
 import type { CodexConfig } from './workflow.js'
-import { verifyWorkspaceForLaunch } from './workspace.js'
+import {
+  assertWorkspaceIdentity,
+  openVerifiedWorkspace,
+  type VerifiedWorkspace,
+} from './workspace.js'
 
 export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,
@@ -428,17 +432,36 @@ export type AgentLaunch = Readonly<{
   onEvent: (event: AgentEvent) => void
 }>
 
+const rejectWorkspaceLaunch = (error: WorkspaceError): AgentError =>
+  new AgentError({
+    category: 'workspace_rejected',
+    message: `refusing to launch Codex: ${error.message}`,
+    cause: error,
+  })
+
 const runVerifiedAgent = (
   launch: AgentLaunch,
-  verifiedPath: string,
-): Effect.Effect<AgentResult, AgentError> =>
-  Effect.scoped(
+  verified: VerifiedWorkspace,
+): Effect.Effect<AgentResult, AgentError> => {
+  /**
+   * A path string is re-resolved by the kernel at every consumer, so the identity is re-bound at
+   * each path-consuming boundary: after the process is created and before every turn. A directory
+   * renamed and replaced by a symlink in between is rejected rather than followed.
+   */
+  const rebind = (): Promise<void> =>
+    Effect.runPromise(
+      assertWorkspaceIdentity(launch.workspaceRoot, verified).pipe(
+        Effect.mapError(rejectWorkspaceLaunch),
+      ),
+    )
+
+  return Effect.scoped(
     Effect.acquireRelease(
       Effect.sync(
         () =>
           new CodexConnection(
             launch.config.command,
-            verifiedPath,
+            verified.path,
             launch.config,
             launch.secretEnvironmentNames,
             launch.onEvent,
@@ -449,7 +472,8 @@ const runVerifiedAgent = (
       Effect.flatMap((connection) =>
         Effect.tryPromise({
           try: async () => {
-            const threadId = await connection.initialize(launch.config, verifiedPath)
+            await rebind()
+            const threadId = await connection.initialize(launch.config, verified.path)
             let turnId = ''
             let turnCount = 0
             while (turnCount < launch.maxTurns) {
@@ -457,7 +481,8 @@ const runVerifiedAgent = (
                 turnCount === 0
                   ? launch.prompt
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
-              turnId = await connection.runTurn(threadId, verifiedPath, launch.config, turnPrompt)
+              await rebind()
+              turnId = await connection.runTurn(threadId, verified.path, launch.config, turnPrompt)
               turnCount += 1
               const refreshed = await Effect.runPromise(launch.refreshIssue())
               if (refreshed === null || !launch.isRoutable(refreshed)) {
@@ -478,23 +503,21 @@ const runVerifiedAgent = (
       ),
     ),
   )
+}
 
 /**
  * Launches Codex for one issue.
  *
- * Workspace containment is re-verified against the configured root immediately before the process
- * is created, and the verified real path — not the caller-supplied one — becomes the subprocess
- * cwd and the thread/turn `cwd`, so a stale, forged, or substituted workspace can never be entered.
+ * Workspace containment is verified against the configured root immediately before the process is
+ * created, and the verified real path — not the caller-supplied one — becomes the subprocess cwd
+ * and the thread/turn `cwd`. Because a path string is re-resolved by the kernel at every consumer,
+ * the verified directory's identity is re-bound after the process is created and before every
+ * turn, so a stale, forged, or substituted workspace can never be entered.
  */
 export const runAgent = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
-  verifyWorkspaceForLaunch(launch.workspaceRoot, launch.workspace).pipe(
-    Effect.mapError(
-      (error) =>
-        new AgentError({
-          category: 'workspace_rejected',
-          message: `refusing to launch Codex: ${error.message}`,
-          cause: error,
-        }),
+  Effect.scoped(
+    openVerifiedWorkspace(launch.workspaceRoot, launch.workspace).pipe(
+      Effect.mapError(rejectWorkspaceLaunch),
+      Effect.flatMap((verified) => runVerifiedAgent(launch, verified)),
     ),
-    Effect.flatMap((verifiedPath) => runVerifiedAgent(launch, verifiedPath)),
   )
