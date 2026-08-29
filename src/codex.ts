@@ -263,6 +263,8 @@ class CodexConnection {
       cwd,
       env: makeCodexEnvironment(process.env, secretEnvironmentNames),
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Its own process group, so shutdown reaches tools the App Server itself started.
+      detached: true,
     })
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
@@ -391,13 +393,11 @@ class CodexConnection {
       return Promise.reject(this.#terminalError)
     }
     return new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.#settle(turnId, {
-          _tag: 'failed',
-          error: new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
-        })
-      }, this.#turnTimeoutMs)
-      this.#waiters.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#waiters.set(turnId, {
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        timeout: this.#armTurnTimer(turnId),
+      })
     })
   }
 
@@ -437,6 +437,29 @@ class CodexConnection {
     this.#settle(target, { _tag: 'failed', error })
   }
 
+  #armTurnTimer(turnId: string): NodeJS.Timeout {
+    return setTimeout(() => {
+      this.#settle(turnId, {
+        _tag: 'failed',
+        error: new AgentError({
+          category: 'turn_timeout',
+          message: `turn ${turnId} produced no output for ${String(this.#turnTimeoutMs)}ms`,
+        }),
+      })
+    }, this.#turnTimeoutMs)
+  }
+
+  /**
+   * `codex.turn_timeout_ms` is a silence timeout, not a total turn budget: every valid protocol
+   * output belonging to the live session re-arms it, so a long but active turn never expires.
+   */
+  #noteActivity(): void {
+    for (const [turnId, waiter] of this.#waiters) {
+      clearTimeout(waiter.timeout)
+      this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
+    }
+  }
+
   emitSessionStarted(issue: Issue): void {
     this.#onEvent({
       event: 'session_started',
@@ -462,26 +485,62 @@ class CodexConnection {
     this.#process.stdout.removeAllListeners('data')
     this.#process.stderr.removeAllListeners('data')
     this.#process.stdin.end()
-    this.#process.kill('SIGTERM')
+    this.#terminate('SIGTERM')
     await new Promise<void>((resolvePromise) => {
       if (this.#process.exitCode !== null || this.#process.signalCode !== null) {
         resolvePromise()
         return
       }
-      const timeout = setTimeout(() => {
-        this.#process.kill('SIGKILL')
+      // The escalation is not cancelled when the shell exits: a tool the App Server started can
+      // outlive it in the same process group. It is skipped when the group is already empty, so a
+      // recycled leader PID is never signalled.
+      setTimeout(() => {
+        if (this.#processGroupIsAlive()) {
+          this.#terminate('SIGKILL')
+        }
         resolvePromise()
-      }, shutdownGraceMs)
+      }, shutdownGraceMs).unref()
       this.#process.once('exit', () => {
-        clearTimeout(timeout)
         resolvePromise()
       })
     })
   }
 
+  /** Whether the App Server's process group still has a member. */
+  #processGroupIsAlive(): boolean {
+    const { pid } = this.#process
+    if (pid === undefined) {
+      return false
+    }
+    try {
+      process.kill(-pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Signals the whole App Server process group, not only the shell that started it. */
+  #terminate(signal: NodeJS.Signals): void {
+    const { pid } = this.#process
+    if (pid === undefined) {
+      return
+    }
+    try {
+      process.kill(-pid, signal)
+    } catch {
+      try {
+        this.#process.kill(signal)
+      } catch {
+        // The process tree is already gone.
+      }
+    }
+  }
+
   static #turnFailure(turnId: string, status: string): AgentError {
+    const cancelled = status === 'cancelled' || status === 'canceled'
     return new AgentError({
-      category: 'turn_failed',
+      category: cancelled ? 'turn_cancelled' : 'turn_failed',
       message: `turn ${turnId} finished with status ${status}`,
     })
   }
@@ -531,6 +590,7 @@ class CodexConnection {
       this.#emit('malformed', 'Codex emitted a non-object protocol message')
       return
     }
+    this.#noteActivity()
     const parsed = decoded
     const id = parsed['id']
     const method = parsed['method']

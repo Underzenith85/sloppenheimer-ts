@@ -2,6 +2,9 @@
 // scenario name selects one protocol behaviour so a test can drive a specific startup, framing,
 // ordering, approval, malformed-data or shutdown path without depending on an installed Codex.
 
+import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+
 type JsonRecord = Record<string, unknown>
 
 const scenario = process.argv[2] ?? 'normal'
@@ -186,6 +189,39 @@ const handleTurnStart = (id: unknown): void => {
         })}\n`,
       )
       completeTurn()
+      return
+    }
+    case 'heartbeat': {
+      send({ id, result: { turn } })
+      let ticks = 0
+      const beat = setInterval(() => {
+        ticks += 1
+        send({ method: 'turn/progress', params: { turn, tick: ticks } })
+        if (ticks >= 10) {
+          clearInterval(beat)
+          completeTurn()
+        }
+      }, 60)
+      return
+    }
+    case 'silent-turn': {
+      send({ id, result: { turn } })
+      return
+    }
+    case 'spawn-grandchild': {
+      send({ id, result: { turn } })
+      const child = spawn('sleep', ['300'], { stdio: 'ignore' })
+      child.unref()
+      writeFileSync('grandchild.pid', String(child.pid ?? 0))
+      return
+    }
+    case 'stubborn-grandchild': {
+      send({ id, result: { turn } })
+      // Ignores SIGTERM and holds none of the inherited pipes, so the App Server can close while
+      // the descendant is still alive in the process group.
+      const child = spawn('sh', ['-c', 'trap "" TERM; sleep 300'], { stdio: 'ignore' })
+      child.unref()
+      writeFileSync('grandchild.pid', String(child.pid ?? 0))
       return
     }
     case 'usage': {

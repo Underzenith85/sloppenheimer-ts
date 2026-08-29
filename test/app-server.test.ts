@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { Effect } from 'effect'
+import { Effect, Fiber } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -68,7 +69,7 @@ const runScenario = async (
   scenario: string,
   overrides: Partial<CodexConfig> = {},
   maxTurns = 1,
-): Promise<RunOutcome> => {
+): Promise<RunOutcome & Readonly<{ path: string }>> => {
   const { root, path } = await makeWorkspace()
   const events: AgentEvent[] = []
   const config: CodexConfig = {
@@ -97,8 +98,28 @@ const runScenario = async (
   }
   const exit = await Effect.runPromise(Effect.either(runAgent(launch)))
   return exit._tag === 'Right'
-    ? { result: exit.right, error: null, events }
-    : { result: null, error: exit.left, events }
+    ? { result: exit.right, error: null, events, path }
+    : { result: null, error: exit.left, events, path }
+}
+
+const processIsAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return true
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25))
+  }
+  return predicate()
 }
 
 describe('App Server framing', (): void => {
@@ -295,7 +316,6 @@ describe('App Server session lifecycle', (): void => {
   it('reports a cancelled turn announced as turn/failed', async (): Promise<void> => {
     const outcome = await runScenario('turn-cancelled')
 
-    expect(outcome.error?.category).toBe('turn_failed')
     // The specific status the server reported must survive; `turn/failed` does not flatten it.
     expect(outcome.error?.message).toContain('cancelled')
   })
@@ -455,4 +475,94 @@ describe('installed Codex App Server schema', (): void => {
       expect(schema).toContain(`"${mode}"`)
     }
   }, 60_000)
+})
+
+describe('App Server timeouts and shutdown', (): void => {
+  it('treats turn_timeout_ms as a silence timeout that activity re-arms', async (): Promise<void> => {
+    // The turn runs far longer than turn_timeout_ms but is never silent for that long.
+    const outcome = await runScenario('heartbeat', { turnTimeoutMs: 300 })
+
+    expect(outcome.error).toBeNull()
+    expect(outcome.result?.turnCount).toBe(1)
+    expect(
+      outcome.events.filter((event) => event.event === 'turn/progress').length,
+    ).toBeGreaterThanOrEqual(5)
+  }, 30_000)
+
+  it('expires a turn that goes silent for longer than the silence timeout', async (): Promise<void> => {
+    const outcome = await runScenario('silent-turn', { turnTimeoutMs: 300 })
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+    expect(outcome.error?.message).toContain('no output')
+  }, 30_000)
+
+  it('keeps the read timeout distinct from the turn silence timeout', async (): Promise<void> => {
+    const outcome = await runScenario('startup-silent', {
+      readTimeoutMs: 200,
+      turnTimeoutMs: 60_000,
+    })
+
+    expect(outcome.error?.category).toBe('read_timeout')
+  }, 30_000)
+
+  it('reports a cancelled turn with its own category', async (): Promise<void> => {
+    const outcome = await runScenario('turn-cancelled')
+
+    expect(outcome.error?.category).toBe('turn_cancelled')
+  })
+
+  it('terminates the whole App Server process tree on shutdown', async (): Promise<void> => {
+    const outcome = await runScenario('spawn-grandchild', { turnTimeoutMs: 400 })
+    const pidFile = join(outcome.path, 'grandchild.pid')
+    const grandchild = Number((await readFile(pidFile, 'utf8')).trim())
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+    expect(Number.isSafeInteger(grandchild)).toBe(true)
+    expect(grandchild).toBeGreaterThan(0)
+    expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
+  }, 30_000)
+
+  it('still forces termination when a descendant ignores SIGTERM', async (): Promise<void> => {
+    const outcome = await runScenario('stubborn-grandchild', { turnTimeoutMs: 400 })
+    const grandchild = Number((await readFile(join(outcome.path, 'grandchild.pid'), 'utf8')).trim())
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+    expect(grandchild).toBeGreaterThan(0)
+    expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
+  }, 40_000)
+
+  it('settles a cancelled session once and leaves no process tree behind', async (): Promise<void> => {
+    const { root, path } = await makeWorkspace()
+    const config: CodexConfig = {
+      command: `node ${JSON.stringify(fakeAppServer)} spawn-grandchild`,
+      approvalPolicy: 'never',
+      threadSandbox: 'workspace-write',
+      turnSandboxPolicy: null,
+      turnTimeoutMs: 60_000,
+      readTimeoutMs: 5_000,
+      stallTimeoutMs: 0,
+    }
+    const fiber = Effect.runFork(
+      runAgent({
+        issue,
+        workspace: { path, key: 'issue-14', createdNow: false },
+        workspaceRoot: root,
+        config,
+        prompt: 'do the work',
+        maxTurns: 1,
+        secretEnvironmentNames: [],
+        refreshIssue: () => Effect.succeed(null),
+        isRoutable: () => false,
+        onEvent: () => undefined,
+      }),
+    )
+    const pidFile = join(path, 'grandchild.pid')
+    await waitFor(() => existsSync(pidFile))
+    const grandchild = Number((await readFile(pidFile, 'utf8')).trim())
+
+    await Effect.runPromise(Fiber.interrupt(fiber))
+
+    expect(grandchild).toBeGreaterThan(0)
+    expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
+  }, 30_000)
 })
