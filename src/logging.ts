@@ -10,8 +10,11 @@ const exactSecretKeys = new Set([
   'secret',
   'token',
   'apikey',
+  'accesskey',
   'accesstoken',
+  'privatekey',
   'refreshtoken',
+  'secretaccesskey',
   'authtoken',
 ])
 
@@ -21,13 +24,13 @@ const isSecretKey = (key: string): boolean => {
     return true
   }
   if (
-    /(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|credentials?|password|secret|token)$/u.test(
+    /(?:^|[_-])(?:api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|credentials?|password|secret|token)$/u.test(
       lowerKey,
     )
   ) {
     return true
   }
-  return /(?:ApiKey|AccessToken|RefreshToken|AuthToken|Credentials?|Password|Secret|Token)$/u.test(
+  return /(?:ApiKey|AccessKey|PrivateKey|SecretAccessKey|AccessToken|RefreshToken|AuthToken|Credentials?|Password|Secret|Token)$/u.test(
     key,
   )
 }
@@ -78,8 +81,11 @@ const sanitize = (value: unknown, depth = 0): unknown => {
   if (typeof value === 'string') {
     return boundedString(value)
   }
-  if (value === null || typeof value !== 'object' || depth >= 4) {
+  if (value === null || typeof value !== 'object') {
     return value
+  }
+  if (depth >= 4) {
+    return '[TRUNCATED]'
   }
   if (Array.isArray(value)) {
     return value.slice(0, 20).map((entry) => sanitize(entry, depth + 1))

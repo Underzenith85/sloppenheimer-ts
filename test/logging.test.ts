@@ -7,10 +7,10 @@ describe('operator logging', (): void => {
   it('redacts credentials embedded in quoted structured strings', (): void => {
     expect(
       redactSecretsInString(
-        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access","clientSecret":"oauth"} payload: {\"token\":\"nested-secret\"} OPENAI_API_KEY=openai CODEX_ACCESS_TOKEN=codex PASSWORD="two words hidden" Authorization: Basic dXNlcjpwYXNz`,
+        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access","clientSecret":"oauth"} payload: {\"token\":\"nested-secret\"} OPENAI_API_KEY=openai CODEX_ACCESS_TOKEN=codex AWS_SECRET_ACCESS_KEY=aws PASSWORD="two words hidden" Authorization: Basic dXNlcjpwYXNz`,
       ),
     ).toBe(
-      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]","clientSecret":"[REDACTED]"} payload: {\"token\":\"[REDACTED]\"} OPENAI_API_KEY=[REDACTED] CODEX_ACCESS_TOKEN=[REDACTED] PASSWORD=[REDACTED] Authorization=[REDACTED]`,
+      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]","clientSecret":"[REDACTED]"} payload: {\"token\":\"[REDACTED]\"} OPENAI_API_KEY=[REDACTED] CODEX_ACCESS_TOKEN=[REDACTED] AWS_SECRET_ACCESS_KEY=[REDACTED] PASSWORD=[REDACTED] Authorization=[REDACTED]`,
     )
   })
 
@@ -30,5 +30,24 @@ describe('operator logging', (): void => {
     ).resolves.toBeUndefined()
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('logging_sink_failed=true'))
     stderr.mockRestore()
+  })
+
+  it('does not expose objects beyond the structured-log depth limit', async (): Promise<void> => {
+    const entries: unknown[] = []
+    const collectingLogger = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make((entry) => {
+        entries.push(entry)
+      }),
+    )
+
+    await Effect.runPromise(
+      logInfo('action=test outcome=completed', {
+        a: { b: { c: { d: { e: { token: 'deep-secret' } } } } },
+      }).pipe(Effect.provide(collectingLogger)),
+    )
+
+    expect(JSON.stringify(entries)).not.toContain('deep-secret')
+    expect(JSON.stringify(entries)).toContain('[TRUNCATED]')
   })
 })
