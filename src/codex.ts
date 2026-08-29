@@ -55,16 +55,22 @@ const isJsonValue = (value: unknown): value is JsonValue => {
 export const composeSessionId = (threadId: string, turnId: string | null): string =>
   turnId === null ? threadId : `${threadId}:${turnId}`
 
+export type TokenUsage = Readonly<{
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}>
+
+export type RateLimits = Readonly<Record<string, string | number | boolean | null>>
+
 export type AgentEvent = Readonly<{
   event: string
   timestamp: Date
   processId: number | null
   message: string | null
-  usage: Readonly<{
-    inputTokens: number
-    outputTokens: number
-    totalTokens: number
-  }> | null
+  /** Absolute session totals. Delta-shaped payloads are never reported here. */
+  usage: TokenUsage | null
+  rateLimits: RateLimits | null
   threadId: string | null
   turnId: string | null
   sessionId: string | null
@@ -107,21 +113,63 @@ const errorMessage = (value: JsonValue): string => {
   return typeof message === 'string' ? message : 'unknown protocol error'
 }
 
-const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
+const readTokens = (usage: JsonObject, camel: string, snake: string): number | null => {
+  const value = usage[camel] ?? usage[snake]
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+/**
+ * Reads absolute session token totals. Only payloads that declare totals are accepted; a
+ * delta-shaped payload is ignored rather than being mistaken for a cumulative total.
+ */
+const usageFrom = (message: JsonObject): TokenUsage | null => {
   const params = message['params']
   if (!isJsonObject(params)) {
     return null
   }
-  const usage = params['usage']
+  const usage = params['usage'] ?? params['totalTokenUsage'] ?? params['total_token_usage']
   if (!isJsonObject(usage)) {
     return null
   }
-  const input = usage['inputTokens']
-  const output = usage['outputTokens']
-  const total = usage['totalTokens']
-  return typeof input === 'number' && typeof output === 'number' && typeof total === 'number'
-    ? { inputTokens: input, outputTokens: output, totalTokens: total }
-    : null
+  if (usage['delta'] !== undefined || usage['isDelta'] === true) {
+    return null
+  }
+  const input = readTokens(usage, 'inputTokens', 'input_tokens')
+  const output = readTokens(usage, 'outputTokens', 'output_tokens')
+  const total = readTokens(usage, 'totalTokens', 'total_tokens')
+  if (input === null || output === null) {
+    return null
+  }
+  return { inputTokens: input, outputTokens: output, totalTokens: total ?? input + output }
+}
+
+/** Flattens the primitive fields of a reported rate-limit window. */
+const rateLimitsFrom = (message: JsonObject): RateLimits | null => {
+  const params = message['params']
+  if (!isJsonObject(params)) {
+    return null
+  }
+  const limits = params['rateLimits'] ?? params['rate_limits']
+  if (!isJsonObject(limits)) {
+    return null
+  }
+  const primitive = (value: JsonValue): value is string | number | boolean | null =>
+    value === null || typeof value !== 'object'
+  const entries: (readonly [string, string | number | boolean | null])[] = []
+  for (const [key, value] of Object.entries(limits)) {
+    if (primitive(value)) {
+      entries.push([key, value])
+      continue
+    }
+    if (isJsonObject(value)) {
+      for (const [nested, nestedValue] of Object.entries(value)) {
+        if (primitive(nestedValue)) {
+          entries.push([`${key}.${nested}`, nestedValue])
+        }
+      }
+    }
+  }
+  return entries.length === 0 ? null : Object.freeze(Object.fromEntries(entries))
 }
 
 /**
@@ -477,6 +525,7 @@ class CodexConnection {
       processId: this.processId,
       message: issue.url,
       usage: null,
+      rateLimits: null,
       threadId: this.#threadId,
       turnId: this.#turnId,
       sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
@@ -744,6 +793,7 @@ class CodexConnection {
       processId: this.processId,
       message: null,
       usage: usageFrom(message),
+      rateLimits: rateLimitsFrom(message),
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
@@ -804,6 +854,7 @@ class CodexConnection {
       processId: this.processId,
       message,
       usage: null,
+      rateLimits: null,
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),

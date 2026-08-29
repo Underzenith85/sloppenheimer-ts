@@ -22,7 +22,12 @@ type RunningEntry = {
   startedAt: Date
   lastEventAt: Date | null
   lastEvent: string | null
+  lastMessage: string | null
   processId: number | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
   tokens: Omit<TokenTotals, 'secondsRunning'>
 }
 
@@ -56,7 +61,12 @@ export type RunningSnapshot = Readonly<{
   startedAt: string
   lastEventAt: string | null
   lastEvent: string | null
+  lastMessage: string | null
   processId: number | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
   tokens: Omit<TokenTotals, 'secondsRunning'>
   workerHost: 'local'
 }>
@@ -292,6 +302,22 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_id: issue.id,
   issue_identifier: issue.identifier,
 })
+
+/** Payload summaries in logs and snapshots are bounded; nothing unbounded reaches a sink. */
+const payloadSummaryLimit = 500
+
+export const summarizePayload = (value: string | null): string | null => {
+  if (value === null) {
+    return null
+  }
+  const collapsed = value.replaceAll(/\s+/gu, ' ').trim()
+  if (collapsed.length === 0) {
+    return null
+  }
+  return collapsed.length <= payloadSummaryLimit
+    ? collapsed
+    : `${collapsed.slice(0, payloadSummaryLimit)}… (truncated)`
+}
 
 const identifierIssueNumber = (identifier: string): number | null => {
   const match = /#(\d+)$/u.exec(identifier)
@@ -532,11 +558,12 @@ export const startOrchestrator = (
         state.retries.set(issue.id, { issue, attempt, dueAt, error, fiber })
         state.claimed.add(issue.id)
         yield* Effect.logInfo('retry scheduled', {
-          issue_id: issue.id,
-          issue_identifier: issue.identifier,
+          ...logContext(issue),
+          action: 'retry',
+          outcome: 'scheduled',
           attempt,
           due_at: new Date(dueAt).toISOString(),
-          error,
+          error: summarizePayload(error),
         })
       })
 
@@ -597,7 +624,9 @@ export const startOrchestrator = (
         if (preflight._tag === 'Failed') {
           yield* Effect.logError('dispatch preflight failed', {
             ...logContext(issue),
-            error: preflight.error.message,
+            action: 'dispatch',
+            outcome: 'rejected',
+            error: summarizePayload(preflight.error.message),
           })
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
           return
@@ -692,10 +721,21 @@ export const startOrchestrator = (
           startedAt: new Date(),
           lastEventAt: null,
           lastEvent: null,
+          lastMessage: null,
           processId: null,
+          threadId: null,
+          turnId: null,
+          sessionId: null,
+          turnCount: 0,
           tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         })
-        yield* Effect.logInfo('worker dispatched', logContext(issue))
+        yield* Effect.logInfo('worker dispatched', {
+          ...logContext(issue),
+          action: 'dispatch',
+          outcome: 'started',
+          attempt,
+          run_id: runId,
+        })
       })
 
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
@@ -778,6 +818,8 @@ export const startOrchestrator = (
             state.claimed.delete(id)
             yield* Effect.logInfo('pull request merged', {
               ...logContext(handoff.issue),
+              action: 'handoff',
+              outcome: 'merged',
               pull_request_url: handoff.pullRequestUrl,
               merge_commit_sha: merged.sha,
             })
@@ -1026,7 +1068,12 @@ export const startOrchestrator = (
           startedAt: entry.startedAt.toISOString(),
           lastEventAt: entry.lastEventAt?.toISOString() ?? null,
           lastEvent: entry.lastEvent,
+          lastMessage: entry.lastMessage,
           processId: entry.processId,
+          threadId: entry.threadId,
+          turnId: entry.turnId,
+          sessionId: entry.sessionId,
+          turnCount: entry.turnCount,
           tokens: entry.tokens,
           workerHost: 'local',
         })),
@@ -1048,9 +1095,19 @@ export const startOrchestrator = (
       }
     }
 
-    const eventLoop = Effect.gen(function* () {
-      for (;;) {
-        const event = yield* Queue.take(mailbox)
+    /**
+     * A failing log sink must stay visible without taking orchestration down with it, so a defect
+     * raised while handling one event is reported on stderr and the loop continues.
+     */
+    const reportLoopDefect = (defect: unknown): Effect.Effect<void> =>
+      Effect.sync(() => {
+        process.stderr.write(
+          `symphony: orchestrator event handling failed: ${summarizePayload(String(defect)) ?? 'unknown defect'}\n`,
+        )
+      })
+
+    const handleEvent = (event: OrchestratorEvent): Effect.Effect<void, never, Scope.Scope> =>
+      Effect.gen(function* () {
         switch (event._tag) {
           case 'Tick': {
             pollRunning = true
@@ -1073,13 +1130,38 @@ export const startOrchestrator = (
           }
           case 'AgentUpdate': {
             const entry = state.running.get(event.issueId)
-            if (entry !== undefined) {
-              entry.lastEvent = event.update.event
-              entry.lastEventAt = event.update.timestamp
-              entry.processId = event.update.processId
-              if (event.update.usage !== null) {
-                entry.tokens = event.update.usage
-              }
+            if (entry === undefined) {
+              break
+            }
+            const update = event.update
+            entry.lastEvent = update.event
+            entry.lastEventAt = update.timestamp
+            entry.lastMessage = summarizePayload(update.message)
+            entry.processId = update.processId
+            entry.threadId = update.threadId ?? entry.threadId
+            entry.turnId = update.turnId ?? entry.turnId
+            entry.sessionId = update.sessionId ?? entry.sessionId
+            if (update.event === 'turn/completed' || update.event === 'turn/failed') {
+              entry.turnCount += 1
+            }
+            if (update.usage !== null) {
+              // Absolute session totals: a repeated report replaces, never accumulates.
+              entry.tokens = update.usage
+            }
+            if (update.rateLimits !== null) {
+              state.rateLimits = update.rateLimits
+            }
+            if (update.event === 'session_started') {
+              yield* Effect.logInfo('session started', {
+                ...logContext(entry.issue),
+                action: 'session',
+                outcome: 'started',
+                session_id: entry.sessionId,
+                thread_id: entry.threadId,
+                turn_id: entry.turnId,
+                process_id: entry.processId,
+                issue_url: entry.issue.url,
+              })
             }
             break
           }
@@ -1089,6 +1171,21 @@ export const startOrchestrator = (
               break
             }
             accountEndedRuntime(entry, Date.now())
+            yield* Effect.logInfo('session ended', {
+              ...logContext(entry.issue),
+              action: 'session',
+              outcome: event.outcome === 'normal' ? 'succeeded' : 'failed',
+              session_id: entry.sessionId,
+              thread_id: entry.threadId,
+              turn_id: entry.turnId,
+              turn_count: entry.turnCount,
+              attempt: event.attempt,
+              input_tokens: entry.tokens.inputTokens,
+              output_tokens: entry.tokens.outputTokens,
+              total_tokens: entry.tokens.totalTokens,
+              seconds_running: Math.max(Date.now() - entry.startedAt.getTime(), 0) / 1_000,
+              error: summarizePayload(event.error),
+            })
             if (event.outcome === 'normal') {
               const handoff = yield* entry.execution.tracker
                 .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
@@ -1126,6 +1223,9 @@ export const startOrchestrator = (
               yield* persistHandoffs()
               yield* Effect.logInfo('worker handed off pull request', {
                 ...logContext(entry.issue),
+                action: 'handoff',
+                outcome: 'opened',
+                session_id: entry.sessionId,
                 branch: handoff.result.branchName,
                 pull_request_url: handoff.result.pullRequestUrl,
               })
@@ -1214,6 +1314,12 @@ export const startOrchestrator = (
             break
           }
         }
+      })
+
+    const eventLoop = Effect.gen(function* () {
+      for (;;) {
+        const event = yield* Queue.take(mailbox)
+        yield* handleEvent(event).pipe(Effect.catchAllDefect(reportLoopDefect))
       }
     })
 

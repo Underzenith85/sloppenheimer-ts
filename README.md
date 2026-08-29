@@ -148,6 +148,25 @@ separate test compares the methods, policy values, and permission types this cli
 `codex app-server generate-json-schema` when Codex is installed, and is inert when it is not, so no
 machine-specific schema is committed.
 
+## Telemetry and logs
+
+Each running worker carries its thread id, turn id, composed session id, process id, turn count,
+last event and bounded last-message summary, last event time, issue URL and retry attempt; the
+operator console and the JSON snapshot expose all of them.
+
+Token accounting uses absolute session totals only: a repeated report of the same totals replaces
+rather than accumulates, and a delta-shaped payload is ignored rather than being mistaken for a
+cumulative total. Session totals are added once when a run ends, and the snapshot adds live runtime
+seconds for workers that are still running. The most recently reported rate-limit window is kept on
+the snapshot.
+
+Logs carry stable fields. Every issue-scoped line includes `issue_id` and `issue_identifier`, every
+session lifecycle line includes `session_id`, and lines use stable `action`, `outcome` and `error`
+fields. Payload summaries are collapsed and truncated, and credentials are never logged: hook
+scripts, tracker tokens and the Codex environment stay out of every sink. A failure while handling
+one orchestrator event is reported on stderr and the loop continues, so a broken log sink stays
+visible without taking orchestration down.
+
 ## Configuration
 
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are

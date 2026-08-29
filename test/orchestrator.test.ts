@@ -1,15 +1,24 @@
 import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
+import type { AgentEvent } from '../src/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
-import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
+import {
+  issueId,
+  issueIdentifier,
+  type BlockerRef,
+  type Issue,
+  type TokenTotals,
+} from '../src/domain.js'
 import { TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import {
   issueIsRoutable,
   retryDelayMs,
   sortIssues,
   startOrchestrator,
+  summarizePayload,
   type OrchestratorDependencies,
+  type RunningSnapshot,
 } from '../src/orchestrator.js'
 import type { TrackerAdapter } from '../src/tracker.js'
 import type { Workflow } from '../src/workflow.js'
@@ -1075,5 +1084,116 @@ describe('scheduler dependency hydration', (): void => {
     )
 
     expect(requested).toContainEqual(['symphony', 'ready'])
+  })
+})
+
+describe('session telemetry and token accounting', (): void => {
+  const agentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
+    event: 'turn/progress',
+    timestamp: new Date(),
+    processId: 4242,
+    message: null,
+    usage: null,
+    rateLimits: null,
+    threadId: null,
+    turnId: null,
+    sessionId: null,
+    ...overrides,
+  })
+
+  const runWithEvents = async (
+    events: readonly AgentEvent[],
+  ): Promise<
+    Readonly<{ running: readonly RunningSnapshot[]; totals: TokenTotals; rateLimits: unknown }>
+  > => {
+    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let emitted = (): void => undefined
+    const allEmitted = new Promise<void>((resolvePromise) => {
+      emitted = resolvePromise
+    })
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: ({ onEvent }) =>
+        Effect.sync(() => {
+          for (const event of events) {
+            onEvent(event)
+          }
+          emitted()
+        }).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          yield* Effect.promise(() => allEmitted)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+    return { running: snapshot.running, totals: snapshot.totals, rateLimits: snapshot.rateLimits }
+  }
+
+  it('tracks thread, turn, session, process and turn count', async (): Promise<void> => {
+    const { running } = await runWithEvents([
+      agentEvent({
+        event: 'session_started',
+        threadId: 'thread-9',
+        turnId: 'turn-1',
+        sessionId: 'thread-9:turn-1',
+        message: 'https://example.test/issues/16',
+      }),
+      agentEvent({ event: 'turn/completed', threadId: 'thread-9', turnId: 'turn-1' }),
+    ])
+
+    expect(running[0]?.threadId).toBe('thread-9')
+    expect(running[0]?.turnId).toBe('turn-1')
+    expect(running[0]?.sessionId).toBe('thread-9:turn-1')
+    expect(running[0]?.processId).toBe(4242)
+    expect(running[0]?.turnCount).toBe(1)
+    expect(running[0]?.lastEvent).toBe('turn/completed')
+  })
+
+  it('replaces repeated absolute totals instead of accumulating them', async (): Promise<void> => {
+    const { running } = await runWithEvents([
+      agentEvent({ usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 } }),
+      agentEvent({ usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 } }),
+      agentEvent({ usage: { inputTokens: 25, outputTokens: 9, totalTokens: 34 } }),
+    ])
+
+    expect(running[0]?.tokens).toEqual({ inputTokens: 25, outputTokens: 9, totalTokens: 34 })
+  })
+
+  it('records the most recent reported rate-limit window', async (): Promise<void> => {
+    const { rateLimits } = await runWithEvents([
+      agentEvent({ rateLimits: { 'primary.used_percent': 12 } }),
+      agentEvent({ rateLimits: { 'primary.used_percent': 41, 'primary.resets_in_seconds': 900 } }),
+    ])
+
+    expect(rateLimits).toEqual({
+      'primary.used_percent': 41,
+      'primary.resets_in_seconds': 900,
+    })
+  })
+
+  it('bounds a payload summary held for the operator', async (): Promise<void> => {
+    const { running } = await runWithEvents([
+      agentEvent({ event: 'diagnostic', message: 'a'.repeat(5_000) }),
+    ])
+
+    expect(running[0]?.lastMessage?.endsWith('(truncated)')).toBe(true)
+    expect(running[0]?.lastMessage?.length).toBeLessThan(600)
+  })
+})
+
+describe('payload summaries', (): void => {
+  it('collapses whitespace, drops empty values and truncates', (): void => {
+    expect(summarizePayload(null)).toBeNull()
+    expect(summarizePayload('   \n ')).toBeNull()
+    expect(summarizePayload(' a \n b ')).toBe('a b')
+    expect(summarizePayload('x'.repeat(600))).toHaveLength(500 + '… (truncated)'.length)
   })
 })
