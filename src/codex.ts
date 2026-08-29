@@ -173,7 +173,37 @@ export const makeLineReader = (
   }
 }
 
-const isApprovalRequest = (method: string): boolean => /requestApproval$/u.test(method)
+/**
+ * Identity a notification carries itself. Item and delta notifications declare `threadId` and
+ * `turnId` directly under `params`, so they attribute correctly even out of order; the turn
+ * lifecycle notifications carry the turn nested under `params.turn` instead.
+ */
+const notificationIdentity = (
+  message: JsonObject,
+): Readonly<{ threadId: string | null; turnId: string | null }> => {
+  const params = message['params']
+  if (!isJsonObject(params)) {
+    return { threadId: null, turnId: null }
+  }
+  const threadId = params['threadId']
+  const turnId = params['turnId']
+  return {
+    threadId: typeof threadId === 'string' ? threadId : null,
+    turnId: typeof turnId === 'string' ? turnId : null,
+  }
+}
+
+/**
+ * A permissions approval answers with a permissions grant, not the `decision` value the command
+ * execution and file change approvals take, so it is declined explicitly rather than answered with
+ * a body the server cannot decode. A declined request fails the turn with a readable reason; an
+ * undecodable one leaves the server waiting until the turn times out.
+ */
+const isPermissionsApproval = (method: string): boolean =>
+  method.endsWith('/permissions/requestApproval')
+
+const isApprovalRequest = (method: string): boolean =>
+  /requestApproval$/u.test(method) && !isPermissionsApproval(method)
 const isUserInputRequest = (method: string): boolean => /requestUserInput$/u.test(method)
 
 class CodexConnection {
@@ -535,16 +565,20 @@ class CodexConnection {
 
   #handleNotification(method: string, message: JsonObject): void {
     const turn = this.#turnFrom(message)
+    const carried = notificationIdentity(message)
+    // A notification that names its own thread and turn is attributable even when it arrives before
+    // the response that would have taught the connection those ids.
+    const threadId = carried.threadId ?? this.#threadId
+    const turnId = carried.turnId ?? turn?.id ?? this.#turnId
     this.#onEvent({
       event: method,
       timestamp: new Date(),
       processId: this.processId,
       message: null,
       usage: usageFrom(message),
-      threadId: this.#threadId,
-      turnId: turn?.id ?? this.#turnId,
-      sessionId:
-        this.#threadId === null ? null : composeSessionId(this.#threadId, turn?.id ?? this.#turnId),
+      threadId,
+      turnId,
+      sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
     })
     if (method !== 'turn/completed' && method !== 'turn/failed') {
       return

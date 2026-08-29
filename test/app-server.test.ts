@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -177,6 +177,23 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.message).toBe('https://example.test/issues/14')
   })
 
+  it('attributes a notification from the thread and turn ids it carries', async (): Promise<void> => {
+    const outcome = await runScenario('carried-identity')
+
+    expect(outcome.error).toBeNull()
+    const started = outcome.events.find((event) => event.event === 'item/started')
+    expect(started?.threadId).toBe('thread-1')
+    expect(started?.turnId).toBe('turn-1')
+    expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
+  }, 30_000)
+
+  it('declines a permissions approval rather than answering with the decision shape', async (): Promise<void> => {
+    const outcome = await runScenario('permissions-approval', { turnTimeoutMs: 1_000 })
+
+    expect(outcome.events.map((event) => event.event)).toContain('unsupported_tool_call')
+    expect(outcome.events.map((event) => event.event)).not.toContain('approval_auto_approved')
+  }, 30_000)
+
   it('attributes a notification batched with the turn/start response to that turn', async (): Promise<void> => {
     const outcome = await runScenario('batched-identity')
 
@@ -289,15 +306,40 @@ describe('App Server request handling', (): void => {
 
 const execFileAsync = promisify(execFile)
 
+const schemaArguments = ['app-server', 'generate-json-schema'] as const
+const bufferLimit = { maxBuffer: 64 * 1024 * 1024 } as const
+
+/**
+ * The schema of the installed Codex, or null when Codex is absent. Only a missing executable is a
+ * skip: any other failure — a rejected invocation above all — must fail the test rather than be
+ * swallowed into a silent pass that checks nothing.
+ */
 const codexSchema = async (): Promise<string | null> => {
-  try {
-    const { stdout } = await execFileAsync('codex', ['app-server', 'generate-json-schema'], {
-      maxBuffer: 64 * 1024 * 1024,
-    })
-    return stdout
-  } catch {
+  const help = await execFileAsync('codex', [...schemaArguments, '--help'], bufferLimit).catch(
+    (cause: unknown) => {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null
+      }
+      throw cause
+    },
+  )
+  if (help === null) {
     return null
   }
+  if (!help.stdout.includes('--out')) {
+    const { stdout } = await execFileAsync('codex', [...schemaArguments], bufferLimit)
+    return stdout
+  }
+  // This build writes a bundle of schema files into a directory instead of printing to stdout.
+  const directory = await mkdtemp(join(tmpdir(), 'symphony-codex-schema-'))
+  roots.push(directory)
+  await execFileAsync('codex', [...schemaArguments, '--out', directory], bufferLimit)
+  const entries = await readdir(directory, { recursive: true, withFileTypes: true })
+  const files = entries.filter((entry) => entry.isFile())
+  const contents = await Promise.all(
+    files.map((entry) => readFile(join(entry.parentPath, entry.name), 'utf8')),
+  )
+  return contents.join('\n')
 }
 
 describe('installed Codex App Server schema', (): void => {
@@ -308,6 +350,9 @@ describe('installed Codex App Server schema', (): void => {
       expect(schema).toBeNull()
       return
     }
+
+    // A schema that came back empty means the invocation produced nothing, not that it agreed.
+    expect(schema.length).toBeGreaterThan(0)
 
     for (const method of ['initialize', 'thread/start', 'turn/start']) {
       expect(schema).toContain(method)

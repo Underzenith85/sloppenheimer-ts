@@ -95,6 +95,26 @@ const handleTurnStart = (id: unknown): void => {
       }, 20)
       return
     }
+    case 'permissions-approval': {
+      send({ id, result: { turn } })
+      send({
+        id: 9004,
+        method: 'item/permissions/requestApproval',
+        params: { permissions: ['network'] },
+      })
+      return
+    }
+    case 'carried-identity': {
+      // An item notification naming its own thread and turn, emitted before the response that
+      // would otherwise teach the client those ids.
+      send({
+        method: 'item/started',
+        params: { threadId: thread.id, turnId: turn.id, item: { id: 'item-1' } },
+      })
+      send({ id, result: { turn } })
+      completeTurn()
+      return
+    }
     case 'batched-identity': {
       // Response and a turn-less notification in a single write, so the client reads both from one
       // chunk and must know the turn id before it dispatches the notification.
@@ -152,7 +172,7 @@ const handle = (message: JsonRecord): void => {
     completeTurn()
     return
   }
-  if (id === 9002 || id === 9003) {
+  if (id === 9002 || id === 9003 || id === 9004) {
     send({ method: 'request/rejected', params: message })
   }
 }
