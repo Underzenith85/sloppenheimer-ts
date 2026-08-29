@@ -1122,6 +1122,12 @@ describe('session telemetry accounting', (): void => {
               },
             }),
           )
+          harness.emitAgentEvent(
+            makeAgentEvent({ event: 'item/completed', message: 'meaningful update', usage: null }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({ event: 'thread/tokenUsage/updated', message: null, usage: null }),
+          )
           yield* Effect.yieldNow()
           yield* Effect.yieldNow()
 
@@ -1132,7 +1138,7 @@ describe('session telemetry accounting', (): void => {
             sessionId: 'thread-1',
             turnCount: 1,
             processId: 123,
-            lastMessage: 'working',
+            lastMessage: 'meaningful update',
             tokens: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
           })
           expect(live.totals).toMatchObject({ inputTokens: 14, outputTokens: 7, totalTokens: 21 })

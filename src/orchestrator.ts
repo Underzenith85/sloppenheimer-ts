@@ -1154,7 +1154,9 @@ export const startOrchestrator = (
             if (entry !== undefined) {
               entry.lastEvent = event.update.event
               entry.lastEventAt = event.update.timestamp
-              entry.lastMessage = event.update.message
+              if (event.update.message !== null) {
+                entry.lastMessage = event.update.message
+              }
               entry.processId = event.update.processId
               entry.threadId = event.update.threadId ?? entry.threadId
               entry.turnId = event.update.turnId ?? entry.turnId

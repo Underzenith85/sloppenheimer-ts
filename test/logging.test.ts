@@ -7,10 +7,10 @@ describe('operator logging', (): void => {
   it('redacts credentials embedded in quoted structured strings', (): void => {
     expect(
       redactSecretsInString(
-        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access"}`,
+        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access"} OPENAI_API_KEY=openai CODEX_ACCESS_TOKEN=codex`,
       ),
     ).toBe(
-      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]"}`,
+      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]"} OPENAI_API_KEY=[REDACTED] CODEX_ACCESS_TOKEN=[REDACTED]`,
     )
   })
 
