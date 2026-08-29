@@ -46,13 +46,10 @@ const redactAssignment = (match: string, key: string): string =>
 
 export const redactSecretsInString = (value: string): string =>
   value
-    .replace(
-      /\b((?:Proxy-)?Authorization)\s*[:=]\s*[A-Za-z][A-Za-z0-9._~-]*\s+\S+/giu,
-      '$1=[REDACTED]',
-    )
+    .replace(/\b((?:Proxy-)?Authorization)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
     .replace(
-      /\\"([A-Za-z_][A-Za-z0-9_-]*)\\"\s*:\s*\\"(?:[^"\\]|\\(?!"))*\\"/gu,
+      /\\"([A-Za-z_][A-Za-z0-9_-]*)\\"\s*:\s*\\"(?:[^"\\]|\\{2,}"|\\(?!"))*\\"/gu,
       (match: string, key: string): string => redactEscapedQuotedField(match, key),
     )
     .replace(
