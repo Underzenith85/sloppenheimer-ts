@@ -6,8 +6,8 @@ A Node.js 24 and native TypeScript 7 implementation of the
 This repository contains a working orchestration core: strict workflow loading and Liquid prompt
 rendering, a GitHub Issues tracker adapter, isolated workspaces and lifecycle hooks, a typed Codex
 App Server JSONL client, polling and hot reload, concurrency limits, reconciliation, stall detection,
-and bounded exponential retries. `WORKFLOW.md` is configured so this implementation can dispatch
-Codex to improve itself from labeled GitHub issues.
+bounded exponential retries, and a loopback operator console. `WORKFLOW.md` is configured so this
+implementation can dispatch Codex to improve itself from labeled GitHub issues.
 
 ## Requirements
 
@@ -37,6 +37,19 @@ GITHUB_TOKEN=github_pat_... npm start -- WORKFLOW.md
 The workflow token is resolved by the host and removed from agent subprocess environments. Each
 eligible issue must carry the `symphony` label. Workspaces live under `.symphony/workspaces` and are
 never treated as trusted paths until containment checks pass.
+
+The configured operator console is available at `http://127.0.0.1:3000`. It shows live and retrying
+agents, session totals, and the open GitHub backlog. **Start** adds the configured orchestration label;
+**Pause** removes it and reconciliation stops the worker. The browser never receives GitHub or
+ChatGPT credentials. Override the workflow port with `--port 8080`, or use `--port 0` to select an
+ephemeral port.
+
+The server deliberately binds only to loopback. From another machine, reach an LXC deployment with
+an SSH tunnel:
+
+```sh
+ssh -L 3000:127.0.0.1:3000 symphony-host
+```
 
 ## Configuration
 

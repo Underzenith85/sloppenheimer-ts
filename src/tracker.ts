@@ -10,6 +10,15 @@ export type TrackerAdapter = Readonly<{
   secretEnvironmentNames: readonly string[]
 }>
 
+export type GitHubIssueControl = Readonly<{
+  listOpenIssues: () => Effect.Effect<readonly Issue[], TrackerError>
+  setLabel: (
+    issueNumber: number,
+    label: string,
+    enabled: boolean,
+  ) => Effect.Effect<void, TrackerError>
+}>
+
 type JsonRecord = Record<string, JsonValue>
 
 type GitHubResponse = Readonly<{
@@ -336,6 +345,89 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
             `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
           ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
         { concurrency: 4 },
+      )
+    },
+  }
+}
+
+const githubMutation = (
+  provider: GitHubProviderConfig,
+  path: string,
+  method: 'POST' | 'DELETE',
+  body: string | undefined,
+): Effect.Effect<void, TrackerError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const response = await fetch(`${provider.apiBaseUrl}${path}`, {
+        method,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${provider.token}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'symphony-ts/0.1',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        ...(body === undefined ? {} : { body }),
+      })
+      if (method === 'DELETE' && response.status === 404) {
+        return
+      }
+      if (!response.ok) {
+        throw new TrackerError({
+          category: 'tracker_status',
+          message: `GitHub returned HTTP ${String(response.status)}`,
+          retryable: response.status >= 500,
+        })
+      }
+    },
+    catch: (cause: unknown) =>
+      cause instanceof TrackerError
+        ? cause
+        : new TrackerError({
+            category: 'tracker_request',
+            message: 'GitHub mutation failed',
+            retryable: true,
+            cause,
+          }),
+  })
+
+export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIssueControl => {
+  const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+  const tracker = makeGitHubTracker(provider)
+  return {
+    listOpenIssues: () => tracker.fetchIssuesByStates(['open']),
+    setLabel: (issueNumber, label, enabled) => {
+      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+        return Effect.fail(
+          new TrackerError({
+            category: 'tracker_request',
+            message: 'issue number must be a positive safe integer',
+            retryable: false,
+          }),
+        )
+      }
+      if (label.length === 0) {
+        return Effect.fail(
+          new TrackerError({
+            category: 'tracker_request',
+            message: 'orchestration label must not be empty',
+            retryable: false,
+          }),
+        )
+      }
+      if (enabled) {
+        return githubMutation(
+          provider,
+          `${prefix}/issues/${String(issueNumber)}/labels`,
+          'POST',
+          JSON.stringify({ labels: [label] }),
+        )
+      }
+      return githubMutation(
+        provider,
+        `${prefix}/issues/${String(issueNumber)}/labels/${encodeURIComponent(label)}`,
+        'DELETE',
+        undefined,
       )
     },
   }

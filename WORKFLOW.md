@@ -31,6 +31,8 @@ codex:
   turn_timeout_ms: 3600000
   read_timeout_ms: 10000
   stall_timeout_ms: 600000
+server:
+  port: 3000
 ---
 
 Implement GitHub issue {{ issue.identifier }} in this repository.
