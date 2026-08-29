@@ -5,6 +5,7 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError } from './errors.js'
+import { terminateChildProcess } from './subprocess.js'
 import type { CodexConfig } from './workflow.js'
 
 export const makeCodexEnvironment = (
@@ -115,6 +116,7 @@ class CodexConnection {
   ) {
     this.#process = spawn('bash', ['-lc', command], {
       cwd,
+      detached: true,
       env: makeCodexEnvironment(process.env, secretEnvironmentNames),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -223,21 +225,7 @@ class CodexConnection {
     this.#closed = true
     this.#lines.close()
     this.#process.stdin.end()
-    this.#process.kill('SIGTERM')
-    await new Promise<void>((resolvePromise) => {
-      if (this.#process.exitCode !== null) {
-        resolvePromise()
-      } else {
-        const timeout = setTimeout(() => {
-          this.#process.kill('SIGKILL')
-          resolvePromise()
-        }, 5_000)
-        this.#process.once('exit', () => {
-          clearTimeout(timeout)
-          resolvePromise()
-        })
-      }
-    })
+    await terminateChildProcess(this.#process)
   }
 
   #request(method: string, params: JsonObject): Promise<JsonValue> {

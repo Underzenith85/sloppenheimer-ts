@@ -39,6 +39,13 @@ pnpm build
 GITHUB_TOKEN=github_pat_... pnpm start -- WORKFLOW.md
 ```
 
+The workflow path is optional and defaults to `WORKFLOW.md` in the current directory. The CLI
+accepts at most one path and one `--port <0-65535>` override; invalid arguments and startup failures
+exit nonzero with a concise error. `SIGINT` and `SIGTERM` initiate a scoped shutdown of polling,
+watching, workers, hooks, App Server subprocesses, and the HTTP listener. A completed signal-driven
+shutdown exits zero, while an abnormal host failure or a shutdown exceeding 10 seconds exits
+nonzero.
+
 Tracker credentials in repository-owned workflow files must use `$VAR` references; literal tracker
 tokens are rejected. The host retains the reference's environment-variable name as secret
 provenance, without making another plaintext token copy, and removes that name plus the GitHub

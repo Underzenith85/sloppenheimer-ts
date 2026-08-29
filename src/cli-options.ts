@@ -21,6 +21,7 @@ export const parseCliArguments = (arguments_: readonly string[]): CliOptions => 
   let workflowWasSet = false
   let optionsEnded = false
   let port: number | undefined
+  let portWasSet = false
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index]
     if (!optionsEnded && argument === '--') {
@@ -28,20 +29,31 @@ export const parseCliArguments = (arguments_: readonly string[]): CliOptions => 
       continue
     }
     if (!optionsEnded && argument === '--port') {
+      if (portWasSet) {
+        throw new Error('--port may only be provided once')
+      }
       const value = arguments_[index + 1]
       if (value === undefined) {
         throw new Error('--port requires a value')
       }
       port = parsePort(value)
+      portWasSet = true
       index += 1
       continue
     }
     if (!optionsEnded && argument?.startsWith('--port=') === true) {
+      if (portWasSet) {
+        throw new Error('--port may only be provided once')
+      }
       port = parsePort(argument.slice('--port='.length))
+      portWasSet = true
       continue
     }
     if (!optionsEnded && argument?.startsWith('-') === true) {
       throw new Error(`unknown option: ${argument}`)
+    }
+    if (argument !== undefined && argument.length === 0) {
+      throw new Error('workflow path must not be empty')
     }
     if (argument !== undefined && !workflowWasSet) {
       workflow = argument

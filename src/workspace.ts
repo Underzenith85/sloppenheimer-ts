@@ -6,6 +6,7 @@ import { Effect } from 'effect'
 
 import type { IssueIdentifier, Workspace } from './domain.js'
 import { WorkspaceError } from './errors.js'
+import { terminateChildProcess } from './subprocess.js'
 import type { HooksConfig } from './workflow.js'
 
 export const workspaceKey = (identifier: IssueIdentifier): string => {
@@ -41,24 +42,44 @@ const runShell = (
   timeoutMs: number,
 ): Effect.Effect<void, WorkspaceError> =>
   Effect.tryPromise({
-    try: () =>
+    try: (signal) =>
       new Promise<void>((resolvePromise, rejectPromise) => {
-        const child = spawn('bash', ['-lc', script], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+        const child = spawn('bash', ['-lc', script], {
+          cwd,
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
         const stderr: Buffer[] = []
-        child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr.push(chunk)
+        })
+        let timedOut = false
+        const stop = (): void => {
+          void terminateChildProcess(child)
+        }
+        signal.addEventListener('abort', stop, { once: true })
         const timeout = setTimeout(() => {
-          child.kill('SIGTERM')
-          rejectPromise(
-            new WorkspaceError({
-              category: 'hook_timeout',
-              message: `hook timed out after ${String(timeoutMs)}ms`,
-            }),
-          )
+          timedOut = true
+          stop()
         }, timeoutMs)
-        child.once('error', rejectPromise)
-        child.once('exit', (code) => {
+        const cleanUp = (): void => {
           clearTimeout(timeout)
-          if (code === 0) {
+          signal.removeEventListener('abort', stop)
+        }
+        child.once('error', (cause) => {
+          cleanUp()
+          rejectPromise(cause)
+        })
+        child.once('exit', (code) => {
+          cleanUp()
+          if (timedOut) {
+            rejectPromise(
+              new WorkspaceError({
+                category: 'hook_timeout',
+                message: `hook timed out after ${String(timeoutMs)}ms`,
+              }),
+            )
+          } else if (code === 0) {
             resolvePromise()
           } else {
             rejectPromise(
