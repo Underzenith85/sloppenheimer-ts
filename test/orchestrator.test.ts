@@ -277,6 +277,13 @@ const makeHarness = (
 const runWithTestClock = <Value>(effect: Effect.Effect<Value, WorkflowError>): Promise<Value> =>
   Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
 
+const awaitLoads = (harness: TestHarness, expected: number): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    while (harness.loads() < expected) {
+      yield* Effect.yieldNow()
+    }
+  })
+
 describe('operator snapshots', (): void => {
   it('start and remain responsive while the initial tracker poll is pending', async (): Promise<void> => {
     let markPollStarted = (): void => undefined
@@ -439,7 +446,9 @@ describe('workflow hot reload', (): void => {
           harness.setWorkflow(
             changedWorkflow({ fingerprint: 'missed-event', pollingIntervalMs: 2_000 }),
           )
+          const beforeTick = harness.loads()
           yield* TestClock.adjust(1_000)
+          yield* awaitLoads(harness, beforeTick + 1)
           return yield* control.snapshot
         }),
       ),
@@ -467,7 +476,7 @@ describe('workflow hot reload', (): void => {
           expect(harness.loads()).toBe(afterReload)
 
           yield* TestClock.adjust(1)
-          yield* control.snapshot
+          yield* awaitLoads(harness, afterReload + 1)
           expect(harness.loads()).toBe(afterReload + 1)
         }),
       ),
