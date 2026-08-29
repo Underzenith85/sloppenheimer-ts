@@ -356,7 +356,7 @@ const parseConfig = (
     codex: {
       command: codex.command ?? 'codex app-server',
       approvalPolicy: codex.approvalPolicy ?? 'never',
-      threadSandbox: codex.threadSandbox ?? 'workspaceWrite',
+      threadSandbox: codex.threadSandbox ?? 'workspace-write',
       turnTimeoutMs: positiveInteger(codex.turnTimeoutMs, 3_600_000, 'codex.turn_timeout_ms'),
       readTimeoutMs: positiveInteger(codex.readTimeoutMs, 5_000, 'codex.read_timeout_ms'),
       stallTimeoutMs: codex.stallTimeoutMs ?? 300_000,

@@ -62,7 +62,7 @@ const workflow: Workflow = {
     codex: {
       command: 'codex app-server',
       approvalPolicy: 'never',
-      threadSandbox: 'workspaceWrite',
+      threadSandbox: 'workspace-write',
       turnTimeoutMs: 60_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 30_000,
