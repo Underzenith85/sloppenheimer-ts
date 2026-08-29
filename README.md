@@ -28,6 +28,10 @@ The codebase uses TypeScript 7's native compiler directly. Oxlint runs its nativ
 and Oxfmt enforces no-semicolon formatting. Strict compiler options, `no-explicit-any`, the
 type-aware unsafe-operation rules, and mandatory braces are CI errors.
 
+The `effect`, `@effect/platform`, and `@effect/platform-node` versions are pinned as a compatible
+Effect 3 set. Update them together: Platform releases declare Effect-line peer ranges, and a partial
+upgrade can produce incompatible HTTP runtime types or behavior.
+
 ## Run
 
 ```sh

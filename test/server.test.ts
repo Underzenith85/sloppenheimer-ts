@@ -1,8 +1,9 @@
 import { Effect } from 'effect'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 
 import { issueId } from '../src/domain.js'
+import { TrackerError } from '../src/errors.js'
 import type { OperatorBackend } from '../src/operator.js'
 import type { OrchestratorSnapshot } from '../src/orchestrator.js'
 import { startOperatorServer } from '../src/server.js'
@@ -95,6 +96,7 @@ describe('operator server', (): void => {
       const state = await fetch(`${url}/api/v1/state`)
       const backlog = await fetch(`${url}/api/v1/backlog`)
       const script = await fetch(`${url}/app.js`)
+      const detail = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
 
       expect(page.status).toBe(200)
       expect(page.headers.get('content-security-policy')).toContain("default-src 'self'")
@@ -106,6 +108,7 @@ describe('operator server', (): void => {
         edges: [],
         cycles: [],
       })
+      expect(await detail.json()).toMatchObject({ identifier: 'example/symphony#17' })
       const source = await script.text()
       expect(source).toContain("'graph-node state-' + status.toLowerCase()")
       expect(source).toContain("button.disabled = !issue.enabled && issue.readiness !== 'ready'")
@@ -135,10 +138,14 @@ describe('operator server', (): void => {
     await withServer(makeBackend(), async (url) => {
       const missing = await fetch(`${url}/missing`)
       const wrongMethod = await fetch(`${url}/api/v1/state`, { method: 'POST' })
+      const invalidAction = await fetch(`${url}/api/v1/issues/not-a-number/start`, {
+        method: 'POST',
+      })
 
       expect(missing.status).toBe(404)
       expect(wrongMethod.status).toBe(405)
       expect(wrongMethod.headers.get('allow')).toBe('GET')
+      expect(invalidAction.status).toBe(404)
     })
   })
 
@@ -163,5 +170,92 @@ describe('operator server', (): void => {
 
       expect(status).toBe(421)
     })
+  })
+
+  it('sanitizes typed backend failures as versioned 502 responses', async (): Promise<void> => {
+    const backend: OperatorBackend = {
+      ...makeBackend(),
+      backlog: Effect.fail(
+        new TrackerError({
+          category: 'tracker_request',
+          message: 'sensitive backend detail',
+          retryable: true,
+        }),
+      ),
+    }
+
+    await withServer(backend, async (url) => {
+      const response = await fetch(`${url}/api/v1/backlog`)
+      const body = await response.text()
+
+      expect(response.status).toBe(502)
+      expect(JSON.parse(body)).toEqual({
+        version: 'v1',
+        error: {
+          code: 'backend_error',
+          message: 'The operator backend could not complete the request',
+        },
+      })
+      expect(body).not.toContain('sensitive backend detail')
+    })
+  })
+
+  it('sanitizes unexpected defects as versioned 500 responses', async (): Promise<void> => {
+    const backend: OperatorBackend = {
+      ...makeBackend(),
+      snapshot: Effect.die(new Error('sensitive defect detail')),
+    }
+
+    await withServer(backend, async (url) => {
+      const response = await fetch(`${url}/api/v1/state`)
+      const body = await response.text()
+
+      expect(response.status).toBe(500)
+      expect(JSON.parse(body)).toEqual({
+        version: 'v1',
+        error: { code: 'internal_error', message: 'The request could not be completed' },
+      })
+      expect(body).not.toContain('sensitive defect detail')
+    })
+  })
+
+  it('represents listen failures as ServerError', async (): Promise<void> => {
+    const occupied = createServer()
+    await new Promise<void>((resolve, reject) => {
+      occupied.once('error', reject)
+      occupied.listen(0, '127.0.0.1', resolve)
+    })
+    const address = occupied.address()
+    if (address === null || typeof address === 'string') {
+      throw new Error('test server did not expose a TCP address')
+    }
+
+    try {
+      const result = await Effect.runPromise(
+        Effect.either(Effect.scoped(startOperatorServer(address.port, makeBackend()))),
+      )
+      expect(result._tag).toBe('Left')
+      if (result._tag === 'Left') {
+        expect(result.left._tag).toBe('ServerError')
+        expect(result.left.category).toBe('listen_failed')
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        occupied.close((error) => (error === undefined ? resolve() : reject(error)))
+      })
+    }
+  })
+
+  it('stops accepting connections when its scope closes', async (): Promise<void> => {
+    let url = ''
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.map(startOperatorServer(0, makeBackend()), (server) => {
+          url = server.url
+        }),
+      ),
+    )
+
+    await expect(fetch(url)).rejects.toThrow()
   })
 })

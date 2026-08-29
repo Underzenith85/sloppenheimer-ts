@@ -1,9 +1,14 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import * as HttpApp from '@effect/platform/HttpApp'
+import * as HttpRouter from '@effect/platform/HttpRouter'
+import * as HttpServerRequest from '@effect/platform/HttpServerRequest'
+import * as HttpServerResponse from '@effect/platform/HttpServerResponse'
+import * as NodeHttpServer from '@effect/platform-node/NodeHttpServer'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { Effect, type Scope } from 'effect'
+import { createServer } from 'node:http'
+import { Cause, Effect, type Scope } from 'effect'
 
 import { ServerError } from './errors.js'
-import type { OperatorBackend } from './operator.js'
+import type { OperatorBackend, OperatorBackendError } from './operator.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
 
 const host = '127.0.0.1'
@@ -13,8 +18,6 @@ export type OperatorServer = Readonly<{
   port: number
   url: string
 }>
-
-type ServerResource = OperatorServer & Readonly<{ close: () => Promise<void> }>
 
 const securityHeaders = {
   'Cache-Control': 'no-store',
@@ -26,33 +29,18 @@ const securityHeaders = {
   'X-Frame-Options': 'DENY',
 } as const
 
-const send = (
-  response: ServerResponse,
-  status: number,
-  contentType: string,
-  body: string,
-  extraHeaders: Readonly<Record<string, string>> = {},
-): void => {
-  response.writeHead(status, {
-    ...securityHeaders,
-    ...extraHeaders,
-    'Content-Type': contentType,
+const json = (status: number, value: object): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.unsafeJson(value, {
+    status,
+    contentType: 'application/json; charset=utf-8',
   })
-  response.end(body)
-}
 
-const sendJson = (response: ServerResponse, status: number, value: object): void => {
-  send(response, status, 'application/json; charset=utf-8', JSON.stringify(value))
-}
-
-const sendError = (
-  response: ServerResponse,
+const errorResponse = (
   status: number,
   code: string,
   message: string,
-): void => {
-  sendJson(response, status, { version: 'v1', error: { code, message } })
-}
+): HttpServerResponse.HttpServerResponse =>
+  json(status, { version: 'v1', error: { code, message } })
 
 const tokenMatches = (actual: string | undefined, expected: string): boolean => {
   if (actual === undefined) {
@@ -61,13 +49,6 @@ const tokenMatches = (actual: string | undefined, expected: string): boolean => 
   const actualBytes = Buffer.from(actual)
   const expectedBytes = Buffer.from(expected)
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
-}
-
-const headerValue = (value: string | readonly string[] | undefined): string | undefined => {
-  if (typeof value === 'string') {
-    return value
-  }
-  return undefined
 }
 
 const hostIsLoopback = (value: string | undefined): boolean => {
@@ -82,217 +63,195 @@ const hostIsLoopback = (value: string | undefined): boolean => {
   }
 }
 
-const runBackend = async <Value>(
-  response: ServerResponse,
-  operation: Effect.Effect<Value, { readonly message: string }>,
-  onSuccess: (value: Value) => void,
-): Promise<void> => {
-  const result = await Effect.runPromiseExit(operation)
-  if (result._tag === 'Failure') {
-    sendError(response, 502, 'backend_error', 'The operator backend could not complete the request')
-    return
-  }
-  onSuccess(result.value)
-}
+const backendFailure = errorResponse(
+  502,
+  'backend_error',
+  'The operator backend could not complete the request',
+)
 
-const methodNotAllowed = (response: ServerResponse, allowed: string): void => {
-  send(
-    response,
-    405,
-    'application/json; charset=utf-8',
-    JSON.stringify({
-      version: 'v1',
-      error: { code: 'method_not_allowed', message: `Use ${allowed} for this endpoint` },
-    }),
-    { Allow: allowed },
+const notFound = errorResponse(404, 'not_found', 'The requested endpoint does not exist')
+
+const runBackend = <Value>(
+  operation: Effect.Effect<Value, OperatorBackendError>,
+): Effect.Effect<Value | HttpServerResponse.HttpServerResponse> =>
+  operation.pipe(Effect.catchAll(() => Effect.succeed(backendFailure)))
+
+const methodNotAllowed = (allowed: string): HttpServerResponse.HttpServerResponse =>
+  errorResponse(405, 'method_not_allowed', `Use ${allowed} for this endpoint`).pipe(
+    HttpServerResponse.setHeader('Allow', allowed),
+  )
+
+const withMethod = <Error, Requirements>(
+  method: 'GET' | 'POST',
+  handler: HttpApp.Default<Error, Requirements>,
+): HttpApp.Default<Error, Requirements> =>
+  Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+    request.method === method ? handler : methodNotAllowed(method),
+  )
+
+const withCsrf = <Error, Requirements>(
+  csrfToken: string,
+  handler: HttpApp.Default<Error, Requirements>,
+): HttpApp.Default<Error, Requirements> =>
+  Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+    tokenMatches(request.headers['x-symphony-csrf'], csrfToken)
+      ? handler
+      : errorResponse(403, 'invalid_csrf_token', 'The request token is missing or invalid'),
+  )
+
+const makeRouter = (
+  backend: OperatorBackend,
+  csrfToken: string,
+): HttpRouter.HttpRouter<never, never> => {
+  const issueAction = (
+    enabled: boolean,
+  ): Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    never,
+    HttpRouter.RouteContext | HttpServerRequest.HttpServerRequest
+  > =>
+    Effect.flatMap(HttpRouter.params, (params) => {
+      const encodedIssueNumber = params['issueNumber'] ?? ''
+      if (!/^\d+$/u.test(encodedIssueNumber)) {
+        return notFound
+      }
+      const issueNumber = Number(encodedIssueNumber)
+      return withMethod(
+        'POST',
+        withCsrf(
+          csrfToken,
+          Effect.flatMap(runBackend(backend.setIssueEnabled(issueNumber, enabled)), (result) =>
+            HttpServerResponse.isServerResponse(result)
+              ? result
+              : json(202, { accepted: true, issueNumber, enabled }),
+          ),
+        ),
+      )
+    })
+
+  return HttpRouter.empty.pipe(
+    HttpRouter.get(
+      '/',
+      HttpServerResponse.text(appTemplate.replace('__CSRF_TOKEN__', csrfToken), {
+        contentType: 'text/html; charset=utf-8',
+      }),
+    ),
+    HttpRouter.get(
+      '/app.js',
+      HttpServerResponse.text(appJavaScript, {
+        contentType: 'text/javascript; charset=utf-8',
+      }),
+    ),
+    HttpRouter.get(
+      '/styles.css',
+      HttpServerResponse.text(appStyles, { contentType: 'text/css; charset=utf-8' }),
+    ),
+    HttpRouter.all(
+      '/api/v1/state',
+      withMethod(
+        'GET',
+        Effect.flatMap(runBackend(backend.snapshot), (result) =>
+          HttpServerResponse.isServerResponse(result) ? result : json(200, result),
+        ),
+      ),
+    ),
+    HttpRouter.all(
+      '/api/v1/backlog',
+      withMethod(
+        'GET',
+        Effect.flatMap(runBackend(backend.backlog), (result) =>
+          HttpServerResponse.isServerResponse(result) ? result : json(200, result),
+        ),
+      ),
+    ),
+    HttpRouter.all(
+      '/api/v1/refresh',
+      withMethod(
+        'POST',
+        withCsrf(
+          csrfToken,
+          Effect.flatMap(runBackend(backend.refresh), (result) =>
+            HttpServerResponse.isServerResponse(result) ? result : json(202, { accepted: true }),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.all('/api/v1/issues/:issueNumber/start', issueAction(true)),
+    HttpRouter.all('/api/v1/issues/:issueNumber/pause', issueAction(false)),
+    HttpRouter.all(
+      '/api/v1/:identifier',
+      withMethod(
+        'GET',
+        Effect.flatMap(HttpRouter.params, (params) =>
+          Effect.flatMap(runBackend(backend.snapshot), (result) => {
+            if (HttpServerResponse.isServerResponse(result)) {
+              return result
+            }
+            const identifier = params['identifier'] ?? ''
+            const running = result.running.find((entry) => entry.identifier === identifier)
+            const retrying = result.retrying.find((entry) => entry.identifier === identifier)
+            return running === undefined && retrying === undefined
+              ? errorResponse(404, 'issue_not_found', 'No live work has that identifier')
+              : json(200, {
+                  identifier,
+                  running: running ?? null,
+                  retrying: retrying ?? null,
+                })
+          }),
+        ),
+      ),
+    ),
   )
 }
 
-const issueAction = /^\/api\/v1\/issues\/(\d+)\/(start|pause)$/u
-const issueDetail = /^\/api\/v1\/([^/]+)$/u
+const makeApp = (backend: OperatorBackend, csrfToken: string): HttpApp.Default<never, never> => {
+  const handled = makeRouter(backend, csrfToken).pipe(
+    Effect.catchTag('RouteNotFound', () => Effect.succeed(notFound)),
+    Effect.catchAllCause((cause) =>
+      Effect.logError('operator request failed', { cause: Cause.pretty(cause) }).pipe(
+        Effect.as(errorResponse(500, 'internal_error', 'The request could not be completed')),
+      ),
+    ),
+  )
 
-const makeHandler =
-  (backend: OperatorBackend, csrfToken: string) =>
-  async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
-    const method = request.method ?? 'GET'
-    const url = new URL(request.url ?? '/', `http://${host}`)
-    const path = url.pathname
-
-    if (!hostIsLoopback(headerValue(request.headers.host))) {
-      sendError(response, 421, 'invalid_host', 'The operator console only accepts loopback hosts')
-      return
-    }
-
-    if (path === '/' && method === 'GET') {
-      send(
-        response,
-        200,
-        'text/html; charset=utf-8',
-        appTemplate.replace('__CSRF_TOKEN__', csrfToken),
-      )
-      return
-    }
-    if (path === '/app.js' && method === 'GET') {
-      send(response, 200, 'text/javascript; charset=utf-8', appJavaScript)
-      return
-    }
-    if (path === '/styles.css' && method === 'GET') {
-      send(response, 200, 'text/css; charset=utf-8', appStyles)
-      return
-    }
-    if (path === '/api/v1/state') {
-      if (method !== 'GET') {
-        methodNotAllowed(response, 'GET')
-        return
-      }
-      await runBackend(response, backend.snapshot, (snapshot) => {
-        sendJson(response, 200, snapshot)
-      })
-      return
-    }
-    if (path === '/api/v1/backlog') {
-      if (method !== 'GET') {
-        methodNotAllowed(response, 'GET')
-        return
-      }
-      await runBackend(response, backend.backlog, (backlog) => {
-        sendJson(response, 200, backlog)
-      })
-      return
-    }
-    if (path === '/api/v1/refresh') {
-      if (method !== 'POST') {
-        methodNotAllowed(response, 'POST')
-        return
-      }
-      if (!tokenMatches(headerValue(request.headers['x-symphony-csrf']), csrfToken)) {
-        sendError(response, 403, 'invalid_csrf_token', 'The request token is missing or invalid')
-        return
-      }
-      await runBackend(response, backend.refresh, () => {
-        sendJson(response, 202, { accepted: true })
-      })
-      return
-    }
-
-    const actionMatch = issueAction.exec(path)
-    if (actionMatch !== null) {
-      if (method !== 'POST') {
-        methodNotAllowed(response, 'POST')
-        return
-      }
-      if (!tokenMatches(headerValue(request.headers['x-symphony-csrf']), csrfToken)) {
-        sendError(response, 403, 'invalid_csrf_token', 'The request token is missing or invalid')
-        return
-      }
-      const issueNumber = Number(actionMatch[1])
-      const enabled = actionMatch[2] === 'start'
-      await runBackend(response, backend.setIssueEnabled(issueNumber, enabled), () => {
-        sendJson(response, 202, { accepted: true, issueNumber, enabled })
-      })
-      return
-    }
-
-    const detailMatch = issueDetail.exec(path)
-    if (detailMatch !== null) {
-      if (method !== 'GET') {
-        methodNotAllowed(response, 'GET')
-        return
-      }
-      const identifier = decodeURIComponent(detailMatch[1] ?? '')
-      await runBackend(response, backend.snapshot, (snapshot) => {
-        const running = snapshot.running.find((entry) => entry.identifier === identifier)
-        const retrying = snapshot.retrying.find((entry) => entry.identifier === identifier)
-        if (running === undefined && retrying === undefined) {
-          sendError(response, 404, 'issue_not_found', 'No live work has that identifier')
-          return
-        }
-        sendJson(response, 200, {
-          identifier,
-          running: running ?? null,
-          retrying: retrying ?? null,
-        })
-      })
-      return
-    }
-
-    sendError(response, 404, 'not_found', 'The requested endpoint does not exist')
-  }
+  return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+    Effect.map(
+      hostIsLoopback(request.headers['host'])
+        ? handled
+        : Effect.succeed(
+            errorResponse(421, 'invalid_host', 'The operator console only accepts loopback hosts'),
+          ),
+      HttpServerResponse.setHeaders(securityHeaders),
+    ),
+  )
+}
 
 export const startOperatorServer = (
   requestedPort: number,
   backend: OperatorBackend,
 ): Effect.Effect<OperatorServer, ServerError, Scope.Scope> =>
-  Effect.acquireRelease(
-    Effect.async<ServerResource, ServerError>((resume) => {
-      const csrfToken = randomBytes(32).toString('base64url')
-      const server = createServer((request, response) => {
-        makeHandler(backend, csrfToken)(request, response).catch(() => {
-          if (!response.headersSent) {
-            sendError(response, 500, 'internal_error', 'The request could not be completed')
-          } else {
-            response.end()
-          }
-        })
-      })
-      const onListenError = (cause: Error): void => {
-        resume(
-          Effect.fail(
-            new ServerError({
-              category: 'listen_failed',
-              message: 'operator server failed',
-              cause,
-            }),
-          ),
-        )
-      }
-      server.once('error', onListenError)
-      server.listen(requestedPort, host, () => {
-        server.removeListener('error', onListenError)
-        const address = server.address()
-        if (address === null || typeof address === 'string') {
-          resume(
-            Effect.fail(
-              new ServerError({
-                category: 'listen_failed',
-                message: 'operator server did not expose a TCP address',
-              }),
-            ),
-          )
-          return
-        }
-        const port = address.port
-        resume(
-          Effect.succeed({
-            host,
-            port,
-            url: `http://${host}:${String(port)}`,
-            close: () =>
-              new Promise<void>((resolve, reject) => {
-                server.close((error) => {
-                  if (error === undefined) {
-                    resolve()
-                  } else {
-                    reject(error)
-                  }
-                })
-              }),
-          }),
-        )
-      })
-    }),
-    (resource) =>
-      Effect.tryPromise({
-        try: resource.close,
-        catch: (cause: unknown) =>
+  Effect.gen(function* () {
+    const csrfToken = randomBytes(32).toString('base64url')
+    const server = yield* NodeHttpServer.make(() => createServer(), {
+      host,
+      port: requestedPort,
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
           new ServerError({
-            category: 'close_failed',
-            message: 'operator server failed to close',
+            category: 'listen_failed',
+            message: 'operator server failed',
             cause,
           }),
-      }).pipe(
-        Effect.catchAll((error) =>
-          Effect.logWarning('operator server failed to close', { error: error.message }),
-        ),
       ),
-  ).pipe(Effect.map(({ host: boundHost, port, url }) => ({ host: boundHost, port, url })))
+    )
+    yield* server.serve(makeApp(backend, csrfToken))
+    if (server.address._tag !== 'TcpAddress') {
+      return yield* new ServerError({
+        category: 'listen_failed',
+        message: 'operator server did not expose a TCP address',
+      })
+    }
+    const port = server.address.port
+    return { host, port, url: `http://${host}:${String(port)}` }
+  })
