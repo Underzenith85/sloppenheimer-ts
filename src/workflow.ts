@@ -252,6 +252,19 @@ const positiveInteger = (value: number | undefined, fallback: number, name: stri
   return value
 }
 
+const portNumber = (value: number | undefined): number | null => {
+  if (value === undefined) {
+    return null
+  }
+  if (value < 0 || value > 65_535) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: 'server.port must be between 0 and 65535',
+    })
+  }
+  return value
+}
+
 const resolveEnvironment = (
   value: string,
   name: string,
@@ -361,7 +374,7 @@ const parseConfig = (
       readTimeoutMs: positiveInteger(codex.readTimeoutMs, 5_000, 'codex.read_timeout_ms'),
       stallTimeoutMs: codex.stallTimeoutMs ?? 300_000,
     },
-    serverPort: server.port === undefined ? null : positiveInteger(server.port, 0, 'server.port'),
+    serverPort: portNumber(server.port),
   }
 }
 

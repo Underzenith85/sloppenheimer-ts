@@ -50,3 +50,9 @@ export class AgentError extends Data.TaggedError('AgentError')<{
   readonly message: string
   readonly cause?: unknown
 }> {}
+
+export class ServerError extends Data.TaggedError('ServerError')<{
+  readonly category: 'listen_failed' | 'close_failed'
+  readonly message: string
+  readonly cause?: unknown
+}> {}

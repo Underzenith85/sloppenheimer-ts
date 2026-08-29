@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-import { resolve } from 'node:path'
 import { Effect } from 'effect'
 
-import { runOrchestrator } from './orchestrator.js'
+import { parseCliArguments } from './cli-options.js'
+import { makeOperatorBackend } from './operator.js'
+import { startOrchestrator } from './orchestrator.js'
+import { startOperatorServer } from './server.js'
+import { loadWorkflow } from './workflow.js'
 
-const workflowPath = resolve(process.argv[2] ?? 'WORKFLOW.md')
+const options = parseCliArguments(process.argv.slice(2))
 const controller = new AbortController()
 
 process.once('SIGINT', () => {
@@ -14,7 +17,23 @@ process.once('SIGTERM', () => {
   controller.abort()
 })
 
-const exit = await Effect.runPromiseExit(runOrchestrator(workflowPath), {
+const program = Effect.scoped(
+  Effect.gen(function* () {
+    const orchestrator = yield* startOrchestrator(options.workflowPath)
+    const workflow = yield* loadWorkflow(options.workflowPath)
+    const port = options.port ?? workflow.config.serverPort
+    if (port !== null) {
+      const server = yield* startOperatorServer(
+        port,
+        makeOperatorBackend(options.workflowPath, orchestrator),
+      )
+      yield* Effect.logInfo('operator console listening', { url: server.url })
+    }
+    return yield* Effect.never
+  }),
+)
+
+const exit = await Effect.runPromiseExit(program, {
   signal: controller.signal,
 })
 

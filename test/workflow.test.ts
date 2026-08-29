@@ -92,4 +92,28 @@ Do the work
 
     expect(error.category).toBe('invalid_config')
   })
+
+  it('accepts port zero for an ephemeral operator server', async (): Promise<void> => {
+    const directory = await makeTemporaryDirectory()
+    const path = join(directory, 'WORKFLOW.md')
+    await writeFile(
+      path,
+      `---
+tracker:
+  kind: github
+  provider:
+    owner: example
+    repository: symphony
+    token: token
+server:
+  port: 0
+---
+Do the work
+`,
+    )
+
+    const workflow = await Effect.runPromise(loadWorkflow(path, {}))
+
+    expect(workflow.config.serverPort).toBe(0)
+  })
 })
