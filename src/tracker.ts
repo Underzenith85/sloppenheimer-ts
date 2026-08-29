@@ -16,12 +16,18 @@ import {
   type GitHubProviderConfig,
 } from './tracker-config.js'
 
+export type IssueFetchOptions = Readonly<{ hydrateDependencies: boolean }>
+
 export type TrackerAdapter = Readonly<{
   fetchIssuesByStates: (
     states: readonly string[],
     dependencyLabels: readonly string[] | null,
+    options?: IssueFetchOptions,
   ) => Effect.Effect<readonly Issue[], TrackerError>
-  fetchIssuesByIds: (ids: readonly IssueId[]) => Effect.Effect<readonly Issue[], TrackerError>
+  fetchIssuesByIds: (
+    ids: readonly IssueId[],
+    options?: IssueFetchOptions,
+  ) => Effect.Effect<readonly Issue[], TrackerError>
   handoffCompletedWork: (
     issue: Issue,
     dispatchLabels: readonly string[],
@@ -650,6 +656,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
     fetchIssuesByStates: (
       states,
       dependencyLabels,
+      options,
     ): Effect.Effect<readonly Issue[], TrackerError> => {
       if (states.length === 0) {
         return Effect.succeed([])
@@ -705,11 +712,13 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
           ...new Map(groups.flat().map((issue) => [issue.id, issue])).values(),
         ]),
         Effect.flatMap((issues) =>
-          hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
+          options?.hydrateDependencies === false
+            ? Effect.succeed(issues)
+            : hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
         ),
       )
     },
-    fetchIssuesByIds: (ids): Effect.Effect<readonly Issue[], TrackerError> => {
+    fetchIssuesByIds: (ids, options): Effect.Effect<readonly Issue[], TrackerError> => {
       if (ids.length === 0) {
         return Effect.succeed([])
       }
@@ -723,7 +732,9 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
         { concurrency: 4 },
       ).pipe(
         Effect.flatMap((issues) =>
-          hydrateDependencies(provider, prefix, issues, [], dependencyCache),
+          options?.hydrateDependencies === false
+            ? Effect.succeed(issues)
+            : hydrateDependencies(provider, prefix, issues, [], dependencyCache),
         ),
       )
     },

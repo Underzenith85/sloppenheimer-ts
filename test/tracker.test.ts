@@ -155,6 +155,50 @@ describe('GitHub tracker pagination', (): void => {
 })
 
 describe('GitHub native issue dependencies', (): void => {
+  it('skips dependency hydration when the caller requests issue metadata only', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> => Response.json([githubIssue(1)]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByStates(['closed'], null, {
+        hydrateDependencies: false,
+      }),
+    )
+
+    expect(issues).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips dependency hydration for metadata-only issue ID refreshes', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> => Response.json(githubIssue(1)))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByIds([issueId('1')], {
+        hydrateDependencies: false,
+      }),
+    )
+
+    expect(issues).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('hydrates dependencies when the label filter is empty', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
+      requestUrl(input).includes('/dependencies/blocked_by')
+        ? Response.json([githubDependency(2)])
+        : Response.json([githubIssue(1)]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [issue] = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByStates(['open'], []),
+    )
+
+    expect(issue?.blockedBy).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('hydrates only dispatch candidates for scheduler list requests', async (): Promise<void> => {
     const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
       const url = requestUrl(input)
@@ -192,6 +236,26 @@ describe('GitHub native issue dependencies', (): void => {
 
     expect(second?.blockedBy).toHaveLength(1)
     expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('bypasses the dependency cache for issue ID refreshes', async (): Promise<void> => {
+    let dependencyFetches = 0
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = requestUrl(input)
+      if (url.endsWith('/issues/2')) {
+        return Response.json(githubIssue(2))
+      }
+      dependencyFetches += 1
+      return Response.json([githubDependency(3, dependencyFetches === 1 ? 'closed' : 'open')])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const tracker = makeGitHubTracker(provider)
+
+    await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
+    const [refreshed] = await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
+
+    expect(refreshed?.blockedBy[0]?.state).toBe('open')
+    expect(dependencyFetches).toBe(2)
   })
 
   it('decodes blockers and follows dependency pagination', async (): Promise<void> => {

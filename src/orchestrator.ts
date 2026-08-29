@@ -310,6 +310,72 @@ export const startOrchestrator = (
     let lastKnownGood = makeEffectiveWorkflow(
       yield* dependencies.loadWorkflow(selectedWorkflowPath),
     )
+    const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const terminalGroups = yield* Effect.forEach(
+          effective.workflow.config.tracker.terminalStates,
+          (state) =>
+            effective.tracker
+              .fetchIssuesByStates([state], null, { hydrateDependencies: false })
+              .pipe(
+                Effect.matchEffect({
+                  onFailure: (error) =>
+                    Effect.logWarning('startup terminal issue fetch failed; continuing', {
+                      state,
+                      error: error.message,
+                    }).pipe(Effect.as<readonly Issue[]>([])),
+                  onSuccess: (issues) => Effect.succeed(issues),
+                }),
+              ),
+          { concurrency: 1 },
+        )
+        const terminalIssues = [
+          ...new Map(terminalGroups.flat().map((issue) => [issue.id, issue])).values(),
+        ]
+        for (const issue of terminalIssues) {
+          const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
+            Effect.matchEffect({
+              onFailure: (error) =>
+                Effect.logWarning('startup workspace inspection failed; continuing', {
+                  ...logContext(issue),
+                  error: error.message,
+                }).pipe(Effect.as<boolean | null>(null)),
+              onSuccess: (exists) => Effect.succeed<boolean | null>(exists),
+            }),
+          )
+          if (workspaceExists !== true) {
+            continue
+          }
+          const refreshed = yield* effective.tracker
+            .fetchIssuesByIds([issue.id], { hydrateDependencies: false })
+            .pipe(
+              Effect.matchEffect({
+                onFailure: (error) =>
+                  Effect.logWarning('startup terminal issue recheck failed; continuing', {
+                    ...logContext(issue),
+                    error: error.message,
+                  }).pipe(Effect.as<readonly Issue[] | null>(null)),
+                onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
+              }),
+            )
+          const current = refreshed?.find((candidate) => candidate.id === issue.id)
+          if (
+            current === undefined ||
+            !stateIsIn(current.state, effective.workflow.config.tracker.terminalStates)
+          ) {
+            continue
+          }
+          yield* effective.workspaces.remove(current.identifier).pipe(
+            Effect.catchAll((error) =>
+              Effect.logWarning('startup terminal workspace cleanup failed; continuing', {
+                ...logContext(current),
+                error: error.message,
+              }),
+            ),
+          )
+        }
+      })
+    yield* cleanupTerminalWorkspaces(lastKnownGood)
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
     const handoffStorePath = resolve(
