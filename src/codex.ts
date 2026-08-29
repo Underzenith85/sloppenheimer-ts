@@ -103,6 +103,7 @@ class CodexConnection {
   readonly #onEvent: (event: AgentEvent) => void
   readonly #pending = new Map<number, PendingRequest>()
   readonly #turns = new Map<string, TurnWaiter>()
+  readonly #earlyTurnStatuses = new Map<string, string>()
   #nextId = 1
   #closed = false
   #turnFailure: AgentError | null = null
@@ -208,6 +209,17 @@ class CodexConnection {
     this.#emit('session_started', `${threadId}-${turnId}`)
     if (this.#turnFailure !== null) {
       throw this.#turnFailure
+    }
+    const earlyStatus = this.#earlyTurnStatuses.get(turnId)
+    if (earlyStatus !== undefined) {
+      this.#earlyTurnStatuses.delete(turnId)
+      if (earlyStatus !== 'completed') {
+        throw new AgentError({
+          category: 'turn_failed',
+          message: `turn ${turnId} finished with status ${earlyStatus}`,
+        })
+      }
+      return turnId
     }
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
@@ -380,6 +392,13 @@ class CodexConnection {
     }
     const waiter = this.#turns.get(turnId)
     if (waiter === undefined) {
+      if (this.#earlyTurnStatuses.size >= 128) {
+        const oldestTurnId = this.#earlyTurnStatuses.keys().next().value
+        if (oldestTurnId !== undefined) {
+          this.#earlyTurnStatuses.delete(oldestTurnId)
+        }
+      }
+      this.#earlyTurnStatuses.set(turnId, status)
       return
     }
     clearTimeout(waiter.timeout)
@@ -415,6 +434,7 @@ class CodexConnection {
       pending.reject(error)
     }
     this.#pending.clear()
+    this.#earlyTurnStatuses.clear()
     this.#failTurns(error)
   }
 }

@@ -12,11 +12,11 @@ const environment = process.env
 const enabledInCi = environment['CI'] === 'true' && environment['SYMPHONY_REAL_INTEGRATION'] === '1'
 const repository = environment['SYMPHONY_INTEGRATION_REPOSITORY']
 const githubToken = environment['GITHUB_TOKEN']
-const codexToken = environment['OPENAI_API_KEY'] ?? environment['CODEX_API_KEY']
+const codexToken = environment['OPENAI_API_KEY'] ?? environment['CODEX_ACCESS_TOKEN']
 const missing = [
   repository === undefined ? 'SYMPHONY_INTEGRATION_REPOSITORY' : null,
   githubToken === undefined ? 'GITHUB_TOKEN' : null,
-  codexToken === undefined ? 'OPENAI_API_KEY or CODEX_API_KEY' : null,
+  codexToken === undefined ? 'OPENAI_API_KEY or CODEX_ACCESS_TOKEN' : null,
 ].filter((name): name is string => name !== null)
 
 const integration = missing.length === 0 ? it : it.skip
