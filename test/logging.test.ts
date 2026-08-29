@@ -7,10 +7,10 @@ describe('operator logging', (): void => {
   it('redacts credentials embedded in quoted structured strings', (): void => {
     expect(
       redactSecretsInString(
-        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access","clientSecret":"oauth"} payload: {\"token\":\"nested-secret\"} OPENAI_API_KEY=openai CODEX_ACCESS_TOKEN=codex AWS_SECRET_ACCESS_KEY=aws PASSWORD="two words hidden" Authorization: Basic dXNlcjpwYXNz`,
+        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access","clientSecret":"oauth"} payload: {\"token\":\"nested-secret\"} OPENAI_API_KEY=openai CODEX_ACCESS_TOKEN=codex AWS_SECRET_ACCESS_KEY=aws PASSWORD="two words hidden" Authorization: Basic dXNlcjpwYXNz next Authorization: token ghp_secret`,
       ),
     ).toBe(
-      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]","clientSecret":"[REDACTED]"} payload: {\"token\":\"[REDACTED]\"} OPENAI_API_KEY=[REDACTED] CODEX_ACCESS_TOKEN=[REDACTED] AWS_SECRET_ACCESS_KEY=[REDACTED] PASSWORD=[REDACTED] Authorization=[REDACTED]`,
+      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]","clientSecret":"[REDACTED]"} payload: {\"token\":\"[REDACTED]\"} OPENAI_API_KEY=[REDACTED] CODEX_ACCESS_TOKEN=[REDACTED] AWS_SECRET_ACCESS_KEY=[REDACTED] PASSWORD=[REDACTED] Authorization=[REDACTED] next Authorization=[REDACTED]`,
     )
   })
 
