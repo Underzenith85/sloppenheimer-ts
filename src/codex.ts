@@ -49,6 +49,7 @@ export type AgentEvent = Readonly<{
   turnId: string | null
   sessionId: string | null
   turnCount: number
+  turnStatus: string | null
   usage: Readonly<{
     inputTokens: number
     outputTokens: number
@@ -437,6 +438,13 @@ class CodexConnection {
   #handleNotification(method: string, message: JsonObject): void {
     const telemetry = telemetryFrom(method, message)
     const params = message['params']
+    const turnStatus =
+      method === 'turn/completed' &&
+      isJsonObject(params) &&
+      isJsonObject(params['turn']) &&
+      typeof params['turn']['status'] === 'string'
+        ? params['turn']['status']
+        : null
     if (isJsonObject(params)) {
       const threadId = params['threadId']
       const turnId = params['turnId']
@@ -454,11 +462,9 @@ class CodexConnection {
       message: messageFrom(message),
       threadId: this.#threadId,
       turnId: this.#turnId,
-      sessionId:
-        this.#threadId === null || this.#turnId === null
-          ? null
-          : `${this.#threadId}-${this.#turnId}`,
+      sessionId: this.#threadId,
       turnCount: this.#turnCount,
+      turnStatus,
       usage: telemetry.usage,
       rateLimits: telemetry.rateLimits,
     })
@@ -501,11 +507,9 @@ class CodexConnection {
       message: message === null ? null : boundedMessage(message),
       threadId: this.#threadId,
       turnId: this.#turnId,
-      sessionId:
-        this.#threadId === null || this.#turnId === null
-          ? null
-          : `${this.#threadId}-${this.#turnId}`,
+      sessionId: this.#threadId,
       turnCount: this.#turnCount,
+      turnStatus: null,
       usage: null,
       rateLimits: null,
     })

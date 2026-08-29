@@ -1171,20 +1171,37 @@ export const startOrchestrator = (
               if (event.update.rateLimits !== null) {
                 state.rateLimits = event.update.rateLimits
               }
+              if (entry.sessionId !== null && event.update.event === 'session_started') {
+                yield* logInfo('action=session outcome=started', {
+                  ...sessionLogContext(entry),
+                  action: 'session',
+                  outcome: 'started',
+                  error: null,
+                })
+              }
+              if (entry.sessionId !== null && event.update.event === 'turn_started') {
+                yield* logInfo('action=turn outcome=started', {
+                  ...sessionLogContext(entry),
+                  action: 'turn',
+                  outcome: 'started',
+                  error: null,
+                })
+              }
               if (
                 entry.sessionId !== null &&
-                (event.update.event === 'session_started' ||
-                  event.update.event === 'turn/completed')
+                event.update.event === 'turn/completed' &&
+                event.update.turnStatus !== null
               ) {
-                yield* logInfo(
-                  event.update.event === 'session_started'
-                    ? 'action=session outcome=started'
-                    : 'action=turn outcome=completed',
+                const completed = event.update.turnStatus === 'completed'
+                yield* (completed ? logInfo : logError)(
+                  completed ? 'action=turn outcome=completed' : 'action=turn outcome=failed',
                   {
                     ...sessionLogContext(entry),
-                    action: event.update.event === 'session_started' ? 'session' : 'turn',
-                    outcome: event.update.event === 'session_started' ? 'started' : 'completed',
-                    error: null,
+                    action: 'turn',
+                    outcome: completed ? 'completed' : 'failed',
+                    error: completed
+                      ? null
+                      : `turn finished with status ${event.update.turnStatus}`,
                   },
                 )
               }

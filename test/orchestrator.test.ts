@@ -1101,8 +1101,9 @@ const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
   message: 'working',
   threadId: 'thread-1',
   turnId: 'turn-1',
-  sessionId: 'thread-1-turn-1',
+  sessionId: 'thread-1',
   turnCount: 1,
+  turnStatus: null,
   usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
   rateLimits: null,
   ...overrides,
@@ -1137,7 +1138,7 @@ describe('session telemetry accounting', (): void => {
           expect(live.running[0]).toMatchObject({
             threadId: 'thread-1',
             turnId: 'turn-1',
-            sessionId: 'thread-1-turn-1',
+            sessionId: 'thread-1',
             turnCount: 1,
             processId: 123,
             lastMessage: 'working',
@@ -1185,7 +1186,7 @@ describe('session telemetry accounting', (): void => {
           onEvent(
             makeAgentEvent({
               threadId: `thread-${String(runCount)}`,
-              sessionId: `thread-${String(runCount)}-turn-1`,
+              sessionId: `thread-${String(runCount)}`,
               usage:
                 runCount === 1
                   ? { inputTokens: 8, outputTokens: 2, totalTokens: 10 }
