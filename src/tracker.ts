@@ -696,7 +696,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
         ),
       )
     },
-    handoffCompletedWork: (issue, dispatchLabels) => {
+    handoffCompletedWork: (issue, _dispatchLabels) => {
       const branchName = issueBranchName(issue)
       return githubBranchExists(provider, prefix, branchName).pipe(
         Effect.flatMap((exists) => {
@@ -709,25 +709,11 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
                 ? createPullRequest(provider, prefix, issue, branchName)
                 : Effect.succeed(existingUrl),
             ),
-            Effect.flatMap((pullRequestUrl) =>
-              Effect.forEach(
-                dispatchLabels,
-                (label) =>
-                  githubMutation(
-                    provider,
-                    `${prefix}/issues/${encodeURIComponent(issue.id)}/labels/${encodeURIComponent(label)}`,
-                    'DELETE',
-                    undefined,
-                  ),
-                { concurrency: 1, discard: true },
-              ).pipe(
-                Effect.as<HandoffResult>({
-                  _tag: 'PullRequest',
-                  branchName,
-                  pullRequestUrl,
-                }),
-              ),
-            ),
+            Effect.map((pullRequestUrl): HandoffResult => ({
+              _tag: 'PullRequest',
+              branchName,
+              pullRequestUrl,
+            })),
           )
         }),
       )

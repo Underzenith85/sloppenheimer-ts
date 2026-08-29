@@ -18,6 +18,7 @@ const snapshot: OrchestratorSnapshot = {
   pollingIntervalMs: 10_000,
   maxConcurrentAgents: 2,
   counts: { running: 1, retrying: 0, completed: 3 },
+  pausedIssueNumbers: [],
   running: [
     {
       issueId: issueId('17'),

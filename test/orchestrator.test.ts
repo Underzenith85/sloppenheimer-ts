@@ -458,4 +458,22 @@ describe('workflow hot reload', (): void => {
       ),
     )
   })
+
+  it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }), () => [issue])
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* harness.awaitAgentRun
+          yield* control.setIssuePaused(1, true)
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.counts.running).toBe(0)
+  })
 })
