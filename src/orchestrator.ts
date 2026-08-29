@@ -312,22 +312,26 @@ export const startOrchestrator = (
     )
     const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
       Effect.gen(function* () {
-        const terminalIssues = yield* effective.tracker
-          .fetchIssuesByStates(effective.workflow.config.tracker.terminalStates, null, {
-            hydrateDependencies: false,
-          })
-          .pipe(
-            Effect.matchEffect({
-              onFailure: (error) =>
-                Effect.logWarning('startup terminal issue fetch failed; continuing', {
-                  error: error.message,
-                }).pipe(Effect.as<readonly Issue[] | null>(null)),
-              onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
-            }),
-          )
-        if (terminalIssues === null) {
-          return
-        }
+        const terminalGroups = yield* Effect.forEach(
+          effective.workflow.config.tracker.terminalStates,
+          (state) =>
+            effective.tracker
+              .fetchIssuesByStates([state], null, { hydrateDependencies: false })
+              .pipe(
+                Effect.matchEffect({
+                  onFailure: (error) =>
+                    Effect.logWarning('startup terminal issue fetch failed; continuing', {
+                      state,
+                      error: error.message,
+                    }).pipe(Effect.as<readonly Issue[]>([])),
+                  onSuccess: (issues) => Effect.succeed(issues),
+                }),
+              ),
+          { concurrency: 1 },
+        )
+        const terminalIssues = [
+          ...new Map(terminalGroups.flat().map((issue) => [issue.id, issue])).values(),
+        ]
         for (const issue of terminalIssues) {
           const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
             Effect.matchEffect({

@@ -333,15 +333,14 @@ describe('startup terminal workspace cleanup', (): void => {
         return {
           ...tracker,
           fetchIssuesByStates: (states, labels, options) => {
-            if (states.includes('closed')) {
+            if (!states.includes('open')) {
               terminalFetches.push({
                 states,
                 labels,
                 hydrateDependencies: options?.hydrateDependencies,
               })
-              return Effect.succeed(terminalIssues)
             }
-            return Effect.succeed([])
+            return Effect.succeed(terminalIssues.filter((issue) => states.includes(issue.state)))
           },
           fetchIssuesByIds: (ids, options) => {
             expect(options?.hydrateDependencies).toBe(false)
@@ -385,12 +384,17 @@ describe('startup terminal workspace cleanup', (): void => {
 
     expect(terminalFetches).toEqual([
       {
-        states: startupWorkflow.config.tracker.terminalStates,
+        states: ['closed'],
+        labels: null,
+        hydrateDependencies: false,
+      },
+      {
+        states: ['cancelled'],
         labels: null,
         hydrateDependencies: false,
       },
     ])
-    expect(removed).toEqual(['GH-1', 'GH-2', 'GH-3'])
+    expect(removed).toEqual(['GH-1', 'GH-3', 'GH-2'])
   })
 
   it('continues startup and dispatch when the terminal fetch fails', async (): Promise<void> => {
@@ -430,6 +434,51 @@ describe('startup terminal workspace cleanup', (): void => {
     )
 
     expect(harness.agentRuns()).toHaveLength(1)
+  })
+
+  it('preserves successful cleanup results when another terminal state fetch fails', async (): Promise<void> => {
+    const startupWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        tracker: { ...workflow.config.tracker, terminalStates: ['closed', 'cancelled'] },
+      },
+    }
+    const closedIssue = { ...makeIssue('GH-9', null, null), state: 'closed' }
+    const harness = makeHarness(startupWorkflow)
+    const removed: string[] = []
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByStates: (states) =>
+          states.includes('cancelled')
+            ? Effect.fail(
+                new TrackerError({
+                  category: 'tracker_request',
+                  message: 'unsupported state',
+                  retryable: false,
+                }),
+              )
+            : Effect.succeed([closedIssue]),
+        fetchIssuesByIds: () => Effect.succeed([closedIssue]),
+      }),
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+      }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(removed).toEqual(['GH-9'])
   })
 
   it('does not dispatch until the startup sweep completes', async (): Promise<void> => {
