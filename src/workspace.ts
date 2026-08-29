@@ -195,9 +195,29 @@ export const openVerifiedWorkspace = (
               : rejectWorkspace(`workspace directory could not be held open: ${verified.path}`),
         }),
         (handle) => Effect.promise(() => handle.close().catch(() => undefined)),
-      ).pipe(Effect.as(verified)),
+      ).pipe(
+        // `open` resolves a path, so the handle itself is checked: only if it refers to the
+        // verified inode does holding it actually keep that inode allocated.
+        Effect.flatMap((handle) =>
+          Effect.tryPromise({
+            try: async () => {
+              const held = await handle.stat()
+              if (held.dev !== verified.deviceId || held.ino !== verified.inode) {
+                throw rejectWorkspace(
+                  `workspace handle does not refer to the verified directory: ${verified.path}`,
+                )
+              }
+              return verified
+            },
+            catch: (cause: unknown) =>
+              cause instanceof WorkspaceError
+                ? cause
+                : rejectWorkspace(`workspace handle could not be confirmed: ${verified.path}`),
+          }),
+        ),
+      ),
     ),
-    // The handle is opened by path, so confirm it landed on the directory that was verified.
+    // With the correct inode pinned, confirm the path still resolves to it.
     Effect.tap((verified) => assertWorkspaceIdentity(root, verified)),
   )
 
