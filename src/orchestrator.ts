@@ -4,7 +4,14 @@ import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
-import { issueId, normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
+import {
+  issueId,
+  normalizeState,
+  type Issue,
+  type IssueId,
+  type JsonObject,
+  type TokenTotals,
+} from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
@@ -91,7 +98,7 @@ export type OrchestratorSnapshot = Readonly<{
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
   totals: TokenTotals
-  rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  rateLimits: JsonObject | null
 }>
 
 export type OrchestratorControl = Readonly<{
@@ -127,7 +134,7 @@ type RuntimeState = {
   pausedIssueNumbers: Set<number>
   handoffs: Map<IssueId, HandoffEntry>
   totals: TokenTotals
-  rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  rateLimits: JsonObject | null
 }
 
 type EffectiveWorkflow = Readonly<{
@@ -1076,6 +1083,9 @@ export const startOrchestrator = (
               entry.processId = event.update.processId
               if (event.update.usage !== null) {
                 entry.tokens = event.update.usage
+              }
+              if (event.update.rateLimits !== null) {
+                state.rateLimits = event.update.rateLimits
               }
             }
             break

@@ -48,6 +48,7 @@ export class AgentError extends Data.TaggedError('AgentError')<{
     | 'read_timeout'
     | 'turn_timeout'
     | 'turn_failed'
+    | 'turn_cancelled'
     | 'input_required'
     | 'process_exited'
   readonly message: string
