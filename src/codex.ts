@@ -1,5 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { statSync } from 'node:fs'
 import { createInterface, type Interface } from 'node:readline'
+import type { Readable, Writable } from 'node:stream'
 import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
@@ -64,11 +66,120 @@ type PendingRequest = Readonly<{
   timeout: NodeJS.Timeout
 }>
 
-type TurnWaiter = Readonly<{
+type TurnWaiter = {
   resolve: () => void
   reject: (error: AgentError) => void
   timeout: NodeJS.Timeout
+}
+
+export type CodexProcess = Readonly<{
+  stdin: Writable
+  stdout: Readable
+  stderr: Readable
+  pid: number | undefined
+  exitCode: number | null
+  onceError: (listener: (error: Error) => void) => void
+  onceExit: (listener: (code: number | null, signal: NodeJS.Signals | null) => void) => void
+  kill: (signal: NodeJS.Signals) => boolean
 }>
+
+export type CodexRuntime = Readonly<{
+  spawn: (command: string, cwd: string, environment: NodeJS.ProcessEnv) => CodexProcess
+  signalProcessTree: (child: CodexProcess, signal: NodeJS.Signals) => boolean
+  shutdownGraceMs: number
+  forceKillWaitMs: number
+}>
+
+const isDirectory = (path: string): boolean => {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+const startupError = (cwd: string, cause: unknown): AgentError => {
+  if (!isDirectory(cwd)) {
+    return new AgentError({
+      category: 'invalid_workspace_cwd',
+      message: `Codex workspace cwd is not a directory: ${cwd}`,
+      cause,
+    })
+  }
+  if (typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ENOENT') {
+    return new AgentError({
+      category: 'codex_not_found',
+      message: 'Codex app-server executable was not found',
+      cause,
+    })
+  }
+  return new AgentError({
+    category: 'response_error',
+    message: 'Codex app-server failed to start',
+    cause,
+  })
+}
+
+const signalProcessTree = (child: CodexProcess, signal: NodeJS.Signals): boolean => {
+  if (child.pid === undefined) {
+    return child.kill(signal)
+  }
+  if (process.platform === 'win32') {
+    const result = spawnSync(
+      'taskkill',
+      signal === 'SIGKILL'
+        ? ['/pid', String(child.pid), '/t', '/f']
+        : ['/pid', String(child.pid), '/t'],
+      { windowsHide: true },
+    )
+    return result.status === 0
+  }
+  try {
+    process.kill(-child.pid, signal)
+    return true
+  } catch (cause: unknown) {
+    if (typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ESRCH') {
+      return false
+    }
+    try {
+      return child.kill(signal)
+    } catch {
+      return false
+    }
+  }
+}
+
+const defaultCodexRuntime: CodexRuntime = {
+  spawn: (command, cwd, environment) => {
+    const child = spawn('bash', ['-lc', command], {
+      cwd,
+      env: environment,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    })
+    return {
+      stdin: child.stdin,
+      stdout: child.stdout,
+      stderr: child.stderr,
+      get pid(): number | undefined {
+        return child.pid
+      },
+      get exitCode(): number | null {
+        return child.exitCode
+      },
+      onceError: (listener) => {
+        child.once('error', listener)
+      },
+      onceExit: (listener) => {
+        child.once('exit', listener)
+      },
+      kill: (signal) => child.kill(signal),
+    }
+  },
+  signalProcessTree,
+  shutdownGraceMs: 5_000,
+  forceKillWaitMs: 1_000,
+}
 
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
@@ -95,9 +206,10 @@ const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
     : null
 }
 
-class CodexConnection {
-  readonly #process: ChildProcessWithoutNullStreams
+export class CodexConnection {
+  readonly #process: CodexProcess
   readonly #lines: Interface
+  readonly #runtime: CodexRuntime
   readonly #readTimeoutMs: number
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
@@ -105,6 +217,12 @@ class CodexConnection {
   readonly #turns = new Map<string, TurnWaiter>()
   #nextId = 1
   #closed = false
+  #initialized = false
+  #processTerminated = false
+  #terminalError: AgentError | null = null
+  #stopPromise: Promise<void> | null = null
+  #awaitingTurnIdentity = false
+  readonly #earlyTurnOutcomes = new Map<string, AgentError | null>()
 
   constructor(
     command: string,
@@ -112,12 +230,18 @@ class CodexConnection {
     config: CodexConfig,
     secretEnvironmentNames: readonly string[],
     onEvent: (event: AgentEvent) => void,
+    runtime: CodexRuntime = defaultCodexRuntime,
   ) {
-    this.#process = spawn('bash', ['-lc', command], {
-      cwd,
-      env: makeCodexEnvironment(process.env, secretEnvironmentNames),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    this.#runtime = runtime
+    try {
+      this.#process = runtime.spawn(
+        command,
+        cwd,
+        makeCodexEnvironment(process.env, secretEnvironmentNames),
+      )
+    } catch (cause: unknown) {
+      throw startupError(cwd, cause)
+    }
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
     this.#onEvent = onEvent
@@ -131,19 +255,32 @@ class CodexConnection {
         this.#emit('diagnostic', message)
       }
     })
-    this.#process.once('error', (cause) => {
-      this.#failAll(
-        new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
+    this.#process.onceError((cause) => {
+      this.#processTerminated = true
+      this.#close(
+        this.#initialized
+          ? new AgentError({
+              category: 'response_error',
+              message: 'Codex app-server process failed',
+              cause,
+            })
+          : startupError(cwd, cause),
       )
     })
-    this.#process.once('exit', (code) => {
+    this.#process.onceExit((code, signal) => {
+      this.#processTerminated = true
       if (!this.#closed) {
-        this.#failAll(
-          new AgentError({
-            category: 'process_exited',
-            message: `Codex process exited with ${String(code)}`,
-          }),
-        )
+        const error =
+          !this.#initialized && code === 127
+            ? new AgentError({
+                category: 'codex_not_found',
+                message: 'Codex app-server executable was not found',
+              })
+            : new AgentError({
+                category: 'port_exit',
+                message: `Codex app-server exited with code ${String(code)} and signal ${String(signal)}`,
+              })
+        this.#close(error)
       }
     })
   }
@@ -169,10 +306,11 @@ class CodexConnection {
       typeof result['thread']['id'] !== 'string'
     ) {
       throw new AgentError({
-        category: 'protocol_error',
+        category: 'response_error',
         message: 'thread/start returned no thread id',
       })
     }
+    this.#initialized = true
     return result['thread']['id']
   }
 
@@ -182,75 +320,149 @@ class CodexConnection {
     config: CodexConfig,
     prompt: string,
   ): Promise<string> {
-    const result = await this.#request('turn/start', {
-      threadId,
-      input: [{ type: 'text', text: prompt }],
-      cwd: workspace.path,
-      approvalPolicy: config.approvalPolicy,
-      sandboxPolicy: config.turnSandboxPolicy ?? {
-        type: 'workspaceWrite',
-        writableRoots: [workspace.path],
-        networkAccess: true,
-      },
-    })
-    if (
-      !isJsonObject(result) ||
-      !isJsonObject(result['turn']) ||
-      typeof result['turn']['id'] !== 'string'
-    ) {
+    if (this.#awaitingTurnIdentity || this.#turns.size > 0) {
       throw new AgentError({
-        category: 'protocol_error',
-        message: 'turn/start returned no turn id',
+        category: 'response_error',
+        message: 'Codex connection already has an active turn',
       })
     }
-    const turnId = result['turn']['id']
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.#turns.delete(turnId)
-        rejectPromise(
-          new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
+    this.#awaitingTurnIdentity = true
+    try {
+      const result = await this.#request('turn/start', {
+        threadId,
+        input: [{ type: 'text', text: prompt }],
+        cwd: workspace.path,
+        approvalPolicy: config.approvalPolicy,
+        sandboxPolicy: config.turnSandboxPolicy ?? {
+          type: 'workspaceWrite',
+          writableRoots: [workspace.path],
+          networkAccess: true,
+        },
+      })
+      if (
+        !isJsonObject(result) ||
+        !isJsonObject(result['turn']) ||
+        typeof result['turn']['id'] !== 'string'
+      ) {
+        throw new AgentError({
+          category: 'response_error',
+          message: 'turn/start returned no turn id',
+        })
+      }
+      if (this.#closed) {
+        throw (
+          this.#terminalError ??
+          new AgentError({ category: 'response_error', message: 'Codex connection is closed' })
         )
-      }, this.#turnTimeoutMs)
-      this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
-    })
-    return turnId
+      }
+      const turnId = result['turn']['id']
+      const earlyOutcome = this.#earlyTurnOutcomes.get(turnId)
+      if (earlyOutcome !== undefined || this.#earlyTurnOutcomes.has(turnId)) {
+        this.#earlyTurnOutcomes.delete(turnId)
+        if (earlyOutcome !== null) {
+          throw earlyOutcome
+        }
+        return turnId
+      }
+      const completion = new Promise<void>((resolvePromise, rejectPromise) => {
+        const timeout = this.#makeTurnTimeout(turnId)
+        this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      })
+      this.#awaitingTurnIdentity = false
+      await completion
+      return turnId
+    } finally {
+      this.#awaitingTurnIdentity = false
+      this.#earlyTurnOutcomes.clear()
+    }
   }
 
   async stop(): Promise<void> {
-    if (this.#closed) {
-      return
+    if (this.#stopPromise === null) {
+      this.#stopPromise = this.#performStop()
     }
-    this.#closed = true
+    await this.#stopPromise
+  }
+
+  async #performStop(): Promise<void> {
+    if (!this.#closed) {
+      this.#close(
+        new AgentError({
+          category: 'turn_cancelled',
+          message: 'Codex app-server session was cancelled',
+        }),
+      )
+    }
     this.#lines.close()
     this.#process.stdin.end()
-    this.#process.kill('SIGTERM')
-    await new Promise<void>((resolvePromise) => {
-      if (this.#process.exitCode !== null) {
-        resolvePromise()
-      } else {
-        const timeout = setTimeout(() => {
-          this.#process.kill('SIGKILL')
-          resolvePromise()
-        }, 5_000)
-        this.#process.once('exit', () => {
+    if (!this.#runtime.signalProcessTree(this.#process, 'SIGTERM')) {
+      return
+    }
+    const exited = await this.#waitForExit(this.#runtime.shutdownGraceMs)
+    if (exited && !this.#runtime.signalProcessTree(this.#process, 'SIGKILL')) {
+      return
+    }
+    if (!exited) {
+      this.#runtime.signalProcessTree(this.#process, 'SIGKILL')
+    }
+    await this.#waitForExit(this.#runtime.forceKillWaitMs)
+  }
+
+  #waitForExit(timeoutMs: number): Promise<boolean> {
+    if (this.#processTerminated || this.#process.exitCode !== null) {
+      return Promise.resolve(true)
+    }
+    return new Promise<boolean>((resolvePromise) => {
+      let settled = false
+      let timeout: NodeJS.Timeout | null = null
+      const settle = (exited: boolean): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        if (timeout !== null) {
           clearTimeout(timeout)
-          resolvePromise()
-        })
+        }
+        resolvePromise(exited)
       }
+      timeout = setTimeout(() => {
+        settle(false)
+      }, timeoutMs)
+      this.#process.onceExit(() => {
+        settle(true)
+      })
     })
   }
 
   #request(method: string, params: JsonObject): Promise<JsonValue> {
+    if (this.#closed) {
+      return Promise.reject(
+        this.#terminalError ??
+          new AgentError({ category: 'response_error', message: 'Codex connection is closed' }),
+      )
+    }
     const id = this.#nextId++
-    this.#write({ id, method, params })
     return new Promise<JsonValue>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#pending.delete(id)
         rejectPromise(
-          new AgentError({ category: 'read_timeout', message: `${method} response timed out` }),
+          new AgentError({ category: 'response_timeout', message: `${method} response timed out` }),
         )
       }, this.#readTimeoutMs)
       this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      try {
+        this.#write({ id, method, params })
+      } catch (cause: unknown) {
+        clearTimeout(timeout)
+        this.#pending.delete(id)
+        rejectPromise(
+          new AgentError({
+            category: 'response_error',
+            message: `failed to send ${method} request`,
+            cause,
+          }),
+        )
+      }
     })
   }
 
@@ -266,10 +478,13 @@ class CodexConnection {
   }
 
   #receiveLine(line: string): void {
+    if (this.#closed) {
+      return
+    }
     if (Buffer.byteLength(line, 'utf8') > 10 * 1024 * 1024) {
-      this.#failAll(
+      this.#close(
         new AgentError({
-          category: 'protocol_error',
+          category: 'response_error',
           message: 'Codex protocol line exceeds 10 MB',
         }),
       )
@@ -287,10 +502,14 @@ class CodexConnection {
     }
     const parsed = decoded
     const id = parsed['id']
-    if (
-      typeof id === 'number' &&
-      (parsed['result'] !== undefined || parsed['error'] !== undefined)
-    ) {
+    const method = parsed['method']
+    const isResponse =
+      typeof id === 'number' && (parsed['result'] !== undefined || parsed['error'] !== undefined)
+    if (!isResponse && typeof method !== 'string') {
+      return
+    }
+    this.#resetTurnSilenceTimeouts()
+    if (isResponse && typeof id === 'number') {
       const pending = this.#pending.get(id)
       if (pending === undefined) {
         return
@@ -299,13 +518,13 @@ class CodexConnection {
       this.#pending.delete(id)
       const error = parsed['error']
       if (error !== undefined) {
-        pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
+        pending.reject(new AgentError({ category: 'response_error', message: errorMessage(error) }))
       } else {
         const result = parsed['result']
         if (result === undefined) {
           pending.reject(
             new AgentError({
-              category: 'protocol_error',
+              category: 'response_error',
               message: 'JSON-RPC response has no result',
             }),
           )
@@ -315,7 +534,6 @@ class CodexConnection {
       }
       return
     }
-    const method = parsed['method']
     if (typeof method !== 'string') {
       return
     }
@@ -340,9 +558,9 @@ class CodexConnection {
         id,
         error: { code: -32000, message: 'Symphony does not support interactive input' },
       })
-      this.#failTurns(
+      this.#close(
         new AgentError({
-          category: 'input_required',
+          category: 'turn_input_required',
           message: 'Codex requested interactive input',
         }),
       )
@@ -375,24 +593,62 @@ class CodexConnection {
     }
     const waiter = this.#turns.get(turnId)
     if (waiter === undefined) {
+      if (this.#awaitingTurnIdentity) {
+        this.#earlyTurnOutcomes.set(turnId, this.#turnOutcome(turnId, status))
+      }
       return
     }
     clearTimeout(waiter.timeout)
     this.#turns.delete(turnId)
-    if (status === 'completed') {
+    const outcome = this.#turnOutcome(turnId, status)
+    if (outcome === null) {
       waiter.resolve()
     } else {
-      waiter.reject(
-        new AgentError({
-          category: 'turn_failed',
-          message: `turn ${turnId} finished with status ${status}`,
-        }),
-      )
+      waiter.reject(outcome)
     }
+  }
+
+  #turnOutcome(turnId: string, status: string): AgentError | null {
+    if (status === 'completed') {
+      return null
+    }
+    if (status === 'cancelled' || status === 'canceled' || status === 'interrupted') {
+      return new AgentError({
+        category: 'turn_cancelled',
+        message: `turn ${turnId} finished with status ${status}`,
+      })
+    }
+    return new AgentError({
+      category: 'turn_failed',
+      message: `turn ${turnId} finished with status ${status}`,
+    })
   }
 
   #emit(event: string, message: string): void {
     this.#onEvent({ event, timestamp: new Date(), processId: this.processId, message, usage: null })
+  }
+
+  #resetTurnSilenceTimeouts(): void {
+    for (const [turnId, waiter] of this.#turns) {
+      clearTimeout(waiter.timeout)
+      waiter.timeout = this.#makeTurnTimeout(turnId)
+    }
+  }
+
+  #makeTurnTimeout(turnId: string): NodeJS.Timeout {
+    return setTimeout(() => {
+      const waiter = this.#turns.get(turnId)
+      if (waiter === undefined) {
+        return
+      }
+      this.#turns.delete(turnId)
+      waiter.reject(
+        new AgentError({
+          category: 'turn_timeout',
+          message: `turn ${turnId} timed out after protocol silence`,
+        }),
+      )
+    }, this.#turnTimeoutMs)
   }
 
   #failTurns(error: AgentError): void {
@@ -410,6 +666,17 @@ class CodexConnection {
     }
     this.#pending.clear()
     this.#failTurns(error)
+  }
+
+  #close(error: AgentError): void {
+    if (this.#closed) {
+      return
+    }
+    this.#closed = true
+    this.#terminalError = error
+    this.#lines.close()
+    this.#earlyTurnOutcomes.clear()
+    this.#failAll(error)
   }
 }
 
@@ -462,7 +729,7 @@ export const runAgent = (
             cause instanceof AgentError
               ? cause
               : new AgentError({
-                  category: 'protocol_error',
+                  category: 'response_error',
                   message: `Codex session failed for ${issue.identifier}`,
                   cause,
                 }),

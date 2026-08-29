@@ -43,13 +43,15 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
 
 export class AgentError extends Data.TaggedError('AgentError')<{
   readonly category:
-    | 'spawn_failed'
-    | 'protocol_error'
-    | 'read_timeout'
+    | 'codex_not_found'
+    | 'invalid_workspace_cwd'
+    | 'response_timeout'
+    | 'response_error'
     | 'turn_timeout'
     | 'turn_failed'
-    | 'input_required'
-    | 'process_exited'
+    | 'turn_cancelled'
+    | 'turn_input_required'
+    | 'port_exit'
   readonly message: string
   readonly cause?: unknown
 }> {}

@@ -627,7 +627,7 @@ export const startOrchestrator = (
             Effect.mapError(
               (error) =>
                 new AgentError({
-                  category: 'protocol_error',
+                  category: 'response_error',
                   message: `issue refresh failed: ${error.message}`,
                   cause: error,
                 }),
