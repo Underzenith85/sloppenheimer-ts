@@ -62,9 +62,9 @@ ssh -L 3000:127.0.0.1:3000 symphony-host
 ```
 
 After a normal agent turn, Symphony looks for the expected `symphony/issue-<number>` branch. When
-the branch exists, the host creates or reuses an open pull request, removes the dispatch labels, and
-stops continuation turns. Without a pushed branch, Symphony preserves the workspace and continues
-the issue. Pull-request operations use only the host-side GitHub credential.
+the branch exists, the host creates or reuses an open pull request and stops continuation turns.
+Dispatch labels remain unchanged. Without a pushed branch, Symphony preserves the workspace and
+continues the issue. Pull-request operations use only the host-side GitHub credential.
 
 ## Configuration
 

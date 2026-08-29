@@ -11,9 +11,15 @@ import { startOperatorServer } from '../src/server.js'
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T12:00:00.000Z',
   workflowPath: '/tmp/WORKFLOW.md',
+  effectiveWorkflow: {
+    fingerprint: 'valid-workflow',
+    loadedAt: '2026-08-29T11:00:00.000Z',
+  },
+  workflowReloadError: null,
   pollingIntervalMs: 10_000,
   maxConcurrentAgents: 2,
   counts: { running: 1, retrying: 0, completed: 3 },
+  pausedIssueNumbers: [],
   running: [
     {
       issueId: issueId('17'),

@@ -83,6 +83,7 @@ export const buildBacklogSnapshot = (
   openIssues: readonly Issue[],
   label: string,
   terminalStates: readonly string[],
+  pausedIssueNumbers: ReadonlySet<number> = new Set(),
 ): BacklogSnapshot => {
   const cycles = findDependencyCycles(openIssues)
   const cyclic = new Set(cycles.flatMap((cycle) => cycle.members))
@@ -97,7 +98,8 @@ export const buildBacklogSnapshot = (
       labels: issue.labels,
       priority: issue.priority,
       createdAt: issue.createdAt?.toISOString() ?? null,
-      enabled: issue.labels.includes(label.toLowerCase()),
+      enabled:
+        !pausedIssueNumbers.has(Number(issue.id)) && issue.labels.includes(label.toLowerCase()),
       state: issue.state,
       blockedBy: issue.blockedBy,
       readiness: isCyclic ? 'cyclic' : blockers.length > 0 ? 'blocked' : 'ready',
@@ -165,6 +167,7 @@ export const makeOperatorBackend = (
     terminalStates: readonly string[]
   }>
   let cachedControl: Readonly<{ fingerprint: string; control: LoadedControl }> | null = null
+  const pausedIssueNumbers = new Set<number>()
   const loadControl = loadWorkflow(workflowPath).pipe(
     Effect.flatMap((workflow) =>
       controlLabel(workflow).pipe(
@@ -192,7 +195,9 @@ export const makeOperatorBackend = (
         issues
           .listOpenIssues()
           .pipe(
-            Effect.map((openIssues) => buildBacklogSnapshot(openIssues, label, terminalStates)),
+            Effect.map((openIssues) =>
+              buildBacklogSnapshot(openIssues, label, terminalStates, pausedIssueNumbers),
+            ),
           ),
       ),
     ),
@@ -200,7 +205,9 @@ export const makeOperatorBackend = (
       loadControl.pipe(
         Effect.flatMap(({ label, issues, terminalStates }) => {
           if (!enabled) {
-            return issues.setLabel(issueNumber, label, false)
+            return orchestrator
+              .setIssuePaused(issueNumber, true)
+              .pipe(Effect.tap(() => Effect.sync(() => pausedIssueNumbers.add(issueNumber))))
           }
           return issues.listOpenIssues().pipe(
             Effect.flatMap((openIssues) => {
@@ -225,7 +232,10 @@ export const makeOperatorBackend = (
                   }),
                 )
               }
-              return issues.setLabel(issueNumber, label, true)
+              return issues.setLabel(issueNumber, label, true).pipe(
+                Effect.zipRight(orchestrator.setIssuePaused(issueNumber, false)),
+                Effect.tap(() => Effect.sync(() => pausedIssueNumbers.delete(issueNumber))),
+              )
             }),
           )
         }),
