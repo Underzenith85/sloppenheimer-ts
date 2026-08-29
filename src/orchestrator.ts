@@ -551,8 +551,12 @@ export const startOrchestrator = (
           return
         }
         const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
-        const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
-          execution.tracker.fetchIssuesByIds([issue.id]).pipe(
+        const runId = nextRunId
+        nextRunId += 1
+        const refreshIssue = (): Effect.Effect<Issue | null, AgentError> => {
+          const running = state.running.get(issue.id)
+          const tracker = running?.runId === runId ? running.execution.tracker : execution.tracker
+          return tracker.fetchIssuesByIds([issue.id]).pipe(
             Effect.map((issues) => issues[0] ?? null),
             Effect.mapError(
               (error) =>
@@ -563,9 +567,8 @@ export const startOrchestrator = (
                 }),
             ),
           )
+        }
 
-        const runId = nextRunId
-        nextRunId += 1
         const worker = execution.workspaces.create(issue.identifier).pipe(
           Effect.flatMap((workspace) =>
             execution.workspaces.beforeRun(workspace).pipe(
