@@ -2,31 +2,64 @@ import { Effect } from 'effect'
 
 type LogFields = Readonly<Record<string, unknown>>
 
-const secretKey =
-  /^(?:authorization|credential|credentials|password|secret|token|apiKey|accessToken|refreshToken)$|(?:^|_)(?:api_key|access_token|refresh_token|auth_token|credential|password|secret)$/iu
+const exactSecretKeys = new Set([
+  'authorization',
+  'credential',
+  'credentials',
+  'password',
+  'secret',
+  'token',
+  'apikey',
+  'accesstoken',
+  'refreshtoken',
+  'authtoken',
+])
+
+const isSecretKey = (key: string): boolean => {
+  const lowerKey = key.toLowerCase()
+  if (exactSecretKeys.has(lowerKey)) {
+    return true
+  }
+  if (
+    /(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|credentials?|password|secret|token)$/u.test(
+      lowerKey,
+    )
+  ) {
+    return true
+  }
+  return /(?:ApiKey|AccessToken|RefreshToken|AuthToken|Credentials?|Password|Secret|Token)$/u.test(
+    key,
+  )
+}
+
+const redactQuotedField = (match: string, key: string, quote: string): string =>
+  isSecretKey(key) ? `${quote}${key}${quote}:${quote}[REDACTED]${quote}` : match
+
+const redactAssignment = (match: string, key: string): string =>
+  isSecretKey(key) ? `${key}=[REDACTED]` : match
 
 export const redactSecretsInString = (value: string): string =>
   value
+    .replace(/\b(Authorization)\s*[:=]\s*(?:Basic|Bearer)\s+\S+/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
     .replace(
-      /"((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))"\s*:\s*"(?:\\.|[^"\\])*"/giu,
-      '"$1":"[REDACTED]"',
+      /"([A-Za-z_][A-Za-z0-9_-]*)"\s*:\s*"(?:\\.|[^"\\])*"/gu,
+      (match: string, key: string): string => redactQuotedField(match, key, '"'),
     )
     .replace(
-      /'((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))'\s*:\s*'(?:\\.|[^'\\])*'/giu,
-      "'$1':'[REDACTED]'",
+      /'([A-Za-z_][A-Za-z0-9_-]*)'\s*:\s*'(?:\\.|[^'\\])*'/gu,
+      (match: string, key: string): string => redactQuotedField(match, key, "'"),
     )
     .replace(
-      /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))\s*[:=]\s*"(?:\\.|[^"\\])*"/giu,
-      '$1=[REDACTED]',
+      /\b([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*"(?:\\.|[^"\\])*"/gu,
+      (match: string, key: string): string => redactAssignment(match, key),
     )
     .replace(
-      /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))\s*[:=]\s*'(?:\\.|[^'\\])*'/giu,
-      '$1=[REDACTED]',
+      /\b([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*'(?:\\.|[^'\\])*'/gu,
+      (match: string, key: string): string => redactAssignment(match, key),
     )
-    .replace(
-      /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))\s*[:=]\s*\S+/giu,
-      '$1=[REDACTED]',
+    .replace(/\b([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*\S+/gu, (match: string, key: string): string =>
+      redactAssignment(match, key),
     )
 
 const boundedString = (value: string): string => {
@@ -47,10 +80,7 @@ const sanitize = (value: unknown, depth = 0): unknown => {
   return Object.fromEntries(
     Object.entries(value)
       .slice(0, 40)
-      .map(([key, entry]) => [
-        key,
-        secretKey.test(key) ? '[REDACTED]' : sanitize(entry, depth + 1),
-      ]),
+      .map(([key, entry]) => [key, isSecretKey(key) ? '[REDACTED]' : sanitize(entry, depth + 1)]),
   )
 }
 
@@ -58,7 +88,7 @@ const sanitizeFields = (fields: LogFields): LogFields =>
   Object.fromEntries(
     Object.entries(fields).map(([key, value]) => [
       key,
-      secretKey.test(key) ? '[REDACTED]' : sanitize(value),
+      isSecretKey(key) ? '[REDACTED]' : sanitize(value),
     ]),
   )
 

@@ -289,7 +289,10 @@ class CodexConnection {
     const turnId = result['turn']['id']
     this.#turnId = turnId
     this.#turnCount = turnCount
-    this.#emit(turnCount === 1 ? 'session_started' : 'turn_started', null)
+    if (turnCount === 1) {
+      this.#emit('session_started', null)
+    }
+    this.#emit('turn_started', null)
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#turns.delete(turnId)
