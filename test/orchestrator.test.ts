@@ -274,17 +274,7 @@ const makeHarness = (
         remove: () => Effect.void,
       }
     },
-    runAgent: (
-      _issue,
-      _workspace,
-      config,
-      prompt,
-      maxTurns,
-      _secrets,
-      _refresh,
-      _routable,
-      onEvent,
-    ) =>
+    runAgent: ({ config, prompt, maxTurns, onEvent }) =>
       Effect.sync(() => {
         agentRuns.push({ command: config.command, prompt, maxTurns })
         onAgentEvent = onEvent
@@ -953,13 +943,14 @@ describe('tracker credential revalidation', (): void => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
     const harness = makeHarness(workflow, () => [issue])
-    let refreshIssue: Parameters<OrchestratorDependencies['runAgent']>[6] | null = null
+    let refreshIssue: Parameters<OrchestratorDependencies['runAgent']>[0]['refreshIssue'] | null =
+      null
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
       environment,
-      runAgent: (...arguments_) => {
-        refreshIssue = arguments_[6]
-        return harness.dependencies.runAgent(...arguments_)
+      runAgent: (launch) => {
+        refreshIssue = launch.refreshIssue
+        return harness.dependencies.runAgent(launch)
       },
     }
     const refreshActiveIssue = (): Effect.Effect<void> =>
@@ -1170,17 +1161,7 @@ describe('session telemetry accounting', (): void => {
     })
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      runAgent: (
-        _issue,
-        _workspace,
-        _config,
-        _prompt,
-        _maxTurns,
-        _secrets,
-        _refresh,
-        _routable,
-        onEvent,
-      ) =>
+      runAgent: ({ onEvent }) =>
         Effect.suspend(() => {
           runCount += 1
           onEvent(

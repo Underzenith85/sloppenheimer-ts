@@ -4,9 +4,14 @@ import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
-import { AgentError } from './errors.js'
+import { AgentError, type WorkspaceError } from './errors.js'
 import { redactSecretsInString } from './logging.js'
 import type { CodexConfig } from './workflow.js'
+import {
+  assertWorkspaceIdentity,
+  openVerifiedWorkspace,
+  type VerifiedWorkspace,
+} from './workspace.js'
 
 export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,
@@ -227,13 +232,13 @@ class CodexConnection {
     return this.#process.pid ?? null
   }
 
-  async initialize(config: CodexConfig, workspace: Workspace): Promise<string> {
+  async initialize(config: CodexConfig, cwd: string): Promise<string> {
     await this.#request('initialize', {
       clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
     })
     this.#notify('initialized', {})
     const result = await this.#request('thread/start', {
-      cwd: workspace.path,
+      cwd,
       approvalPolicy: config.approvalPolicy,
       sandbox: config.threadSandbox,
       serviceName: 'symphony_ts',
@@ -255,7 +260,7 @@ class CodexConnection {
 
   async runTurn(
     threadId: string,
-    workspace: Workspace,
+    cwd: string,
     config: CodexConfig,
     prompt: string,
     turnCount: number,
@@ -263,11 +268,11 @@ class CodexConnection {
     const result = await this.#request('turn/start', {
       threadId,
       input: [{ type: 'text', text: prompt }],
-      cwd: workspace.path,
+      cwd,
       approvalPolicy: config.approvalPolicy,
       sandboxPolicy: config.turnSandboxPolicy ?? {
         type: 'workspaceWrite',
-        writableRoots: [workspace.path],
+        writableRoots: [cwd],
         networkAccess: true,
       },
     })
@@ -532,27 +537,53 @@ class CodexConnection {
   }
 }
 
-export const runAgent = (
-  issue: Issue,
-  workspace: Workspace,
-  config: CodexConfig,
-  prompt: string,
-  maxTurns: number,
-  secretEnvironmentNames: readonly string[],
-  refreshIssue: () => Effect.Effect<Issue | null, AgentError>,
-  isRoutable: (issue: Issue) => boolean,
-  onEvent: (event: AgentEvent) => void,
-): Effect.Effect<AgentResult, AgentError> =>
-  Effect.scoped(
+export type AgentLaunch = Readonly<{
+  issue: Issue
+  workspace: Workspace
+  /** The configured workspace root; containment is re-verified against it at launch. */
+  workspaceRoot: string
+  config: CodexConfig
+  prompt: string
+  maxTurns: number
+  secretEnvironmentNames: readonly string[]
+  refreshIssue: () => Effect.Effect<Issue | null, AgentError>
+  isRoutable: (issue: Issue) => boolean
+  onEvent: (event: AgentEvent) => void
+}>
+
+const rejectWorkspaceLaunch = (error: WorkspaceError): AgentError =>
+  new AgentError({
+    category: 'workspace_rejected',
+    message: `refusing to launch Codex: ${error.message}`,
+    cause: error,
+  })
+
+const runVerifiedAgent = (
+  launch: AgentLaunch,
+  verified: VerifiedWorkspace,
+): Effect.Effect<AgentResult, AgentError> => {
+  /**
+   * A path string is re-resolved by the kernel at every consumer, so the identity is re-bound at
+   * each path-consuming boundary: after the process is created and before every turn. A directory
+   * renamed and replaced by a symlink in between is rejected rather than followed.
+   */
+  const rebind = (): Promise<void> =>
+    Effect.runPromise(
+      assertWorkspaceIdentity(launch.workspaceRoot, verified).pipe(
+        Effect.mapError(rejectWorkspaceLaunch),
+      ),
+    )
+
+  return Effect.scoped(
     Effect.acquireRelease(
       Effect.sync(
         () =>
           new CodexConnection(
-            config.command,
-            workspace.path,
-            config,
-            secretEnvironmentNames,
-            onEvent,
+            launch.config.command,
+            verified.path,
+            launch.config,
+            launch.secretEnvironmentNames,
+            launch.onEvent,
           ),
       ),
       (connection) => Effect.promise(() => connection.stop()),
@@ -560,25 +591,31 @@ export const runAgent = (
       Effect.flatMap((connection) =>
         Effect.tryPromise({
           try: async () => {
-            const threadId = await connection.initialize(config, workspace)
+            await rebind()
+            const threadId = await connection.initialize(launch.config, verified.path)
+            // Re-bound after the boundary too: a swap during the request window is then detected
+            // and the session torn down before any turn runs.
+            await rebind()
             let turnId = ''
             let turnCount = 0
-            while (turnCount < maxTurns) {
+            while (turnCount < launch.maxTurns) {
               const turnPrompt =
                 turnCount === 0
-                  ? prompt
+                  ? launch.prompt
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
               const nextTurnCount = turnCount + 1
+              await rebind()
               turnId = await connection.runTurn(
                 threadId,
-                workspace,
-                config,
+                verified.path,
+                launch.config,
                 turnPrompt,
                 nextTurnCount,
               )
+              await rebind()
               turnCount = nextTurnCount
-              const refreshed = await Effect.runPromise(refreshIssue())
-              if (refreshed === null || !isRoutable(refreshed)) {
+              const refreshed = await Effect.runPromise(launch.refreshIssue())
+              if (refreshed === null || !launch.isRoutable(refreshed)) {
                 break
               }
             }
@@ -589,10 +626,28 @@ export const runAgent = (
               ? cause
               : new AgentError({
                   category: 'protocol_error',
-                  message: `Codex session failed for ${issue.identifier}`,
+                  message: `Codex session failed for ${launch.issue.identifier}`,
                   cause,
                 }),
         }),
       ),
+    ),
+  )
+}
+
+/**
+ * Launches Codex for one issue.
+ *
+ * Workspace containment is verified against the configured root immediately before the process is
+ * created, and the verified real path — not the caller-supplied one — becomes the subprocess cwd
+ * and the thread/turn `cwd`. Because a path string is re-resolved by the kernel at every consumer,
+ * the verified directory's identity is re-bound after the process is created and before every
+ * turn, so a stale, forged, or substituted workspace can never be entered.
+ */
+export const runAgent = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  Effect.scoped(
+    openVerifiedWorkspace(launch.workspaceRoot, launch.workspace).pipe(
+      Effect.mapError(rejectWorkspaceLaunch),
+      Effect.flatMap((verified) => runVerifiedAgent(launch, verified)),
     ),
   )

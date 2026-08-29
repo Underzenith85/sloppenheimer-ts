@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import type { Stats } from 'node:fs'
-import { lstat, mkdir, rm } from 'node:fs/promises'
+import { lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { Effect } from 'effect'
+import { Effect, type Scope } from 'effect'
 
 import type { IssueIdentifier, Workspace } from './domain.js'
 import { WorkspaceError } from './errors.js'
@@ -44,6 +44,182 @@ export const containedWorkspacePath = (root: string, key: string): string => {
   }
   return candidate
 }
+
+const isStrictDescendant = (root: string, candidate: string): boolean => {
+  const difference = relative(root, candidate)
+  return (
+    difference !== '' &&
+    !isAbsolute(difference) &&
+    difference !== '..' &&
+    !difference.startsWith(`..${sep}`)
+  )
+}
+
+const rejectWorkspace = (message: string): WorkspaceError =>
+  new WorkspaceError({ category: 'invalid_path', message })
+
+/**
+ * The identity of a verified workspace directory. The path alone is not enough: a path string is
+ * re-resolved by the kernel at every consumer, so the directory that a later consumer enters is
+ * only known to be the verified one if its filesystem identity still matches.
+ */
+export type VerifiedWorkspace = Readonly<{
+  /** The canonical path of the verified directory. */
+  path: string
+  /** The canonical path of the configured root it was verified against. */
+  rootPath: string
+  deviceId: number
+  inode: number
+}>
+
+const directoryIdentity = async (path: string): Promise<Stats> => {
+  let info: Stats
+  try {
+    info = await lstat(path)
+  } catch {
+    throw rejectWorkspace(`workspace directory is not present: ${path}`)
+  }
+  if (info.isSymbolicLink()) {
+    throw rejectWorkspace(`workspace path is a symbolic link: ${path}`)
+  }
+  if (!info.isDirectory()) {
+    throw rejectWorkspace(`workspace path is not a directory: ${path}`)
+  }
+  return info
+}
+
+const canonicalRoot = async (root: string): Promise<string> => {
+  try {
+    return await realpath(resolve(root))
+  } catch {
+    throw rejectWorkspace(`configured workspace root is not present: ${resolve(root)}`)
+  }
+}
+
+/**
+ * The single containment invariant every executor must satisfy immediately before launching an
+ * agent. Creation-time checks are not enough: a `Workspace` value can be stale, forged, or the
+ * directory can have been replaced since it was produced.
+ *
+ * Returns the canonical workspace path, the canonical root it was checked against, and the device
+ * and inode that path resolved to, so every later consumer can confirm it is the same directory.
+ */
+export const verifyWorkspaceForLaunch = (
+  root: string,
+  workspace: Workspace,
+): Effect.Effect<VerifiedWorkspace, WorkspaceError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const normalizedRoot = resolve(root)
+      const declaredPath = resolve(workspace.path)
+      if (!isStrictDescendant(normalizedRoot, declaredPath)) {
+        throw rejectWorkspace(
+          `workspace path is not a strict descendant of the configured root: ${declaredPath}`,
+        )
+      }
+      await directoryIdentity(declaredPath)
+      const rootPath = await canonicalRoot(normalizedRoot)
+      const realWorkspace = await realpath(declaredPath)
+      if (!isStrictDescendant(rootPath, realWorkspace)) {
+        throw rejectWorkspace(
+          `resolved workspace path escapes the configured root: ${realWorkspace}`,
+        )
+      }
+      const resolved = await directoryIdentity(realWorkspace)
+      return { path: realWorkspace, rootPath, deviceId: resolved.dev, inode: resolved.ino }
+    },
+    catch: (cause: unknown) =>
+      cause instanceof WorkspaceError
+        ? cause
+        : rejectWorkspace('workspace containment could not be verified'),
+  })
+
+/**
+ * Re-binds a verified workspace at a path-consuming boundary. Both the root and the workspace are
+ * compared against the canonical values captured at verification, so a directory renamed and
+ * replaced between verification and use is rejected instead of followed. The root is compared
+ * canonically, so a configured root that is itself a symlink still verifies.
+ */
+export const assertWorkspaceIdentity = (
+  root: string,
+  verified: VerifiedWorkspace,
+): Effect.Effect<void, WorkspaceError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const rootPath = await canonicalRoot(root)
+      if (rootPath !== verified.rootPath) {
+        throw rejectWorkspace(
+          `configured workspace root changed since verification: ${verified.rootPath}`,
+        )
+      }
+      if (!isStrictDescendant(rootPath, verified.path)) {
+        throw rejectWorkspace(
+          `verified workspace path no longer descends from the root: ${verified.path}`,
+        )
+      }
+      const resolved = await directoryIdentity(verified.path)
+      const current = await realpath(verified.path)
+      if (
+        current !== verified.path ||
+        resolved.dev !== verified.deviceId ||
+        resolved.ino !== verified.inode
+      ) {
+        throw rejectWorkspace(
+          `workspace directory identity changed since verification: ${verified.path}`,
+        )
+      }
+    },
+    catch: (cause: unknown) =>
+      cause instanceof WorkspaceError
+        ? cause
+        : rejectWorkspace('workspace identity could not be confirmed'),
+  })
+
+/**
+ * Verifies containment and then holds an open handle on the verified directory for the caller's
+ * scope. Holding the handle keeps the inode allocated, so a directory deleted and recreated at the
+ * same path is guaranteed a different inode and cannot pass the identity check.
+ */
+export const openVerifiedWorkspace = (
+  root: string,
+  workspace: Workspace,
+): Effect.Effect<VerifiedWorkspace, WorkspaceError, Scope.Scope> =>
+  verifyWorkspaceForLaunch(root, workspace).pipe(
+    Effect.flatMap((verified) =>
+      Effect.acquireRelease(
+        Effect.tryPromise({
+          try: () => open(verified.path, 'r'),
+          catch: (cause: unknown) =>
+            cause instanceof WorkspaceError
+              ? cause
+              : rejectWorkspace(`workspace directory could not be held open: ${verified.path}`),
+        }),
+        (handle) => Effect.promise(() => handle.close().catch(() => undefined)),
+      ).pipe(
+        // `open` resolves a path, so the handle itself is checked: only if it refers to the
+        // verified inode does holding it actually keep that inode allocated.
+        Effect.flatMap((handle) =>
+          Effect.tryPromise({
+            try: async () => {
+              const held = await handle.stat()
+              if (held.dev !== verified.deviceId || held.ino !== verified.inode) {
+                throw rejectWorkspace(
+                  `workspace handle does not refer to the verified directory: ${verified.path}`,
+                )
+              }
+              return verified
+            },
+            catch: (cause: unknown) =>
+              cause instanceof WorkspaceError
+                ? cause
+                : rejectWorkspace(`workspace handle could not be confirmed: ${verified.path}`),
+          }),
+        ),
+      ),
+    ),
+    // With the correct inode pinned, confirm the path still resolves to it.
+    Effect.tap((verified) => assertWorkspaceIdentity(root, verified)),
+  )
 
 /**
  * Reports whether a usable workspace directory is present. A path that exists but is not a real
