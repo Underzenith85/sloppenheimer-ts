@@ -6,6 +6,7 @@ import type { PullRequestObservation } from './handoff.js'
 import type { GitHubProviderConfig } from './workflow.js'
 
 type JsonRecord = Record<string, JsonValue>
+const githubRequestTimeoutMs = 30_000
 
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (
@@ -51,6 +52,7 @@ const json = (
       const response = await fetch(url, {
         ...init,
         headers,
+        signal: AbortSignal.timeout(githubRequestTimeoutMs),
       })
       if (!response.ok) {
         throw new TrackerError({

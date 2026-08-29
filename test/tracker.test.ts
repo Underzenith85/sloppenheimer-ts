@@ -85,19 +85,21 @@ describe('GitHub tracker pagination', (): void => {
   it('combines all pages and removes duplicate issues', async (): Promise<void> => {
     const secondPageUrl =
       'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100&page=2'
-    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
-      if (requestUrl(input).includes('/dependencies/blocked_by')) {
-        return Response.json([])
-      }
-      if (requestUrl(input) === secondPageUrl) {
-        return Response.json([githubIssue(2), githubIssue(3)])
-      }
-      return Response.json([githubIssue(1), githubIssue(2)], {
-        headers: {
-          Link: `<${secondPageUrl}>; rel="next", <${secondPageUrl}>; rel="last"`,
-        },
-      })
-    })
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+        if (requestUrl(input).includes('/dependencies/blocked_by')) {
+          return Response.json([])
+        }
+        if (requestUrl(input) === secondPageUrl) {
+          return Response.json([githubIssue(2), githubIssue(3)])
+        }
+        return Response.json([githubIssue(1), githubIssue(2)], {
+          headers: {
+            Link: `<${secondPageUrl}>; rel="next", <${secondPageUrl}>; rel="last"`,
+          },
+        })
+      },
+    )
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
@@ -106,6 +108,7 @@ describe('GitHub tracker pagination', (): void => {
 
     expect(issues.map((issue) => issue.id)).toEqual(['1', '2', '3'])
     expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(fetchMock.mock.calls.every(([, init]) => init?.signal instanceof AbortSignal)).toBe(true)
     expect(fetchMock.mock.calls.slice(0, 2).map(([input]) => requestUrl(input))).toEqual([
       'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100',
       secondPageUrl,

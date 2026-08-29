@@ -112,10 +112,6 @@ type OrchestratorEvent =
     }>
   | Readonly<{ _tag: 'RetryDue'; issueId: IssueId; attempt: number }>
   | Readonly<{
-      _tag: 'Snapshot'
-      reply: Deferred.Deferred<OrchestratorSnapshot>
-    }>
-  | Readonly<{
       _tag: 'SetIssuePaused'
       issueNumber: number
       paused: boolean
@@ -385,6 +381,7 @@ export const startOrchestrator = (
     let nextRunId = 1
     let tickQueued = false
     let pollTimer: Fiber.RuntimeFiber<void> | null = null
+    const refreshWaiters: Deferred.Deferred<void>[] = []
 
     const offerFromCallback = (event: OrchestratorEvent): void => {
       Effect.runFork(Queue.offer(mailbox, event))
@@ -396,6 +393,13 @@ export const startOrchestrator = (
       }
       tickQueued = true
       return Queue.offer(mailbox, { _tag: 'Tick' }).pipe(Effect.asVoid)
+    })
+
+    const requestRefresh = Effect.gen(function* () {
+      const reply = yield* Deferred.make<void>()
+      refreshWaiters.push(reply)
+      yield* requestTick
+      yield* Deferred.await(reply)
     })
 
     const watcher = yield* Effect.acquireRelease(
@@ -882,9 +886,13 @@ export const startOrchestrator = (
         const event = yield* Queue.take(mailbox)
         switch (event._tag) {
           case 'Tick': {
-            tickQueued = false
             yield* poll()
+            tickQueued = false
             yield* scheduleNextTick()
+            const waiters = refreshWaiters.splice(0)
+            yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, undefined), {
+              discard: true,
+            })
             break
           }
           case 'AgentUpdate': {
@@ -1008,10 +1016,6 @@ export const startOrchestrator = (
             yield* dispatch(issue, event.attempt)
             break
           }
-          case 'Snapshot': {
-            yield* Deferred.succeed(event.reply, createSnapshot())
-            break
-          }
           case 'SetIssuePaused': {
             if (event.paused) {
               state.pausedIssueNumbers.add(event.issueNumber)
@@ -1041,12 +1045,8 @@ export const startOrchestrator = (
     yield* requestTick
 
     return {
-      snapshot: Effect.gen(function* () {
-        const reply = yield* Deferred.make<OrchestratorSnapshot>()
-        yield* Queue.offer(mailbox, { _tag: 'Snapshot', reply })
-        return yield* Deferred.await(reply)
-      }),
-      refresh: requestTick,
+      snapshot: Effect.sync(createSnapshot),
+      refresh: requestRefresh,
       setIssuePaused: (issueNumber, paused) =>
         Effect.gen(function* () {
           const reply = yield* Deferred.make<void>()
