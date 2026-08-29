@@ -468,7 +468,7 @@ describe('workflow hot reload', (): void => {
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
           yield* harness.awaitAgentRun
-          yield* control.pauseIssue(1)
+          yield* control.setIssuePaused(1, true)
           return yield* control.snapshot
         }),
       ),

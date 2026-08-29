@@ -70,6 +70,7 @@ export type OrchestratorSnapshot = Readonly<{
   pollingIntervalMs: number
   maxConcurrentAgents: number
   counts: Readonly<{ running: number; retrying: number; completed: number }>
+  pausedIssueNumbers: readonly number[]
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
   totals: TokenTotals
@@ -79,7 +80,7 @@ export type OrchestratorSnapshot = Readonly<{
 export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
   refresh: Effect.Effect<void>
-  pauseIssue: (issueNumber: number) => Effect.Effect<void>
+  setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
 }>
 
 type OrchestratorEvent =
@@ -99,8 +100,9 @@ type OrchestratorEvent =
       reply: Deferred.Deferred<OrchestratorSnapshot>
     }>
   | Readonly<{
-      _tag: 'PauseIssue'
+      _tag: 'SetIssuePaused'
       issueNumber: number
+      paused: boolean
       reply: Deferred.Deferred<void>
     }>
 
@@ -109,6 +111,7 @@ type RuntimeState = {
   claimed: Set<IssueId>
   retries: Map<IssueId, RetryEntry>
   completed: Set<IssueId>
+  pausedIssueNumbers: Set<number>
   totals: TokenTotals
   rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
 }
@@ -158,6 +161,7 @@ const initialState = (): RuntimeState => ({
   claimed: new Set(),
   retries: new Map(),
   completed: new Set(),
+  pausedIssueNumbers: new Set(),
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
   rateLimits: null,
 })
@@ -222,6 +226,11 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_id: issue.id,
   issue_identifier: issue.identifier,
 })
+
+const identifierIssueNumber = (identifier: string): number | null => {
+  const match = /#(\d+)$/u.exec(identifier)
+  return match?.[1] === undefined ? null : Number(match[1])
+}
 
 export const startOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
@@ -536,6 +545,8 @@ export const startOrchestrator = (
         for (const issue of sortIssues(candidates)) {
           if (
             state.claimed.has(issue.id) ||
+            (identifierIssueNumber(issue.identifier) !== null &&
+              state.pausedIssueNumbers.has(identifierIssueNumber(issue.identifier) ?? -1)) ||
             cyclicIdentifiers.has(issue.identifier) ||
             !issueIsActive(issue, effective.workflow) ||
             !issueIsRoutable(issue, effective.workflow) ||
@@ -575,6 +586,7 @@ export const startOrchestrator = (
           retrying: state.retries.size,
           completed: state.completed.size,
         },
+        pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
         running: [...state.running.values()].map((entry) => ({
           issueId: entry.issue.id,
           identifier: entry.issue.identifier,
@@ -733,19 +745,23 @@ export const startOrchestrator = (
             yield* Deferred.succeed(event.reply, createSnapshot())
             break
           }
-          case 'PauseIssue': {
-            const suffix = `#${String(event.issueNumber)}`
-            for (const [id, entry] of state.running) {
-              if (entry.issue.identifier.endsWith(suffix)) {
-                yield* cancelRunning(id, false)
+          case 'SetIssuePaused': {
+            if (event.paused) {
+              state.pausedIssueNumbers.add(event.issueNumber)
+              for (const [id, entry] of state.running) {
+                if (identifierIssueNumber(entry.issue.identifier) === event.issueNumber) {
+                  yield* cancelRunning(id, false)
+                }
               }
-            }
-            for (const [id, retry] of state.retries) {
-              if (retry.issue.identifier.endsWith(suffix)) {
-                yield* Fiber.interrupt(retry.fiber)
-                state.retries.delete(id)
-                state.claimed.delete(id)
+              for (const [id, retry] of state.retries) {
+                if (identifierIssueNumber(retry.issue.identifier) === event.issueNumber) {
+                  yield* Fiber.interrupt(retry.fiber)
+                  state.retries.delete(id)
+                  state.claimed.delete(id)
+                }
               }
+            } else {
+              state.pausedIssueNumbers.delete(event.issueNumber)
             }
             yield* Deferred.succeed(event.reply, undefined)
             break
@@ -764,10 +780,10 @@ export const startOrchestrator = (
         return yield* Deferred.await(reply)
       }),
       refresh: requestTick,
-      pauseIssue: (issueNumber) =>
+      setIssuePaused: (issueNumber, paused) =>
         Effect.gen(function* () {
           const reply = yield* Deferred.make<void>()
-          yield* Queue.offer(mailbox, { _tag: 'PauseIssue', issueNumber, reply })
+          yield* Queue.offer(mailbox, { _tag: 'SetIssuePaused', issueNumber, paused, reply })
           yield* Deferred.await(reply)
         }),
     }

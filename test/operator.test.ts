@@ -140,18 +140,18 @@ Do the work
       },
     )
     vi.stubGlobal('fetch', fetchMock)
-    const pauseIssue = vi.fn(() => Effect.void)
+    const setIssuePaused = vi.fn(() => Effect.void)
     const backend = makeOperatorBackend(workflowPath, {
       snapshot: Effect.die('unused'),
       refresh: Effect.void,
-      pauseIssue,
+      setIssuePaused,
     })
 
     await Effect.runPromise(backend.backlog)
     await Effect.runPromise(backend.backlog)
     await Effect.runPromise(backend.setIssueEnabled(1, false))
 
-    expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(pauseIssue).toHaveBeenCalledWith(1)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(setIssuePaused).toHaveBeenCalledWith(1, true)
   })
 })
