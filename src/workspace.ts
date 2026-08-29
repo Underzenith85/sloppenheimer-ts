@@ -140,10 +140,26 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
     Effect.tryPromise({
       try: async () => {
         const path = containedWorkspacePath(root, workspaceKey(identifier))
+        try {
+          await lstat(path)
+        } catch (cause: unknown) {
+          const code =
+            typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined
+          if (code === 'ENOENT') {
+            return
+          }
+          throw cause
+        }
         if (hooks.beforeRemove !== null) {
           await Effect.runPromise(
             runShell(hooks.beforeRemove, path, hooks.timeoutMs).pipe(
-              Effect.catchAll(() => Effect.void),
+              Effect.catchAll((error) =>
+                Effect.logWarning('before_remove hook failed; continuing cleanup', {
+                  issue_identifier: identifier,
+                  workspace_path: path,
+                  error: error.message,
+                }),
+              ),
             ),
           )
         }

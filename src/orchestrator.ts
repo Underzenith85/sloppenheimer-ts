@@ -310,6 +310,34 @@ export const startOrchestrator = (
     let lastKnownGood = makeEffectiveWorkflow(
       yield* dependencies.loadWorkflow(selectedWorkflowPath),
     )
+    const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const terminalIssues = yield* effective.tracker
+          .fetchIssuesByStates(effective.workflow.config.tracker.terminalStates, null)
+          .pipe(
+            Effect.matchEffect({
+              onFailure: (error) =>
+                Effect.logWarning('startup terminal issue fetch failed; continuing', {
+                  error: error.message,
+                }).pipe(Effect.as<readonly Issue[] | null>(null)),
+              onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
+            }),
+          )
+        if (terminalIssues === null) {
+          return
+        }
+        for (const issue of terminalIssues) {
+          yield* effective.workspaces.remove(issue.identifier).pipe(
+            Effect.catchAll((error) =>
+              Effect.logWarning('startup terminal workspace cleanup failed; continuing', {
+                ...logContext(issue),
+                error: error.message,
+              }),
+            ),
+          )
+        }
+      })
+    yield* cleanupTerminalWorkspaces(lastKnownGood)
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
     const handoffStorePath = resolve(
