@@ -35,6 +35,7 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
     | 'create_failed'
     | 'hook_failed'
     | 'hook_timeout'
+    | 'inspect_failed'
     | 'remove_failed'
   readonly message: string
   readonly cause?: unknown

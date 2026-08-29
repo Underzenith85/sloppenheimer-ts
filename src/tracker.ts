@@ -26,6 +26,8 @@ import {
 } from './tracker-config.js'
 import type { PullRequestObservation } from './handoff.js'
 
+export type IssueFetchOptions = Readonly<{ hydrateDependencies: boolean }>
+
 export type TrackerAdapter = Readonly<{
   /**
    * Reads every normalized record in provider scope for the given states, including
@@ -37,8 +39,12 @@ export type TrackerAdapter = Readonly<{
   fetchIssuesByStates: (
     states: readonly string[],
     dependencyLabels: readonly string[] | null,
+    options?: IssueFetchOptions,
   ) => Effect.Effect<readonly Issue[], TrackerError>
-  fetchIssuesByIds: (ids: readonly IssueId[]) => Effect.Effect<readonly Issue[], TrackerError>
+  fetchIssuesByIds: (
+    ids: readonly IssueId[],
+    options?: IssueFetchOptions,
+  ) => Effect.Effect<readonly Issue[], TrackerError>
   handoffCompletedWork: (
     issue: Issue,
     dispatchLabels: readonly string[],
@@ -458,6 +464,7 @@ const hydrateDependencies = (
   issues: readonly Issue[],
   dependencyLabels: readonly string[] | null,
   cache: Map<IssueId, DependencyCacheEntry>,
+  useCache = true,
 ): Effect.Effect<readonly Issue[], TrackerError> =>
   Effect.forEach(
     issues,
@@ -473,6 +480,7 @@ const hydrateDependencies = (
       const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
       const cached = cache.get(issue.id)
       if (
+        useCache &&
         dependencyLabels === null &&
         cached !== undefined &&
         cached.issueUpdatedAt === issueUpdatedAt &&
@@ -505,6 +513,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
     fetchIssuesByStates: (
       states,
       dependencyLabels,
+      options,
     ): Effect.Effect<readonly Issue[], TrackerError> => {
       if (states.length === 0) {
         return Effect.succeed([])
@@ -538,11 +547,13 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
           ).values(),
         ]),
         Effect.flatMap((issues) =>
-          hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
+          options?.hydrateDependencies === false
+            ? Effect.succeed(issues)
+            : hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
         ),
       )
     },
-    fetchIssuesByIds: (ids): Effect.Effect<readonly Issue[], TrackerError> => {
+    fetchIssuesByIds: (ids, options): Effect.Effect<readonly Issue[], TrackerError> => {
       const uniqueIds = [...new Set(ids)]
       if (uniqueIds.length === 0) {
         return Effect.succeed([])
@@ -570,7 +581,9 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
           ...new Map(issues.map((issue) => [issue.id, issue] as const)).values(),
         ]),
         Effect.flatMap((issues) =>
-          hydrateDependencies(provider, prefix, issues, null, dependencyCache),
+          options?.hydrateDependencies === false
+            ? Effect.succeed(issues)
+            : hydrateDependencies(provider, prefix, issues, null, dependencyCache, false),
         ),
       )
     },
