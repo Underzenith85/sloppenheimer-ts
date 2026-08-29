@@ -17,6 +17,14 @@ export const redactSecretsInString = (value: string): string =>
       "'$1':'[REDACTED]'",
     )
     .replace(
+      /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))\s*[:=]\s*"(?:\\.|[^"\\])*"/giu,
+      '$1=[REDACTED]',
+    )
+    .replace(
+      /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))\s*[:=]\s*'(?:\\.|[^'\\])*'/giu,
+      '$1=[REDACTED]',
+    )
+    .replace(
       /\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|authorization|credentials?|password|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token))\s*[:=]\s*\S+/giu,
       '$1=[REDACTED]',
     )
