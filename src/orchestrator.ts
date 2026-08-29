@@ -901,7 +901,6 @@ export const startOrchestrator = (
           case 'Tick': {
             pollRunning = true
             yield* poll()
-            pollRunning = false
             const waiters = currentRefreshWaiters.splice(0)
             yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, undefined), {
               discard: true,
@@ -909,9 +908,11 @@ export const startOrchestrator = (
             if (followUpRequested) {
               followUpRequested = false
               currentRefreshWaiters.push(...nextRefreshWaiters.splice(0))
+              pollRunning = false
               yield* Queue.offer(mailbox, { _tag: 'Tick' })
               break
             }
+            pollRunning = false
             tickQueued = false
             yield* scheduleNextTick()
             break

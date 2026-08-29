@@ -356,6 +356,25 @@ describe('operator snapshots', (): void => {
 
     expect(snapshot.effectiveWorkflow.fingerprint).toBe('late-refresh')
   })
+
+  it('preserves a refresh started while the previous refresh is settling', async (): Promise<void> => {
+    const harness = makeHarness(workflow)
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* control.refresh
+          const before = harness.stateFetches()
+          const consecutiveRefreshes = yield* Effect.forkScoped(
+            control.refresh.pipe(Effect.zipRight(control.refresh)),
+          )
+          yield* Fiber.join(consecutiveRefreshes)
+          expect(harness.stateFetches()).toBe(before + 2)
+        }),
+      ),
+    )
+  })
 })
 
 describe('workflow hot reload', (): void => {
