@@ -106,6 +106,7 @@ const runShellProcess = (
     let settled = false
     let closed = false
     let cancelling = false
+    let terminating = false
     let timedOut = false
     let forceSent = false
     let processError: unknown
@@ -220,6 +221,10 @@ const runShellProcess = (
     }
 
     const terminate = (): void => {
+      if (terminating) {
+        return
+      }
+      terminating = true
       signalProcessTree('SIGTERM')
       graceTimer = setTimeout(forceProcessTree, TERMINATION_GRACE_MS)
       terminationTimer = setTimeout(finishTermination, TERMINATION_GRACE_MS * 2)
@@ -368,19 +373,16 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
         ),
   remove: (identifier) => {
     const path = containedWorkspacePath(root, workspaceKey(identifier))
-    const pathExists = Effect.tryPromise({
+    const workspaceDirectoryExists = Effect.tryPromise({
       try: async () => {
-        let exists = true
         try {
-          await lstat(path)
+          return (await lstat(path)).isDirectory()
         } catch (cause: unknown) {
           if (causeCode(cause) === 'ENOENT') {
-            exists = false
-          } else {
-            throw cause
+            return false
           }
+          throw cause
         }
-        return exists
       },
       catch: (cause: unknown) =>
         new WorkspaceError({
@@ -398,7 +400,7 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
           cause,
         }),
     })
-    return pathExists.pipe(
+    return workspaceDirectoryExists.pipe(
       Effect.flatMap((exists) =>
         exists && hooks.beforeRemove !== null
           ? runShell('before_remove', hooks.beforeRemove, path, hooks.timeoutMs).pipe(

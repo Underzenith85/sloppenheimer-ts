@@ -1,4 +1,4 @@
-import { access, readFile, rm } from 'node:fs/promises'
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -203,5 +203,21 @@ describe('workspace safety', (): void => {
     await Effect.runPromise(manager.remove(issueIdentifier('GH-missing')))
 
     expect(await exists(marker)).toBe(false)
+  })
+
+  it('skips before_remove when the workspace path is not a directory', async (): Promise<void> => {
+    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+    roots.push(root)
+    const identifier = issueIdentifier('GH-not-a-directory')
+    const path = containedWorkspacePath(root, workspaceKey(identifier))
+    const marker = join(root, 'unexpected-file-hook')
+    const manager = makeWorkspaceManager(root, hooks({ beforeRemove: `touch '${marker}'` }))
+    await mkdir(root, { recursive: true })
+    await writeFile(path, 'not a workspace')
+
+    await Effect.runPromise(manager.remove(identifier))
+
+    expect(await exists(marker)).toBe(false)
+    expect(await exists(path)).toBe(false)
   })
 })
