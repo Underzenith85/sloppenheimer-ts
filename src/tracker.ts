@@ -9,6 +9,8 @@ import {
   type JsonValue,
 } from './domain.js'
 import { TrackerError } from './errors.js'
+import type { PullRequestObservation } from './handoff.js'
+import { makeGitHubPullRequestMonitor } from './github-handoff.js'
 import type { GitHubProviderConfig } from './workflow.js'
 
 export type TrackerAdapter = Readonly<{
@@ -21,20 +23,28 @@ export type TrackerAdapter = Readonly<{
     issue: Issue,
     dispatchLabels: readonly string[],
   ) => Effect.Effect<HandoffResult, TrackerError>
+  inspectPullRequest: (
+    pullRequestNumber: number,
+  ) => Effect.Effect<PullRequestObservation, TrackerError>
+  mergePullRequest: (
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+  ) => Effect.Effect<string, TrackerError>
   secretEnvironmentNames: readonly string[]
 }>
 
 export type HandoffResult =
   | Readonly<{ _tag: 'NoBranch'; branchName: string }>
-  | Readonly<{ _tag: 'PullRequest'; branchName: string; pullRequestUrl: string }>
+  | Readonly<{
+      _tag: 'PullRequest'
+      branchName: string
+      pullRequestUrl: string
+      pullRequestNumber: number
+    }>
 
 export type GitHubIssueControl = Readonly<{
   listOpenIssues: () => Effect.Effect<readonly Issue[], TrackerError>
-  setLabel: (
-    issueNumber: number,
-    label: string,
-    enabled: boolean,
-  ) => Effect.Effect<void, TrackerError>
+  addLabel: (issueNumber: number, label: string) => Effect.Effect<void, TrackerError>
 }>
 
 type JsonRecord = Record<string, JsonValue>
@@ -383,6 +393,19 @@ const githubRequest = (
           }),
   })
 
+const pullRequestNumberFromUrl = (url: string): number => {
+  const match = /\/pulls?\/(\d+)(?:\/)?$/u.exec(url)
+  const number = match?.[1] === undefined ? Number.NaN : Number(match[1])
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub pull request URL has no valid number',
+      retryable: false,
+    })
+  }
+  return number
+}
+
 const githubBranchExists = (
   provider: GitHubProviderConfig,
   prefix: string,
@@ -612,6 +635,7 @@ const hydrateDependencies = (
 export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapter => {
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
+  const pullRequests = makeGitHubPullRequestMonitor(provider)
   return {
     secretEnvironmentNames: [
       ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
@@ -713,18 +737,21 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
               _tag: 'PullRequest',
               branchName,
               pullRequestUrl,
+              pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
             })),
           )
         }),
       )
     },
+    inspectPullRequest: pullRequests.inspect,
+    mergePullRequest: pullRequests.merge,
   }
 }
 
 const githubMutation = (
   provider: GitHubProviderConfig,
   path: string,
-  method: 'POST' | 'DELETE',
+  method: 'POST',
   body: string | undefined,
 ): Effect.Effect<void, TrackerError> =>
   Effect.tryPromise({
@@ -740,9 +767,6 @@ const githubMutation = (
         },
         ...(body === undefined ? {} : { body }),
       })
-      if (method === 'DELETE' && response.status === 404) {
-        return
-      }
       if (!response.ok) {
         throw new TrackerError({
           category: 'tracker_status',
@@ -767,7 +791,7 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIs
   const tracker = makeGitHubTracker(provider)
   return {
     listOpenIssues: () => tracker.fetchIssuesByStates(['open'], null),
-    setLabel: (issueNumber, label, enabled) => {
+    addLabel: (issueNumber, label) => {
       if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
         return Effect.fail(
           new TrackerError({
@@ -786,19 +810,11 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIs
           }),
         )
       }
-      if (enabled) {
-        return githubMutation(
-          provider,
-          `${prefix}/issues/${String(issueNumber)}/labels`,
-          'POST',
-          JSON.stringify({ labels: [label] }),
-        )
-      }
       return githubMutation(
         provider,
-        `${prefix}/issues/${String(issueNumber)}/labels/${encodeURIComponent(label)}`,
-        'DELETE',
-        undefined,
+        `${prefix}/issues/${String(issueNumber)}/labels`,
+        'POST',
+        JSON.stringify({ labels: [label] }),
       )
     },
   }

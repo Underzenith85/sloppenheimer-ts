@@ -62,6 +62,13 @@ the branch exists, the host creates or reuses an open pull request and stops con
 Dispatch labels remain unchanged. Without a pushed branch, Symphony preserves the workspace and
 continues the issue. Pull-request operations use only the host-side GitHub credential.
 
+After handoff, Symphony persists the PR under the workspace root and monitors its exact head SHA,
+CI checks, mergeability, review decision, and unresolved review threads. Failed checks, requested
+changes, stale branches, and conflicts return to the coding agent with repair context. A clean PR is
+squash-merged only through the repository protection rules with an expected-head guard. The
+operator console shows each active handoff and its current blocker; no handoff or pause transition
+removes the Symphony label.
+
 ## Configuration
 
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are

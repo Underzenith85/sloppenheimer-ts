@@ -36,6 +36,10 @@ export const appTemplate = `<!doctype html>
           <div class="panel-heading"><div><p class="eyebrow">On deck</p><h2>Recovery queue</h2></div></div>
           <div id="retry-list" class="work-list"><p class="empty">No retries are scheduled.</p></div>
         </article>
+        <article class="panel handoff-panel">
+          <div class="panel-heading"><div><p class="eyebrow">After the agent</p><h2>Pull request handoffs</h2></div></div>
+          <div id="handoff-list" class="work-list"><p class="empty">No pull requests are being monitored.</p></div>
+        </article>
       </section>
 
       <section class="panel graph-panel" aria-labelledby="dependency-heading">
@@ -130,6 +134,23 @@ const renderWork = (container, entries, retrying) => {
   container.replaceChildren(...cards)
 }
 
+const renderHandoffs = (entries) => {
+  const container = element('#handoff-list')
+  if (entries.length === 0) {
+    container.replaceChildren(text('p', 'empty', 'No pull requests are being monitored.'))
+    return
+  }
+  container.replaceChildren(...entries.map((entry) => {
+    const card = document.createElement('a')
+    card.className = 'work-card'
+    card.href = entry.pullRequestUrl
+    const copy = document.createElement('div')
+    copy.append(text('strong', '', entry.identifier), text('span', '', entry.state.replaceAll('_', ' ')))
+    card.append(copy, text('small', '', entry.reason ?? ('Head ' + (entry.headSha ?? 'pending'))))
+    return card
+  }))
+}
+
 const renderState = (snapshot) => {
   state = snapshot
   element('#running-count').textContent = String(snapshot.counts.running)
@@ -141,6 +162,7 @@ const renderState = (snapshot) => {
   element('#updated-at').textContent = 'Updated ' + formatTime(snapshot.generatedAt)
   renderWork(element('#running-list'), snapshot.running, false)
   renderWork(element('#retry-list'), snapshot.retrying, true)
+  renderHandoffs(snapshot.handoffs)
   if (backlog !== null) {
     renderGraph(backlog)
   }
@@ -396,7 +418,8 @@ button { font: inherit; }
 .metrics span { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; }
 .metrics strong { display: block; font: 500 44px/1 Georgia, serif; margin: 14px 0 9px; }
 .metrics small { font-size: 12px; }
-.live-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; margin-bottom: 18px; }
+.live-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-bottom: 18px; }
+.handoff-panel { grid-column: 1 / -1; }
 .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(18px); border-radius: 18px; overflow: hidden; }
 .graph-panel { margin-bottom: 18px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 25px 26px; border-bottom: 1px solid var(--line); }

@@ -4,8 +4,10 @@ import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
-import { normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
+import { issueId, normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
+import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
+import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
 import { loadWorkflow, renderPrompt, type Workflow } from './workflow.js'
 import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
@@ -29,6 +31,19 @@ type RetryEntry = {
   dueAt: number
   error: string | null
   fiber: Fiber.RuntimeFiber<void>
+}
+
+type HandoffEntry = {
+  issue: Issue
+  execution: ExecutionSnapshot
+  pullRequestNumber: number
+  pullRequestUrl: string
+  branchName: string
+  state: HandoffSnapshot['state']
+  headSha: string | null
+  reason: string | null
+  repairAttempts: number
+  observedAt: Date
 }
 
 export type RunningSnapshot = Readonly<{
@@ -71,6 +86,7 @@ export type OrchestratorSnapshot = Readonly<{
   maxConcurrentAgents: number
   counts: Readonly<{ running: number; retrying: number; completed: number }>
   pausedIssueNumbers: readonly number[]
+  handoffs: readonly HandoffSnapshot[]
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
   totals: TokenTotals
@@ -112,6 +128,7 @@ type RuntimeState = {
   retries: Map<IssueId, RetryEntry>
   completed: Set<IssueId>
   pausedIssueNumbers: Set<number>
+  handoffs: Map<IssueId, HandoffEntry>
   totals: TokenTotals
   rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
 }
@@ -124,6 +141,7 @@ type EffectiveWorkflow = Readonly<{
 }>
 
 type ExecutionSnapshot = Readonly<{
+  workflow: Workflow
   tracker: TrackerAdapter
   requiredLabels: readonly string[]
   activeStates: readonly string[]
@@ -175,6 +193,7 @@ const initialState = (): RuntimeState => ({
   retries: new Map(),
   completed: new Set(),
   pausedIssueNumbers: new Set(),
+  handoffs: new Map(),
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
   rateLimits: null,
 })
@@ -236,6 +255,7 @@ const captureExecutionSnapshot = (
   prompt: string,
 ): ExecutionSnapshot =>
   Object.freeze({
+    workflow: effective.workflow,
     tracker: effective.tracker,
     requiredLabels: Object.freeze([...effective.workflow.config.tracker.requiredLabels]),
     activeStates: Object.freeze([...effective.workflow.config.tracker.activeStates]),
@@ -292,6 +312,52 @@ export const startOrchestrator = (
     )
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
+    const handoffStorePath = resolve(
+      lastKnownGood.workflow.config.workspaceRoot,
+      '.symphony',
+      'handoffs.json',
+    )
+    const handoffSnapshots = (): readonly HandoffSnapshot[] =>
+      [...state.handoffs.values()].map((handoff) => ({
+        issueId: handoff.issue.id,
+        identifier: handoff.issue.identifier,
+        pullRequestUrl: handoff.pullRequestUrl,
+        branchName: handoff.branchName,
+        state: handoff.state,
+        headSha: handoff.headSha,
+        reason: handoff.reason,
+        repairAttempts: handoff.repairAttempts,
+        observedAt: handoff.observedAt.toISOString(),
+      }))
+    const persistHandoffs = (): Effect.Effect<void> =>
+      saveHandoffs(handoffStorePath, handoffSnapshots())
+    const restoredHandoffs = yield* loadHandoffs(handoffStorePath)
+    if (restoredHandoffs.length > 0) {
+      const restoredIssues = yield* lastKnownGood.tracker
+        .fetchIssuesByIds(restoredHandoffs.map((handoff) => issueId(handoff.issueId)))
+        .pipe(Effect.catchAll(() => Effect.succeed<readonly Issue[]>([])))
+      for (const restored of restoredHandoffs) {
+        const issue = restoredIssues.find((candidate) => candidate.id === restored.issueId)
+        const numberMatch = /\/pulls?\/(\d+)(?:\/)?$/u.exec(restored.pullRequestUrl)
+        const pullRequestNumber = Number(numberMatch?.[1])
+        if (issue === undefined || !Number.isSafeInteger(pullRequestNumber)) {
+          continue
+        }
+        state.handoffs.set(issue.id, {
+          issue,
+          execution: captureExecutionSnapshot(lastKnownGood, ''),
+          pullRequestNumber,
+          pullRequestUrl: restored.pullRequestUrl,
+          branchName: restored.branchName,
+          state: restored.state,
+          headSha: restored.headSha,
+          reason: restored.reason,
+          repairAttempts: restored.repairAttempts,
+          observedAt: new Date(restored.observedAt),
+        })
+        state.claimed.add(issue.id)
+      }
+    }
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
     let nextRunId = 1
     let tickQueued = false
@@ -365,6 +431,7 @@ export const startOrchestrator = (
     const dispatch = (
       issue: Issue,
       attempt: number | null,
+      effectiveOverride?: EffectiveWorkflow,
     ): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         if (state.running.has(issue.id)) {
@@ -377,7 +444,7 @@ export const startOrchestrator = (
           state.retries.delete(issue.id)
         }
 
-        const effective = lastKnownGood
+        const effective = effectiveOverride ?? lastKnownGood
         const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
@@ -462,6 +529,80 @@ export const startOrchestrator = (
           tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         })
         yield* Effect.logInfo('worker dispatched', logContext(issue))
+      })
+
+    const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
+      Effect.gen(function* () {
+        for (const [id, handoff] of state.handoffs) {
+          const inspected = yield* handoff.execution.tracker
+            .inspectPullRequest(handoff.pullRequestNumber)
+            .pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+              }),
+            )
+          handoff.observedAt = new Date()
+          if (inspected._tag === 'Failed') {
+            handoff.reason = inspected.error.message
+            continue
+          }
+          const disposition = classifyPullRequest(inspected.observation)
+          handoff.state = disposition.state
+          handoff.headSha = inspected.observation.headSha
+          handoff.reason = 'reason' in disposition ? disposition.reason : null
+          if (disposition.state === 'merged') {
+            state.handoffs.delete(id)
+            state.completed.add(id)
+            state.claimed.delete(id)
+            continue
+          }
+          if (disposition.state === 'ready_to_merge') {
+            handoff.state = 'merging'
+            const merged = yield* handoff.execution.tracker
+              .mergePullRequest(handoff.pullRequestNumber, disposition.headSha)
+              .pipe(
+                Effect.match({
+                  onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                  onSuccess: (sha) => ({ _tag: 'Succeeded' as const, sha }),
+                }),
+              )
+            if (merged._tag === 'Failed') {
+              handoff.state = 'awaiting_checks'
+              handoff.reason = merged.error.message
+              continue
+            }
+            state.handoffs.delete(id)
+            state.completed.add(id)
+            state.claimed.delete(id)
+            yield* Effect.logInfo('pull request merged', {
+              ...logContext(handoff.issue),
+              pull_request_url: handoff.pullRequestUrl,
+              merge_commit_sha: merged.sha,
+            })
+            continue
+          }
+          if (disposition.state === 'repair_needed') {
+            if (handoff.repairAttempts >= 3) {
+              handoff.state = 'intervention_required'
+              handoff.reason = `Repair limit reached. ${disposition.reason}`
+              continue
+            }
+            state.handoffs.delete(id)
+            const repairIssue: Issue = {
+              ...handoff.issue,
+              description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${inspected.observation.headSha}\n\n${disposition.reason}`,
+            }
+            const effective: EffectiveWorkflow = {
+              workflow: handoff.execution.workflow,
+              tracker: handoff.execution.tracker,
+              workspaces: handoff.execution.workspaces,
+              loadedAt: handoff.observedAt,
+            }
+            yield* dispatch(repairIssue, handoff.repairAttempts + 1, effective)
+          }
+        }
+        yield* persistHandoffs()
       })
 
     const endRunning = (id: IssueId, expectedRunId: number | null): RunningEntry | null => {
@@ -559,6 +700,7 @@ export const startOrchestrator = (
 
     const poll = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
+        yield* reconcileHandoffs()
         yield* reconcile()
         const reloaded = yield* dependencies.loadWorkflow(selectedWorkflowPath).pipe(
           Effect.matchEffect({
@@ -641,6 +783,17 @@ export const startOrchestrator = (
           completed: state.completed.size,
         },
         pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
+        handoffs: [...state.handoffs.values()].map((handoff) => ({
+          issueId: handoff.issue.id,
+          identifier: handoff.issue.identifier,
+          pullRequestUrl: handoff.pullRequestUrl,
+          branchName: handoff.branchName,
+          state: handoff.state,
+          headSha: handoff.headSha,
+          reason: handoff.reason,
+          repairAttempts: handoff.repairAttempts,
+          observedAt: handoff.observedAt.toISOString(),
+        })),
         running: [...state.running.values()].map((entry) => ({
           issueId: entry.issue.id,
           identifier: entry.issue.identifier,
@@ -722,8 +875,19 @@ export const startOrchestrator = (
                 yield* scheduleRetry(entry.issue, 1, null, true)
                 break
               }
-              state.completed.add(event.issueId)
-              state.claimed.delete(event.issueId)
+              state.handoffs.set(event.issueId, {
+                issue: entry.issue,
+                execution: entry.execution,
+                pullRequestNumber: handoff.result.pullRequestNumber,
+                pullRequestUrl: handoff.result.pullRequestUrl,
+                branchName: handoff.result.branchName,
+                state: 'awaiting_checks',
+                headSha: null,
+                reason: 'Awaiting the first protected-branch observation',
+                repairAttempts: event.attempt ?? 0,
+                observedAt: new Date(),
+              })
+              yield* persistHandoffs()
               yield* Effect.logInfo('worker handed off pull request', {
                 ...logContext(entry.issue),
                 branch: handoff.result.branchName,
