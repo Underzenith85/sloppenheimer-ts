@@ -224,6 +224,26 @@ describe('GitHub native issue dependencies', (): void => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('bypasses the dependency cache for issue ID refreshes', async (): Promise<void> => {
+    let dependencyFetches = 0
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = requestUrl(input)
+      if (url.endsWith('/issues/2')) {
+        return Response.json(githubIssue(2))
+      }
+      dependencyFetches += 1
+      return Response.json([githubDependency(3, dependencyFetches === 1 ? 'closed' : 'open')])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const tracker = makeGitHubTracker(provider)
+
+    await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
+    const [refreshed] = await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
+
+    expect(refreshed?.blockedBy[0]?.state).toBe('open')
+    expect(dependencyFetches).toBe(2)
+  })
+
   it('decodes blockers and follows dependency pagination', async (): Promise<void> => {
     const next =
       'https://api.example.test/repos/example/symphony/issues/2/dependencies/blocked_by?per_page=100&page=2'

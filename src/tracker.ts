@@ -725,7 +725,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
         { concurrency: 4 },
       ).pipe(
         Effect.flatMap((issues) =>
-          hydrateDependencies(provider, prefix, issues, null, dependencyCache),
+          hydrateDependencies(provider, prefix, issues, [], dependencyCache),
         ),
       )
     },
