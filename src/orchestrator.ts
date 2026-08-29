@@ -317,8 +317,13 @@ export const startOrchestrator = (
       '.symphony',
       'handoffs.json',
     )
-    const handoffSnapshots = (): readonly HandoffSnapshot[] =>
-      [...state.handoffs.values()].map((handoff) => ({
+    let pendingRestoredHandoffs = yield* loadHandoffs(handoffStorePath)
+    for (const pending of pendingRestoredHandoffs) {
+      state.claimed.add(issueId(pending.issueId))
+    }
+    const handoffSnapshots = (): readonly HandoffSnapshot[] => [
+      ...pendingRestoredHandoffs,
+      ...[...state.handoffs.values()].map((handoff) => ({
         issueId: handoff.issue.id,
         identifier: handoff.issue.identifier,
         pullRequestUrl: handoff.pullRequestUrl,
@@ -328,36 +333,54 @@ export const startOrchestrator = (
         reason: handoff.reason,
         repairAttempts: handoff.repairAttempts,
         observedAt: handoff.observedAt.toISOString(),
-      }))
+      })),
+    ]
     const persistHandoffs = (): Effect.Effect<void> =>
       saveHandoffs(handoffStorePath, handoffSnapshots())
-    const restoredHandoffs = yield* loadHandoffs(handoffStorePath)
-    if (restoredHandoffs.length > 0) {
-      const restoredIssues = yield* lastKnownGood.tracker
-        .fetchIssuesByIds(restoredHandoffs.map((handoff) => issueId(handoff.issueId)))
-        .pipe(Effect.catchAll(() => Effect.succeed<readonly Issue[]>([])))
-      for (const restored of restoredHandoffs) {
-        const issue = restoredIssues.find((candidate) => candidate.id === restored.issueId)
-        const numberMatch = /\/pulls?\/(\d+)(?:\/)?$/u.exec(restored.pullRequestUrl)
-        const pullRequestNumber = Number(numberMatch?.[1])
-        if (issue === undefined || !Number.isSafeInteger(pullRequestNumber)) {
-          continue
+    const hydrateRestoredHandoffs = (): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        if (pendingRestoredHandoffs.length === 0) {
+          return
         }
-        state.handoffs.set(issue.id, {
-          issue,
-          execution: captureExecutionSnapshot(lastKnownGood, ''),
-          pullRequestNumber,
-          pullRequestUrl: restored.pullRequestUrl,
-          branchName: restored.branchName,
-          state: restored.state,
-          headSha: restored.headSha,
-          reason: restored.reason,
-          repairAttempts: restored.repairAttempts,
-          observedAt: new Date(restored.observedAt),
-        })
-        state.claimed.add(issue.id)
-      }
-    }
+        const fetched = yield* lastKnownGood.tracker
+          .fetchIssuesByIds(pendingRestoredHandoffs.map((handoff) => issueId(handoff.issueId)))
+          .pipe(
+            Effect.match({
+              onFailure: () => null,
+              onSuccess: (issues) => issues,
+            }),
+          )
+        if (fetched === null) {
+          return
+        }
+        const hydrated = new Set<string>()
+        for (const restored of pendingRestoredHandoffs) {
+          const issue = fetched.find((candidate) => candidate.id === restored.issueId)
+          const numberMatch = /\/pulls?\/(\d+)(?:\/)?$/u.exec(restored.pullRequestUrl)
+          const pullRequestNumber = Number(numberMatch?.[1])
+          if (issue === undefined || !Number.isSafeInteger(pullRequestNumber)) {
+            continue
+          }
+          state.handoffs.set(issue.id, {
+            issue,
+            execution: captureExecutionSnapshot(lastKnownGood, ''),
+            pullRequestNumber,
+            pullRequestUrl: restored.pullRequestUrl,
+            branchName: restored.branchName,
+            state: restored.state,
+            headSha: restored.headSha,
+            reason: restored.reason,
+            repairAttempts: restored.repairAttempts,
+            observedAt: new Date(restored.observedAt),
+          })
+          state.claimed.add(issue.id)
+          hydrated.add(restored.issueId)
+        }
+        pendingRestoredHandoffs = pendingRestoredHandoffs.filter(
+          (handoff) => !hydrated.has(handoff.issueId),
+        )
+      })
+    yield* hydrateRestoredHandoffs()
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
     let nextRunId = 1
     let tickQueued = false
@@ -534,6 +557,10 @@ export const startOrchestrator = (
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         for (const [id, handoff] of state.handoffs) {
+          const handoffIssueNumber = identifierIssueNumber(handoff.issue.identifier)
+          if (handoffIssueNumber !== null && state.pausedIssueNumbers.has(handoffIssueNumber)) {
+            continue
+          }
           const inspected = yield* handoff.execution.tracker
             .inspectPullRequest(handoff.pullRequestNumber)
             .pipe(
@@ -555,7 +582,6 @@ export const startOrchestrator = (
             inspected.observation.mergeable === true &&
             inspected.observation.mergeState !== 'dirty' &&
             inspected.observation.mergeState !== 'behind' &&
-            inspected.observation.checks.length > 0 &&
             inspected.observation.checks.every(
               (check) =>
                 check.status === 'completed' &&
@@ -623,6 +649,10 @@ export const startOrchestrator = (
             const repairIssue: Issue = {
               ...handoff.issue,
               description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${inspected.observation.headSha}\n\n${disposition.reason}`,
+            }
+            if (!stateHasSlot(repairIssue, state, handoff.execution.workflow)) {
+              handoff.reason = `Waiting for an agent slot. ${disposition.reason}`
+              continue
             }
             const effective: EffectiveWorkflow = {
               workflow: handoff.execution.workflow,
@@ -731,6 +761,7 @@ export const startOrchestrator = (
 
     const poll = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
+        yield* hydrateRestoredHandoffs()
         yield* reconcileHandoffs()
         yield* reconcile()
         const reloaded = yield* dependencies.loadWorkflow(selectedWorkflowPath).pipe(
@@ -814,17 +845,7 @@ export const startOrchestrator = (
           completed: state.completed.size,
         },
         pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
-        handoffs: [...state.handoffs.values()].map((handoff) => ({
-          issueId: handoff.issue.id,
-          identifier: handoff.issue.identifier,
-          pullRequestUrl: handoff.pullRequestUrl,
-          branchName: handoff.branchName,
-          state: handoff.state,
-          headSha: handoff.headSha,
-          reason: handoff.reason,
-          repairAttempts: handoff.repairAttempts,
-          observedAt: handoff.observedAt.toISOString(),
-        })),
+        handoffs: handoffSnapshots(),
         running: [...state.running.values()].map((entry) => ({
           issueId: entry.issue.id,
           identifier: entry.issue.identifier,

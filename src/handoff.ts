@@ -52,7 +52,7 @@ export const classifyPullRequest = (observation: PullRequestObservation): Handof
     }
   }
   const incomplete = observation.checks.filter((check) => check.status !== 'completed')
-  if (observation.checks.length === 0 || incomplete.length > 0) {
+  if (incomplete.length > 0) {
     return { state: 'awaiting_checks', reason: 'Required CI checks are still running' }
   }
   const failed = observation.checks.filter(

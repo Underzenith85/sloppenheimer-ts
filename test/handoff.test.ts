@@ -18,7 +18,10 @@ const observation = (overrides: Partial<PullRequestObservation> = {}): PullReque
 
 describe('pull request handoff state machine', (): void => {
   it('waits for checks and rejects stale or failed heads', (): void => {
-    expect(classifyPullRequest(observation({ checks: [] })).state).toBe('awaiting_checks')
+    expect(classifyPullRequest(observation({ checks: [], mergeState: 'clean' }))).toEqual({
+      state: 'ready_to_merge',
+      headSha: 'abc123',
+    })
     expect(
       classifyPullRequest(
         observation({
