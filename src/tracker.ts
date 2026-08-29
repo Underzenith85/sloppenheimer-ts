@@ -104,6 +104,7 @@ const githubApiVersion = '2026-03-10'
 const githubAuthenticationEnvironmentNames = ['GITHUB_TOKEN', 'GH_TOKEN'] as const
 const dependencyConcurrency = 4
 const dependencyCacheTtlMs = 60_000
+const githubRequestTimeoutMs = 30_000
 
 type DependencyCacheEntry = Readonly<{
   blockedBy: readonly BlockerRef[]
@@ -349,6 +350,7 @@ const githubRequest = (
   Effect.tryPromise({
     try: async () => {
       const response = await fetch(url, {
+        signal: AbortSignal.timeout(githubRequestTimeoutMs),
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${provider.token}`,
@@ -417,6 +419,7 @@ const githubBranchExists = (
       const response = await fetch(
         `${provider.apiBaseUrl}${prefix}/git/ref/heads/${encodeURIComponent(branchName)}`,
         {
+          signal: AbortSignal.timeout(githubRequestTimeoutMs),
           headers: {
             Accept: 'application/vnd.github+json',
             Authorization: `Bearer ${provider.token}`,
@@ -493,6 +496,7 @@ const createPullRequest = (
     try: async () => {
       const response = await fetch(`${provider.apiBaseUrl}${prefix}/pulls`, {
         method: 'POST',
+        signal: AbortSignal.timeout(githubRequestTimeoutMs),
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${provider.token}`,
@@ -760,6 +764,7 @@ const githubMutation = (
     try: async () => {
       const response = await fetch(`${provider.apiBaseUrl}${path}`, {
         method,
+        signal: AbortSignal.timeout(githubRequestTimeoutMs),
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${provider.token}`,

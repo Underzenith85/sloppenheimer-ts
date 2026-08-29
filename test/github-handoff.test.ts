@@ -81,6 +81,7 @@ describe('GitHub pull request monitor', (): void => {
       async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
         expect(init?.method).toBe('PUT')
         expect(init?.body).toBe(JSON.stringify({ sha: 'head-1', merge_method: 'squash' }))
+        expect(init?.signal).toBeInstanceOf(AbortSignal)
         return Response.json({ merged: true, sha: 'merge-1', message: 'merged' })
       },
     )
