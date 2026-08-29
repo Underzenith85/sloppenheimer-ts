@@ -6,6 +6,20 @@ import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { AgentError } from './errors.js'
 import type { CodexConfig } from './workflow.js'
 
+const codexAuthenticationEnvironmentNames = new Set(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])
+
+export const makeCodexEnvironment = (
+  environment: NodeJS.ProcessEnv,
+  secretEnvironmentNames: readonly string[],
+): NodeJS.ProcessEnv => {
+  const blockedEnvironmentNames = new Set(
+    secretEnvironmentNames.filter((name) => !codexAuthenticationEnvironmentNames.has(name)),
+  )
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !blockedEnvironmentNames.has(name)),
+  )
+}
+
 const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
@@ -100,13 +114,9 @@ class CodexConnection {
     secretEnvironmentNames: readonly string[],
     onEvent: (event: AgentEvent) => void,
   ) {
-    const blockedEnvironmentNames = new Set(secretEnvironmentNames)
-    const environment = Object.fromEntries(
-      Object.entries(process.env).filter(([name]) => !blockedEnvironmentNames.has(name)),
-    )
     this.#process = spawn('bash', ['-lc', command], {
       cwd,
-      env: environment,
+      env: makeCodexEnvironment(process.env, secretEnvironmentNames),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.#readTimeoutMs = config.readTimeoutMs

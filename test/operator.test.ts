@@ -11,6 +11,7 @@ const temporaryDirectories: string[] = []
 
 afterEach(async (): Promise<void> => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))
 })
 
@@ -104,13 +105,14 @@ tracker:
   provider:
     owner: example
     repository: symphony
-    token: secret
+    token: $TEST_OPERATOR_GITHUB_TOKEN
     api_base_url: https://api.example.test
   required_labels: [symphony]
 ---
 Do the work
 `,
     )
+    vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
     const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (url.includes('/dependencies/blocked_by')) {

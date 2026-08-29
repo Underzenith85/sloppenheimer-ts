@@ -12,6 +12,7 @@ export type GitHubProviderConfig = Readonly<{
   owner: string
   repository: string
   token: string
+  tokenEnvironmentName: string
   apiBaseUrl: string
   baseBranch: string
 }>
@@ -286,6 +287,36 @@ const resolveEnvironment = (
   return resolved
 }
 
+const codexAuthenticationEnvironmentNames = new Set(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])
+
+const resolveSecretEnvironment = (
+  value: string,
+  name: string,
+  environment: NodeJS.ProcessEnv,
+): Readonly<{ value: string; environmentName: string }> => {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u.exec(value)
+  if (match === null) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
+    })
+  }
+  const environmentName = match[1]
+  if (environmentName === undefined) {
+    throw new WorkflowError({ category: 'invalid_config', message: `${name} is invalid` })
+  }
+  if (codexAuthenticationEnvironmentNames.has(environmentName)) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must not use Codex authentication environment variable ${environmentName}`,
+    })
+  }
+  return {
+    value: resolveEnvironment(value, name, environment),
+    environmentName,
+  }
+}
+
 const resolveWorkspaceRoot = (
   value: string | undefined,
   workflowPath: string,
@@ -332,6 +363,11 @@ const parseConfig = (
   }
 
   const { polling, workspace, hooks, agent, codex, server } = raw
+  const trackerToken = resolveSecretEnvironment(
+    provider.token,
+    'tracker.provider.token',
+    environment,
+  )
 
   return {
     tracker: {
@@ -339,7 +375,8 @@ const parseConfig = (
       provider: {
         owner: provider.owner,
         repository: provider.repository,
-        token: resolveEnvironment(provider.token, 'tracker.provider.token', environment),
+        token: trackerToken.value,
+        tokenEnvironmentName: trackerToken.environmentName,
         apiBaseUrl: provider.apiBaseUrl ?? 'https://api.github.com',
         baseBranch: provider.baseBranch ?? 'main',
       },
