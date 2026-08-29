@@ -44,4 +44,4 @@ Description:
 
 Follow the repository's TypeScript 7 conventions. Never use `any`, never omit braces around a
 control-flow body, and do not add TypeScript 6 compatibility. Create a branch named
-`symphony/issue-{{ issue.id }}`, run `npm run check`, commit the implementation, and push the branch.
+`symphony/issue-{{ issue.id }}`, run `pnpm check`, commit the implementation, and push the branch.
