@@ -143,27 +143,34 @@ export const telemetryFrom = (
   return { usage: null, rateLimits: null }
 }
 
-export const boundedMessage = (value: string): string => {
-  const redacted = redactSecretsInString(value)
+export const boundedMessage = (
+  value: string,
+  knownSecretValues: readonly string[] = [],
+): string => {
+  const knownSecretsRedacted = [...knownSecretValues]
+    .filter((secret) => secret.length > 0)
+    .sort((left, right) => right.length - left.length)
+    .reduce((message, secret) => message.replaceAll(secret, '[REDACTED]'), value)
+  const redacted = redactSecretsInString(knownSecretsRedacted)
   return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
 }
 
-const messageFrom = (message: JsonObject): string | null => {
+const messageFrom = (message: JsonObject, knownSecretValues: readonly string[]): string | null => {
   const params = message['params']
   if (!isJsonObject(params)) {
     return null
   }
   const direct = params['message']
   if (typeof direct === 'string') {
-    return boundedMessage(direct)
+    return boundedMessage(direct, knownSecretValues)
   }
   const error = params['error']
   if (isJsonObject(error) && typeof error['message'] === 'string') {
-    return boundedMessage(error['message'])
+    return boundedMessage(error['message'], knownSecretValues)
   }
   const item = params['item']
   if (isJsonObject(item) && item['type'] === 'agentMessage' && typeof item['text'] === 'string') {
-    return boundedMessage(item['text'])
+    return boundedMessage(item['text'], knownSecretValues)
   }
   const turn = params['turn']
   if (isJsonObject(turn) && typeof turn['status'] === 'string') {
@@ -178,6 +185,7 @@ class CodexConnection {
   readonly #readTimeoutMs: number
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
+  readonly #knownSecretValues: readonly string[]
   readonly #pending = new Map<number, PendingRequest>()
   readonly #turns = new Map<string, TurnWaiter>()
   #nextId = 1
@@ -193,9 +201,13 @@ class CodexConnection {
     secretEnvironmentNames: readonly string[],
     onEvent: (event: AgentEvent) => void,
   ) {
+    const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
+    this.#knownSecretValues = [...codexAuthenticationEnvironmentNames]
+      .map((name) => environment[name])
+      .filter((value): value is string => value !== undefined && value.length > 0)
     this.#process = spawn('bash', ['-lc', command], {
       cwd,
-      env: makeCodexEnvironment(process.env, secretEnvironmentNames),
+      env: environment,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.#readTimeoutMs = config.readTimeoutMs
@@ -387,7 +399,12 @@ class CodexConnection {
       this.#pending.delete(id)
       const error = parsed['error']
       if (error !== undefined) {
-        pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
+        pending.reject(
+          new AgentError({
+            category: 'protocol_error',
+            message: boundedMessage(errorMessage(error), this.#knownSecretValues),
+          }),
+        )
       } else {
         const result = parsed['result']
         if (result === undefined) {
@@ -464,7 +481,7 @@ class CodexConnection {
       event: method,
       timestamp: new Date(),
       processId: this.processId,
-      message: messageFrom(message),
+      message: messageFrom(message, this.#knownSecretValues),
       threadId: this.#threadId,
       turnId: this.#turnId,
       sessionId: this.#threadId,
@@ -509,7 +526,7 @@ class CodexConnection {
       event,
       timestamp: new Date(),
       processId: this.processId,
-      message: message === null ? null : boundedMessage(message),
+      message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
       threadId: this.#threadId,
       turnId: this.#turnId,
       sessionId: this.#threadId,

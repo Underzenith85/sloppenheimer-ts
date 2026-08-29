@@ -59,6 +59,12 @@ describe('Codex event message redaction', (): void => {
       boundedMessage(String.raw`{"token":"secret","password":"two words",'api_key':'also-secret'}`),
     ).toBe(String.raw`{"token":"[REDACTED]","password":"[REDACTED]",'api_key':'[REDACTED]'}`)
   })
+
+  it('redacts bare retained authentication values', (): void => {
+    expect(
+      boundedMessage('printed openai-secret and codex-secret', ['openai-secret', 'codex-secret']),
+    ).toBe('printed [REDACTED] and [REDACTED]')
+  })
 })
 
 describe('Codex protocol telemetry', (): void => {
