@@ -11,7 +11,10 @@ import {
 import { TrackerError } from './errors.js'
 import type { PullRequestObservation } from './handoff.js'
 import { makeGitHubPullRequestMonitor } from './github-handoff.js'
-import type { GitHubProviderConfig } from './workflow.js'
+import {
+  githubAuthenticationEnvironmentNames,
+  type GitHubProviderConfig,
+} from './tracker-config.js'
 
 export type TrackerAdapter = Readonly<{
   fetchIssuesByStates: (
@@ -101,7 +104,6 @@ type GitHubDependency = Readonly<{
 }>
 
 const githubApiVersion = '2026-03-10'
-const githubAuthenticationEnvironmentNames = ['GITHUB_TOKEN', 'GH_TOKEN'] as const
 const dependencyConcurrency = 4
 const dependencyCacheTtlMs = 60_000
 const githubRequestTimeoutMs = 30_000

@@ -38,20 +38,30 @@ const makeIssue = (
   updatedAt: null,
 })
 
+const testEnvironment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+
 const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
   promptTemplate: 'test',
+  tracker: {
+    kind: 'github',
+    provider: {
+      owner: 'example',
+      repository: 'symphony',
+      token: 'secret',
+      tokenEnvironmentName: 'SYMPHONY_TEST_TOKEN',
+      apiBaseUrl: 'https://api.github.com',
+      baseBranch: 'main',
+    },
+  },
   config: {
     tracker: {
       kind: 'github',
       provider: {
         owner: 'example',
         repository: 'symphony',
-        token: 'secret',
-        tokenEnvironmentName: 'GITHUB_TOKEN',
-        apiBaseUrl: 'https://api.github.com',
-        baseBranch: 'main',
+        token: '$SYMPHONY_TEST_TOKEN',
       },
       requiredLabels: ['symphony', 'ready'],
       activeStates: ['open'],
@@ -76,11 +86,13 @@ const workflow: Workflow = {
       command: 'codex app-server',
       approvalPolicy: 'never',
       threadSandbox: 'workspace-write',
+      turnSandboxPolicy: null,
       turnTimeoutMs: 60_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 30_000,
     },
     serverPort: null,
+    extensions: {},
   },
 }
 
@@ -250,6 +262,7 @@ const makeHarness = (
         agentRuns.push({ command: config.command, prompt, maxTurns })
         resolveAgentRun()
       }).pipe(Effect.zipRight(Effect.never)),
+    environment: testEnvironment,
     watchWorkflow: (_path, onChange) => {
       notifyChanged = onChange
       return { close: () => Promise.resolve() }
@@ -450,7 +463,7 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider.repository).toBe(
+    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider['repository']).toBe(
       'reloaded-repository',
     )
     expect(harness.trackerWorkflows().at(-1)?.config.tracker.activeStates).toEqual([

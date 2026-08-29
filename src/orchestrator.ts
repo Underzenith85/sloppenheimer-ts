@@ -9,7 +9,7 @@ import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
-import { loadWorkflow, renderPrompt, type Workflow } from './workflow.js'
+import { loadWorkflow, preflightWorkflow, renderPrompt, type Workflow } from './workflow.js'
 import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
 
 type RunningEntry = {
@@ -165,11 +165,13 @@ export type OrchestratorDependencies = Readonly<{
   makeWorkspaces: (workflow: Workflow) => WorkspaceManager
   runAgent: typeof runAgent
   watchWorkflow: (path: string, onChange: () => void) => WorkflowWatcher
+  /** Environment used by dispatch preflight validation of secret indirection. */
+  environment: NodeJS.ProcessEnv
 }>
 
 const defaultDependencies: OrchestratorDependencies = {
   loadWorkflow,
-  makeTracker: (workflow) => makeGitHubTracker(workflow.config.tracker.provider),
+  makeTracker: (workflow) => makeGitHubTracker(workflow.tracker.provider),
   makeWorkspaces: (workflow) =>
     makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
   runAgent,
@@ -181,6 +183,7 @@ const defaultDependencies: OrchestratorDependencies = {
     watcher.on('change', onChange)
     return watcher
   },
+  environment: process.env,
 }
 
 const initialState = (): RuntimeState => ({
@@ -485,6 +488,23 @@ export const startOrchestrator = (
         }
 
         const effective = effectiveOverride ?? lastKnownGood
+        const preflight = yield* preflightWorkflow(
+          effective.workflow,
+          dependencies.environment,
+        ).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: () => ({ _tag: 'Succeeded' as const }),
+          }),
+        )
+        if (preflight._tag === 'Failed') {
+          yield* Effect.logError('dispatch preflight failed', {
+            ...logContext(issue),
+            error: preflight.error.message,
+          })
+          yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
+          return
+        }
         const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),

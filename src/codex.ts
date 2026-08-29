@@ -3,10 +3,9 @@ import { createInterface, type Interface } from 'node:readline'
 import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
+import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError } from './errors.js'
 import type { CodexConfig } from './workflow.js'
-
-const codexAuthenticationEnvironmentNames = new Set(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])
 
 export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,
@@ -188,7 +187,7 @@ class CodexConnection {
       input: [{ type: 'text', text: prompt }],
       cwd: workspace.path,
       approvalPolicy: config.approvalPolicy,
-      sandboxPolicy: {
+      sandboxPolicy: config.turnSandboxPolicy ?? {
         type: 'workspaceWrite',
         writableRoots: [workspace.path],
         networkAccess: true,

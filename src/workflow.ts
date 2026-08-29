@@ -1,26 +1,23 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Effect } from 'effect'
 import { Liquid } from 'liquidjs'
 import { parse } from 'yaml'
 
-import type { Issue, JsonObject } from './domain.js'
+import type { Issue, JsonObject, JsonValue } from './domain.js'
+import { expandHomePath, resolvePathReference } from './env-reference.js'
 import { WorkflowError } from './errors.js'
+import { emptyJsonObject, JsonConversionError, toJsonObject, toJsonValue } from './json.js'
+import { validateTrackerProvider, type ValidatedTrackerProvider } from './tracker-config.js'
 
-export type GitHubProviderConfig = Readonly<{
-  owner: string
-  repository: string
-  token: string
-  tokenEnvironmentName: string
-  apiBaseUrl: string
-  baseBranch: string
-}>
+export type { GitHubProviderConfig, ValidatedTrackerProvider } from './tracker-config.js'
 
 export type TrackerConfig = Readonly<{
-  kind: 'github'
-  provider: GitHubProviderConfig
+  kind: string
+  /** Adapter-owned configuration, preserved exactly as authored until an adapter validates it. */
+  provider: JsonObject
   requiredLabels: readonly string[]
   activeStates: readonly string[]
   terminalStates: readonly string[]
@@ -45,6 +42,8 @@ export type CodexConfig = Readonly<{
   command: string
   approvalPolicy: string
   threadSandbox: string
+  /** Verbatim pass-through for the App Server turn sandbox policy. */
+  turnSandboxPolicy: JsonObject | null
   turnTimeoutMs: number
   readTimeoutMs: number
   stallTimeoutMs: number
@@ -58,27 +57,54 @@ export type EffectiveConfig = Readonly<{
   agent: AgentConfig
   codex: CodexConfig
   serverPort: number | null
+  /** Unknown front-matter keys, preserved verbatim and otherwise ignored. */
+  extensions: JsonObject
 }>
 
 export type Workflow = Readonly<{
   path: string
   fingerprint: string
   config: EffectiveConfig
+  /** The adapter-validated tracker selection for `config.tracker.kind`. */
+  tracker: ValidatedTrackerProvider
   promptTemplate: string
 }>
 
-type RawGitHubProvider = Readonly<{
-  owner: string
-  repository: string
-  token: string
-  apiBaseUrl: string | undefined
-  baseBranch: string | undefined
-}>
+export const workflowDefaults = Object.freeze({
+  pollingIntervalMs: 30_000,
+  workspaceRootBasename: 'symphony_workspaces',
+  hookTimeoutMs: 60_000,
+  maxConcurrentAgents: 10,
+  maxTurns: 20,
+  maxRetryBackoffMs: 300_000,
+  codexCommand: 'codex app-server',
+  approvalPolicy: 'never',
+  threadSandbox: 'workspace-write',
+  turnTimeoutMs: 3_600_000,
+  readTimeoutMs: 5_000,
+  stallTimeoutMs: 300_000,
+  activeStates: ['open'] as readonly string[],
+  terminalStates: ['closed'] as readonly string[],
+})
+
+/** Codex-owned policy values, aligned with the generated App Server schemas. */
+export const codexApprovalPolicies = ['untrusted', 'on-failure', 'on-request', 'never'] as const
+export const codexSandboxModes = ['read-only', 'workspace-write', 'danger-full-access'] as const
+
+const knownSections = new Set([
+  'tracker',
+  'polling',
+  'workspace',
+  'hooks',
+  'agent',
+  'codex',
+  'server',
+])
 
 type RawWorkflowConfig = Readonly<{
   tracker: Readonly<{
     kind: string
-    provider: RawGitHubProvider
+    provider: JsonObject
     requiredLabels: readonly string[] | undefined
     activeStates: readonly string[] | undefined
     terminalStates: readonly string[] | undefined
@@ -102,11 +128,13 @@ type RawWorkflowConfig = Readonly<{
     command: string | undefined
     approvalPolicy: string | undefined
     threadSandbox: string | undefined
+    turnSandboxPolicy: JsonObject | undefined
     turnTimeoutMs: number | undefined
     readTimeoutMs: number | undefined
     stallTimeoutMs: number | undefined
   }>
   server: Readonly<{ port: number | undefined }>
+  extensions: JsonObject
 }>
 
 type DecodeRecord = Record<string, unknown>
@@ -119,6 +147,20 @@ const decodeRecord = (value: unknown, name: string, required = false): DecodeRec
     throw new WorkflowError({ category: 'invalid_config', message: `${name} must be a map` })
   }
   return value as DecodeRecord
+}
+
+const decodeJsonObject = (value: unknown, name: string): JsonObject => {
+  try {
+    return toJsonObject(value, name)
+  } catch (cause: unknown) {
+    if (cause instanceof JsonConversionError) {
+      throw new WorkflowError({
+        category: 'invalid_config',
+        message: `${cause.path} must be a JSON-safe value`,
+      })
+    }
+    throw new WorkflowError({ category: 'invalid_config', message: `${name} must be a map`, cause })
+  }
 }
 
 const decodeString = (
@@ -189,26 +231,38 @@ const decodeConcurrency = (value: unknown): Readonly<Record<string, number>> | u
   )
 }
 
+const decodeExtensions = (root: DecodeRecord): JsonObject => {
+  const entries = Object.entries(root).filter(([key]) => !knownSections.has(key))
+  if (entries.length === 0) {
+    return emptyJsonObject
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      entries.map(
+        ([key, value]) =>
+          [key, toJsonValue(value, key)] as const satisfies readonly [string, JsonValue],
+      ),
+    ),
+  )
+}
+
 const decodeRawConfig = (value: unknown): RawWorkflowConfig => {
   const root = decodeRecord(value, 'workflow front matter', true)
   const tracker = decodeRecord(root['tracker'], 'tracker', true)
-  const provider = decodeRecord(tracker['provider'], 'tracker.provider', true)
   const polling = decodeRecord(root['polling'], 'polling')
   const workspace = decodeRecord(root['workspace'], 'workspace')
   const hooks = decodeRecord(root['hooks'], 'hooks')
   const agent = decodeRecord(root['agent'], 'agent')
   const codex = decodeRecord(root['codex'], 'codex')
   const server = decodeRecord(root['server'], 'server')
+  const rawTurnSandboxPolicy = codex['turn_sandbox_policy']
   return {
     tracker: {
       kind: decodeRequiredString(tracker, 'kind', 'tracker.kind'),
-      provider: {
-        owner: decodeRequiredString(provider, 'owner', 'tracker.provider.owner'),
-        repository: decodeRequiredString(provider, 'repository', 'tracker.provider.repository'),
-        token: decodeRequiredString(provider, 'token', 'tracker.provider.token'),
-        apiBaseUrl: decodeString(provider, 'api_base_url', 'tracker.provider.api_base_url'),
-        baseBranch: decodeString(provider, 'base_branch', 'tracker.provider.base_branch'),
-      },
+      provider: decodeJsonObject(
+        decodeRecord(tracker['provider'], 'tracker.provider', true),
+        'tracker.provider',
+      ),
       requiredLabels: decodeStrings(tracker, 'required_labels', 'tracker.required_labels'),
       activeStates: decodeStrings(tracker, 'active_states', 'tracker.active_states'),
       terminalStates: decodeStrings(tracker, 'terminal_states', 'tracker.terminal_states'),
@@ -236,11 +290,19 @@ const decodeRawConfig = (value: unknown): RawWorkflowConfig => {
       command: decodeString(codex, 'command', 'codex.command'),
       approvalPolicy: decodeString(codex, 'approval_policy', 'codex.approval_policy'),
       threadSandbox: decodeString(codex, 'thread_sandbox', 'codex.thread_sandbox'),
+      turnSandboxPolicy:
+        rawTurnSandboxPolicy === undefined
+          ? undefined
+          : decodeJsonObject(
+              decodeRecord(rawTurnSandboxPolicy, 'codex.turn_sandbox_policy', true),
+              'codex.turn_sandbox_policy',
+            ),
       turnTimeoutMs: decodeNumber(codex, 'turn_timeout_ms', 'codex.turn_timeout_ms'),
       readTimeoutMs: decodeNumber(codex, 'read_timeout_ms', 'codex.read_timeout_ms'),
       stallTimeoutMs: decodeNumber(codex, 'stall_timeout_ms', 'codex.stall_timeout_ms'),
     },
     server: { port: decodeNumber(server, 'port', 'server.port') },
+    extensions: decodeExtensions(root),
   }
 }
 
@@ -252,6 +314,19 @@ const positiveInteger = (value: number | undefined, fallback: number, name: stri
     throw new WorkflowError({
       category: 'invalid_config',
       message: `${name} must be a positive integer`,
+    })
+  }
+  return value
+}
+
+const nonNegativeInteger = (value: number | undefined, fallback: number, name: string): number => {
+  if (value === undefined) {
+    return fallback
+  }
+  if (value < 0) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must not be negative`,
     })
   }
   return value
@@ -270,52 +345,22 @@ const portNumber = (value: number | undefined): number | null => {
   return value
 }
 
-const resolveEnvironment = (
-  value: string,
+const enumeratedValue = (
+  value: string | undefined,
+  allowed: readonly string[],
+  fallback: string,
   name: string,
-  environment: NodeJS.ProcessEnv,
 ): string => {
-  if (!/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
-    return value
+  if (value === undefined) {
+    return fallback
   }
-  const resolved = environment[value.slice(1)]
-  if (resolved === undefined || resolved.length === 0) {
+  if (!allowed.includes(value)) {
     throw new WorkflowError({
       category: 'invalid_config',
-      message: `${name} references a missing environment variable`,
+      message: `${name} must be one of: ${allowed.join(', ')}`,
     })
   }
-  return resolved
-}
-
-const codexAuthenticationEnvironmentNames = new Set(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])
-
-const resolveSecretEnvironment = (
-  value: string,
-  name: string,
-  environment: NodeJS.ProcessEnv,
-): Readonly<{ value: string; environmentName: string }> => {
-  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u.exec(value)
-  if (match === null) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
-    })
-  }
-  const environmentName = match[1]
-  if (environmentName === undefined) {
-    throw new WorkflowError({ category: 'invalid_config', message: `${name} is invalid` })
-  }
-  if (codexAuthenticationEnvironmentNames.has(environmentName)) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} must not use Codex authentication environment variable ${environmentName}`,
-    })
-  }
-  return {
-    value: resolveEnvironment(value, name, environment),
-    environmentName,
-  }
+  return value
 }
 
 const resolveWorkspaceRoot = (
@@ -323,16 +368,10 @@ const resolveWorkspaceRoot = (
   workflowPath: string,
   environment: NodeJS.ProcessEnv,
 ): string => {
-  let configured =
+  const configured =
     value === undefined
-      ? join(tmpdir(), 'symphony_workspaces')
-      : resolveEnvironment(value, 'workspace.root', environment)
-  if (configured === '~') {
-    configured = homedir()
-  }
-  if (configured.startsWith('~/')) {
-    configured = join(homedir(), configured.slice(2))
-  }
+      ? join(tmpdir(), workflowDefaults.workspaceRootBasename)
+      : expandHomePath(resolvePathReference(value, 'workspace.root', environment))
   return resolve(isAbsolute(configured) ? configured : join(dirname(workflowPath), configured))
 }
 
@@ -353,70 +392,87 @@ const parseConfig = (
   workflowPath: string,
   environment: NodeJS.ProcessEnv,
 ): EffectiveConfig => {
-  const { tracker } = raw
-  const { provider } = tracker
-  const { kind } = tracker
-  if (kind !== 'github') {
+  const { tracker, polling, workspace, hooks, agent, codex, server } = raw
+  const command = codex.command ?? workflowDefaults.codexCommand
+  if (command.trim().length === 0) {
     throw new WorkflowError({
       category: 'invalid_config',
-      message: `unsupported tracker.kind: ${kind}`,
+      message: 'codex.command must be a non-empty string',
     })
   }
 
-  const { polling, workspace, hooks, agent, codex, server } = raw
-  const trackerToken = resolveSecretEnvironment(
-    provider.token,
-    'tracker.provider.token',
-    environment,
-  )
-
   return {
     tracker: {
-      kind: 'github',
-      provider: {
-        owner: provider.owner,
-        repository: provider.repository,
-        token: trackerToken.value,
-        tokenEnvironmentName: trackerToken.environmentName,
-        apiBaseUrl: provider.apiBaseUrl ?? 'https://api.github.com',
-        baseBranch: provider.baseBranch ?? 'main',
-      },
+      kind: tracker.kind,
+      provider: tracker.provider,
       requiredLabels: (tracker.requiredLabels ?? []).map((label) => label.trim().toLowerCase()),
-      activeStates: tracker.activeStates ?? ['open'],
-      terminalStates: tracker.terminalStates ?? ['closed'],
+      activeStates: tracker.activeStates ?? workflowDefaults.activeStates,
+      terminalStates: tracker.terminalStates ?? workflowDefaults.terminalStates,
     },
-    pollingIntervalMs: positiveInteger(polling.intervalMs, 30_000, 'polling.interval_ms'),
+    pollingIntervalMs: positiveInteger(
+      polling.intervalMs,
+      workflowDefaults.pollingIntervalMs,
+      'polling.interval_ms',
+    ),
     workspaceRoot: resolveWorkspaceRoot(workspace.root, workflowPath, environment),
     hooks: {
       afterCreate: hooks.afterCreate ?? null,
       beforeRun: hooks.beforeRun ?? null,
       afterRun: hooks.afterRun ?? null,
       beforeRemove: hooks.beforeRemove ?? null,
-      timeoutMs: positiveInteger(hooks.timeoutMs, 60_000, 'hooks.timeout_ms'),
+      timeoutMs: positiveInteger(
+        hooks.timeoutMs,
+        workflowDefaults.hookTimeoutMs,
+        'hooks.timeout_ms',
+      ),
     },
     agent: {
       maxConcurrentAgents: positiveInteger(
         agent.maxConcurrentAgents,
-        10,
+        workflowDefaults.maxConcurrentAgents,
         'agent.max_concurrent_agents',
       ),
-      maxTurns: positiveInteger(agent.maxTurns, 20, 'agent.max_turns'),
+      maxTurns: positiveInteger(agent.maxTurns, workflowDefaults.maxTurns, 'agent.max_turns'),
       maxRetryBackoffMs: positiveInteger(
         agent.maxRetryBackoffMs,
-        300_000,
+        workflowDefaults.maxRetryBackoffMs,
         'agent.max_retry_backoff_ms',
       ),
       maxConcurrentAgentsByState: parseConcurrencyByState(agent.maxConcurrentAgentsByState),
     },
     codex: {
-      command: codex.command ?? 'codex app-server',
-      approvalPolicy: codex.approvalPolicy ?? 'never',
-      threadSandbox: codex.threadSandbox ?? 'workspace-write',
-      turnTimeoutMs: positiveInteger(codex.turnTimeoutMs, 3_600_000, 'codex.turn_timeout_ms'),
-      readTimeoutMs: positiveInteger(codex.readTimeoutMs, 5_000, 'codex.read_timeout_ms'),
-      stallTimeoutMs: codex.stallTimeoutMs ?? 300_000,
+      command,
+      approvalPolicy: enumeratedValue(
+        codex.approvalPolicy,
+        codexApprovalPolicies,
+        workflowDefaults.approvalPolicy,
+        'codex.approval_policy',
+      ),
+      threadSandbox: enumeratedValue(
+        codex.threadSandbox,
+        codexSandboxModes,
+        workflowDefaults.threadSandbox,
+        'codex.thread_sandbox',
+      ),
+      turnSandboxPolicy: codex.turnSandboxPolicy ?? null,
+      turnTimeoutMs: positiveInteger(
+        codex.turnTimeoutMs,
+        workflowDefaults.turnTimeoutMs,
+        'codex.turn_timeout_ms',
+      ),
+      readTimeoutMs: positiveInteger(
+        codex.readTimeoutMs,
+        workflowDefaults.readTimeoutMs,
+        'codex.read_timeout_ms',
+      ),
+      stallTimeoutMs: nonNegativeInteger(
+        codex.stallTimeoutMs,
+        workflowDefaults.stallTimeoutMs,
+        'codex.stall_timeout_ms',
+      ),
     },
     serverPort: portNumber(server.port),
+    extensions: raw.extensions,
   }
 }
 
@@ -452,6 +508,39 @@ const splitWorkflow = (source: string): Readonly<{ config: unknown; prompt: stri
   }
 }
 
+/**
+ * Re-runs the validation that must hold before every dispatch: a supported `tracker.kind`, an
+ * adapter-accepted `tracker.provider` (including its secret indirection), and a usable
+ * `codex.command`.
+ */
+export const preflightWorkflow = (
+  workflow: Workflow,
+  environment: NodeJS.ProcessEnv = process.env,
+): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
+  Effect.try({
+    try: () => {
+      if (workflow.config.codex.command.trim().length === 0) {
+        throw new WorkflowError({
+          category: 'invalid_config',
+          message: 'codex.command must be a non-empty string',
+        })
+      }
+      return validateTrackerProvider(
+        workflow.config.tracker.kind,
+        workflow.config.tracker.provider,
+        environment,
+      )
+    },
+    catch: (cause: unknown) =>
+      cause instanceof WorkflowError
+        ? cause
+        : new WorkflowError({
+            category: 'invalid_config',
+            message: 'workflow preflight validation failed',
+            cause,
+          }),
+  })
+
 export const loadWorkflow = (
   path = resolve(process.cwd(), 'WORKFLOW.md'),
   environment: NodeJS.ProcessEnv = process.env,
@@ -479,10 +568,12 @@ export const loadWorkflow = (
           message: 'workflow front matter must be a map',
         })
       }
+      const config = parseConfig(decodeRawConfig(definition.config), path, environment)
       return {
         path,
         fingerprint: createHash('sha256').update(source).digest('hex'),
-        config: parseConfig(decodeRawConfig(definition.config), path, environment),
+        config,
+        tracker: validateTrackerProvider(config.tracker.kind, config.tracker.provider, environment),
         promptTemplate: definition.prompt,
       }
     },
