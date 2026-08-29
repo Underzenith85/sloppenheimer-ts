@@ -67,6 +67,7 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
     expect(workflow.config.tracker.requiredLabels).toEqual(['symphony'])
     expect(workflow.config.workspaceRoot).toBe(join(directory, '.workspaces'))
     expect(workflow.config.agent.maxConcurrentAgents).toBe(2)
+    expect(workflow.config.codex.threadSandbox).toBe('workspace-write')
     expect(prompt).toBe('Work on GH-42: Keep types exact (attempt 3)')
   })
 
