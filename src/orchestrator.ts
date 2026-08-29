@@ -496,8 +496,34 @@ export const startOrchestrator = (
               secondsRunning: state.totals.secondsRunning + seconds,
             }
             if (event.outcome === 'normal') {
+              const handoff = yield* tracker
+                .handoffCompletedWork(entry.issue, workflow.config.tracker.requiredLabels)
+                .pipe(
+                  Effect.match({
+                    onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                    onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
+                  }),
+                )
+              if (handoff._tag === 'Failed') {
+                yield* scheduleRetry(
+                  entry.issue,
+                  (event.attempt ?? 0) + 1,
+                  `handoff failed: ${handoff.error.message}`,
+                  false,
+                )
+                break
+              }
+              if (handoff.result._tag === 'NoBranch') {
+                yield* scheduleRetry(entry.issue, 1, null, true)
+                break
+              }
               state.completed.add(event.issueId)
-              yield* scheduleRetry(entry.issue, 1, null, true)
+              state.claimed.delete(event.issueId)
+              yield* Effect.logInfo('worker handed off pull request', {
+                ...logContext(entry.issue),
+                branch: handoff.result.branchName,
+                pull_request_url: handoff.result.pullRequestUrl,
+              })
             } else {
               yield* scheduleRetry(entry.issue, (event.attempt ?? 0) + 1, event.error, false)
             }

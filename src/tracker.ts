@@ -7,8 +7,16 @@ import type { GitHubProviderConfig } from './workflow.js'
 export type TrackerAdapter = Readonly<{
   fetchIssuesByStates: (states: readonly string[]) => Effect.Effect<readonly Issue[], TrackerError>
   fetchIssuesByIds: (ids: readonly IssueId[]) => Effect.Effect<readonly Issue[], TrackerError>
+  handoffCompletedWork: (
+    issue: Issue,
+    dispatchLabels: readonly string[],
+  ) => Effect.Effect<HandoffResult, TrackerError>
   secretEnvironmentNames: readonly string[]
 }>
+
+export type HandoffResult =
+  | Readonly<{ _tag: 'NoBranch'; branchName: string }>
+  | Readonly<{ _tag: 'PullRequest'; branchName: string; pullRequestUrl: string }>
 
 export type GitHubIssueControl = Readonly<{
   listOpenIssues: () => Effect.Effect<readonly Issue[], TrackerError>
@@ -273,6 +281,136 @@ const githubRequest = (
           }),
   })
 
+const githubBranchExists = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  branchName: string,
+): Effect.Effect<boolean, TrackerError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const response = await fetch(
+        `${provider.apiBaseUrl}${prefix}/git/ref/heads/${encodeURIComponent(branchName)}`,
+        {
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${provider.token}`,
+            'User-Agent': 'symphony-ts/0.1',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        },
+      )
+      if (response.status === 404) {
+        return false
+      }
+      if (!response.ok) {
+        throw new TrackerError({
+          category: 'tracker_status',
+          message: `GitHub returned HTTP ${String(response.status)}`,
+          retryable: response.status >= 500,
+        })
+      }
+      return true
+    },
+    catch: (cause: unknown) =>
+      cause instanceof TrackerError
+        ? cause
+        : new TrackerError({
+            category: 'tracker_request',
+            message: 'GitHub branch lookup failed',
+            retryable: true,
+            cause,
+          }),
+  })
+
+const decodePullRequestUrl = (value: JsonValue): string => {
+  if (!isJsonRecord(value) || typeof value['html_url'] !== 'string') {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub pull request is missing html_url',
+      retryable: false,
+    })
+  }
+  return value['html_url']
+}
+
+const findPullRequest = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  branchName: string,
+): Effect.Effect<string | null, TrackerError> =>
+  githubRequest(
+    provider,
+    `${provider.apiBaseUrl}${prefix}/pulls?state=open&head=${encodeURIComponent(`${provider.owner}:${branchName}`)}&base=${encodeURIComponent(provider.baseBranch)}&per_page=100`,
+  ).pipe(
+    Effect.flatMap(({ body }) => {
+      if (!isJsonArray(body)) {
+        return Effect.fail(
+          new TrackerError({
+            category: 'tracker_response',
+            message: 'GitHub pull request list is not an array',
+            retryable: false,
+          }),
+        )
+      }
+      const first = body[0]
+      return Effect.succeed(first === undefined ? null : decodePullRequestUrl(first))
+    }),
+  )
+
+const createPullRequest = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  issue: Issue,
+  branchName: string,
+): Effect.Effect<string, TrackerError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const response = await fetch(`${provider.apiBaseUrl}${prefix}/pulls`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${provider.token}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'symphony-ts/0.1',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        body: JSON.stringify({
+          base: provider.baseBranch,
+          head: branchName,
+          title: issue.title,
+          body: `Closes #${issue.id}`,
+        }),
+      })
+      if (!response.ok) {
+        throw new TrackerError({
+          category: 'tracker_status',
+          message: `GitHub returned HTTP ${String(response.status)}`,
+          retryable: response.status >= 500,
+        })
+      }
+      const body: unknown = await response.json()
+      if (!isJsonValue(body)) {
+        throw new TrackerError({
+          category: 'tracker_response',
+          message: 'GitHub returned non-JSON pull request data',
+          retryable: false,
+        })
+      }
+      return decodePullRequestUrl(body)
+    },
+    catch: (cause: unknown) =>
+      cause instanceof TrackerError
+        ? cause
+        : new TrackerError({
+            category: 'tracker_request',
+            message: 'GitHub pull request creation failed',
+            retryable: true,
+            cause,
+          }),
+  })
+
+export const issueBranchName = (issue: Issue): string => `symphony/issue-${issue.id}`
+
 export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapter => {
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   return {
@@ -345,6 +483,42 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
             `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
           ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
         { concurrency: 4 },
+      )
+    },
+    handoffCompletedWork: (issue, dispatchLabels) => {
+      const branchName = issueBranchName(issue)
+      return githubBranchExists(provider, prefix, branchName).pipe(
+        Effect.flatMap((exists) => {
+          if (!exists) {
+            return Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName })
+          }
+          return findPullRequest(provider, prefix, branchName).pipe(
+            Effect.flatMap((existingUrl) =>
+              existingUrl === null
+                ? createPullRequest(provider, prefix, issue, branchName)
+                : Effect.succeed(existingUrl),
+            ),
+            Effect.flatMap((pullRequestUrl) =>
+              Effect.forEach(
+                dispatchLabels,
+                (label) =>
+                  githubMutation(
+                    provider,
+                    `${prefix}/issues/${encodeURIComponent(issue.id)}/labels/${encodeURIComponent(label)}`,
+                    'DELETE',
+                    undefined,
+                  ),
+                { concurrency: 1, discard: true },
+              ).pipe(
+                Effect.as<HandoffResult>({
+                  _tag: 'PullRequest',
+                  branchName,
+                  pullRequestUrl,
+                }),
+              ),
+            ),
+          )
+        }),
       )
     },
   }

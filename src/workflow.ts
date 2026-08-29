@@ -13,6 +13,7 @@ export type GitHubProviderConfig = Readonly<{
   repository: string
   token: string
   apiBaseUrl: string
+  baseBranch: string
 }>
 
 export type TrackerConfig = Readonly<{
@@ -69,6 +70,7 @@ type RawGitHubProvider = Readonly<{
   repository: string
   token: string
   apiBaseUrl: string | undefined
+  baseBranch: string | undefined
 }>
 
 type RawWorkflowConfig = Readonly<{
@@ -203,6 +205,7 @@ const decodeRawConfig = (value: unknown): RawWorkflowConfig => {
         repository: decodeRequiredString(provider, 'repository', 'tracker.provider.repository'),
         token: decodeRequiredString(provider, 'token', 'tracker.provider.token'),
         apiBaseUrl: decodeString(provider, 'api_base_url', 'tracker.provider.api_base_url'),
+        baseBranch: decodeString(provider, 'base_branch', 'tracker.provider.base_branch'),
       },
       requiredLabels: decodeStrings(tracker, 'required_labels', 'tracker.required_labels'),
       activeStates: decodeStrings(tracker, 'active_states', 'tracker.active_states'),
@@ -338,6 +341,7 @@ const parseConfig = (
         repository: provider.repository,
         token: resolveEnvironment(provider.token, 'tracker.provider.token', environment),
         apiBaseUrl: provider.apiBaseUrl ?? 'https://api.github.com',
+        baseBranch: provider.baseBranch ?? 'main',
       },
       requiredLabels: (tracker.requiredLabels ?? []).map((label) => label.trim().toLowerCase()),
       activeStates: tracker.activeStates ?? ['open'],

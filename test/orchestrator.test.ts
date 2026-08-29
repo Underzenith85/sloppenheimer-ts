@@ -39,6 +39,7 @@ const workflow: Workflow = {
         repository: 'symphony',
         token: 'secret',
         apiBaseUrl: 'https://api.github.com',
+        baseBranch: 'main',
       },
       requiredLabels: ['symphony', 'ready'],
       activeStates: ['open'],
