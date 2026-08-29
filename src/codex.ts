@@ -45,11 +45,16 @@ export type AgentEvent = Readonly<{
   timestamp: Date
   processId: number | null
   message: string | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
   usage: Readonly<{
     inputTokens: number
     outputTokens: number
     totalTokens: number
   }> | null
+  rateLimits: JsonObject | null
 }>
 
 export type AgentResult = Readonly<{
@@ -78,21 +83,88 @@ const errorMessage = (value: JsonValue): string => {
   return typeof message === 'string' ? message : 'unknown protocol error'
 }
 
-const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
+const nonNegativeInteger = (value: JsonValue | undefined): number | null =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+
+const valueAt = (object: JsonObject, camelCase: string, snakeCase: string): number | null =>
+  nonNegativeInteger(object[camelCase] ?? object[snakeCase])
+
+const tokenTotalsFrom = (value: JsonValue | undefined): AgentEvent['usage'] => {
+  if (!isJsonObject(value)) {
+    return null
+  }
+  const inputTokens = valueAt(value, 'inputTokens', 'input_tokens')
+  const outputTokens = valueAt(value, 'outputTokens', 'output_tokens')
+  const totalTokens = valueAt(value, 'totalTokens', 'total_tokens')
+  return inputTokens === null || outputTokens === null || totalTokens === null
+    ? null
+    : { inputTokens, outputTokens, totalTokens }
+}
+
+const wrapperFrom = (params: JsonObject): JsonObject => {
+  const message = params['msg']
+  return isJsonObject(message) ? message : params
+}
+
+export const telemetryFrom = (
+  method: string,
+  message: JsonObject,
+): Readonly<{ usage: AgentEvent['usage']; rateLimits: JsonObject | null }> => {
+  const params = message['params']
+  if (!isJsonObject(params)) {
+    return { usage: null, rateLimits: null }
+  }
+  if (method === 'thread/tokenUsage/updated') {
+    const tokenUsage = params['tokenUsage']
+    const total = isJsonObject(tokenUsage) ? tokenUsage['total'] : undefined
+    return { usage: tokenTotalsFrom(total), rateLimits: null }
+  }
+  if (method === 'account/rateLimits/updated') {
+    const rateLimits = params['rateLimits']
+    return { usage: null, rateLimits: isJsonObject(rateLimits) ? rateLimits : null }
+  }
+  if (method === 'codex/event/token_count') {
+    const wrapper = wrapperFrom(params)
+    const info = wrapper['info']
+    const total = isJsonObject(info) ? info['total_token_usage'] : undefined
+    const rateLimits = wrapper['rate_limits']
+    return {
+      usage: tokenTotalsFrom(total),
+      rateLimits: isJsonObject(rateLimits) ? rateLimits : null,
+    }
+  }
+  return { usage: null, rateLimits: null }
+}
+
+const boundedMessage = (value: string): string => {
+  const redacted = value
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(/\b(api[_-]?key|authorization|password|token)\s*[:=]\s*\S+/giu, '$1=[REDACTED]')
+  return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
+}
+
+const messageFrom = (message: JsonObject): string | null => {
   const params = message['params']
   if (!isJsonObject(params)) {
     return null
   }
-  const usage = params['usage']
-  if (!isJsonObject(usage)) {
-    return null
+  const direct = params['message']
+  if (typeof direct === 'string') {
+    return boundedMessage(direct)
   }
-  const input = usage['inputTokens']
-  const output = usage['outputTokens']
-  const total = usage['totalTokens']
-  return typeof input === 'number' && typeof output === 'number' && typeof total === 'number'
-    ? { inputTokens: input, outputTokens: output, totalTokens: total }
-    : null
+  const error = params['error']
+  if (isJsonObject(error) && typeof error['message'] === 'string') {
+    return boundedMessage(error['message'])
+  }
+  const item = params['item']
+  if (isJsonObject(item) && item['type'] === 'agentMessage' && typeof item['text'] === 'string') {
+    return boundedMessage(item['text'])
+  }
+  const turn = params['turn']
+  if (isJsonObject(turn) && typeof turn['status'] === 'string') {
+    return `turn status=${turn['status']}`
+  }
+  return null
 }
 
 class CodexConnection {
@@ -105,6 +177,9 @@ class CodexConnection {
   readonly #turns = new Map<string, TurnWaiter>()
   #nextId = 1
   #closed = false
+  #threadId: string | null = null
+  #turnId: string | null = null
+  #turnCount = 0
 
   constructor(
     command: string,
@@ -173,7 +248,9 @@ class CodexConnection {
         message: 'thread/start returned no thread id',
       })
     }
-    return result['thread']['id']
+    this.#threadId = result['thread']['id']
+    this.#emit('thread_started', null)
+    return this.#threadId
   }
 
   async runTurn(
@@ -181,6 +258,7 @@ class CodexConnection {
     workspace: Workspace,
     config: CodexConfig,
     prompt: string,
+    turnCount: number,
   ): Promise<string> {
     const result = await this.#request('turn/start', {
       threadId,
@@ -204,6 +282,9 @@ class CodexConnection {
       })
     }
     const turnId = result['turn']['id']
+    this.#turnId = turnId
+    this.#turnCount = turnCount
+    this.#emit(turnCount === 1 ? 'session_started' : 'turn_started', null)
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#turns.delete(turnId)
@@ -220,6 +301,7 @@ class CodexConnection {
     if (this.#closed) {
       return
     }
+    this.#emit('session_stopped', null)
     this.#closed = true
     this.#lines.close()
     this.#process.stdin.end()
@@ -353,21 +435,41 @@ class CodexConnection {
   }
 
   #handleNotification(method: string, message: JsonObject): void {
+    const telemetry = telemetryFrom(method, message)
+    const params = message['params']
+    if (isJsonObject(params)) {
+      const threadId = params['threadId']
+      const turnId = params['turnId']
+      if (typeof threadId === 'string') {
+        this.#threadId = threadId
+      }
+      if (typeof turnId === 'string') {
+        this.#turnId = turnId
+      }
+    }
     this.#onEvent({
       event: method,
       timestamp: new Date(),
       processId: this.processId,
-      message: null,
-      usage: usageFrom(message),
+      message: messageFrom(message),
+      threadId: this.#threadId,
+      turnId: this.#turnId,
+      sessionId:
+        this.#threadId === null || this.#turnId === null
+          ? null
+          : `${this.#threadId}-${this.#turnId}`,
+      turnCount: this.#turnCount,
+      usage: telemetry.usage,
+      rateLimits: telemetry.rateLimits,
     })
     if (method !== 'turn/completed') {
       return
     }
-    const params = message['params']
-    if (!isJsonObject(params) || !isJsonObject(params['turn'])) {
+    const completionParams = message['params']
+    if (!isJsonObject(completionParams) || !isJsonObject(completionParams['turn'])) {
       return
     }
-    const turn = params['turn']
+    const turn = completionParams['turn']
     const turnId = turn['id']
     const status = turn['status']
     if (typeof turnId !== 'string' || typeof status !== 'string') {
@@ -391,8 +493,22 @@ class CodexConnection {
     }
   }
 
-  #emit(event: string, message: string): void {
-    this.#onEvent({ event, timestamp: new Date(), processId: this.processId, message, usage: null })
+  #emit(event: string, message: string | null): void {
+    this.#onEvent({
+      event,
+      timestamp: new Date(),
+      processId: this.processId,
+      message: message === null ? null : boundedMessage(message),
+      threadId: this.#threadId,
+      turnId: this.#turnId,
+      sessionId:
+        this.#threadId === null || this.#turnId === null
+          ? null
+          : `${this.#threadId}-${this.#turnId}`,
+      turnCount: this.#turnCount,
+      usage: null,
+      rateLimits: null,
+    })
   }
 
   #failTurns(error: AgentError): void {
@@ -449,8 +565,15 @@ export const runAgent = (
                 turnCount === 0
                   ? prompt
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
-              turnId = await connection.runTurn(threadId, workspace, config, turnPrompt)
-              turnCount += 1
+              const nextTurnCount = turnCount + 1
+              turnId = await connection.runTurn(
+                threadId,
+                workspace,
+                config,
+                turnPrompt,
+                nextTurnCount,
+              )
+              turnCount = nextTurnCount
               const refreshed = await Effect.runPromise(refreshIssue())
               if (refreshed === null || !isRoutable(refreshed)) {
                 break

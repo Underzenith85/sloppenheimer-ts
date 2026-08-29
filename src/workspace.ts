@@ -6,6 +6,7 @@ import { Effect } from 'effect'
 
 import type { IssueIdentifier, Workspace } from './domain.js'
 import { WorkspaceError } from './errors.js'
+import { logWarning } from './logging.js'
 import type { HooksConfig } from './workflow.js'
 
 export const workspaceKey = (identifier: IssueIdentifier): string => {
@@ -164,7 +165,7 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
     hooks.afterRun === null
       ? Effect.void
       : runShell(hooks.afterRun, workspace.path, hooks.timeoutMs).pipe(
-          Effect.catchAll((error) => Effect.logWarning('after_run hook failed', { error })),
+          Effect.catchAll((error) => logWarning('after_run hook failed', { error })),
         ),
   remove: (identifier) =>
     Effect.tryPromise({
@@ -190,7 +191,7 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
           await Effect.runPromise(
             runShell(hooks.beforeRemove, path, hooks.timeoutMs).pipe(
               Effect.catchAll((error) =>
-                Effect.logWarning('before_remove hook failed; continuing cleanup', {
+                logWarning('before_remove hook failed; continuing cleanup', {
                   issue_identifier: identifier,
                   workspace_path: path,
                   error: error.message,

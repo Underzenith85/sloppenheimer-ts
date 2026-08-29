@@ -4,10 +4,18 @@ import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
-import { issueId, normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
+import {
+  issueId,
+  normalizeState,
+  type Issue,
+  type IssueId,
+  type JsonObject,
+  type TokenTotals,
+} from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
+import { logError, logInfo, logWarning } from './logging.js'
 import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
 import { sameTrackerProvider } from './tracker-config.js'
 import { loadWorkflow, preflightWorkflow, renderPrompt, type Workflow } from './workflow.js'
@@ -22,8 +30,14 @@ type RunningEntry = {
   startedAt: Date
   lastEventAt: Date | null
   lastEvent: string | null
+  lastMessage: string | null
   processId: number | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
   tokens: Omit<TokenTotals, 'secondsRunning'>
+  lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
 }
 
 type RetryEntry = {
@@ -56,8 +70,14 @@ export type RunningSnapshot = Readonly<{
   startedAt: string
   lastEventAt: string | null
   lastEvent: string | null
+  lastMessage: string | null
   processId: number | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
   tokens: Omit<TokenTotals, 'secondsRunning'>
+  lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
   workerHost: 'local'
 }>
 
@@ -91,7 +111,7 @@ export type OrchestratorSnapshot = Readonly<{
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
   totals: TokenTotals
-  rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  rateLimits: JsonObject | null
 }>
 
 export type OrchestratorControl = Readonly<{
@@ -127,7 +147,7 @@ type RuntimeState = {
   pausedIssueNumbers: Set<number>
   handoffs: Map<IssueId, HandoffEntry>
   totals: TokenTotals
-  rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  rateLimits: JsonObject | null
 }
 
 type EffectiveWorkflow = Readonly<{
@@ -291,6 +311,16 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_identifier: issue.identifier,
 })
 
+const sessionLogContext = (
+  entry: RunningEntry,
+): Readonly<Record<string, string | number | null>> => ({
+  ...logContext(entry.issue),
+  session_id: entry.sessionId,
+  thread_id: entry.threadId,
+  turn_id: entry.turnId,
+  turn_count: entry.turnCount,
+})
+
 const identifierIssueNumber = (identifier: string): number | null => {
   const match = /#(\d+)$/u.exec(identifier)
   return match?.[1] === undefined ? null : Number(match[1])
@@ -320,7 +350,7 @@ export const startOrchestrator = (
               .pipe(
                 Effect.matchEffect({
                   onFailure: (error) =>
-                    Effect.logWarning('startup terminal issue fetch failed; continuing', {
+                    logWarning('startup terminal issue fetch failed; continuing', {
                       state,
                       error: error.message,
                     }).pipe(Effect.as<readonly Issue[]>([])),
@@ -336,8 +366,10 @@ export const startOrchestrator = (
           const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
             Effect.matchEffect({
               onFailure: (error) =>
-                Effect.logWarning('startup workspace inspection failed; continuing', {
+                logWarning('startup workspace inspection failed; continuing', {
                   ...logContext(issue),
+                  action: 'workspace_inspection',
+                  outcome: 'failed',
                   error: error.message,
                 }).pipe(Effect.as<boolean | null>(null)),
               onSuccess: (exists) => Effect.succeed<boolean | null>(exists),
@@ -351,8 +383,10 @@ export const startOrchestrator = (
             .pipe(
               Effect.matchEffect({
                 onFailure: (error) =>
-                  Effect.logWarning('startup terminal issue recheck failed; continuing', {
+                  logWarning('startup terminal issue recheck failed; continuing', {
                     ...logContext(issue),
+                    action: 'terminal_recheck',
+                    outcome: 'failed',
                     error: error.message,
                   }).pipe(Effect.as<readonly Issue[] | null>(null)),
                 onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
@@ -367,8 +401,10 @@ export const startOrchestrator = (
           }
           yield* effective.workspaces.remove(current.identifier).pipe(
             Effect.catchAll((error) =>
-              Effect.logWarning('startup terminal workspace cleanup failed; continuing', {
+              logWarning('startup terminal workspace cleanup failed; continuing', {
                 ...logContext(current),
+                action: 'workspace_cleanup',
+                outcome: 'failed',
                 error: error.message,
               }),
             ),
@@ -457,7 +493,7 @@ export const startOrchestrator = (
     const nextRefreshWaiters: Deferred.Deferred<void>[] = []
 
     const offerFromCallback = (event: OrchestratorEvent): void => {
-      Effect.runFork(Queue.offer(mailbox, event))
+      Effect.runSync(Queue.offer(mailbox, event))
     }
 
     const requestTick = (source: 'startup' | 'timer' | 'change'): Effect.Effect<void> =>
@@ -529,9 +565,11 @@ export const startOrchestrator = (
         )
         state.retries.set(issue.id, { issue, attempt, dueAt, error, fiber })
         state.claimed.add(issue.id)
-        yield* Effect.logInfo('retry scheduled', {
+        yield* logInfo('action=retry outcome=scheduled', {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
+          action: 'retry',
+          outcome: 'scheduled',
           attempt,
           due_at: new Date(dueAt).toISOString(),
           error,
@@ -593,8 +631,10 @@ export const startOrchestrator = (
           }),
         )
         if (preflight._tag === 'Failed') {
-          yield* Effect.logError('dispatch preflight failed', {
+          yield* logError('action=dispatch outcome=failed', {
             ...logContext(issue),
+            action: 'dispatch',
+            outcome: 'failed',
             error: preflight.error.message,
           })
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
@@ -689,10 +729,20 @@ export const startOrchestrator = (
           startedAt: new Date(),
           lastEventAt: null,
           lastEvent: null,
+          lastMessage: null,
           processId: null,
+          threadId: null,
+          turnId: null,
+          sessionId: null,
+          turnCount: 0,
           tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         })
-        yield* Effect.logInfo('worker dispatched', logContext(issue))
+        yield* logInfo('action=dispatch outcome=started', {
+          ...logContext(issue),
+          action: 'dispatch',
+          outcome: 'started',
+        })
       })
 
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
@@ -773,8 +823,11 @@ export const startOrchestrator = (
             state.handoffs.delete(id)
             state.completed.add(id)
             state.claimed.delete(id)
-            yield* Effect.logInfo('pull request merged', {
+            yield* logInfo('pull request merged', {
               ...logContext(handoff.issue),
+              action: 'pull_request_merge',
+              outcome: 'completed',
+              error: null,
               pull_request_url: handoff.pullRequestUrl,
               merge_commit_sha: merged.sha,
             })
@@ -838,11 +891,21 @@ export const startOrchestrator = (
         accountEndedRuntime(entry, Date.now())
         state.claimed.delete(id)
         yield* Fiber.interrupt(entry.fiber)
+        if (entry.sessionId !== null) {
+          yield* logInfo('action=session outcome=cancelled', {
+            ...sessionLogContext(entry),
+            action: 'session',
+            outcome: 'cancelled',
+            error: null,
+          })
+        }
         if (cleanupWorkspace) {
           yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
             Effect.catchAll((error) =>
-              Effect.logWarning('terminal workspace cleanup failed', {
+              logWarning('terminal workspace cleanup failed', {
                 ...logContext(entry.issue),
+                action: 'workspace_cleanup',
+                outcome: 'failed',
                 error: error.message,
               }),
             ),
@@ -880,8 +943,10 @@ export const startOrchestrator = (
             }),
           )
           if (refreshResult._tag === 'Failed') {
-            yield* Effect.logWarning('reconciliation failed; keeping worker running', {
+            yield* logWarning('reconciliation failed; keeping worker running', {
               ...logContext(entry.issue),
+              action: 'reconciliation',
+              outcome: 'failed',
               error: refreshResult.error.message,
             })
             continue
@@ -909,18 +974,15 @@ export const startOrchestrator = (
           }),
         )
         if (revalidated._tag === 'Failed') {
-          yield* Effect.logError(
-            'tracker credential validation failed; retaining last known good',
-            {
-              error: revalidated.error.message,
-              effective_fingerprint: lastKnownGood.workflow.fingerprint,
-            },
-          )
+          yield* logError('tracker credential validation failed; retaining last known good', {
+            error: revalidated.error.message,
+            effective_fingerprint: lastKnownGood.workflow.fingerprint,
+          })
         } else if (revalidated.value !== lastKnownGood) {
           const previousTracker = lastKnownGood.tracker
           lastKnownGood = revalidated.value
           adoptTracker(previousTracker, revalidated.value.tracker)
-          yield* Effect.logInfo('tracker credential refreshed from the environment', {
+          yield* logInfo('tracker credential refreshed from the environment', {
             tracker_kind: revalidated.value.workflow.tracker.kind,
             secret_environment_name:
               revalidated.value.workflow.tracker.provider.tokenEnvironmentName,
@@ -933,7 +995,7 @@ export const startOrchestrator = (
           Effect.matchEffect({
             onFailure: (error) => {
               workflowReloadError = { message: error.message, observedAt: new Date() }
-              return Effect.logError('workflow validation failed; retaining last known good', {
+              return logError('workflow validation failed; retaining last known good', {
                 error: error.message,
                 effective_fingerprint: lastKnownGood.workflow.fingerprint,
               }).pipe(Effect.as<Workflow | null>(null))
@@ -945,7 +1007,7 @@ export const startOrchestrator = (
           workflowReloadError = null
           if (reloaded.fingerprint !== lastKnownGood.workflow.fingerprint) {
             lastKnownGood = makeEffectiveWorkflow(reloaded)
-            yield* Effect.logInfo('workflow reloaded', {
+            yield* logInfo('workflow reloaded', {
               path: reloaded.path,
               fingerprint: reloaded.fingerprint,
             })
@@ -962,7 +1024,7 @@ export const startOrchestrator = (
           )
           .pipe(
             Effect.catchAll((error) =>
-              Effect.logError('candidate fetch failed', { error: error.message }).pipe(
+              logError('candidate fetch failed', { error: error.message }).pipe(
                 Effect.as<readonly Issue[]>([]),
               ),
             ),
@@ -990,6 +1052,14 @@ export const startOrchestrator = (
       const activeSeconds = [...state.running.values()].reduce(
         (total, entry) => total + (now - entry.startedAt.getTime()) / 1_000,
         0,
+      )
+      const activeTokens = [...state.running.values()].reduce(
+        (totals, entry) => ({
+          inputTokens: totals.inputTokens + entry.tokens.inputTokens,
+          outputTokens: totals.outputTokens + entry.tokens.outputTokens,
+          totalTokens: totals.totalTokens + entry.tokens.totalTokens,
+        }),
+        { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
       )
       return {
         generatedAt: new Date(now).toISOString(),
@@ -1023,8 +1093,14 @@ export const startOrchestrator = (
           startedAt: entry.startedAt.toISOString(),
           lastEventAt: entry.lastEventAt?.toISOString() ?? null,
           lastEvent: entry.lastEvent,
+          lastMessage: entry.lastMessage,
           processId: entry.processId,
+          threadId: entry.threadId,
+          turnId: entry.turnId,
+          sessionId: entry.sessionId,
+          turnCount: entry.turnCount,
           tokens: entry.tokens,
+          lastReportedTokens: entry.lastReportedTokens,
           workerHost: 'local',
         })),
         retrying: [...state.retries.values()].map((entry) => ({
@@ -1038,7 +1114,9 @@ export const startOrchestrator = (
           workerHost: 'local',
         })),
         totals: {
-          ...state.totals,
+          inputTokens: state.totals.inputTokens + activeTokens.inputTokens,
+          outputTokens: state.totals.outputTokens + activeTokens.outputTokens,
+          totalTokens: state.totals.totalTokens + activeTokens.totalTokens,
           secondsRunning: state.totals.secondsRunning + activeSeconds,
         },
         rateLimits: state.rateLimits,
@@ -1073,9 +1151,42 @@ export const startOrchestrator = (
             if (entry !== undefined) {
               entry.lastEvent = event.update.event
               entry.lastEventAt = event.update.timestamp
+              entry.lastMessage = event.update.message
               entry.processId = event.update.processId
+              entry.threadId = event.update.threadId ?? entry.threadId
+              entry.turnId = event.update.turnId ?? entry.turnId
+              entry.sessionId = event.update.sessionId ?? entry.sessionId
+              entry.turnCount = Math.max(entry.turnCount, event.update.turnCount)
               if (event.update.usage !== null) {
-                entry.tokens = event.update.usage
+                entry.lastReportedTokens = event.update.usage
+                entry.tokens = {
+                  inputTokens: Math.max(entry.tokens.inputTokens, event.update.usage.inputTokens),
+                  outputTokens: Math.max(
+                    entry.tokens.outputTokens,
+                    event.update.usage.outputTokens,
+                  ),
+                  totalTokens: Math.max(entry.tokens.totalTokens, event.update.usage.totalTokens),
+                }
+              }
+              if (event.update.rateLimits !== null) {
+                state.rateLimits = event.update.rateLimits
+              }
+              if (
+                entry.sessionId !== null &&
+                (event.update.event === 'session_started' ||
+                  event.update.event === 'turn/completed')
+              ) {
+                yield* logInfo(
+                  event.update.event === 'session_started'
+                    ? 'action=session outcome=started'
+                    : 'action=turn outcome=completed',
+                  {
+                    ...sessionLogContext(entry),
+                    action: event.update.event === 'session_started' ? 'session' : 'turn',
+                    outcome: event.update.event === 'session_started' ? 'started' : 'completed',
+                    error: null,
+                  },
+                )
               }
             }
             break
@@ -1086,6 +1197,19 @@ export const startOrchestrator = (
               break
             }
             accountEndedRuntime(entry, Date.now())
+            if (entry.sessionId !== null) {
+              yield* (event.outcome === 'normal' ? logInfo : logError)(
+                event.outcome === 'normal'
+                  ? 'action=session outcome=completed'
+                  : 'action=session outcome=failed',
+                {
+                  ...sessionLogContext(entry),
+                  action: 'session',
+                  outcome: event.outcome === 'normal' ? 'completed' : 'failed',
+                  error: event.error,
+                },
+              )
+            }
             if (event.outcome === 'normal') {
               const handoff = yield* entry.execution.tracker
                 .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
@@ -1121,8 +1245,11 @@ export const startOrchestrator = (
                 observedAt: new Date(),
               })
               yield* persistHandoffs()
-              yield* Effect.logInfo('worker handed off pull request', {
+              yield* logInfo('worker handed off pull request', {
                 ...logContext(entry.issue),
+                action: 'pull_request_handoff',
+                outcome: 'completed',
+                error: null,
                 branch: handoff.result.branchName,
                 pull_request_url: handoff.result.pullRequestUrl,
               })
@@ -1161,8 +1288,10 @@ export const startOrchestrator = (
             if (stateIsIn(issue.state, effective.workflow.config.tracker.terminalStates)) {
               yield* effective.workspaces.remove(issue.identifier).pipe(
                 Effect.catchAll((error) =>
-                  Effect.logWarning('terminal workspace cleanup failed', {
+                  logWarning('terminal workspace cleanup failed', {
                     ...logContext(issue),
+                    action: 'workspace_cleanup',
+                    outcome: 'failed',
                     error: error.message,
                   }),
                 ),
