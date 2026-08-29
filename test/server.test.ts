@@ -20,7 +20,19 @@ const snapshot: OrchestratorSnapshot = {
   maxConcurrentAgents: 2,
   counts: { running: 1, retrying: 0, completed: 3 },
   pausedIssueNumbers: [],
-  handoffs: [],
+  handoffs: [
+    {
+      issueId: '9',
+      identifier: 'example/symphony#9',
+      pullRequestUrl: 'https://github.com/example/symphony/pull/44',
+      branchName: 'symphony/issue-9',
+      state: 'awaiting_checks',
+      headSha: null,
+      reason: 'Required CI checks are still running',
+      repairAttempts: 0,
+      observedAt: '2026-08-29T12:00:00.000Z',
+    },
+  ],
   running: [
     {
       issueId: issueId('17'),
@@ -117,7 +129,11 @@ describe('operator server', (): void => {
       })
       expect(await detail.json()).toMatchObject({ identifier: 'example/symphony#17' })
       const source = await script.text()
-      expect(source).toContain("'graph-node state-' + status.toLowerCase()")
+      expect(source).toContain("'graph-node state-' + statusClass(status)")
+      expect(source).toContain("awaiting_checks: 'Awaiting checks'")
+      expect(source).toContain(
+        '(state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)',
+      )
       expect(source).toContain("button.disabled = !issue.enabled && issue.readiness !== 'ready'")
     })
   })

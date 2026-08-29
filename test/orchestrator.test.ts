@@ -1,4 +1,4 @@
-import { Effect, TestClock, TestContext } from 'effect'
+import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
@@ -193,6 +193,10 @@ type TestHarness = Readonly<{
 const makeHarness = (
   initial: Workflow,
   candidates: (workflow: Workflow) => readonly Issue[] = () => [],
+  fetchCandidates?: (
+    workflow: Workflow,
+    states: readonly string[],
+  ) => Effect.Effect<readonly Issue[], never>,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
   let notifyChanged = (): void => undefined
@@ -215,14 +219,18 @@ const makeHarness = (
     makeTracker: (effectiveWorkflow): TrackerAdapter => {
       trackerWorkflows.push(effectiveWorkflow)
       return {
-        fetchIssuesByStates: (states) =>
-          Effect.sync(() => {
-            stateFetchCount += 1
-            const normalizedStates = new Set(states.map((state) => state.trim().toLowerCase()))
-            return candidates(effectiveWorkflow).filter((issue) =>
-              normalizedStates.has(issue.state.trim().toLowerCase()),
+        fetchIssuesByStates: (states) => {
+          stateFetchCount += 1
+          const normalizedStates = new Set(states.map((state) => state.trim().toLowerCase()))
+          return (
+            fetchCandidates?.(effectiveWorkflow, states) ??
+            Effect.succeed(
+              candidates(effectiveWorkflow).filter((issue) =>
+                normalizedStates.has(issue.state.trim().toLowerCase()),
+              ),
             )
-          }),
+          )
+        },
         fetchIssuesByIds: () =>
           Effect.sync(() => {
             idFetchCount += 1
@@ -348,7 +356,7 @@ describe('startup terminal workspace cleanup', (): void => {
     )
 
     expect(terminalFetches).toEqual([
-      { states: startupWorkflow.config.tracker.terminalStates, labels: null },
+      { states: startupWorkflow.config.tracker.terminalStates, labels: [] },
     ])
     expect(removed).toEqual(['GH-1', 'GH-2', 'GH-3'])
   })
@@ -437,6 +445,112 @@ describe('startup terminal workspace cleanup', (): void => {
   })
 })
 
+const awaitLoads = (harness: TestHarness, expected: number): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    while (harness.loads() < expected) {
+      yield* Effect.yieldNow()
+    }
+  })
+
+describe('operator snapshots', (): void => {
+  it('start and remain responsive while the initial tracker poll is pending', async (): Promise<void> => {
+    let markPollStarted = (): void => undefined
+    const pollStarted = new Promise<void>((resolve) => {
+      markPollStarted = resolve
+    })
+    const harness = makeHarness(
+      workflow,
+      () => [],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open')) {
+          return Effect.succeed([])
+        }
+        markPollStarted()
+        return Effect.never
+      },
+    )
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* Effect.promise(() => pollStarted)
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.effectiveWorkflow.fingerprint).toBe('test')
+  })
+
+  it('runs one follow-up poll for a refresh received during a pending poll', async (): Promise<void> => {
+    let pollShouldBlock = false
+    let markPollStarted = (): void => undefined
+    let releasePoll = (): void => undefined
+    const pollStarted = new Promise<void>((resolve) => {
+      markPollStarted = resolve
+    })
+    const pollReleased = new Promise<void>((resolve) => {
+      releasePoll = resolve
+    })
+    const initial = changedWorkflow({ fingerprint: 'initial' })
+    const reloaded = changedWorkflow({ fingerprint: 'late-refresh' })
+    const harness = makeHarness(
+      initial,
+      () => [],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open')) {
+          return Effect.succeed([])
+        }
+        if (pollShouldBlock) {
+          markPollStarted()
+          return Effect.promise(() => pollReleased).pipe(Effect.as([]))
+        }
+        return Effect.succeed([])
+      },
+    )
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* control.refresh
+          pollShouldBlock = true
+          yield* Effect.forkScoped(control.refresh)
+          yield* Effect.promise(() => pollStarted)
+          harness.setWorkflow(reloaded)
+          const lateRefresh = yield* Effect.forkScoped(control.refresh)
+          pollShouldBlock = false
+          releasePoll()
+          yield* Fiber.join(lateRefresh)
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.effectiveWorkflow.fingerprint).toBe('late-refresh')
+  })
+
+  it('preserves a refresh started while the previous refresh is settling', async (): Promise<void> => {
+    const harness = makeHarness(workflow)
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* control.refresh
+          const before = harness.stateFetches()
+          const consecutiveRefreshes = yield* Effect.forkScoped(
+            control.refresh.pipe(Effect.zipRight(control.refresh)),
+          )
+          yield* Fiber.join(consecutiveRefreshes)
+          expect(harness.stateFetches()).toBe(before + 2)
+        }),
+      ),
+    )
+  })
+})
+
 describe('workflow hot reload', (): void => {
   it('replaces the last known good workflow after a valid defensive reload', async (): Promise<void> => {
     const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
@@ -451,7 +565,7 @@ describe('workflow hot reload', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
-          yield* control.snapshot
+          yield* control.refresh
           harness.setWorkflow(reloaded)
           yield* control.refresh
           return yield* control.snapshot
@@ -501,7 +615,7 @@ describe('workflow hot reload', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
-          yield* control.snapshot
+          yield* control.refresh
           harness.setWorkflow(reloaded)
           yield* control.refresh
           yield* control.snapshot
@@ -542,7 +656,7 @@ describe('workflow hot reload', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
-          yield* control.snapshot
+          yield* control.refresh
           harness.setWorkflow(
             new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
           )
@@ -566,11 +680,13 @@ describe('workflow hot reload', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
-          yield* control.snapshot
+          yield* control.refresh
           harness.setWorkflow(
             changedWorkflow({ fingerprint: 'missed-event', pollingIntervalMs: 2_000 }),
           )
+          const beforeTick = harness.loads()
           yield* TestClock.adjust(1_000)
+          yield* awaitLoads(harness, beforeTick + 1)
           return yield* control.snapshot
         }),
       ),
@@ -587,7 +703,7 @@ describe('workflow hot reload', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
-          yield* control.snapshot
+          yield* control.refresh
           harness.setWorkflow(changedWorkflow({ fingerprint: 'slower', pollingIntervalMs: 5_000 }))
           yield* control.refresh
           yield* control.snapshot
@@ -598,7 +714,7 @@ describe('workflow hot reload', (): void => {
           expect(harness.loads()).toBe(afterReload)
 
           yield* TestClock.adjust(1)
-          yield* control.snapshot
+          yield* awaitLoads(harness, afterReload + 1)
           expect(harness.loads()).toBe(afterReload + 1)
         }),
       ),
@@ -612,7 +728,7 @@ describe('workflow hot reload', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
-          yield* control.snapshot
+          yield* control.refresh
           const before = harness.loads()
           yield* control.refresh
           harness.notifyChanged()
