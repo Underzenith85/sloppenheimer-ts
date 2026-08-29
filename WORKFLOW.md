@@ -14,7 +14,11 @@ workspace:
   root: .symphony/workspaces
 hooks:
   after_create: git clone git@github.com:Underzenith85/symphony-ts.git .
-  before_run: git fetch origin main && git checkout --detach origin/main
+  before_run: |
+    if test -z "$(git status --porcelain)"; then
+      git fetch origin main
+      git checkout --detach origin/main
+    fi
   timeout_ms: 120000
 agent:
   max_concurrent_agents: 1
