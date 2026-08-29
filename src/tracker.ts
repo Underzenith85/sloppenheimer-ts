@@ -12,6 +12,11 @@ export type TrackerAdapter = Readonly<{
 
 type JsonRecord = Record<string, JsonValue>
 
+type GitHubResponse = Readonly<{
+  body: JsonValue
+  nextUrl: string | null
+}>
+
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (
     value === null ||
@@ -162,13 +167,58 @@ const normalizeIssue = (source: GitHubIssue, provider: GitHubProviderConfig): Is
   }
 }
 
+const paginationError = (message: string, cause?: unknown): TrackerError =>
+  new TrackerError({
+    category: 'tracker_pagination',
+    message,
+    retryable: false,
+    ...(cause === undefined ? {} : { cause }),
+  })
+
+const parseNextUrl = (
+  linkHeader: string | null,
+  requestUrl: string,
+  apiBaseUrl: string,
+): string | null => {
+  if (linkHeader === null) {
+    return null
+  }
+  for (const entry of linkHeader.split(',')) {
+    const [target, ...parameters] = entry.trim().split(';')
+    const relations = parameters.flatMap((parameter) => {
+      const match = /^\s*rel\s*=\s*"([^"]*)"\s*$/iu.exec(parameter)
+      return match?.[1]?.split(/\s+/u) ?? []
+    })
+    if (!relations.includes('next')) {
+      continue
+    }
+    const targetMatch = /^<([^<>]+)>$/u.exec(target ?? '')
+    if (targetMatch?.[1] === undefined) {
+      throw paginationError('GitHub returned an invalid next page link')
+    }
+    try {
+      const nextUrl = new URL(targetMatch[1], requestUrl)
+      if (nextUrl.origin !== new URL(apiBaseUrl).origin) {
+        throw paginationError('GitHub next page URL has an unexpected origin')
+      }
+      return nextUrl.href
+    } catch (cause: unknown) {
+      if (cause instanceof TrackerError) {
+        throw cause
+      }
+      throw paginationError('GitHub returned an invalid next page URL', cause)
+    }
+  }
+  return null
+}
+
 const githubRequest = (
   provider: GitHubProviderConfig,
-  path: string,
-): Effect.Effect<JsonValue, TrackerError> =>
+  url: string,
+): Effect.Effect<GitHubResponse, TrackerError> =>
   Effect.tryPromise({
     try: async () => {
-      const response = await fetch(`${provider.apiBaseUrl}${path}`, {
+      const response = await fetch(url, {
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${provider.token}`,
@@ -198,7 +248,10 @@ const githubRequest = (
           retryable: false,
         })
       }
-      return body
+      return {
+        body,
+        nextUrl: parseNextUrl(response.headers.get('link'), url, provider.apiBaseUrl),
+      }
     },
     catch: (cause: unknown) =>
       cause instanceof TrackerError
@@ -219,39 +272,56 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
       if (states.length === 0) {
         return Effect.succeed([])
       }
-      const fetchState = (state: string): Effect.Effect<readonly Issue[], TrackerError> =>
-        githubRequest(
-          provider,
-          `${prefix}/issues?state=${encodeURIComponent(state.toLowerCase())}&per_page=100`,
-        ).pipe(
-          Effect.flatMap((value) => {
-            if (!isJsonArray(value)) {
-              return Effect.fail(
-                new TrackerError({
-                  category: 'tracker_response',
-                  message: 'GitHub issue list is not an array',
-                  retryable: false,
-                }),
-              )
-            }
-            const issues: Issue[] = []
-            for (const item of value) {
-              try {
-                const issue = normalizeIssue(decodeGitHubIssue(item), provider)
-                if (issue.dispatchable) {
-                  issues.push(issue)
-                }
-              } catch (error: unknown) {
-                if (!(error instanceof TrackerError)) {
-                  throw error
+      const fetchPage = (
+        url: string,
+        visitedUrls: ReadonlySet<string>,
+      ): Effect.Effect<readonly Issue[], TrackerError> =>
+        Effect.suspend(() => {
+          if (visitedUrls.has(url)) {
+            return Effect.fail(paginationError('GitHub pagination contains a cycle'))
+          }
+          return githubRequest(provider, url).pipe(
+            Effect.flatMap(({ body, nextUrl }) => {
+              if (!isJsonArray(body)) {
+                return Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_response',
+                    message: 'GitHub issue list is not an array',
+                    retryable: false,
+                  }),
+                )
+              }
+              const issues: Issue[] = []
+              for (const item of body) {
+                try {
+                  const issue = normalizeIssue(decodeGitHubIssue(item), provider)
+                  if (issue.dispatchable) {
+                    issues.push(issue)
+                  }
+                } catch (error: unknown) {
+                  if (!(error instanceof TrackerError)) {
+                    throw error
+                  }
                 }
               }
-            }
-            return Effect.succeed(issues)
-          }),
+              if (nextUrl === null) {
+                return Effect.succeed(issues)
+              }
+              return fetchPage(nextUrl, new Set([...visitedUrls, url])).pipe(
+                Effect.map((nextIssues) => [...issues, ...nextIssues]),
+              )
+            }),
+          )
+        })
+      const fetchState = (state: string): Effect.Effect<readonly Issue[], TrackerError> =>
+        fetchPage(
+          `${provider.apiBaseUrl}${prefix}/issues?state=${encodeURIComponent(state.toLowerCase())}&per_page=100`,
+          new Set(),
         )
       return Effect.forEach(states, fetchState, { concurrency: 1 }).pipe(
-        Effect.map((groups) => groups.flat()),
+        Effect.map((groups) => [
+          ...new Map(groups.flat().map((issue) => [issue.id, issue])).values(),
+        ]),
       )
     },
     fetchIssuesByIds: (ids): Effect.Effect<readonly Issue[], TrackerError> => {
@@ -261,9 +331,10 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
       return Effect.forEach(
         [...new Set(ids)],
         (id) =>
-          githubRequest(provider, `${prefix}/issues/${encodeURIComponent(id)}`).pipe(
-            Effect.map((value) => normalizeIssue(decodeGitHubIssue(value), provider)),
-          ),
+          githubRequest(
+            provider,
+            `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
+          ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
         { concurrency: 4 },
       )
     },
