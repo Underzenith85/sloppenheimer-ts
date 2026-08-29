@@ -90,4 +90,25 @@ describe('GitHub pull request monitor', (): void => {
       Effect.runPromise(makeGitHubPullRequestMonitor(provider).merge(41, 'head-1')),
     ).resolves.toBe('merge-1')
   })
+
+  it('resolves review threads through explicit GraphQL mutations', async (): Promise<void> => {
+    const bodies: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        if (typeof init?.body === 'string') {
+          bodies.push(init.body)
+        }
+        return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
+      }),
+    )
+
+    await Effect.runPromise(
+      makeGitHubPullRequestMonitor(provider).resolveThreads(['thread-1', 'thread-2']),
+    )
+
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]).toContain('thread-1')
+    expect(bodies[1]).toContain('thread-2')
+  })
 })

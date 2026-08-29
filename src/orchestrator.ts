@@ -547,6 +547,37 @@ export const startOrchestrator = (
             handoff.reason = inspected.error.message
             continue
           }
+          const unresolvedThreadIds = inspected.observation.reviewThreads
+            .filter((thread) => !thread.resolved)
+            .map((thread) => thread.id)
+          const repairedHeadIsVerified =
+            handoff.repairAttempts > 0 &&
+            inspected.observation.mergeable === true &&
+            inspected.observation.mergeState !== 'dirty' &&
+            inspected.observation.mergeState !== 'behind' &&
+            inspected.observation.checks.length > 0 &&
+            inspected.observation.checks.every(
+              (check) =>
+                check.status === 'completed' &&
+                check.conclusion !== null &&
+                ['success', 'neutral', 'skipped'].includes(check.conclusion),
+            )
+          if (unresolvedThreadIds.length > 0 && repairedHeadIsVerified) {
+            const resolved = yield* handoff.execution.tracker
+              .resolveReviewThreads(unresolvedThreadIds)
+              .pipe(
+                Effect.match({
+                  onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                  onSuccess: () => ({ _tag: 'Succeeded' as const }),
+                }),
+              )
+            handoff.state = 'awaiting_checks'
+            handoff.reason =
+              resolved._tag === 'Failed'
+                ? resolved.error.message
+                : 'Verified repair head; waiting for resolved review state'
+            continue
+          }
           const disposition = classifyPullRequest(inspected.observation)
           handoff.state = disposition.state
           handoff.headSha = inspected.observation.headSha

@@ -30,6 +30,7 @@ export type TrackerAdapter = Readonly<{
     pullRequestNumber: number,
     expectedHeadSha: string,
   ) => Effect.Effect<string, TrackerError>
+  resolveReviewThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
   secretEnvironmentNames: readonly string[]
 }>
 
@@ -745,6 +746,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
     },
     inspectPullRequest: pullRequests.inspect,
     mergePullRequest: pullRequests.merge,
+    resolveReviewThreads: pullRequests.resolveThreads,
   }
 }
 

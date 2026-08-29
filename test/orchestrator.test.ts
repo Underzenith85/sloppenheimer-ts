@@ -229,6 +229,7 @@ const makeHarness = (
           Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
         inspectPullRequest: () => Effect.die('unused'),
         mergePullRequest: () => Effect.die('unused'),
+        resolveReviewThreads: () => Effect.die('unused'),
         secretEnvironmentNames: [],
       }
     },

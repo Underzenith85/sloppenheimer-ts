@@ -145,6 +145,7 @@ const decodeThreads = (value: JsonValue | undefined): PullRequestObservation['re
 export type GitHubPullRequestMonitor = Readonly<{
   inspect: (number: number) => Effect.Effect<PullRequestObservation, TrackerError>
   merge: (number: number, expectedHeadSha: string) => Effect.Effect<string, TrackerError>
+  resolveThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
 }>
 
 export const makeGitHubPullRequestMonitor = (
@@ -247,6 +248,20 @@ export const makeGitHubPullRequestMonitor = (
           }
           return Effect.succeed(sha)
         }),
+      ),
+    resolveThreads: (threadIds) =>
+      Effect.forEach(
+        threadIds,
+        (threadId) =>
+          json(provider, `${provider.apiBaseUrl.replace(/\/$/u, '')}/graphql`, {
+            method: 'POST',
+            body: JSON.stringify({
+              query:
+                'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
+              variables: { threadId },
+            }),
+          }),
+        { concurrency: 1, discard: true },
       ),
   }
 }
