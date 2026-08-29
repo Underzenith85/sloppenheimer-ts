@@ -642,6 +642,7 @@ export const startOrchestrator = (
                 dependencies.runAgent(
                   issue,
                   workspace,
+                  execution.workflow.config.workspaceRoot,
                   execution.codex,
                   execution.prompt,
                   execution.maxTurns,

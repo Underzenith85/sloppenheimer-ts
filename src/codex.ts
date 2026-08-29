@@ -4,7 +4,8 @@ import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
-import { AgentError } from './errors.js'
+import { AgentError, WorkspaceError } from './errors.js'
+import { workspaceKey, validateWorkspaceForLaunch } from './workspace.js'
 import type { CodexConfig } from './workflow.js'
 
 export const makeCodexEnvironment = (
@@ -416,6 +417,7 @@ class CodexConnection {
 export const runAgent = (
   issue: Issue,
   workspace: Workspace,
+  workspaceRoot: string,
   config: CodexConfig,
   prompt: string,
   maxTurns: number,
@@ -426,22 +428,40 @@ export const runAgent = (
 ): Effect.Effect<AgentResult, AgentError> =>
   Effect.scoped(
     Effect.acquireRelease(
-      Effect.sync(
-        () =>
-          new CodexConnection(
-            config.command,
-            workspace.path,
-            config,
-            secretEnvironmentNames,
-            onEvent,
-          ),
-      ),
-      (connection) => Effect.promise(() => connection.stop()),
+      Effect.tryPromise({
+        try: async () => {
+          const validatedWorkspace = await validateWorkspaceForLaunch(
+            workspaceRoot,
+            workspaceKey(issue.identifier),
+            workspace,
+          )
+          return {
+            connection: new CodexConnection(
+              config.command,
+              validatedWorkspace.path,
+              config,
+              secretEnvironmentNames,
+              onEvent,
+            ),
+            workspace: validatedWorkspace,
+          }
+        },
+        catch: (cause: unknown) =>
+          new AgentError({
+            category: cause instanceof WorkspaceError ? 'invalid_workspace' : 'spawn_failed',
+            message:
+              cause instanceof WorkspaceError
+                ? `invalid workspace for ${issue.identifier}: ${cause.message}`
+                : `failed to launch Codex for ${issue.identifier}`,
+            cause,
+          }),
+      }),
+      ({ connection }) => Effect.promise(() => connection.stop()),
     ).pipe(
-      Effect.flatMap((connection) =>
+      Effect.flatMap(({ connection, workspace: validatedWorkspace }) =>
         Effect.tryPromise({
           try: async () => {
-            const threadId = await connection.initialize(config, workspace)
+            const threadId = await connection.initialize(config, validatedWorkspace)
             let turnId = ''
             let turnCount = 0
             while (turnCount < maxTurns) {
@@ -449,7 +469,7 @@ export const runAgent = (
                 turnCount === 0
                   ? prompt
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
-              turnId = await connection.runTurn(threadId, workspace, config, turnPrompt)
+              turnId = await connection.runTurn(threadId, validatedWorkspace, config, turnPrompt)
               turnCount += 1
               const refreshed = await Effect.runPromise(refreshIssue())
               if (refreshed === null || !isRoutable(refreshed)) {

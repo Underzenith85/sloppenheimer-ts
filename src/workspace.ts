@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, lstat, rm } from 'node:fs/promises'
+import { lstat, mkdir, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import { Effect } from 'effect'
@@ -33,6 +33,96 @@ export const containedWorkspacePath = (root: string, key: string): string => {
     })
   }
   return candidate
+}
+
+const sameFile = (
+  left: Readonly<{ dev: number | bigint; ino: number | bigint }>,
+  right: Readonly<{ dev: number | bigint; ino: number | bigint }>,
+): boolean => left.dev === right.dev && left.ino === right.ino
+
+export const validateWorkspaceForLaunch = async (
+  root: string,
+  expectedKey: string,
+  workspace: Workspace,
+): Promise<Workspace> => {
+  const normalizedRoot = resolve(root)
+  const normalizedWorkspace = resolve(workspace.path)
+  const expectedPath = containedWorkspacePath(normalizedRoot, expectedKey)
+
+  if (
+    workspace.key !== expectedKey ||
+    workspace.path !== normalizedWorkspace ||
+    normalizedWorkspace !== expectedPath
+  ) {
+    throw new WorkspaceError({
+      category: 'invalid_path',
+      message: `workspace does not match the configured launch path: ${workspace.path}`,
+    })
+  }
+
+  try {
+    const rootInfo = await lstat(normalizedRoot)
+    const workspaceInfo = await lstat(normalizedWorkspace)
+    if (
+      !rootInfo.isDirectory() ||
+      rootInfo.isSymbolicLink() ||
+      !workspaceInfo.isDirectory() ||
+      workspaceInfo.isSymbolicLink()
+    ) {
+      throw new WorkspaceError({
+        category: 'invalid_path',
+        message: `workspace launch path is not a real directory: ${normalizedWorkspace}`,
+      })
+    }
+
+    const [canonicalRoot, canonicalWorkspace] = await Promise.all([
+      realpath(normalizedRoot),
+      realpath(normalizedWorkspace),
+    ])
+    const difference = relative(canonicalRoot, canonicalWorkspace)
+    if (
+      canonicalRoot !== normalizedRoot ||
+      canonicalWorkspace !== normalizedWorkspace ||
+      difference === '' ||
+      isAbsolute(difference) ||
+      difference === '..' ||
+      difference.startsWith(`..${sep}`)
+    ) {
+      throw new WorkspaceError({
+        category: 'invalid_path',
+        message: `workspace launch path escapes or equals its real root: ${normalizedWorkspace}`,
+      })
+    }
+
+    const [currentRootInfo, currentWorkspaceInfo] = await Promise.all([
+      lstat(normalizedRoot),
+      lstat(normalizedWorkspace),
+    ])
+    if (
+      !currentRootInfo.isDirectory() ||
+      currentRootInfo.isSymbolicLink() ||
+      !currentWorkspaceInfo.isDirectory() ||
+      currentWorkspaceInfo.isSymbolicLink() ||
+      !sameFile(rootInfo, currentRootInfo) ||
+      !sameFile(workspaceInfo, currentWorkspaceInfo)
+    ) {
+      throw new WorkspaceError({
+        category: 'invalid_path',
+        message: `workspace launch path changed during validation: ${normalizedWorkspace}`,
+      })
+    }
+  } catch (cause: unknown) {
+    if (cause instanceof WorkspaceError) {
+      throw cause
+    }
+    throw new WorkspaceError({
+      category: 'invalid_path',
+      message: `failed to validate workspace launch path: ${normalizedWorkspace}`,
+      cause,
+    })
+  }
+
+  return { ...workspace, path: normalizedWorkspace }
 }
 
 const runShell = (

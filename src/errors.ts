@@ -43,6 +43,7 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
 
 export class AgentError extends Data.TaggedError('AgentError')<{
   readonly category:
+    | 'invalid_workspace'
     | 'spawn_failed'
     | 'protocol_error'
     | 'read_timeout'

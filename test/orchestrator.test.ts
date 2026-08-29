@@ -199,7 +199,12 @@ type TestHarness = Readonly<{
   idFetchTokens: () => readonly string[]
   trackerWorkflows: () => readonly Workflow[]
   workspaceWorkflows: () => readonly Workflow[]
-  agentRuns: () => readonly Readonly<{ command: string; prompt: string; maxTurns: number }>[]
+  agentRuns: () => readonly Readonly<{
+    workspaceRoot: string
+    command: string
+    prompt: string
+    maxTurns: number
+  }>[]
   awaitAgentRun: Effect.Effect<void>
 }>
 
@@ -220,7 +225,12 @@ const makeHarness = (
   const idFetchTokens: string[] = []
   const trackerWorkflows: Workflow[] = []
   const workspaceWorkflows: Workflow[] = []
-  const agentRuns: Readonly<{ command: string; prompt: string; maxTurns: number }>[] = []
+  const agentRuns: Readonly<{
+    workspaceRoot: string
+    command: string
+    prompt: string
+    maxTurns: number
+  }>[] = []
   let resolveAgentRun = (): void => undefined
   const agentRun = new Promise<void>((resolve) => {
     resolveAgentRun = resolve
@@ -271,9 +281,9 @@ const makeHarness = (
         remove: () => Effect.void,
       }
     },
-    runAgent: (_issue, _workspace, config, prompt, maxTurns) =>
+    runAgent: (_issue, _workspace, workspaceRoot, config, prompt, maxTurns) =>
       Effect.sync(() => {
-        agentRuns.push({ command: config.command, prompt, maxTurns })
+        agentRuns.push({ workspaceRoot, command: config.command, prompt, maxTurns })
         resolveAgentRun()
       }).pipe(Effect.zipRight(Effect.never)),
     environment,
@@ -787,6 +797,7 @@ describe('workflow hot reload', (): void => {
     expect(harness.workspaceWorkflows().at(-1)?.config.hooks.beforeRun).toBe('echo reloaded')
     expect(harness.agentRuns()).toEqual([
       {
+        workspaceRoot: '/tmp/reloaded-workspaces',
         command: 'reloaded-codex app-server',
         prompt: 'Reloaded GH-9',
         maxTurns: 9,
@@ -936,12 +947,12 @@ describe('tracker credential revalidation', (): void => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
     const harness = makeHarness(workflow, () => [issue])
-    let refreshIssue: Parameters<OrchestratorDependencies['runAgent']>[6] | null = null
+    let refreshIssue: Parameters<OrchestratorDependencies['runAgent']>[7] | null = null
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
       environment,
       runAgent: (...arguments_) => {
-        refreshIssue = arguments_[6]
+        refreshIssue = arguments_[7]
         return harness.dependencies.runAgent(...arguments_)
       },
     }
