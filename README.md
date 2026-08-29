@@ -12,6 +12,7 @@ implementation can dispatch Codex to improve itself from labeled GitHub issues.
 ## Requirements
 
 - Node.js 24
+- pnpm 11.24.0
 - Git
 - Codex CLI, authenticated for `codex app-server`
 - A GitHub token in `GITHUB_TOKEN`
@@ -19,8 +20,8 @@ implementation can dispatch Codex to improve itself from labeled GitHub issues.
 ## Development
 
 ```sh
-npm ci
-npm run check
+pnpm install --frozen-lockfile
+pnpm check
 ```
 
 The codebase uses TypeScript 7's native compiler directly. Oxlint runs its native type-aware engine,
@@ -30,8 +31,8 @@ type-aware unsafe-operation rules, and mandatory braces are CI errors.
 ## Run
 
 ```sh
-npm run build
-GITHUB_TOKEN=github_pat_... npm start -- WORKFLOW.md
+pnpm build
+GITHUB_TOKEN=github_pat_... pnpm start -- WORKFLOW.md
 ```
 
 The workflow token is resolved by the host and removed from agent subprocess environments. Each
