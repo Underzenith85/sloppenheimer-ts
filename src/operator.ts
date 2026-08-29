@@ -159,14 +159,27 @@ export const makeOperatorBackend = (
   workflowPath: string,
   orchestrator: OrchestratorControl,
 ): OperatorBackend => {
+  type LoadedControl = Readonly<{
+    label: string
+    issues: ReturnType<typeof makeGitHubIssueControl>
+    terminalStates: readonly string[]
+  }>
+  let cachedControl: Readonly<{ fingerprint: string; control: LoadedControl }> | null = null
   const loadControl = loadWorkflow(workflowPath).pipe(
     Effect.flatMap((workflow) =>
       controlLabel(workflow).pipe(
-        Effect.map((label) => ({
-          label,
-          issues: makeGitHubIssueControl(workflow.config.tracker.provider),
-          terminalStates: workflow.config.tracker.terminalStates,
-        })),
+        Effect.map((label) => {
+          if (cachedControl?.fingerprint === workflow.fingerprint) {
+            return cachedControl.control
+          }
+          const control: LoadedControl = {
+            label,
+            issues: makeGitHubIssueControl(workflow.config.tracker.provider),
+            terminalStates: workflow.config.tracker.terminalStates,
+          }
+          cachedControl = { fingerprint: workflow.fingerprint, control }
+          return control
+        }),
       ),
     ),
   )

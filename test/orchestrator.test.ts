@@ -140,7 +140,7 @@ describe('orchestrator policies', (): void => {
     expect(findDependencyCycles(graph)).toEqual([
       {
         members: ['example/symphony#6', 'example/symphony#7'],
-        message: 'Dependency cycle: example/symphony#6 → example/symphony#7 → example/symphony#6',
+        message: 'Dependency cycle members: example/symphony#6, example/symphony#7',
       },
     ])
     expect([...cyclicIssueIdentifiers(graph)]).toEqual(['example/symphony#6', 'example/symphony#7'])

@@ -1,7 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Effect } from 'effect'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
-import { buildBacklogSnapshot } from '../src/operator.js'
+import { buildBacklogSnapshot, makeOperatorBackend } from '../src/operator.js'
+
+const temporaryDirectories: string[] = []
+
+afterEach(async (): Promise<void> => {
+  vi.unstubAllGlobals()
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))
+})
 
 const blocker = (number: number, state = 'open'): BlockerRef => ({
   id: String(10_000 + number),
@@ -79,5 +90,56 @@ describe('operator dependency graph', (): void => {
     expect(snapshot.nodes.find(({ identifier }) => identifier.endsWith('#9'))?.readiness).toBe(
       'completed',
     )
+  })
+
+  it('reuses dependency hydration across repeated backlog snapshots', async (): Promise<void> => {
+    const directory = await mkdtemp(join(tmpdir(), 'symphony-operator-test-'))
+    temporaryDirectories.push(directory)
+    const workflowPath = join(directory, 'WORKFLOW.md')
+    await writeFile(
+      workflowPath,
+      `---
+tracker:
+  kind: github
+  provider:
+    owner: example
+    repository: symphony
+    token: secret
+    api_base_url: https://api.example.test
+  required_labels: [symphony]
+---
+Do the work
+`,
+    )
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.includes('/dependencies/blocked_by')) {
+        return Response.json([])
+      }
+      return Response.json([
+        {
+          number: 1,
+          node_id: 'node-1',
+          title: 'Issue 1',
+          body: null,
+          state: 'open',
+          html_url: 'https://example.test/issues/1',
+          assignee: null,
+          labels: [],
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-01-02T00:00:00.000Z',
+        },
+      ])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const backend = makeOperatorBackend(workflowPath, {
+      snapshot: Effect.die('unused'),
+      refresh: Effect.void,
+    })
+
+    await Effect.runPromise(backend.backlog)
+    await Effect.runPromise(backend.backlog)
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 })

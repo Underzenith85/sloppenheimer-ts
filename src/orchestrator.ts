@@ -397,7 +397,10 @@ export const startOrchestrator = (
           yield* Effect.logInfo('workflow reloaded', { path: workflow.path })
         }
         const candidates = yield* tracker
-          .fetchIssuesByStates(workflow.config.tracker.activeStates)
+          .fetchIssuesByStates(
+            workflow.config.tracker.activeStates,
+            workflow.config.tracker.requiredLabels,
+          )
           .pipe(
             Effect.catchAll((error) =>
               Effect.logError('candidate fetch failed', { error: error.message }).pipe(

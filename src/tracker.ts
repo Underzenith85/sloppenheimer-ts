@@ -12,7 +12,10 @@ import { TrackerError } from './errors.js'
 import type { GitHubProviderConfig } from './workflow.js'
 
 export type TrackerAdapter = Readonly<{
-  fetchIssuesByStates: (states: readonly string[]) => Effect.Effect<readonly Issue[], TrackerError>
+  fetchIssuesByStates: (
+    states: readonly string[],
+    dependencyLabels: readonly string[] | null,
+  ) => Effect.Effect<readonly Issue[], TrackerError>
   fetchIssuesByIds: (ids: readonly IssueId[]) => Effect.Effect<readonly Issue[], TrackerError>
   handoffCompletedWork: (
     issue: Issue,
@@ -88,6 +91,13 @@ type GitHubDependency = Readonly<{
 
 const githubApiVersion = '2026-03-10'
 const dependencyConcurrency = 4
+const dependencyCacheTtlMs = 60_000
+
+type DependencyCacheEntry = Readonly<{
+  blockedBy: readonly BlockerRef[]
+  issueUpdatedAt: number | null
+  expiresAt: number
+}>
 
 const nullableString = (value: JsonValue | undefined): string | null =>
   typeof value === 'string' ? value : null
@@ -562,21 +572,51 @@ const hydrateDependencies = (
   provider: GitHubProviderConfig,
   prefix: string,
   issues: readonly Issue[],
+  dependencyLabels: readonly string[] | null,
+  cache: Map<IssueId, DependencyCacheEntry>,
 ): Effect.Effect<readonly Issue[], TrackerError> =>
   Effect.forEach(
     issues,
-    (issue) =>
-      fetchBlockedBy(provider, prefix, issue).pipe(
-        Effect.map((blockedBy) => ({ ...issue, blockedBy })),
-      ),
+    (issue) => {
+      const shouldHydrate =
+        dependencyLabels === null ||
+        dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))
+      if (!shouldHydrate) {
+        return Effect.succeed(issue)
+      }
+      const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
+      const cached = cache.get(issue.id)
+      if (
+        dependencyLabels === null &&
+        cached !== undefined &&
+        cached.issueUpdatedAt === issueUpdatedAt &&
+        cached.expiresAt > Date.now()
+      ) {
+        return Effect.succeed({ ...issue, blockedBy: cached.blockedBy })
+      }
+      return fetchBlockedBy(provider, prefix, issue).pipe(
+        Effect.map((blockedBy) => {
+          cache.set(issue.id, {
+            blockedBy,
+            issueUpdatedAt,
+            expiresAt: Date.now() + dependencyCacheTtlMs,
+          })
+          return { ...issue, blockedBy }
+        }),
+      )
+    },
     { concurrency: dependencyConcurrency },
   )
 
 export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapter => {
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+  const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   return {
     secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
-    fetchIssuesByStates: (states): Effect.Effect<readonly Issue[], TrackerError> => {
+    fetchIssuesByStates: (
+      states,
+      dependencyLabels,
+    ): Effect.Effect<readonly Issue[], TrackerError> => {
       if (states.length === 0) {
         return Effect.succeed([])
       }
@@ -630,7 +670,9 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
         Effect.map((groups) => [
           ...new Map(groups.flat().map((issue) => [issue.id, issue])).values(),
         ]),
-        Effect.flatMap((issues) => hydrateDependencies(provider, prefix, issues)),
+        Effect.flatMap((issues) =>
+          hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
+        ),
       )
     },
     fetchIssuesByIds: (ids): Effect.Effect<readonly Issue[], TrackerError> => {
@@ -645,7 +687,11 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
             `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
           ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
         { concurrency: 4 },
-      ).pipe(Effect.flatMap((issues) => hydrateDependencies(provider, prefix, issues)))
+      ).pipe(
+        Effect.flatMap((issues) =>
+          hydrateDependencies(provider, prefix, issues, [], dependencyCache),
+        ),
+      )
     },
     handoffCompletedWork: (issue, dispatchLabels) => {
       const branchName = issueBranchName(issue)
@@ -731,7 +777,7 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIs
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const tracker = makeGitHubTracker(provider)
   return {
-    listOpenIssues: () => tracker.fetchIssuesByStates(['open']),
+    listOpenIssues: () => tracker.fetchIssuesByStates(['open'], null),
     setLabel: (issueNumber, label, enabled) => {
       if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
         return Effect.fail(

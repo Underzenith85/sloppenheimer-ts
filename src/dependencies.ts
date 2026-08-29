@@ -85,7 +85,7 @@ export const findDependencyCycles = (issues: readonly Issue[]): readonly Depende
     .sort((left, right) => (left[0] ?? '').localeCompare(right[0] ?? ''))
     .map((members) => ({
       members,
-      message: `Dependency cycle: ${members.join(' → ')} → ${members[0] ?? ''}`,
+      message: `Dependency cycle members: ${members.join(', ')}`,
     }))
 }
 

@@ -13,7 +13,7 @@ const provider: GitHubProviderConfig = {
   baseBranch: 'main',
 }
 
-const githubIssue = (number: number): JsonObject => ({
+const githubIssue = (number: number, labels: readonly string[] = []): JsonObject => ({
   number,
   node_id: `node-${String(number)}`,
   title: `Issue ${String(number)}`,
@@ -21,7 +21,7 @@ const githubIssue = (number: number): JsonObject => ({
   state: 'open',
   html_url: `https://example.test/issues/${String(number)}`,
   assignee: null,
-  labels: [],
+  labels: labels.map((name) => ({ name })),
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-02T00:00:00.000Z',
 })
@@ -84,7 +84,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open']),
+      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
     )
 
     expect(issues.map((issue) => issue.id)).toEqual(['1', '2', '3'])
@@ -109,7 +109,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'])),
+      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -126,7 +126,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'])),
+      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_pagination')
@@ -135,6 +135,45 @@ describe('GitHub tracker pagination', (): void => {
 })
 
 describe('GitHub native issue dependencies', (): void => {
+  it('hydrates only dispatch candidates for scheduler list requests', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = requestUrl(input)
+      return url.includes('/dependencies/blocked_by')
+        ? Response.json([])
+        : Response.json([githubIssue(1, ['symphony']), githubIssue(2)])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByStates(['open'], ['symphony']),
+    )
+
+    expect(issues).toHaveLength(2)
+    expect(
+      fetchMock.mock.calls
+        .map(([input]) => requestUrl(input))
+        .filter((url) => url.includes('/dependencies/blocked_by')),
+    ).toEqual([
+      'https://api.example.test/repos/example/symphony/issues/1/dependencies/blocked_by?per_page=100',
+    ])
+  })
+
+  it('caches console dependency hydration between backlog refreshes', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
+      requestUrl(input).includes('/dependencies/blocked_by')
+        ? Response.json([githubDependency(2)])
+        : Response.json([githubIssue(1)]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const tracker = makeGitHubTracker(provider)
+
+    await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
+    const [second] = await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
+
+    expect(second?.blockedBy).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
   it('decodes blockers and follows dependency pagination', async (): Promise<void> => {
     const next =
       'https://api.example.test/repos/example/symphony/issues/2/dependencies/blocked_by?per_page=100&page=2'
