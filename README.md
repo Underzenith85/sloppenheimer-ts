@@ -85,6 +85,30 @@ squash-merged only through the repository protection rules with an expected-head
 operator console shows each active handoff and its current blocker; no handoff or pause transition
 removes the Symphony label.
 
+## Codex App Server client
+
+The client speaks the App Server protocol over the subprocess's stdio: stdout carries protocol
+framing only and stderr is diagnostic only, never parsed. Lines are split by a reader that enforces
+the 10 MB framing limit on the _pending_ buffer, so an unterminated line is rejected before it can
+grow without bound.
+
+Ordering is not assumed. A pending request is registered before its line is written, so a response
+can never arrive unowned; a `turn/completed` that arrives before its waiter exists is buffered and
+drained when the turn is awaited; and a turn failure raised before any waiter exists — an
+interactive-input request, for example — is held and delivered to the next await. A process that
+exits or fails to start settles every outstanding request and turn once, so no call waits out its
+timeout after the session is already gone.
+
+Approval requests are auto-approved, interactive-input requests are declined and fail the turn,
+other server-initiated requests are declined with `-32601`, and malformed protocol data is reported
+as an event rather than ending the session. `session_started` carries the thread id, turn id, the
+composed `thread:turn` session id, and the issue URL.
+
+`test/fixtures/fake-app-server.mjs` is a deterministic stand-in used by the protocol suite; a
+separate test compares the methods and policy values this client sends against
+`codex app-server generate-json-schema` when Codex is installed, and is inert when it is not, so no
+machine-specific schema is committed.
+
 ## Configuration
 
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are

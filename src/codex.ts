@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createInterface, type Interface } from 'node:readline'
 import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
@@ -24,6 +23,10 @@ export const makeCodexEnvironment = (
   )
 }
 
+/** The App Server framing limit for one protocol line. */
+export const codexMaxLineBytes = 10 * 1024 * 1024
+const shutdownGraceMs = 5_000
+
 const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
@@ -45,6 +48,10 @@ const isJsonValue = (value: unknown): value is JsonValue => {
   return Object.values(value).every(isJsonValue)
 }
 
+/** Composes the session identity the SPEC reports for a thread and its current turn. */
+export const composeSessionId = (threadId: string, turnId: string | null): string =>
+  turnId === null ? threadId : `${threadId}:${turnId}`
+
 export type AgentEvent = Readonly<{
   event: string
   timestamp: Date
@@ -55,6 +62,9 @@ export type AgentEvent = Readonly<{
     outputTokens: number
     totalTokens: number
   }> | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
 }>
 
 export type AgentResult = Readonly<{
@@ -74,6 +84,8 @@ type TurnWaiter = Readonly<{
   reject: (error: AgentError) => void
   timeout: NodeJS.Timeout
 }>
+
+type TurnOutcome = Readonly<{ status: string }>
 
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
@@ -100,16 +112,65 @@ const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
     : null
 }
 
+/**
+ * Splits a byte stream into protocol lines while enforcing the framing limit on the *pending*
+ * buffer, so an unterminated line can never grow without bound before it is rejected.
+ */
+export const makeLineReader = (
+  limitBytes: number,
+  onLine: (line: string) => void,
+  onOverflow: () => void,
+): ((chunk: Buffer) => void) => {
+  let pending: Buffer = Buffer.alloc(0)
+  let overflowed = false
+  return (chunk: Buffer): void => {
+    if (overflowed) {
+      return
+    }
+    pending = pending.byteLength === 0 ? chunk : Buffer.concat([pending, chunk])
+    for (;;) {
+      const index = pending.indexOf(0x0a)
+      if (index < 0) {
+        break
+      }
+      const raw = pending.subarray(0, index)
+      pending = pending.subarray(index + 1)
+      const line = raw.at(-1) === 0x0d ? raw.subarray(0, raw.byteLength - 1) : raw
+      if (line.byteLength > limitBytes) {
+        overflowed = true
+        pending = Buffer.alloc(0)
+        onOverflow()
+        return
+      }
+      onLine(line.toString('utf8'))
+    }
+    if (pending.byteLength > limitBytes) {
+      overflowed = true
+      pending = Buffer.alloc(0)
+      onOverflow()
+    }
+  }
+}
+
+const isApprovalRequest = (method: string): boolean => /requestApproval$/u.test(method)
+const isUserInputRequest = (method: string): boolean => /requestUserInput$/u.test(method)
+
 class CodexConnection {
   readonly #process: ChildProcessWithoutNullStreams
-  readonly #lines: Interface
   readonly #readTimeoutMs: number
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
   readonly #pending = new Map<number, PendingRequest>()
   readonly #turns = new Map<string, TurnWaiter>()
+  /** Completions that arrived before their waiter existed; drained by `awaitTurn`. */
+  readonly #bufferedTurnOutcomes = new Map<string, TurnOutcome>()
   #nextId = 1
   #closed = false
+  #terminalError: AgentError | null = null
+  /** A turn failure raised before any waiter existed; drained by the next `awaitTurn`. */
+  #unattributedTurnFailure: AgentError | null = null
+  #threadId: string | null = null
+  #turnId: string | null = null
 
   constructor(
     command: string,
@@ -126,27 +187,48 @@ class CodexConnection {
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
     this.#onEvent = onEvent
-    this.#lines = createInterface({ input: this.#process.stdout, crlfDelay: Infinity })
-    this.#lines.on('line', (line) => {
-      this.#receiveLine(line)
+
+    // stdout carries protocol framing only.
+    const readStdout = makeLineReader(
+      codexMaxLineBytes,
+      (line) => {
+        this.#receiveLine(line)
+      },
+      () => {
+        this.#fail(
+          new AgentError({
+            category: 'protocol_error',
+            message: `Codex protocol line exceeds ${String(codexMaxLineBytes)} bytes`,
+          }),
+        )
+      },
+    )
+    this.#process.stdout.on('data', (chunk: Buffer) => {
+      readStdout(chunk)
     })
+
+    // stderr is diagnostic only and never parsed as protocol.
     this.#process.stderr.on('data', (chunk: Buffer) => {
       const message = chunk.toString('utf8').trim()
       if (message.length > 0) {
         this.#emit('diagnostic', message)
       }
     })
+
     this.#process.once('error', (cause) => {
-      this.#failAll(
+      this.#fail(
         new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
       )
     })
-    this.#process.once('exit', (code) => {
+    this.#process.once('exit', (code, signal) => {
       if (!this.#closed) {
-        this.#failAll(
+        this.#fail(
           new AgentError({
             category: 'process_exited',
-            message: `Codex process exited with ${String(code)}`,
+            message:
+              signal === null
+                ? `Codex process exited with ${String(code)}`
+                : `Codex process terminated by ${signal}`,
           }),
         )
       }
@@ -178,10 +260,11 @@ class CodexConnection {
         message: 'thread/start returned no thread id',
       })
     }
-    return result['thread']['id']
+    this.#threadId = result['thread']['id']
+    return this.#threadId
   }
 
-  async runTurn(
+  async startTurn(
     threadId: string,
     cwd: string,
     config: CodexConfig,
@@ -208,8 +291,33 @@ class CodexConnection {
         message: 'turn/start returned no turn id',
       })
     }
-    const turnId = result['turn']['id']
-    await new Promise<void>((resolvePromise, rejectPromise) => {
+    this.#turnId = result['turn']['id']
+    return this.#turnId
+  }
+
+  /**
+   * Waits for a turn to finish. A completion that arrived before this call — the App Server may
+   * emit it in the same batch as the `turn/start` response — is drained from the buffer instead of
+   * being lost, and a process that already died fails immediately rather than waiting out the
+   * timeout.
+   */
+  awaitTurn(turnId: string): Promise<void> {
+    const buffered = this.#bufferedTurnOutcomes.get(turnId)
+    if (buffered !== undefined) {
+      this.#bufferedTurnOutcomes.delete(turnId)
+      return buffered.status === 'completed'
+        ? Promise.resolve()
+        : Promise.reject(CodexConnection.#turnFailure(turnId, buffered.status))
+    }
+    if (this.#terminalError !== null) {
+      return Promise.reject(this.#terminalError)
+    }
+    if (this.#unattributedTurnFailure !== null) {
+      const failure = this.#unattributedTurnFailure
+      this.#unattributedTurnFailure = null
+      return Promise.reject(failure)
+    }
+    return new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#turns.delete(turnId)
         rejectPromise(
@@ -218,7 +326,19 @@ class CodexConnection {
       }, this.#turnTimeoutMs)
       this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
     })
-    return turnId
+  }
+
+  emitSessionStarted(issue: Issue): void {
+    this.#onEvent({
+      event: 'session_started',
+      timestamp: new Date(),
+      processId: this.processId,
+      message: issue.url,
+      usage: null,
+      threadId: this.#threadId,
+      turnId: this.#turnId,
+      sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
+    })
   }
 
   async stop(): Promise<void> {
@@ -226,28 +346,44 @@ class CodexConnection {
       return
     }
     this.#closed = true
-    this.#lines.close()
+    this.#fail(
+      new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
+      false,
+    )
+    this.#process.stdout.removeAllListeners('data')
+    this.#process.stderr.removeAllListeners('data')
     this.#process.stdin.end()
     this.#process.kill('SIGTERM')
     await new Promise<void>((resolvePromise) => {
-      if (this.#process.exitCode !== null) {
+      if (this.#process.exitCode !== null || this.#process.signalCode !== null) {
         resolvePromise()
-      } else {
-        const timeout = setTimeout(() => {
-          this.#process.kill('SIGKILL')
-          resolvePromise()
-        }, 5_000)
-        this.#process.once('exit', () => {
-          clearTimeout(timeout)
-          resolvePromise()
-        })
+        return
       }
+      const timeout = setTimeout(() => {
+        this.#process.kill('SIGKILL')
+        resolvePromise()
+      }, shutdownGraceMs)
+      this.#process.once('exit', () => {
+        clearTimeout(timeout)
+        resolvePromise()
+      })
     })
   }
 
+  static #turnFailure(turnId: string, status: string): AgentError {
+    return new AgentError({
+      category: 'turn_failed',
+      message: `turn ${turnId} finished with status ${status}`,
+    })
+  }
+
+  /** Registers the pending entry before writing, so a response can never arrive unowned. */
   #request(method: string, params: JsonObject): Promise<JsonValue> {
-    const id = this.#nextId++
-    this.#write({ id, method, params })
+    if (this.#terminalError !== null) {
+      return Promise.reject(this.#terminalError)
+    }
+    const id = this.#nextId
+    this.#nextId += 1
     return new Promise<JsonValue>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#pending.delete(id)
@@ -256,6 +392,7 @@ class CodexConnection {
         )
       }, this.#readTimeoutMs)
       this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#write({ id, method, params })
     })
   }
 
@@ -271,13 +408,7 @@ class CodexConnection {
   }
 
   #receiveLine(line: string): void {
-    if (Buffer.byteLength(line, 'utf8') > 10 * 1024 * 1024) {
-      this.#failAll(
-        new AgentError({
-          category: 'protocol_error',
-          message: 'Codex protocol line exceeds 10 MB',
-        }),
-      )
+    if (line.trim().length === 0) {
       return
     }
     let decoded: unknown
@@ -288,40 +419,22 @@ class CodexConnection {
       return
     }
     if (!isJsonValue(decoded) || !isJsonObject(decoded)) {
+      this.#emit('malformed', 'Codex emitted a non-object protocol message')
       return
     }
     const parsed = decoded
     const id = parsed['id']
+    const method = parsed['method']
     if (
       typeof id === 'number' &&
+      typeof method !== 'string' &&
       (parsed['result'] !== undefined || parsed['error'] !== undefined)
     ) {
-      const pending = this.#pending.get(id)
-      if (pending === undefined) {
-        return
-      }
-      clearTimeout(pending.timeout)
-      this.#pending.delete(id)
-      const error = parsed['error']
-      if (error !== undefined) {
-        pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
-      } else {
-        const result = parsed['result']
-        if (result === undefined) {
-          pending.reject(
-            new AgentError({
-              category: 'protocol_error',
-              message: 'JSON-RPC response has no result',
-            }),
-          )
-        } else {
-          pending.resolve(result)
-        }
-      }
+      this.#settleResponse(id, parsed)
       return
     }
-    const method = parsed['method']
     if (typeof method !== 'string') {
+      this.#emit('malformed', 'Codex emitted a message with no method or response payload')
       return
     }
     if (typeof id === 'number') {
@@ -331,16 +444,36 @@ class CodexConnection {
     this.#handleNotification(method, parsed)
   }
 
+  #settleResponse(id: number, parsed: JsonObject): void {
+    const pending = this.#pending.get(id)
+    if (pending === undefined) {
+      this.#emit('unmatched_response', `no pending request for response id ${String(id)}`)
+      return
+    }
+    clearTimeout(pending.timeout)
+    this.#pending.delete(id)
+    const error = parsed['error']
+    if (error !== undefined) {
+      pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
+      return
+    }
+    const result = parsed['result']
+    if (result === undefined) {
+      pending.reject(
+        new AgentError({ category: 'protocol_error', message: 'response has no result' }),
+      )
+      return
+    }
+    pending.resolve(result)
+  }
+
   #handleServerRequest(id: number, method: string): void {
-    if (
-      method === 'item/commandExecution/requestApproval' ||
-      method === 'item/fileChange/requestApproval'
-    ) {
+    if (isApprovalRequest(method)) {
       this.#write({ id, result: { decision: 'acceptForSession' } })
       this.#emit('approval_auto_approved', method)
       return
     }
-    if (method === 'item/tool/requestUserInput' || method === 'tool/requestUserInput') {
+    if (isUserInputRequest(method)) {
       this.#write({
         id,
         error: { code: -32000, message: 'Symphony does not support interactive input' },
@@ -358,49 +491,74 @@ class CodexConnection {
   }
 
   #handleNotification(method: string, message: JsonObject): void {
+    const turn = this.#turnFrom(message)
     this.#onEvent({
       event: method,
       timestamp: new Date(),
       processId: this.processId,
       message: null,
       usage: usageFrom(message),
+      threadId: this.#threadId,
+      turnId: turn?.id ?? this.#turnId,
+      sessionId:
+        this.#threadId === null ? null : composeSessionId(this.#threadId, turn?.id ?? this.#turnId),
     })
-    if (method !== 'turn/completed') {
+    if (method !== 'turn/completed' && method !== 'turn/failed') {
       return
     }
+    if (turn === null) {
+      return
+    }
+    this.#settleTurn(turn.id, { status: method === 'turn/failed' ? 'failed' : turn.status })
+  }
+
+  #turnFrom(message: JsonObject): Readonly<{ id: string; status: string }> | null {
     const params = message['params']
     if (!isJsonObject(params) || !isJsonObject(params['turn'])) {
-      return
+      return null
     }
     const turn = params['turn']
-    const turnId = turn['id']
-    const status = turn['status']
-    if (typeof turnId !== 'string' || typeof status !== 'string') {
-      return
+    const id = turn['id']
+    if (typeof id !== 'string') {
+      return null
     }
+    const status = turn['status']
+    return { id, status: typeof status === 'string' ? status : 'completed' }
+  }
+
+  #settleTurn(turnId: string, outcome: TurnOutcome): void {
     const waiter = this.#turns.get(turnId)
     if (waiter === undefined) {
+      this.#bufferedTurnOutcomes.set(turnId, outcome)
       return
     }
     clearTimeout(waiter.timeout)
     this.#turns.delete(turnId)
-    if (status === 'completed') {
+    if (outcome.status === 'completed') {
       waiter.resolve()
-    } else {
-      waiter.reject(
-        new AgentError({
-          category: 'turn_failed',
-          message: `turn ${turnId} finished with status ${status}`,
-        }),
-      )
+      return
     }
+    waiter.reject(CodexConnection.#turnFailure(turnId, outcome.status))
   }
 
   #emit(event: string, message: string): void {
-    this.#onEvent({ event, timestamp: new Date(), processId: this.processId, message, usage: null })
+    this.#onEvent({
+      event,
+      timestamp: new Date(),
+      processId: this.processId,
+      message,
+      usage: null,
+      threadId: this.#threadId,
+      turnId: this.#turnId,
+      sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
+    })
   }
 
   #failTurns(error: AgentError): void {
+    if (this.#turns.size === 0) {
+      this.#unattributedTurnFailure ??= error
+      return
+    }
     for (const waiter of this.#turns.values()) {
       clearTimeout(waiter.timeout)
       waiter.reject(error)
@@ -408,13 +566,18 @@ class CodexConnection {
     this.#turns.clear()
   }
 
-  #failAll(error: AgentError): void {
+  /** Settles every outstanding request and turn exactly once and records the terminal reason. */
+  #fail(error: AgentError, remember = true): void {
+    if (remember && this.#terminalError === null) {
+      this.#terminalError = error
+    }
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timeout)
       pending.reject(error)
     }
     this.#pending.clear()
     this.#failTurns(error)
+    this.#bufferedTurnOutcomes.clear()
   }
 }
 
@@ -485,8 +648,17 @@ const runVerifiedAgent = (
                   ? launch.prompt
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
               await rebind()
-              turnId = await connection.runTurn(threadId, verified.path, launch.config, turnPrompt)
+              turnId = await connection.startTurn(
+                threadId,
+                verified.path,
+                launch.config,
+                turnPrompt,
+              )
               await rebind()
+              if (turnCount === 0) {
+                connection.emitSessionStarted(launch.issue)
+              }
+              await connection.awaitTurn(turnId)
               turnCount += 1
               const refreshed = await Effect.runPromise(launch.refreshIssue())
               if (refreshed === null || !launch.isRoutable(refreshed)) {
