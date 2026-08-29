@@ -380,32 +380,45 @@ export const startOrchestrator = (
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
     let nextRunId = 1
     let tickQueued = false
+    let pollRunning = false
+    let followUpRequested = false
     let pollTimer: Fiber.RuntimeFiber<void> | null = null
-    const refreshWaiters: Deferred.Deferred<void>[] = []
+    const currentRefreshWaiters: Deferred.Deferred<void>[] = []
+    const nextRefreshWaiters: Deferred.Deferred<void>[] = []
 
     const offerFromCallback = (event: OrchestratorEvent): void => {
       Effect.runFork(Queue.offer(mailbox, event))
     }
 
-    const requestTick: Effect.Effect<void> = Effect.suspend(() => {
-      if (tickQueued) {
-        return Effect.void
-      }
-      tickQueued = true
-      return Queue.offer(mailbox, { _tag: 'Tick' }).pipe(Effect.asVoid)
-    })
+    const requestTick = (source: 'startup' | 'timer' | 'change'): Effect.Effect<void> =>
+      Effect.suspend(() => {
+        if (tickQueued) {
+          if (pollRunning && source === 'change') {
+            followUpRequested = true
+          }
+          return Effect.void
+        }
+        tickQueued = true
+        return Queue.offer(mailbox, { _tag: 'Tick' }).pipe(Effect.asVoid)
+      })
 
-    const requestRefresh = Effect.gen(function* () {
-      const reply = yield* Deferred.make<void>()
-      refreshWaiters.push(reply)
-      yield* requestTick
-      yield* Deferred.await(reply)
-    })
+    const requestRefresh = Effect.suspend(() =>
+      Effect.gen(function* () {
+        const reply = yield* Deferred.make<void>()
+        if (pollRunning) {
+          nextRefreshWaiters.push(reply)
+        } else {
+          currentRefreshWaiters.push(reply)
+        }
+        yield* requestTick('change')
+        yield* Deferred.await(reply)
+      }),
+    )
 
     const watcher = yield* Effect.acquireRelease(
       Effect.sync(() =>
         dependencies.watchWorkflow(selectedWorkflowPath, () => {
-          Effect.runFork(requestTick)
+          Effect.runFork(requestTick('change'))
         }),
       ),
       (instance) => Effect.promise(() => instance.close()),
@@ -419,7 +432,7 @@ export const startOrchestrator = (
         }
         const intervalMs = lastKnownGood.workflow.config.pollingIntervalMs
         pollTimer = yield* Effect.forkScoped(
-          Effect.sleep(intervalMs).pipe(Effect.zipRight(requestTick), Effect.asVoid),
+          Effect.sleep(intervalMs).pipe(Effect.zipRight(requestTick('timer')), Effect.asVoid),
         )
       })
 
@@ -886,13 +899,21 @@ export const startOrchestrator = (
         const event = yield* Queue.take(mailbox)
         switch (event._tag) {
           case 'Tick': {
+            pollRunning = true
             yield* poll()
-            tickQueued = false
-            yield* scheduleNextTick()
-            const waiters = refreshWaiters.splice(0)
+            pollRunning = false
+            const waiters = currentRefreshWaiters.splice(0)
             yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, undefined), {
               discard: true,
             })
+            if (followUpRequested) {
+              followUpRequested = false
+              currentRefreshWaiters.push(...nextRefreshWaiters.splice(0))
+              yield* Queue.offer(mailbox, { _tag: 'Tick' })
+              break
+            }
+            tickQueued = false
+            yield* scheduleNextTick()
             break
           }
           case 'AgentUpdate': {
@@ -1042,7 +1063,7 @@ export const startOrchestrator = (
     })
 
     yield* Effect.forkScoped(eventLoop)
-    yield* requestTick
+    yield* requestTick('startup')
 
     return {
       snapshot: Effect.sync(createSnapshot),

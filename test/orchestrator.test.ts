@@ -1,4 +1,4 @@
-import { Effect, TestClock, TestContext } from 'effect'
+import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
@@ -310,6 +310,51 @@ describe('operator snapshots', (): void => {
     )
 
     expect(snapshot.effectiveWorkflow.fingerprint).toBe('test')
+  })
+
+  it('runs one follow-up poll for a refresh received during a pending poll', async (): Promise<void> => {
+    let pollShouldBlock = false
+    let markPollStarted = (): void => undefined
+    let releasePoll = (): void => undefined
+    const pollStarted = new Promise<void>((resolve) => {
+      markPollStarted = resolve
+    })
+    const pollReleased = new Promise<void>((resolve) => {
+      releasePoll = resolve
+    })
+    const initial = changedWorkflow({ fingerprint: 'initial' })
+    const reloaded = changedWorkflow({ fingerprint: 'late-refresh' })
+    const harness = makeHarness(
+      initial,
+      () => [],
+      () => {
+        if (pollShouldBlock) {
+          markPollStarted()
+          return Effect.promise(() => pollReleased).pipe(Effect.as([]))
+        }
+        return Effect.succeed([])
+      },
+    )
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* control.refresh
+          pollShouldBlock = true
+          yield* Effect.forkScoped(control.refresh)
+          yield* Effect.promise(() => pollStarted)
+          harness.setWorkflow(reloaded)
+          const lateRefresh = yield* Effect.forkScoped(control.refresh)
+          pollShouldBlock = false
+          releasePoll()
+          yield* Fiber.join(lateRefresh)
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.effectiveWorkflow.fingerprint).toBe('late-refresh')
   })
 })
 
