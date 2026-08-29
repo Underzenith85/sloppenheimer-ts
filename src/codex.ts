@@ -5,6 +5,7 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError } from './errors.js'
+import { redactSecretsInString } from './logging.js'
 import type { CodexConfig } from './workflow.js'
 
 export const makeCodexEnvironment = (
@@ -138,17 +139,7 @@ export const telemetryFrom = (
 }
 
 export const boundedMessage = (value: string): string => {
-  const redacted = value
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
-    .replace(
-      /"(api[_-]?key|authorization|password|token)"\s*:\s*"(?:\\.|[^"\\])*"/giu,
-      '"$1":"[REDACTED]"',
-    )
-    .replace(
-      /'(api[_-]?key|authorization|password|token)'\s*:\s*'(?:\\.|[^'\\])*'/giu,
-      "'$1':'[REDACTED]'",
-    )
-    .replace(/\b(api[_-]?key|authorization|password|token)\s*[:=]\s*\S+/giu, '$1=[REDACTED]')
+  const redacted = redactSecretsInString(value)
   return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
 }
 

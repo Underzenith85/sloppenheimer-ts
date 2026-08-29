@@ -5,10 +5,21 @@ type LogFields = Readonly<Record<string, unknown>>
 const secretKey =
   /^(?:authorization|credential|credentials|password|secret|token|apiKey|accessToken|refreshToken)$|(?:^|_)(?:api_key|access_token|refresh_token|auth_token|credential|password|secret)$/iu
 
-const boundedString = (value: string): string => {
-  const redacted = value
+export const redactSecretsInString = (value: string): string =>
+  value
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(
+      /"(api[_-]?key|authorization|password|token)"\s*:\s*"(?:\\.|[^"\\])*"/giu,
+      '"$1":"[REDACTED]"',
+    )
+    .replace(
+      /'(api[_-]?key|authorization|password|token)'\s*:\s*'(?:\\.|[^'\\])*'/giu,
+      "'$1':'[REDACTED]'",
+    )
     .replace(/\b(api[_-]?key|authorization|password|token)\s*[:=]\s*\S+/giu, '$1=[REDACTED]')
+
+const boundedString = (value: string): string => {
+  const redacted = redactSecretsInString(value)
   return redacted.length <= 1_024 ? redacted : `${redacted.slice(0, 1_021)}...`
 }
 
