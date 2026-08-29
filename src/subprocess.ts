@@ -16,11 +16,24 @@ const signalChildGroup = (child: ChildProcess, signal: NodeJS.Signals): void => 
   }
 }
 
+const childProcessGroupIsAlive = (child: ChildProcess): boolean => {
+  const pid = child.pid
+  if (pid === undefined) {
+    return false
+  }
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const terminateChildProcess = (
   child: ChildProcess,
   gracePeriodMs = 5_000,
 ): Promise<void> => {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  if (!childProcessGroupIsAlive(child)) {
     return Promise.resolve()
   }
 
@@ -33,16 +46,25 @@ export const terminateChildProcess = (
       settled = true
       clearTimeout(forceTimer)
       clearTimeout(boundTimer)
-      child.removeListener('exit', finish)
+      child.removeListener('exit', handleLeaderExit)
       resolve()
     }
+    const handleLeaderExit = (): void => {
+      if (!childProcessGroupIsAlive(child)) {
+        finish()
+      }
+    }
     const forceTimer = setTimeout(() => {
-      signalChildGroup(child, 'SIGKILL')
+      if (childProcessGroupIsAlive(child)) {
+        signalChildGroup(child, 'SIGKILL')
+      } else {
+        finish()
+      }
     }, gracePeriodMs)
     const boundTimer = setTimeout(finish, gracePeriodMs + 1_000)
-    child.once('exit', finish)
+    child.once('exit', handleLeaderExit)
     signalChildGroup(child, 'SIGTERM')
-    if (child.exitCode !== null || child.signalCode !== null) {
+    if (!childProcessGroupIsAlive(child)) {
       finish()
     }
   })

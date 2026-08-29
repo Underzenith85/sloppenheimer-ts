@@ -118,6 +118,26 @@ Codex-owned values that must stay aligned with the generated App Server schemas.
 `codex.turn_sandbox_policy` is an escape hatch: when set, the map is passed to `turn/start` as
 `sandboxPolicy` verbatim instead of the host-derived workspace-write policy.
 
+### Workspace hooks
+
+Each hook runs `bash -lc <script>` in the workspace directory as its own process group.
+
+| Hook            | When                                                     | Failure                             |
+| --------------- | -------------------------------------------------------- | ----------------------------------- |
+| `after_create`  | Once, immediately after a workspace directory is created | Fatal — the workspace is not usable |
+| `before_run`    | Before every agent launch                                | Fatal — the issue is retried        |
+| `after_run`     | After every agent turn                                   | Best effort — logged and ignored    |
+| `before_remove` | Before removing an existing workspace                    | Best effort — removal continues     |
+
+`before_remove` runs only when the workspace directory is actually present, so a startup sweep over
+closed issues does not execute it for workspaces that were never created.
+
+Both output streams are drained continuously, so a chatty hook cannot fill a pipe and hang; only a
+bounded head of each stream is kept for diagnostics and is marked truncated when it overflows. A
+hook that exceeds `hooks.timeout_ms`, or whose effect is interrupted, has its whole process tree
+signalled — `SIGTERM` first, then `SIGKILL` after a bounded grace — so background grandchildren are
+never left behind. Hook scripts are never written to the log, because they may embed credentials.
+
 ### Declared secret and path fields
 
 `$VAR` indirection and `~` expansion apply only to fields that declare them. `workspace.root` is the
