@@ -3,6 +3,7 @@ import chokidar from 'chokidar'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
+import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
 import { normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
 import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
@@ -132,6 +133,9 @@ const stateIsIn = (state: string, configured: readonly string[]): boolean => {
 
 export const issueIsRoutable = (issue: Issue, workflow: Workflow): boolean => {
   if (!issue.dispatchable) {
+    return false
+  }
+  if (unresolvedBlockers(issue, workflow.config.tracker.terminalStates).length > 0) {
     return false
   }
   const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
@@ -393,7 +397,10 @@ export const startOrchestrator = (
           yield* Effect.logInfo('workflow reloaded', { path: workflow.path })
         }
         const candidates = yield* tracker
-          .fetchIssuesByStates(workflow.config.tracker.activeStates)
+          .fetchIssuesByStates(
+            workflow.config.tracker.activeStates,
+            workflow.config.tracker.requiredLabels,
+          )
           .pipe(
             Effect.catchAll((error) =>
               Effect.logError('candidate fetch failed', { error: error.message }).pipe(
@@ -401,9 +408,11 @@ export const startOrchestrator = (
               ),
             ),
           )
+        const cyclicIdentifiers = cyclicIssueIdentifiers(candidates)
         for (const issue of sortIssues(candidates)) {
           if (
             state.claimed.has(issue.id) ||
+            cyclicIdentifiers.has(issue.identifier) ||
             !issueIsActive(issue, workflow) ||
             !issueIsRoutable(issue, workflow) ||
             !stateHasSlot(issue, state, workflow)

@@ -1,11 +1,21 @@
 import { Effect } from 'effect'
 
-import { issueId, issueIdentifier, type Issue, type IssueId, type JsonValue } from './domain.js'
+import {
+  issueId,
+  issueIdentifier,
+  type BlockerRef,
+  type Issue,
+  type IssueId,
+  type JsonValue,
+} from './domain.js'
 import { TrackerError } from './errors.js'
 import type { GitHubProviderConfig } from './workflow.js'
 
 export type TrackerAdapter = Readonly<{
-  fetchIssuesByStates: (states: readonly string[]) => Effect.Effect<readonly Issue[], TrackerError>
+  fetchIssuesByStates: (
+    states: readonly string[],
+    dependencyLabels: readonly string[] | null,
+  ) => Effect.Effect<readonly Issue[], TrackerError>
   fetchIssuesByIds: (ids: readonly IssueId[]) => Effect.Effect<readonly Issue[], TrackerError>
   handoffCompletedWork: (
     issue: Issue,
@@ -68,6 +78,25 @@ type GitHubIssue = Readonly<{
   isPullRequest: boolean
   createdAt: string
   updatedAt: string
+}>
+
+type GitHubDependency = Readonly<{
+  id: number
+  number: number
+  title: string
+  state: string
+  repositoryUrl: string
+  htmlUrl: string
+}>
+
+const githubApiVersion = '2026-03-10'
+const dependencyConcurrency = 4
+const dependencyCacheTtlMs = 60_000
+
+type DependencyCacheEntry = Readonly<{
+  blockedBy: readonly BlockerRef[]
+  issueUpdatedAt: number | null
+  expiresAt: number
 }>
 
 const nullableString = (value: JsonValue | undefined): string | null =>
@@ -146,7 +175,79 @@ const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
   }
 }
 
-const normalizeIssue = (source: GitHubIssue, provider: GitHubProviderConfig): Issue => {
+const decodeGitHubDependency = (value: JsonValue): GitHubDependency => {
+  if (!isJsonRecord(value)) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub issue dependency is not an object',
+      retryable: false,
+    })
+  }
+  const id = value['id']
+  const number = value['number']
+  const title = value['title']
+  const state = value['state']
+  const repositoryUrl = value['repository_url']
+  const htmlUrl = value['html_url']
+  if (
+    typeof id !== 'number' ||
+    !Number.isSafeInteger(id) ||
+    typeof number !== 'number' ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    typeof title !== 'string' ||
+    title.length === 0 ||
+    typeof state !== 'string' ||
+    state.length === 0 ||
+    typeof repositoryUrl !== 'string' ||
+    typeof htmlUrl !== 'string'
+  ) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub issue dependency is missing required fields',
+      retryable: false,
+    })
+  }
+  return { id, number, title, state, repositoryUrl, htmlUrl }
+}
+
+const normalizeDependency = (
+  source: GitHubDependency,
+  provider: GitHubProviderConfig,
+): BlockerRef => {
+  try {
+    const repositoryUrl = new URL(source.repositoryUrl)
+    if (repositoryUrl.origin !== new URL(provider.apiBaseUrl).origin) {
+      throw new Error('unexpected dependency repository origin')
+    }
+    const match = /\/repos\/([^/]+)\/([^/]+)\/?$/u.exec(repositoryUrl.pathname)
+    if (match?.[1] === undefined || match[2] === undefined) {
+      throw new Error('invalid dependency repository URL')
+    }
+    const owner = decodeURIComponent(match[1])
+    const repository = decodeURIComponent(match[2])
+    return {
+      id: String(source.id),
+      identifier: issueIdentifier(`${owner}/${repository}#${String(source.number)}`),
+      title: source.title,
+      state: source.state,
+      url: source.htmlUrl,
+    }
+  } catch (cause: unknown) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub issue dependency has an invalid repository URL',
+      retryable: false,
+      cause,
+    })
+  }
+}
+
+const normalizeIssue = (
+  source: GitHubIssue,
+  provider: GitHubProviderConfig,
+  blockedBy: readonly BlockerRef[] = [],
+): Issue => {
   const labels = [
     ...new Set(
       source.labels.flatMap((label) => {
@@ -177,7 +278,7 @@ const normalizeIssue = (source: GitHubIssue, provider: GitHubProviderConfig): Is
     url: source.htmlUrl,
     assigneeId: source.assignee?.login ?? null,
     labels,
-    blockedBy: [],
+    blockedBy,
     dispatchable: !source.isPullRequest,
     createdAt: parseDate(source.createdAt),
     updatedAt: parseDate(source.updatedAt),
@@ -240,7 +341,7 @@ const githubRequest = (
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${provider.token}`,
           'User-Agent': 'symphony-ts/0.1',
-          'X-GitHub-Api-Version': '2022-11-28',
+          'X-GitHub-Api-Version': githubApiVersion,
         },
       })
       if (response.status === 403 && response.headers.has('retry-after')) {
@@ -295,7 +396,7 @@ const githubBranchExists = (
             Accept: 'application/vnd.github+json',
             Authorization: `Bearer ${provider.token}`,
             'User-Agent': 'symphony-ts/0.1',
-            'X-GitHub-Api-Version': '2022-11-28',
+            'X-GitHub-Api-Version': githubApiVersion,
           },
         },
       )
@@ -372,7 +473,7 @@ const createPullRequest = (
           Authorization: `Bearer ${provider.token}`,
           'Content-Type': 'application/json',
           'User-Agent': 'symphony-ts/0.1',
-          'X-GitHub-Api-Version': '2022-11-28',
+          'X-GitHub-Api-Version': githubApiVersion,
         },
         body: JSON.stringify({
           base: provider.baseBranch,
@@ -411,11 +512,111 @@ const createPullRequest = (
 
 export const issueBranchName = (issue: Issue): string => `symphony/issue-${issue.id}`
 
+const fetchBlockedBy = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  issue: Issue,
+): Effect.Effect<readonly BlockerRef[], TrackerError> => {
+  const fetchPage = (
+    url: string,
+    visitedUrls: ReadonlySet<string>,
+  ): Effect.Effect<readonly BlockerRef[], TrackerError> =>
+    Effect.suspend(() => {
+      if (visitedUrls.has(url)) {
+        return Effect.fail(paginationError('GitHub dependency pagination contains a cycle'))
+      }
+      return githubRequest(provider, url).pipe(
+        Effect.flatMap(({ body, nextUrl }) => {
+          if (!isJsonArray(body)) {
+            return Effect.fail(
+              new TrackerError({
+                category: 'tracker_response',
+                message: 'GitHub issue dependency list is not an array',
+                retryable: false,
+              }),
+            )
+          }
+          let blockers: readonly BlockerRef[]
+          try {
+            blockers = body.map((value) =>
+              normalizeDependency(decodeGitHubDependency(value), provider),
+            )
+          } catch (cause: unknown) {
+            return Effect.fail(
+              cause instanceof TrackerError
+                ? cause
+                : new TrackerError({
+                    category: 'tracker_response',
+                    message: 'GitHub issue dependency could not be decoded',
+                    retryable: false,
+                    cause,
+                  }),
+            )
+          }
+          if (nextUrl === null) {
+            return Effect.succeed(blockers)
+          }
+          return fetchPage(nextUrl, new Set([...visitedUrls, url])).pipe(
+            Effect.map((nextBlockers) => [...blockers, ...nextBlockers]),
+          )
+        }),
+      )
+    })
+  return fetchPage(
+    `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(issue.id)}/dependencies/blocked_by?per_page=100`,
+    new Set(),
+  )
+}
+
+const hydrateDependencies = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  issues: readonly Issue[],
+  dependencyLabels: readonly string[] | null,
+  cache: Map<IssueId, DependencyCacheEntry>,
+): Effect.Effect<readonly Issue[], TrackerError> =>
+  Effect.forEach(
+    issues,
+    (issue) => {
+      const shouldHydrate =
+        dependencyLabels === null ||
+        dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))
+      if (!shouldHydrate) {
+        return Effect.succeed(issue)
+      }
+      const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
+      const cached = cache.get(issue.id)
+      if (
+        dependencyLabels === null &&
+        cached !== undefined &&
+        cached.issueUpdatedAt === issueUpdatedAt &&
+        cached.expiresAt > Date.now()
+      ) {
+        return Effect.succeed({ ...issue, blockedBy: cached.blockedBy })
+      }
+      return fetchBlockedBy(provider, prefix, issue).pipe(
+        Effect.map((blockedBy) => {
+          cache.set(issue.id, {
+            blockedBy,
+            issueUpdatedAt,
+            expiresAt: Date.now() + dependencyCacheTtlMs,
+          })
+          return { ...issue, blockedBy }
+        }),
+      )
+    },
+    { concurrency: dependencyConcurrency },
+  )
+
 export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapter => {
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+  const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   return {
     secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
-    fetchIssuesByStates: (states): Effect.Effect<readonly Issue[], TrackerError> => {
+    fetchIssuesByStates: (
+      states,
+      dependencyLabels,
+    ): Effect.Effect<readonly Issue[], TrackerError> => {
       if (states.length === 0) {
         return Effect.succeed([])
       }
@@ -469,6 +670,9 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
         Effect.map((groups) => [
           ...new Map(groups.flat().map((issue) => [issue.id, issue])).values(),
         ]),
+        Effect.flatMap((issues) =>
+          hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
+        ),
       )
     },
     fetchIssuesByIds: (ids): Effect.Effect<readonly Issue[], TrackerError> => {
@@ -483,6 +687,10 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
             `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
           ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
         { concurrency: 4 },
+      ).pipe(
+        Effect.flatMap((issues) =>
+          hydrateDependencies(provider, prefix, issues, [], dependencyCache),
+        ),
       )
     },
     handoffCompletedWork: (issue, dispatchLabels) => {
@@ -539,7 +747,7 @@ const githubMutation = (
           Authorization: `Bearer ${provider.token}`,
           'Content-Type': 'application/json',
           'User-Agent': 'symphony-ts/0.1',
-          'X-GitHub-Api-Version': '2022-11-28',
+          'X-GitHub-Api-Version': githubApiVersion,
         },
         ...(body === undefined ? {} : { body }),
       })
@@ -569,7 +777,7 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIs
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const tracker = makeGitHubTracker(provider)
   return {
-    listOpenIssues: () => tracker.fetchIssuesByStates(['open']),
+    listOpenIssues: () => tracker.fetchIssuesByStates(['open'], null),
     setLabel: (issueNumber, label, enabled) => {
       if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
         return Effect.fail(

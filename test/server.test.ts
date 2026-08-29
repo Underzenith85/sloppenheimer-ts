@@ -48,8 +48,26 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
         priority: 1,
         createdAt: '2026-08-29T10:00:00.000Z',
         enabled: true,
+        state: 'open',
+        blockedBy: [],
+        readiness: 'ready',
+        reason: null,
       },
     ],
+    nodes: [
+      {
+        identifier: 'example/symphony#17',
+        number: 17,
+        title: 'Operator console',
+        url: 'https://github.com/example/symphony/issues/17',
+        state: 'open',
+        readiness: 'ready',
+        reason: null,
+        actionable: true,
+      },
+    ],
+    edges: [],
+    cycles: [],
   }),
   setIssueEnabled: (number, enabled) =>
     Effect.sync(() => {
@@ -75,12 +93,22 @@ describe('operator server', (): void => {
     await withServer(makeBackend(), async (url) => {
       const page = await fetch(url)
       const state = await fetch(`${url}/api/v1/state`)
+      const backlog = await fetch(`${url}/api/v1/backlog`)
+      const script = await fetch(`${url}/app.js`)
 
       expect(page.status).toBe(200)
       expect(page.headers.get('content-security-policy')).toContain("default-src 'self'")
-      expect(await page.text()).toContain('Conduct the work.')
+      expect(await page.text()).toContain('Native issue dependencies')
       expect(state.status).toBe(200)
       expect(await state.json()).toMatchObject({ counts: { running: 1 }, maxConcurrentAgents: 2 })
+      expect(await backlog.json()).toMatchObject({
+        nodes: [{ identifier: 'example/symphony#17', readiness: 'ready' }],
+        edges: [],
+        cycles: [],
+      })
+      const source = await script.text()
+      expect(source).toContain("'graph-node state-' + status.toLowerCase()")
+      expect(source).toContain("button.disabled = !issue.enabled && issue.readiness !== 'ready'")
     })
   })
 
