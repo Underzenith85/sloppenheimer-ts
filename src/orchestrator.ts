@@ -3,6 +3,7 @@ import chokidar from 'chokidar'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
+import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
 import { normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
 import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
@@ -12,6 +13,7 @@ import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
 type RunningEntry = {
   issue: Issue
   fiber: Fiber.RuntimeFiber<void>
+  effective: EffectiveWorkflow
   attempt: number | null
   startedAt: Date
   lastEventAt: Date | null
@@ -179,6 +181,9 @@ const stateIsIn = (state: string, configured: readonly string[]): boolean => {
 
 export const issueIsRoutable = (issue: Issue, workflow: Workflow): boolean => {
   if (!issue.dispatchable) {
+    return false
+  }
+  if (unresolvedBlockers(issue, workflow.config.tracker.terminalStates).length > 0) {
     return false
   }
   const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
@@ -371,6 +376,7 @@ export const startOrchestrator = (
         state.running.set(issue.id, {
           issue,
           fiber,
+          effective,
           attempt,
           startedAt: new Date(),
           lastEventAt: null,
@@ -387,9 +393,9 @@ export const startOrchestrator = (
           return
         }
         const now = Date.now()
-        const effective = lastKnownGood
-        const stallTimeout = effective.workflow.config.codex.stallTimeoutMs
         for (const [id, entry] of state.running) {
+          const effective = entry.effective
+          const stallTimeout = effective.workflow.config.codex.stallTimeoutMs
           const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
           if (stallTimeout > 0 && now - activeAt > stallTimeout) {
             yield* Fiber.interrupt(entry.fiber)
@@ -400,18 +406,17 @@ export const startOrchestrator = (
         if (state.running.size === 0) {
           return
         }
-        const refreshed = yield* effective.tracker
-          .fetchIssuesByIds([...state.running.keys()])
-          .pipe(
+        for (const [id, entry] of state.running) {
+          const effective = entry.effective
+          const refreshed = yield* effective.tracker.fetchIssuesByIds([id]).pipe(
             Effect.catchAll((error) =>
-              Effect.logWarning('reconciliation failed', { error: error.message }).pipe(
-                Effect.as<readonly Issue[]>([]),
-              ),
+              Effect.logWarning('reconciliation failed', {
+                ...logContext(entry.issue),
+                error: error.message,
+              }).pipe(Effect.as<readonly Issue[]>([])),
             ),
           )
-        const byId = new Map(refreshed.map((issue) => [issue.id, issue] as const))
-        for (const [id, entry] of state.running) {
-          const issue = byId.get(id)
+          const issue = refreshed[0]
           if (issue === undefined) {
             continue
           }
@@ -467,7 +472,10 @@ export const startOrchestrator = (
         }
         const effective = lastKnownGood
         const candidates = yield* effective.tracker
-          .fetchIssuesByStates(effective.workflow.config.tracker.activeStates)
+          .fetchIssuesByStates(
+            effective.workflow.config.tracker.activeStates,
+            effective.workflow.config.tracker.requiredLabels,
+          )
           .pipe(
             Effect.catchAll((error) =>
               Effect.logError('candidate fetch failed', { error: error.message }).pipe(
@@ -475,9 +483,11 @@ export const startOrchestrator = (
               ),
             ),
           )
+        const cyclicIdentifiers = cyclicIssueIdentifiers(candidates)
         for (const issue of sortIssues(candidates)) {
           if (
             state.claimed.has(issue.id) ||
+            cyclicIdentifiers.has(issue.identifier) ||
             !issueIsActive(issue, effective.workflow) ||
             !issueIsRoutable(issue, effective.workflow) ||
             !stateHasSlot(issue, state, effective.workflow)
@@ -583,9 +593,11 @@ export const startOrchestrator = (
               secondsRunning: state.totals.secondsRunning + seconds,
             }
             if (event.outcome === 'normal') {
-              const effective = lastKnownGood
-              const handoff = yield* effective.tracker
-                .handoffCompletedWork(entry.issue, effective.workflow.config.tracker.requiredLabels)
+              const handoff = yield* entry.effective.tracker
+                .handoffCompletedWork(
+                  entry.issue,
+                  entry.effective.workflow.config.tracker.requiredLabels,
+                )
                 .pipe(
                   Effect.match({
                     onFailure: (error) => ({ _tag: 'Failed' as const, error }),

@@ -1,7 +1,8 @@
 import { Effect, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
+import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
+import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
 import { WorkflowError } from '../src/errors.js'
 import {
   issueIsRoutable,
@@ -18,6 +19,7 @@ const makeIssue = (
   priority: number | null,
   createdAt: string | null,
   labels: readonly string[] = ['symphony'],
+  blockedBy: readonly BlockerRef[] = [],
 ): Issue => ({
   id: issueId(identifier),
   nativeRef: null,
@@ -30,7 +32,7 @@ const makeIssue = (
   url: null,
   assigneeId: null,
   labels,
-  blockedBy: [],
+  blockedBy,
   dispatchable: true,
   createdAt: createdAt === null ? null : new Date(createdAt),
   updatedAt: null,
@@ -47,6 +49,7 @@ const workflow: Workflow = {
         owner: 'example',
         repository: 'symphony',
         token: 'secret',
+        tokenEnvironmentName: 'GITHUB_TOKEN',
         apiBaseUrl: 'https://api.github.com',
         baseBranch: 'main',
       },
@@ -101,6 +104,56 @@ describe('orchestrator policies', (): void => {
   it('matches required labels case-insensitively', (): void => {
     expect(issueIsRoutable(makeIssue('GH-1', 1, null, ['Ready', 'SYMPHONY']), workflow)).toBe(true)
     expect(issueIsRoutable(makeIssue('GH-2', 1, null, ['symphony']), workflow)).toBe(false)
+  })
+
+  it('does not route an issue until its final native blocker is terminal', (): void => {
+    const openBlocker: BlockerRef = {
+      id: '101',
+      identifier: issueIdentifier('example/symphony#1'),
+      title: 'Foundation',
+      state: 'open',
+      url: 'https://github.com/example/symphony/issues/1',
+    }
+    const blocked = makeIssue('example/symphony#2', 1, null, ['ready', 'symphony'], [openBlocker])
+    const ready = { ...blocked, blockedBy: [{ ...openBlocker, state: 'closed' }] }
+
+    expect(issueIsRoutable(blocked, workflow)).toBe(false)
+    expect(issueIsRoutable(ready, workflow)).toBe(true)
+  })
+
+  it('detects cycle members while leaving independent, chain, and diamond work acyclic', (): void => {
+    const blocker = (identifier: string): BlockerRef => ({
+      id: identifier,
+      identifier: issueIdentifier(identifier),
+      title: identifier,
+      state: 'open',
+      url: `https://github.com/${identifier.replace('#', '/issues/')}`,
+    })
+    const issue = (number: number, blockers: readonly number[] = []): Issue =>
+      makeIssue(
+        `example/symphony#${String(number)}`,
+        null,
+        null,
+        ['ready', 'symphony'],
+        blockers.map((number) => blocker(`example/symphony#${String(number)}`)),
+      )
+    const graph = [
+      issue(1),
+      issue(2, [1]),
+      issue(3, [1]),
+      issue(4, [2, 3]),
+      issue(5),
+      issue(6, [7]),
+      issue(7, [6]),
+    ]
+
+    expect(findDependencyCycles(graph)).toEqual([
+      {
+        members: ['example/symphony#6', 'example/symphony#7'],
+        message: 'Dependency cycle members: example/symphony#6, example/symphony#7',
+      },
+    ])
+    expect([...cyclicIssueIdentifiers(graph)]).toEqual(['example/symphony#6', 'example/symphony#7'])
   })
 })
 
