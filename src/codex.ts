@@ -620,7 +620,9 @@ class CodexConnection {
     }
     this.#pending.clear()
     this.#failTurns(error)
-    this.#bufferedTurnOutcomes.clear()
+    // Buffered outcomes are deliberately kept. A turn the server already reported as completed is
+    // finished work; discarding it here would make `awaitTurn` fall through to the terminal error
+    // and report a successful turn as `process_exited`, which the orchestrator would then retry.
   }
 }
 
