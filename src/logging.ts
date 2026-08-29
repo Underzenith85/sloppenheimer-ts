@@ -9,14 +9,17 @@ export const redactSecretsInString = (value: string): string =>
   value
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
     .replace(
-      /"(api[_-]?key|authorization|password|token)"\s*:\s*"(?:\\.|[^"\\])*"/giu,
+      /"(api[_-]?key|authorization|credentials?|password|(?:client[_-])?secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token)"\s*:\s*"(?:\\.|[^"\\])*"/giu,
       '"$1":"[REDACTED]"',
     )
     .replace(
-      /'(api[_-]?key|authorization|password|token)'\s*:\s*'(?:\\.|[^'\\])*'/giu,
+      /'(api[_-]?key|authorization|credentials?|password|(?:client[_-])?secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token)'\s*:\s*'(?:\\.|[^'\\])*'/giu,
       "'$1':'[REDACTED]'",
     )
-    .replace(/\b(api[_-]?key|authorization|password|token)\s*[:=]\s*\S+/giu, '$1=[REDACTED]')
+    .replace(
+      /\b(api[_-]?key|authorization|credentials?|password|(?:client[_-])?secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token)\s*[:=]\s*\S+/giu,
+      '$1=[REDACTED]',
+    )
 
 const boundedString = (value: string): string => {
   const redacted = redactSecretsInString(value)

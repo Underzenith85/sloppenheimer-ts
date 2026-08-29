@@ -6,8 +6,12 @@ import { logInfo, redactSecretsInString } from '../src/logging.js'
 describe('operator logging', (): void => {
   it('redacts credentials embedded in quoted structured strings', (): void => {
     expect(
-      redactSecretsInString(String.raw`failure: {"token":"secret","password":"two words"}`),
-    ).toBe(String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]"}`)
+      redactSecretsInString(
+        String.raw`failure: {"token":"secret","password":"two words","client_secret":"hidden","access_token":"access"}`,
+      ),
+    ).toBe(
+      String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]"}`,
+    )
   })
 
   it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {
