@@ -154,6 +154,30 @@ describe('hook process hardening', (): void => {
     expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
   })
 
+  it('still forces termination when a descendant ignores SIGTERM after the shell closes', async (): Promise<void> => {
+    const root = makeRoot()
+    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-109')))
+    const workspace = workspaceFor(root, 'GH-109')
+    const manager = makeWorkspaceManager(
+      root,
+      hooks({
+        // The descendant redirects its inherited pipes, so the shell's `close` fires while the
+        // process group is still alive.
+        beforeRun: `sh -c 'trap "" TERM; sleep 300' >/dev/null 2>&1 & echo $! > grandchild.pid; wait`,
+        timeoutMs: 250,
+      }),
+    )
+
+    const error = await Effect.runPromise(Effect.flip(manager.beforeRun(workspace)))
+    const grandchild = Number(
+      (await readFile(join(workspace.path, 'grandchild.pid'), 'utf8')).trim(),
+    )
+
+    expect(error.category).toBe('hook_timeout')
+    expect(grandchild).toBeGreaterThan(0)
+    expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
+  }, 40_000)
+
   it('terminates the hook process tree when the effect is interrupted', async (): Promise<void> => {
     const root = makeRoot()
     await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-104')))

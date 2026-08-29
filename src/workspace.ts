@@ -153,14 +153,13 @@ const runHookProcess = (
       }
     }
 
+    // The escalation timer is deliberately not cleared on settlement: a descendant that ignores
+    // `SIGTERM` and redirected its inherited pipes lets the shell emit `close` while the process
+    // group is still alive, so the forceful kill must still land.
     const clearTimers = (): void => {
       if (timeoutTimer !== undefined) {
         clearTimeout(timeoutTimer)
         timeoutTimer = undefined
-      }
-      if (graceTimer !== undefined) {
-        clearTimeout(graceTimer)
-        graceTimer = undefined
       }
     }
 
@@ -230,6 +229,7 @@ const runHookProcess = (
         terminate('SIGKILL')
         settle(timeoutFailure())
       }, hookTerminationGraceMs)
+      graceTimer.unref()
     }, timeoutMs)
 
     return Effect.sync(() => {
