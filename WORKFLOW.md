@@ -5,6 +5,7 @@ tracker:
     owner: Underzenith85
     repository: symphony-ts
     token: $GITHUB_TOKEN
+    base_branch: main
   required_labels: [symphony]
   active_states: [open]
   terminal_states: [closed]

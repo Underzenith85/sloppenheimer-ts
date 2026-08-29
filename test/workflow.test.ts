@@ -65,6 +65,7 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
 
     expect(workflow.config.tracker.provider.token).toBe('secret')
     expect(workflow.config.tracker.requiredLabels).toEqual(['symphony'])
+    expect(workflow.config.tracker.provider.baseBranch).toBe('main')
     expect(workflow.config.workspaceRoot).toBe(join(directory, '.workspaces'))
     expect(workflow.config.agent.maxConcurrentAgents).toBe(2)
     expect(workflow.config.codex.threadSandbox).toBe('workspace-write')
