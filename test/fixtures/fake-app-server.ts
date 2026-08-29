@@ -95,6 +95,14 @@ const handleTurnStart = (id: unknown): void => {
       }, 20)
       return
     }
+    case 'failed-then-completed': {
+      // Two lifecycle notifications for one turn. The first settlement is the turn's result; a
+      // later one must not overturn it.
+      send({ id, result: { turn } })
+      send({ method: 'turn/failed', params: { turn: { ...turn, status: 'failed' } } })
+      completeTurn()
+      return
+    }
     case 'turn-no-status': {
       send({ id, result: { turn } })
       send({ method: 'turn/completed', params: { turn: { id: turn.id } } })

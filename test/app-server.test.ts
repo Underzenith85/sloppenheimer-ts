@@ -209,6 +209,13 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
   }, 30_000)
 
+  it('keeps the first settlement when a later notification contradicts it', async (): Promise<void> => {
+    const outcome = await runScenario('failed-then-completed')
+
+    expect(outcome.result).toBeNull()
+    expect(outcome.error?.category).toBe('turn_failed')
+  }, 30_000)
+
   it('fails a turn whose completion omitted a status', async (): Promise<void> => {
     const outcome = await runScenario('turn-no-status')
 

@@ -85,7 +85,16 @@ type TurnWaiter = Readonly<{
   timeout: NodeJS.Timeout
 }>
 
-type TurnOutcome = Readonly<{ status: string }>
+/**
+ * How a turn ended. Whatever observes the end — a lifecycle notification, a request Symphony
+ * cannot serve, the turn timeout, or the session dying — records one of these against the turn id,
+ * and the first record wins. That single rule replaces the precedence questions that arise once
+ * "completed", "failed", and "the session died" live in separate places: a turn the server already
+ * reported keeps its own result, and a later session-level error cannot overwrite or mask it.
+ */
+type TurnSettlement =
+  | Readonly<{ _tag: 'completed' }>
+  | Readonly<{ _tag: 'failed'; error: AgentError }>
 
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
@@ -216,14 +225,17 @@ class CodexConnection {
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
   readonly #pending = new Map<number, PendingRequest>()
-  readonly #turns = new Map<string, TurnWaiter>()
-  /** Completions that arrived before their waiter existed; drained by `awaitTurn`. */
-  readonly #bufferedTurnOutcomes = new Map<string, TurnOutcome>()
+  /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
+  readonly #settled = new Map<string, TurnSettlement>()
+  /** Callers waiting on turns that have not settled yet. */
+  readonly #waiters = new Map<string, TurnWaiter>()
   #nextId = 1
   #closed = false
+  /**
+   * Why the session as a whole is unusable. It answers only turns that never settled — a turn with
+   * a settlement of its own is already decided.
+   */
   #terminalError: AgentError | null = null
-  /** A turn failure raised before any waiter existed; drained by the next `awaitTurn`. */
-  #unattributedTurnFailure: AgentError | null = null
   #threadId: string | null = null
   #turnId: string | null = null
 
@@ -351,41 +363,65 @@ class CodexConnection {
   }
 
   /**
-   * Waits for a turn to finish. A completion that arrived before this call — the App Server may
-   * emit it in the same batch as the `turn/start` response — is drained from the buffer instead of
-   * being lost, and a process that already died fails immediately rather than waiting out the
-   * timeout.
+   * Waits for a turn to finish. Everything that could have decided it already — a completion the
+   * App Server emitted in the same batch as the `turn/start` response, a request Symphony could not
+   * serve, a process that died — is one settlement lookup, so this never has to rank one against
+   * another.
    */
   awaitTurn(turnId: string): Promise<void> {
-    // A failure recorded before any waiter existed outranks everything else: it is why the turn
-    // could not be carried out, and it is the actionable reason. A completion buffered for the same
-    // turn goes with it — reporting success would hand off work that actually stalled, and leaving
-    // the failure behind would poison the next turn with a stale error.
-    if (this.#unattributedTurnFailure !== null) {
-      const failure = this.#unattributedTurnFailure
-      this.#unattributedTurnFailure = null
-      this.#bufferedTurnOutcomes.delete(turnId)
-      return Promise.reject(failure)
+    const settlement = this.#settled.get(turnId)
+    if (settlement !== undefined) {
+      return settlement._tag === 'completed' ? Promise.resolve() : Promise.reject(settlement.error)
     }
-    const buffered = this.#bufferedTurnOutcomes.get(turnId)
-    if (buffered !== undefined) {
-      this.#bufferedTurnOutcomes.delete(turnId)
-      return buffered.status === 'completed'
-        ? Promise.resolve()
-        : Promise.reject(CodexConnection.#turnFailure(turnId, buffered.status))
-    }
+    // Only a turn that never settled falls back to the session-level reason.
     if (this.#terminalError !== null) {
       return Promise.reject(this.#terminalError)
     }
     return new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
-        this.#turns.delete(turnId)
-        rejectPromise(
-          new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
-        )
+        this.#settle(turnId, {
+          _tag: 'failed',
+          error: new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
+        })
       }, this.#turnTimeoutMs)
-      this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#waiters.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
     })
+  }
+
+  /**
+   * Records how a turn ended and answers anyone waiting on it. The first settlement wins, so a
+   * later report — including the session dying — cannot overwrite a decided turn.
+   */
+  #settle(turnId: string, settlement: TurnSettlement): void {
+    if (this.#settled.has(turnId)) {
+      return
+    }
+    this.#settled.set(turnId, settlement)
+    const waiter = this.#waiters.get(turnId)
+    if (waiter === undefined) {
+      return
+    }
+    this.#waiters.delete(turnId)
+    clearTimeout(waiter.timeout)
+    if (settlement._tag === 'completed') {
+      waiter.resolve()
+      return
+    }
+    waiter.reject(settlement.error)
+  }
+
+  /**
+   * Fails the turn the App Server is working on. A request Symphony cannot serve ends that turn,
+   * and the turn it names — or failing that, the turn in flight — is where the reason belongs. With
+   * no turn to attribute it to the whole session is unusable, so it becomes the terminal reason.
+   */
+  #failCurrentTurn(error: AgentError, turnId: string | null): void {
+    const target = turnId ?? this.#turnId
+    if (target === null) {
+      this.#fail(error)
+      return
+    }
+    this.#settle(target, { _tag: 'failed', error })
   }
 
   emitSessionStarted(issue: Issue): void {
@@ -498,7 +534,7 @@ class CodexConnection {
       return
     }
     if (typeof id === 'number') {
-      this.#handleServerRequest(id, method)
+      this.#handleServerRequest(id, method, parsed)
       return
     }
     this.#handleNotification(method, parsed)
@@ -549,7 +585,7 @@ class CodexConnection {
     }
   }
 
-  #handleServerRequest(id: number, method: string): void {
+  #handleServerRequest(id: number, method: string, message: JsonObject): void {
     if (isApprovalRequest(method)) {
       this.#write({ id, result: { decision: 'acceptForSession' } })
       this.#emit('approval_auto_approved', method)
@@ -560,11 +596,12 @@ class CodexConnection {
         id,
         error: { code: -32000, message: 'Symphony does not support interactive input' },
       })
-      this.#failTurns(
+      this.#failCurrentTurn(
         new AgentError({
           category: 'input_required',
           message: 'Codex requested interactive input',
         }),
+        notificationIdentity(message).turnId,
       )
       return
     }
@@ -601,7 +638,12 @@ class CodexConnection {
       // the server never reported as complete, so the turn fails with a legible reason instead.
       this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
     }
-    this.#settleTurn(turn.id, { status: status ?? 'unreported' })
+    this.#settle(
+      turn.id,
+      status === 'completed'
+        ? { _tag: 'completed' }
+        : { _tag: 'failed', error: CodexConnection.#turnFailure(turn.id, status ?? 'unreported') },
+    )
   }
 
   #turnFrom(message: JsonObject): Readonly<{ id: string; status: string | null }> | null {
@@ -618,21 +660,6 @@ class CodexConnection {
     return { id, status: typeof status === 'string' ? status : null }
   }
 
-  #settleTurn(turnId: string, outcome: TurnOutcome): void {
-    const waiter = this.#turns.get(turnId)
-    if (waiter === undefined) {
-      this.#bufferedTurnOutcomes.set(turnId, outcome)
-      return
-    }
-    clearTimeout(waiter.timeout)
-    this.#turns.delete(turnId)
-    if (outcome.status === 'completed') {
-      waiter.resolve()
-      return
-    }
-    waiter.reject(CodexConnection.#turnFailure(turnId, outcome.status))
-  }
-
   #emit(event: string, message: string): void {
     this.#onEvent({
       event,
@@ -646,19 +673,11 @@ class CodexConnection {
     })
   }
 
-  #failTurns(error: AgentError): void {
-    if (this.#turns.size === 0) {
-      this.#unattributedTurnFailure ??= error
-      return
-    }
-    for (const waiter of this.#turns.values()) {
-      clearTimeout(waiter.timeout)
-      waiter.reject(error)
-    }
-    this.#turns.clear()
-  }
-
-  /** Settles every outstanding request and turn exactly once and records the terminal reason. */
+  /**
+   * Records the session-level reason and settles everything still outstanding. Turns that already
+   * settled keep their own result — `#settle` ignores a second write — so finished work is never
+   * relabelled as a session failure.
+   */
   #fail(error: AgentError, remember = true): void {
     if (remember && this.#terminalError === null) {
       this.#terminalError = error
@@ -668,10 +687,9 @@ class CodexConnection {
       pending.reject(error)
     }
     this.#pending.clear()
-    this.#failTurns(error)
-    // Buffered outcomes are deliberately kept. A turn the server already reported as completed is
-    // finished work; discarding it here would make `awaitTurn` fall through to the terminal error
-    // and report a successful turn as `process_exited`, which the orchestrator would then retry.
+    for (const turnId of [...this.#waiters.keys()]) {
+      this.#settle(turnId, { _tag: 'failed', error })
+    }
   }
 }
 
