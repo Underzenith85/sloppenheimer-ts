@@ -1,6 +1,7 @@
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type { JsonObject } from '../src/domain.js'
 import { makeGitHubTracker } from '../src/tracker.js'
 import type { GitHubProviderConfig } from '../src/workflow.js'
 
@@ -11,7 +12,7 @@ const provider: GitHubProviderConfig = {
   apiBaseUrl: 'https://api.example.test',
 }
 
-const githubIssue = (number: number): Readonly<Record<string, unknown>> => ({
+const githubIssue = (number: number): JsonObject => ({
   number,
   node_id: `node-${String(number)}`,
   title: `Issue ${String(number)}`,
@@ -83,5 +84,21 @@ describe('GitHub tracker pagination', (): void => {
     expect(error.category).toBe('tracker_response')
     expect(error.retryable).toBe(false)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not send the tracker token to a different origin', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> =>
+      Response.json([githubIssue(1)], {
+        headers: { Link: '<https://attacker.example.test/issues?page=2>; rel="next"' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const error = await Effect.runPromise(
+      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'])),
+    )
+
+    expect(error.category).toBe('tracker_pagination')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

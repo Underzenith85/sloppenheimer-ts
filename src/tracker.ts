@@ -175,7 +175,11 @@ const paginationError = (message: string, cause?: unknown): TrackerError =>
     ...(cause === undefined ? {} : { cause }),
   })
 
-const parseNextUrl = (linkHeader: string | null, requestUrl: string): string | null => {
+const parseNextUrl = (
+  linkHeader: string | null,
+  requestUrl: string,
+  apiBaseUrl: string,
+): string | null => {
   if (linkHeader === null) {
     return null
   }
@@ -193,8 +197,15 @@ const parseNextUrl = (linkHeader: string | null, requestUrl: string): string | n
       throw paginationError('GitHub returned an invalid next page link')
     }
     try {
-      return new URL(targetMatch[1], requestUrl).href
+      const nextUrl = new URL(targetMatch[1], requestUrl)
+      if (nextUrl.origin !== new URL(apiBaseUrl).origin) {
+        throw paginationError('GitHub next page URL has an unexpected origin')
+      }
+      return nextUrl.href
     } catch (cause: unknown) {
+      if (cause instanceof TrackerError) {
+        throw cause
+      }
       throw paginationError('GitHub returned an invalid next page URL', cause)
     }
   }
@@ -239,7 +250,7 @@ const githubRequest = (
       }
       return {
         body,
-        nextUrl: parseNextUrl(response.headers.get('link'), url),
+        nextUrl: parseNextUrl(response.headers.get('link'), url, provider.apiBaseUrl),
       }
     },
     catch: (cause: unknown) =>
