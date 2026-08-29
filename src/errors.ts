@@ -24,6 +24,8 @@ export class TrackerError extends Data.TaggedError('TrackerError')<{
     | 'tracker_rate_limited'
   readonly message: string
   readonly retryable: boolean
+  readonly retryAfterMs?: number
+  readonly status?: number
   readonly cause?: unknown
 }> {}
 

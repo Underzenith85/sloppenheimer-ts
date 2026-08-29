@@ -79,16 +79,16 @@ type GitHubLabel = Readonly<{ name: string | null }>
 type GitHubUser = Readonly<{ login: string }>
 type GitHubIssue = Readonly<{
   number: number
-  nodeId: string
+  nodeId: string | null
   title: string
   body: string | null
   state: string
-  htmlUrl: string
+  htmlUrl: string | null
   assignee: GitHubUser | null
   labels: readonly GitHubLabel[]
   isPullRequest: boolean
-  createdAt: string
-  updatedAt: string
+  createdAt: Date | null
+  updatedAt: Date | null
 }>
 
 type GitHubDependency = Readonly<{
@@ -113,12 +113,23 @@ type DependencyCacheEntry = Readonly<{
 
 const nullableString = (value: JsonValue | undefined): string | null =>
   typeof value === 'string' ? value : null
-const parseDate = (value: string): Date | null => {
+const nonBlankString = (value: JsonValue | undefined): string | null =>
+  typeof value === 'string' && value.trim().length > 0 ? value : null
+const parseDate = (value: JsonValue | undefined): Date | null => {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
+  ) {
+    return null
+  }
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
 const decodeGitHubLabel = (value: JsonValue): GitHubLabel | null => {
+  if (typeof value === 'string') {
+    return { name: value }
+  }
   if (!isJsonRecord(value)) {
     return null
   }
@@ -135,23 +146,16 @@ const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
     })
   }
   const number = value['number']
-  const nodeId = value['node_id']
   const title = value['title']
   const state = value['state']
-  const htmlUrl = value['html_url']
-  const createdAt = value['created_at']
-  const updatedAt = value['updated_at']
   if (
     typeof number !== 'number' ||
-    !Number.isInteger(number) ||
-    typeof nodeId !== 'string' ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
     typeof title !== 'string' ||
-    title.length === 0 ||
+    title.trim().length === 0 ||
     typeof state !== 'string' ||
-    state.length === 0 ||
-    typeof htmlUrl !== 'string' ||
-    typeof createdAt !== 'string' ||
-    typeof updatedAt !== 'string'
+    state.trim().length === 0
   ) {
     throw new TrackerError({
       category: 'tracker_response',
@@ -169,21 +173,23 @@ const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
       : []
   const rawAssignee = value['assignee']
   const assignee =
-    isJsonRecord(rawAssignee) && typeof rawAssignee['login'] === 'string'
+    isJsonRecord(rawAssignee) &&
+    typeof rawAssignee['login'] === 'string' &&
+    rawAssignee['login'].trim().length > 0
       ? { login: rawAssignee['login'] }
       : null
   return {
     number,
-    nodeId,
+    nodeId: nonBlankString(value['node_id']),
     title,
     body: nullableString(value['body']),
     state,
-    htmlUrl,
+    htmlUrl: nonBlankString(value['html_url']),
     assignee,
     labels,
     isPullRequest: value['pull_request'] !== undefined,
-    createdAt,
-    updatedAt,
+    createdAt: parseDate(value['created_at']),
+    updatedAt: parseDate(value['updated_at']),
   }
 }
 
@@ -271,14 +277,18 @@ const normalizeIssue = (
   const priorityLabel = labels.find((label) => /^priority:[1-4]$/u.test(label))
   const priority = priorityLabel === undefined ? null : Number(priorityLabel.slice(-1))
 
+  const nativeRef: Record<string, JsonValue> = {
+    issue_number: source.number,
+    owner: provider.owner,
+    repository: provider.repository,
+  }
+  if (source.nodeId !== null) {
+    nativeRef['node_id'] = source.nodeId
+  }
+
   return {
     id: issueId(String(source.number)),
-    nativeRef: {
-      node_id: source.nodeId,
-      issue_number: source.number,
-      owner: provider.owner,
-      repository: provider.repository,
-    },
+    nativeRef,
     identifier: issueIdentifier(
       `${provider.owner}/${provider.repository}#${String(source.number)}`,
     ),
@@ -292,8 +302,8 @@ const normalizeIssue = (
     labels,
     blockedBy,
     dispatchable: !source.isPullRequest,
-    createdAt: parseDate(source.createdAt),
-    updatedAt: parseDate(source.updatedAt),
+    createdAt: source.createdAt,
+    updatedAt: source.updatedAt,
   }
 }
 
@@ -342,6 +352,74 @@ const parseNextUrl = (
   return null
 }
 
+const retryAfterMilliseconds = (headers: Headers, now = Date.now()): number | undefined => {
+  const retryAfter = headers.get('retry-after')
+  if (retryAfter !== null) {
+    const seconds = Number(retryAfter)
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.ceil(seconds * 1_000)
+    }
+    const retryAt = Date.parse(retryAfter)
+    if (!Number.isNaN(retryAt)) {
+      return Math.max(0, retryAt - now)
+    }
+  }
+  const reset = headers.get('x-ratelimit-reset')
+  if (reset !== null) {
+    const resetSeconds = Number(reset)
+    if (Number.isFinite(resetSeconds) && resetSeconds >= 0) {
+      return Math.max(0, Math.ceil(resetSeconds * 1_000 - now))
+    }
+  }
+  return undefined
+}
+
+const githubStatusError = (response: Response): TrackerError => {
+  const retryAfterMs = retryAfterMilliseconds(response.headers)
+  const rateLimited =
+    response.status === 429 ||
+    (response.status === 403 &&
+      (response.headers.get('x-ratelimit-remaining') === '0' ||
+        response.headers.has('retry-after')))
+  if (rateLimited) {
+    return new TrackerError({
+      category: 'tracker_rate_limited',
+      message: `GitHub rate limit exceeded (HTTP ${String(response.status)})`,
+      retryable: true,
+      status: response.status,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    })
+  }
+  return new TrackerError({
+    category: 'tracker_status',
+    message: `GitHub returned HTTP ${String(response.status)}`,
+    retryable: response.status >= 500 || response.status === 408,
+    status: response.status,
+  })
+}
+
+const decodeResponseJson = async (response: Response, description: string): Promise<JsonValue> => {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch (cause: unknown) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: `GitHub returned malformed JSON ${description}`,
+      retryable: false,
+      cause,
+    })
+  }
+  if (!isJsonValue(body)) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: `GitHub returned non-JSON ${description}`,
+      retryable: false,
+    })
+  }
+  return body
+}
+
 const githubRequest = (
   provider: GitHubProviderConfig,
   url: string,
@@ -356,28 +434,10 @@ const githubRequest = (
           'X-GitHub-Api-Version': githubApiVersion,
         },
       })
-      if (response.status === 403 && response.headers.has('retry-after')) {
-        throw new TrackerError({
-          category: 'tracker_rate_limited',
-          message: 'GitHub rate limit exceeded',
-          retryable: true,
-        })
-      }
       if (!response.ok) {
-        throw new TrackerError({
-          category: 'tracker_status',
-          message: `GitHub returned HTTP ${String(response.status)}`,
-          retryable: response.status >= 500,
-        })
+        throw githubStatusError(response)
       }
-      const body: unknown = await response.json()
-      if (!isJsonValue(body)) {
-        throw new TrackerError({
-          category: 'tracker_response',
-          message: 'GitHub returned non-JSON data',
-          retryable: false,
-        })
-      }
+      const body = await decodeResponseJson(response, 'data')
       return {
         body,
         nextUrl: parseNextUrl(response.headers.get('link'), url, provider.apiBaseUrl),
@@ -604,8 +664,9 @@ const hydrateDependencies = (
     issues,
     (issue) => {
       const shouldHydrate =
-        dependencyLabels === null ||
-        dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))
+        issue.dispatchable &&
+        (dependencyLabels === null ||
+          dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase())))
       if (!shouldHydrate) {
         return Effect.succeed(issue)
       }
@@ -668,23 +729,34 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
                 )
               }
               const issues: Issue[] = []
+              const malformed: TrackerError[] = []
               for (const item of body) {
                 try {
-                  const issue = normalizeIssue(decodeGitHubIssue(item), provider)
-                  if (issue.dispatchable) {
-                    issues.push(issue)
-                  }
+                  issues.push(normalizeIssue(decodeGitHubIssue(item), provider))
                 } catch (error: unknown) {
-                  if (!(error instanceof TrackerError)) {
-                    throw error
+                  if (error instanceof TrackerError) {
+                    malformed.push(error)
+                  } else {
+                    return Effect.die(error)
                   }
                 }
               }
-              if (nextUrl === null) {
-                return Effect.succeed(issues)
-              }
-              return fetchPage(nextUrl, new Set([...visitedUrls, url])).pipe(
-                Effect.map((nextIssues) => [...issues, ...nextIssues]),
+              return Effect.forEach(malformed, (error) =>
+                Effect.logWarning('omitting malformed GitHub issue from state-list response', {
+                  category: error.category,
+                  error: error.message,
+                  owner: provider.owner,
+                  repository: provider.repository,
+                }),
+              ).pipe(
+                Effect.flatMap(() => {
+                  if (nextUrl === null) {
+                    return Effect.succeed<readonly Issue[]>(issues)
+                  }
+                  return fetchPage(nextUrl, new Set([...visitedUrls, url])).pipe(
+                    Effect.map((nextIssues) => [...issues, ...nextIssues]),
+                  )
+                }),
               )
             }),
           )
@@ -713,9 +785,34 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
           githubRequest(
             provider,
             `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
-          ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
+          ).pipe(
+            Effect.flatMap(({ body }) =>
+              Effect.try({
+                try: () => normalizeIssue(decodeGitHubIssue(body), provider),
+                catch: (cause: unknown) =>
+                  cause instanceof TrackerError
+                    ? cause
+                    : new TrackerError({
+                        category: 'tracker_response',
+                        message: 'GitHub issue could not be normalized',
+                        retryable: false,
+                        cause,
+                      }),
+              }),
+            ),
+            Effect.catchAll((error) =>
+              error.category === 'tracker_status' && error.status === 404
+                ? Effect.succeed(null)
+                : Effect.fail(error),
+            ),
+          ),
         { concurrency: 4 },
       ).pipe(
+        Effect.map((results) => [
+          ...new Map(
+            results.flatMap((issue) => (issue === null ? [] : [[issue.id, issue] as const])),
+          ).values(),
+        ]),
         Effect.flatMap((issues) =>
           hydrateDependencies(provider, prefix, issues, [], dependencyCache),
         ),
