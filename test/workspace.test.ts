@@ -1,4 +1,4 @@
-import { access, readFile, rm } from 'node:fs/promises'
+import { access, mkdir, readFile, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -77,6 +77,27 @@ describe('workspace safety', (): void => {
     expect(await Effect.runPromise(manager.exists(identifier))).toBe(false)
     await Effect.runPromise(manager.create(identifier))
     expect(await Effect.runPromise(manager.exists(identifier))).toBe(true)
+  })
+
+  it('rejects symlinked workspaces before running removal hooks', async (): Promise<void> => {
+    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+    const outside = join('/tmp', `symphony-outside-${crypto.randomUUID()}`)
+    roots.push(root, outside)
+    await mkdir(root)
+    await mkdir(outside)
+    const identifier = issueIdentifier('GH-12')
+    await symlink(outside, join(root, workspaceKey(identifier)), 'dir')
+    const manager = makeWorkspaceManager(root, {
+      afterCreate: null,
+      beforeRun: null,
+      afterRun: null,
+      beforeRemove: 'touch hook-ran',
+      timeoutMs: 5_000,
+    })
+
+    await expect(Effect.runPromise(manager.exists(identifier))).rejects.toThrow()
+    await expect(Effect.runPromise(manager.remove(identifier))).rejects.toThrow()
+    await expect(access(join(outside, 'hook-ran'))).rejects.toThrow()
   })
 
   it('logs and ignores before_remove failure while deleting the workspace', async (): Promise<void> => {

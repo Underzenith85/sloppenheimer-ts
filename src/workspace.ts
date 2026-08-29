@@ -132,7 +132,13 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
       try: async () => {
         const path = containedWorkspacePath(root, workspaceKey(identifier))
         try {
-          await lstat(path)
+          const info = await lstat(path)
+          if (!info.isDirectory()) {
+            throw new WorkspaceError({
+              category: 'invalid_path',
+              message: `workspace exists and is not a directory: ${path}`,
+            })
+          }
           return true
         } catch (cause: unknown) {
           const code =
@@ -165,7 +171,13 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
       try: async () => {
         const path = containedWorkspacePath(root, workspaceKey(identifier))
         try {
-          await lstat(path)
+          const info = await lstat(path)
+          if (!info.isDirectory()) {
+            throw new WorkspaceError({
+              category: 'invalid_path',
+              message: `workspace exists and is not a directory: ${path}`,
+            })
+          }
         } catch (cause: unknown) {
           const code =
             typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined
