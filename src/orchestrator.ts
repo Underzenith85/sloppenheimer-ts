@@ -145,6 +145,7 @@ type ExecutionSnapshot = Readonly<{
   terminalStates: readonly string[]
   secretEnvironmentNames: readonly string[]
   workspaces: WorkspaceManager
+  workspaceRoot: string
   prompt: string
   codex: Workflow['config']['codex']
   maxTurns: number
@@ -262,6 +263,7 @@ const captureExecutionSnapshot = (
     terminalStates: Object.freeze([...effective.workflow.config.tracker.terminalStates]),
     secretEnvironmentNames: Object.freeze([...effective.tracker.secretEnvironmentNames]),
     workspaces: effective.workspaces,
+    workspaceRoot: effective.workflow.config.workspaceRoot,
     prompt,
     codex: Object.freeze({ ...effective.workflow.config.codex }),
     maxTurns: effective.workflow.config.agent.maxTurns,
@@ -639,21 +641,22 @@ export const startOrchestrator = (
           Effect.flatMap((workspace) =>
             execution.workspaces.beforeRun(workspace).pipe(
               Effect.zipRight(
-                dependencies.runAgent(
+                dependencies.runAgent({
                   issue,
                   workspace,
-                  execution.codex,
-                  execution.prompt,
-                  execution.maxTurns,
-                  execution.secretEnvironmentNames,
+                  workspaceRoot: execution.workspaceRoot,
+                  config: execution.codex,
+                  prompt: execution.prompt,
+                  maxTurns: execution.maxTurns,
+                  secretEnvironmentNames: execution.secretEnvironmentNames,
                   refreshIssue,
-                  (refreshed) =>
+                  isRoutable: (refreshed) =>
                     issueIsActiveInSnapshot(refreshed, execution) &&
                     issueIsRoutableInSnapshot(refreshed, execution),
-                  (update) => {
+                  onEvent: (update) => {
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
-                ),
+                }),
               ),
               Effect.ensuring(execution.workspaces.afterRun(workspace)),
             ),

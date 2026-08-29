@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import type { Stats } from 'node:fs'
-import { lstat, mkdir, rm } from 'node:fs/promises'
+import { lstat, mkdir, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { Effect } from 'effect'
 
@@ -44,6 +44,67 @@ export const containedWorkspacePath = (root: string, key: string): string => {
   }
   return candidate
 }
+
+const isStrictDescendant = (root: string, candidate: string): boolean => {
+  const difference = relative(root, candidate)
+  return (
+    difference !== '' &&
+    !isAbsolute(difference) &&
+    difference !== '..' &&
+    !difference.startsWith(`..${sep}`)
+  )
+}
+
+const rejectWorkspace = (message: string): WorkspaceError =>
+  new WorkspaceError({ category: 'invalid_path', message })
+
+/**
+ * The single containment invariant every executor must satisfy immediately before launching an
+ * agent. Creation-time checks are not enough: a `Workspace` value can be stale, forged, or the
+ * directory can have been replaced since it was produced.
+ *
+ * Returns the verified real path, which is also what the subprocess must use as its cwd — so the
+ * path that was checked and the path that is entered are the same one.
+ */
+export const verifyWorkspaceForLaunch = (
+  root: string,
+  workspace: Workspace,
+): Effect.Effect<string, WorkspaceError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const normalizedRoot = resolve(root)
+      const declaredPath = resolve(workspace.path)
+      if (!isStrictDescendant(normalizedRoot, declaredPath)) {
+        throw rejectWorkspace(
+          `workspace path is not a strict descendant of the configured root: ${declaredPath}`,
+        )
+      }
+      let info: Stats
+      try {
+        info = await lstat(declaredPath)
+      } catch {
+        throw rejectWorkspace(`workspace directory is not present: ${declaredPath}`)
+      }
+      if (info.isSymbolicLink()) {
+        throw rejectWorkspace(`workspace path is a symbolic link: ${declaredPath}`)
+      }
+      if (!info.isDirectory()) {
+        throw rejectWorkspace(`workspace path is not a directory: ${declaredPath}`)
+      }
+      const realRoot = await realpath(normalizedRoot)
+      const realWorkspace = await realpath(declaredPath)
+      if (!isStrictDescendant(realRoot, realWorkspace)) {
+        throw rejectWorkspace(
+          `resolved workspace path escapes the configured root: ${realWorkspace}`,
+        )
+      }
+      return realWorkspace
+    },
+    catch: (cause: unknown) =>
+      cause instanceof WorkspaceError
+        ? cause
+        : rejectWorkspace('workspace containment could not be verified'),
+  })
 
 /**
  * Reports whether a usable workspace directory is present. A path that exists but is not a real

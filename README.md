@@ -46,7 +46,12 @@ fallback aliases `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environment
 `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` authentication sources are always preserved, and tracker
 configuration may not reuse those names. Each eligible issue must carry the `symphony` label.
 Workspaces live under `.symphony/workspaces` and are never treated as trusted paths until
-containment checks pass.
+containment checks pass. Containment is re-verified immediately before every agent launch, not only
+at creation: the path must be a strict descendant of the configured root both as written and after
+symlink resolution, and must be a real directory that still exists. The verified real path — not
+the caller-supplied one — becomes the Codex subprocess cwd and the thread and turn `cwd`, so a
+stale, forged, or substituted workspace can never be entered. Every executor, local or remote, goes
+through the same `verifyWorkspaceForLaunch` invariant.
 
 The configured operator console is available at `http://127.0.0.1:3000`. It shows live and retrying
 agents, session totals, and the open GitHub backlog. **Start** adds the configured orchestration label;
