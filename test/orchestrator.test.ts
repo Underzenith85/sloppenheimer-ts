@@ -304,6 +304,7 @@ describe('startup terminal workspace cleanup', (): void => {
     const terminalFetches: Readonly<{
       states: readonly string[]
       labels: readonly string[] | null
+      hydrateDependencies: boolean | undefined
     }>[] = []
     const removed: string[] = []
     const dependencies: OrchestratorDependencies = {
@@ -312,9 +313,13 @@ describe('startup terminal workspace cleanup', (): void => {
         const tracker = harness.dependencies.makeTracker(effectiveWorkflow)
         return {
           ...tracker,
-          fetchIssuesByStates: (states, labels) => {
+          fetchIssuesByStates: (states, labels, options) => {
             if (states.includes('closed')) {
-              terminalFetches.push({ states, labels })
+              terminalFetches.push({
+                states,
+                labels,
+                hydrateDependencies: options?.hydrateDependencies,
+              })
               return Effect.succeed(terminalIssues)
             }
             return Effect.succeed([])
@@ -356,7 +361,11 @@ describe('startup terminal workspace cleanup', (): void => {
     )
 
     expect(terminalFetches).toEqual([
-      { states: startupWorkflow.config.tracker.terminalStates, labels: [] },
+      {
+        states: startupWorkflow.config.tracker.terminalStates,
+        labels: null,
+        hydrateDependencies: false,
+      },
     ])
     expect(removed).toEqual(['GH-1', 'GH-2', 'GH-3'])
   })

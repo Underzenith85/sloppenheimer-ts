@@ -309,7 +309,9 @@ export const startOrchestrator = (
     const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
       Effect.gen(function* () {
         const terminalIssues = yield* effective.tracker
-          .fetchIssuesByStates(effective.workflow.config.tracker.terminalStates, [])
+          .fetchIssuesByStates(effective.workflow.config.tracker.terminalStates, null, {
+            hydrateDependencies: false,
+          })
           .pipe(
             Effect.matchEffect({
               onFailure: (error) =>

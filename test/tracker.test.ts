@@ -160,11 +160,29 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['closed'], []),
+      makeGitHubTracker(provider).fetchIssuesByStates(['closed'], null, {
+        hydrateDependencies: false,
+      }),
     )
 
     expect(issues).toHaveLength(1)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('hydrates dependencies when the label filter is empty', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
+      requestUrl(input).includes('/dependencies/blocked_by')
+        ? Response.json([githubDependency(2)])
+        : Response.json([githubIssue(1)]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [issue] = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByStates(['open'], []),
+    )
+
+    expect(issue?.blockedBy).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('hydrates only dispatch candidates for scheduler list requests', async (): Promise<void> => {
