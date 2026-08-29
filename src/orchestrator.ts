@@ -886,10 +886,13 @@ export const startOrchestrator = (
           }
         }
         const effective = lastKnownGood
+        const requiredLabels = effective.workflow.config.tracker.requiredLabels
         const candidates = yield* effective.tracker
           .fetchIssuesByStates(
             effective.workflow.config.tracker.activeStates,
-            effective.workflow.config.tracker.requiredLabels,
+            // No required labels means every candidate is in scope, so hydrate every candidate's
+            // blockers. An empty list is reserved for callers that want no hydration at all.
+            requiredLabels.length === 0 ? null : requiredLabels,
           )
           .pipe(
             Effect.catchAll((error) =>

@@ -711,3 +711,65 @@ describe('tracker credential revalidation', (): void => {
     ])
   })
 })
+
+describe('scheduler dependency hydration', (): void => {
+  it('requests hydration for every candidate when no labels are required', async (): Promise<void> => {
+    const unlabeled: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        tracker: { ...workflow.config.tracker, requiredLabels: [] },
+      },
+    }
+    const requested: (readonly string[] | null)[] = []
+    const harness = makeHarness(unlabeled)
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByStates: (_states, dependencyLabels) => {
+          requested.push(dependencyLabels)
+          return Effect.succeed([])
+        },
+      }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+        }),
+      ),
+    )
+
+    expect(requested).toContain(null)
+    expect(requested).not.toContainEqual([])
+  })
+
+  it('passes the configured labels through when some are required', async (): Promise<void> => {
+    const requested: (readonly string[] | null)[] = []
+    const harness = makeHarness(workflow)
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByStates: (_states, dependencyLabels) => {
+          requested.push(dependencyLabels)
+          return Effect.succeed([])
+        },
+      }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+        }),
+      ),
+    )
+
+    expect(requested).toContainEqual(['symphony', 'ready'])
+  })
+})
