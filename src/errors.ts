@@ -24,6 +24,8 @@ export class TrackerError extends Data.TaggedError('TrackerError')<{
     | 'tracker_rate_limited'
   readonly message: string
   readonly retryable: boolean
+  /** Adapter-supplied delay before the request may be retried, when the tracker advertises one. */
+  readonly retryAfterMs?: number
   readonly cause?: unknown
 }> {}
 
