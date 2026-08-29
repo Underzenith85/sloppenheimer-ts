@@ -357,19 +357,22 @@ class CodexConnection {
    * timeout.
    */
   awaitTurn(turnId: string): Promise<void> {
+    // A failure recorded before any waiter existed outranks everything else: it is why the turn
+    // could not be carried out, and it is the actionable reason. A completion buffered for the same
+    // turn goes with it — reporting success would hand off work that actually stalled, and leaving
+    // the failure behind would poison the next turn with a stale error.
+    if (this.#unattributedTurnFailure !== null) {
+      const failure = this.#unattributedTurnFailure
+      this.#unattributedTurnFailure = null
+      this.#bufferedTurnOutcomes.delete(turnId)
+      return Promise.reject(failure)
+    }
     const buffered = this.#bufferedTurnOutcomes.get(turnId)
     if (buffered !== undefined) {
       this.#bufferedTurnOutcomes.delete(turnId)
       return buffered.status === 'completed'
         ? Promise.resolve()
         : Promise.reject(CodexConnection.#turnFailure(turnId, buffered.status))
-    }
-    // A failure recorded before any waiter existed is the reason the turn actually ended, and it
-    // is the actionable one. A terminal error raised afterwards would only mask it.
-    if (this.#unattributedTurnFailure !== null) {
-      const failure = this.#unattributedTurnFailure
-      this.#unattributedTurnFailure = null
-      return Promise.reject(failure)
     }
     if (this.#terminalError !== null) {
       return Promise.reject(this.#terminalError)
@@ -592,10 +595,16 @@ class CodexConnection {
     if (turn === null) {
       return
     }
-    this.#settleTurn(turn.id, { status: method === 'turn/failed' ? 'failed' : turn.status })
+    const status = method === 'turn/failed' ? 'failed' : turn.status
+    if (status === null) {
+      // The Turn schema requires `status`. Reading a missing one as success would hand off work
+      // the server never reported as complete, so the turn fails with a legible reason instead.
+      this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
+    }
+    this.#settleTurn(turn.id, { status: status ?? 'unreported' })
   }
 
-  #turnFrom(message: JsonObject): Readonly<{ id: string; status: string }> | null {
+  #turnFrom(message: JsonObject): Readonly<{ id: string; status: string | null }> | null {
     const params = message['params']
     if (!isJsonObject(params) || !isJsonObject(params['turn'])) {
       return null
@@ -606,7 +615,7 @@ class CodexConnection {
       return null
     }
     const status = turn['status']
-    return { id, status: typeof status === 'string' ? status : 'completed' }
+    return { id, status: typeof status === 'string' ? status : null }
   }
 
   #settleTurn(turnId: string, outcome: TurnOutcome): void {

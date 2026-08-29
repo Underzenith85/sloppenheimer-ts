@@ -95,6 +95,27 @@ const handleTurnStart = (id: unknown): void => {
       }, 20)
       return
     }
+    case 'turn-no-status': {
+      send({ id, result: { turn } })
+      send({ method: 'turn/completed', params: { turn: { id: turn.id } } })
+      return
+    }
+    case 'input-then-completion': {
+      // An interactive-input request and a completion for the same turn, both before any waiter can
+      // exist. One write, so the client sees all three lines in one synchronous pass.
+      sendRaw(
+        [
+          JSON.stringify({ id, result: { turn } }),
+          JSON.stringify({
+            id: 9006,
+            method: 'item/tool/requestUserInput',
+            params: { prompt: 'continue?' },
+          }),
+          JSON.stringify({ method: 'turn/completed', params: { turn } }),
+        ].join('\n') + '\n',
+      )
+      return
+    }
     case 'permissions-approval': {
       send({ id, result: { turn } })
       send({
@@ -172,7 +193,7 @@ const handle = (message: JsonRecord): void => {
     completeTurn()
     return
   }
-  if (id === 9002 || id === 9003 || id === 9004) {
+  if (id === 9002 || id === 9003 || id === 9004 || id === 9006) {
     send({ method: 'request/rejected', params: message })
   }
 }

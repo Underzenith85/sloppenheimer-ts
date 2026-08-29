@@ -209,6 +209,21 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
   }, 30_000)
 
+  it('fails a turn whose completion omitted a status', async (): Promise<void> => {
+    const outcome = await runScenario('turn-no-status')
+
+    expect(outcome.result).toBeNull()
+    expect(outcome.error?.category).toBe('turn_failed')
+    expect(outcome.events.map((event) => event.event)).toContain('malformed')
+  }, 30_000)
+
+  it('reports a recorded turn failure in preference to a buffered completion', async (): Promise<void> => {
+    const outcome = await runScenario('input-then-completion')
+
+    expect(outcome.result).toBeNull()
+    expect(outcome.error?.category).toBe('input_required')
+  }, 30_000)
+
   it('declines a permissions approval rather than answering with the decision shape', async (): Promise<void> => {
     const outcome = await runScenario('permissions-approval', { turnTimeoutMs: 1_000 })
 
