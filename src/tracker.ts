@@ -9,16 +9,33 @@ import {
   type JsonValue,
 } from './domain.js'
 import { TrackerError } from './errors.js'
-import type { PullRequestObservation } from './handoff.js'
 import { makeGitHubPullRequestMonitor } from './github-handoff.js'
+import {
+  githubJson,
+  githubMaxPages,
+  githubPageSize,
+  isJsonArray,
+  isJsonRecord,
+  parseNextUrl,
+  trackerPaginationError,
+  trackerResponseError,
+} from './github-http.js'
 import {
   githubAuthenticationEnvironmentNames,
   type GitHubProviderConfig,
 } from './tracker-config.js'
+import type { PullRequestObservation } from './handoff.js'
 
 export type IssueFetchOptions = Readonly<{ hydrateDependencies: boolean }>
 
 export type TrackerAdapter = Readonly<{
+  /**
+   * Reads every normalized record in provider scope for the given states, including
+   * `dispatchable=false`; dispatch filtering belongs to the orchestrator.
+   *
+   * `dependencyLabels` selects blocker hydration: `null` hydrates every dispatch candidate, a list
+   * hydrates only candidates carrying all of those labels, and an empty list hydrates none.
+   */
   fetchIssuesByStates: (
     states: readonly string[],
     dependencyLabels: readonly string[] | null,
@@ -57,47 +74,19 @@ export type GitHubIssueControl = Readonly<{
   addLabel: (issueNumber: number, label: string) => Effect.Effect<void, TrackerError>
 }>
 
-type JsonRecord = Record<string, JsonValue>
-
-type GitHubResponse = Readonly<{
-  body: JsonValue
-  nextUrl: string | null
-}>
-
-const isJsonValue = (value: unknown): value is JsonValue => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return true
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonValue)
-  }
-  return isJsonRecord(value) && Object.values(value).every(isJsonValue)
-}
-
-const isJsonRecord = (value: unknown): value is JsonRecord =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const isJsonArray = (value: JsonValue): value is readonly JsonValue[] => Array.isArray(value)
-
 type GitHubLabel = Readonly<{ name: string | null }>
-type GitHubUser = Readonly<{ login: string }>
 type GitHubIssue = Readonly<{
   number: number
   nodeId: string
   title: string
   body: string | null
   state: string
-  htmlUrl: string
-  assignee: GitHubUser | null
+  htmlUrl: string | null
+  assigneeLogin: string | null
   labels: readonly GitHubLabel[]
   isPullRequest: boolean
-  createdAt: string
-  updatedAt: string
+  createdAt: string | null
+  updatedAt: string | null
 }>
 
 type GitHubDependency = Readonly<{
@@ -109,10 +98,9 @@ type GitHubDependency = Readonly<{
   htmlUrl: string
 }>
 
-const githubApiVersion = '2026-03-10'
 const dependencyConcurrency = 4
+const idRefreshConcurrency = 4
 const dependencyCacheTtlMs = 60_000
-const githubRequestTimeoutMs = 30_000
 
 type DependencyCacheEntry = Readonly<{
   blockedBy: readonly BlockerRef[]
@@ -120,14 +108,31 @@ type DependencyCacheEntry = Readonly<{
   expiresAt: number
 }>
 
-const nullableString = (value: JsonValue | undefined): string | null =>
-  typeof value === 'string' ? value : null
-const parseDate = (value: string): Date | null => {
+const nullableString = (value: JsonValue | undefined): string | null => {
+  if (typeof value !== 'string') {
+    return null
+  }
+  return value
+}
+
+const nonEmptyString = (value: JsonValue | undefined): string | null => {
+  const text = nullableString(value)
+  return text === null || text.length === 0 ? null : text
+}
+
+const parseDate = (value: string | null): Date | null => {
+  if (value === null) {
+    return null
+  }
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
+/** GitHub returns labels either as objects or, on some payload shapes, as bare strings. */
 const decodeGitHubLabel = (value: JsonValue): GitHubLabel | null => {
+  if (typeof value === 'string') {
+    return { name: value }
+  }
   if (!isJsonRecord(value)) {
     return null
   }
@@ -137,72 +142,51 @@ const decodeGitHubLabel = (value: JsonValue): GitHubLabel | null => {
 
 const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
   if (!isJsonRecord(value)) {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub issue is not an object',
-      retryable: false,
-    })
+    throw trackerResponseError('GitHub issue is not an object')
   }
   const number = value['number']
   const nodeId = value['node_id']
   const title = value['title']
   const state = value['state']
-  const htmlUrl = value['html_url']
-  const createdAt = value['created_at']
-  const updatedAt = value['updated_at']
   if (
     typeof number !== 'number' ||
-    !Number.isInteger(number) ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
     typeof nodeId !== 'string' ||
+    nodeId.length === 0 ||
     typeof title !== 'string' ||
     title.length === 0 ||
     typeof state !== 'string' ||
-    state.length === 0 ||
-    typeof htmlUrl !== 'string' ||
-    typeof createdAt !== 'string' ||
-    typeof updatedAt !== 'string'
+    state.length === 0
   ) {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub issue is missing required fields',
-      retryable: false,
-    })
+    throw trackerResponseError('GitHub issue is missing required fields')
   }
   const rawLabels = value['labels']
-  const labels =
-    rawLabels !== undefined && isJsonArray(rawLabels)
-      ? rawLabels.flatMap((item) => {
-          const label = decodeGitHubLabel(item)
-          return label === null ? [] : [label]
-        })
-      : []
+  const labels = isJsonArray(rawLabels)
+    ? rawLabels.flatMap((item) => {
+        const label = decodeGitHubLabel(item)
+        return label === null ? [] : [label]
+      })
+    : []
   const rawAssignee = value['assignee']
-  const assignee =
-    isJsonRecord(rawAssignee) && typeof rawAssignee['login'] === 'string'
-      ? { login: rawAssignee['login'] }
-      : null
   return {
     number,
     nodeId,
     title,
     body: nullableString(value['body']),
     state,
-    htmlUrl,
-    assignee,
+    htmlUrl: nonEmptyString(value['html_url']),
+    assigneeLogin: isJsonRecord(rawAssignee) ? nonEmptyString(rawAssignee['login']) : null,
     labels,
-    isPullRequest: value['pull_request'] !== undefined,
-    createdAt,
-    updatedAt,
+    isPullRequest: value['pull_request'] !== undefined && value['pull_request'] !== null,
+    createdAt: nonEmptyString(value['created_at']),
+    updatedAt: nonEmptyString(value['updated_at']),
   }
 }
 
 const decodeGitHubDependency = (value: JsonValue): GitHubDependency => {
   if (!isJsonRecord(value)) {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub issue dependency is not an object',
-      retryable: false,
-    })
+    throw trackerResponseError('GitHub issue dependency is not an object')
   }
   const id = value['id']
   const number = value['number']
@@ -223,11 +207,7 @@ const decodeGitHubDependency = (value: JsonValue): GitHubDependency => {
     typeof repositoryUrl !== 'string' ||
     typeof htmlUrl !== 'string'
   ) {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub issue dependency is missing required fields',
-      retryable: false,
-    })
+    throw trackerResponseError('GitHub issue dependency is missing required fields')
   }
   return { id, number, title, state, repositoryUrl, htmlUrl }
 }
@@ -255,15 +235,15 @@ const normalizeDependency = (
       url: source.htmlUrl,
     }
   } catch (cause: unknown) {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub issue dependency has an invalid repository URL',
-      retryable: false,
-      cause,
-    })
+    throw trackerResponseError('GitHub issue dependency has an invalid repository URL', cause)
   }
 }
 
+/**
+ * Section 11.3 normalization. Dispatch identity is the opaque issue number, native identity keeps
+ * the provider scope plus GraphQL node id, and every nullable field is normalized to `null` rather
+ * than an empty value.
+ */
 const normalizeIssue = (
   source: GitHubIssue,
   provider: GitHubProviderConfig,
@@ -297,7 +277,7 @@ const normalizeIssue = (
     state: source.state,
     branchName: null,
     url: source.htmlUrl,
-    assigneeId: source.assignee?.login ?? null,
+    assigneeId: source.assigneeLogin,
     labels,
     blockedBy,
     dispatchable: !source.isPullRequest,
@@ -306,113 +286,38 @@ const normalizeIssue = (
   }
 }
 
-const paginationError = (message: string, cause?: unknown): TrackerError =>
-  new TrackerError({
-    category: 'tracker_pagination',
-    message,
-    retryable: false,
-    ...(cause === undefined ? {} : { cause }),
-  })
+type DecodedPage = Readonly<{
+  issues: readonly Issue[]
+  malformed: readonly string[]
+}>
 
-const parseNextUrl = (
-  linkHeader: string | null,
-  requestUrl: string,
-  apiBaseUrl: string,
-): string | null => {
-  if (linkHeader === null) {
-    return null
+const decodeIssuePage = (body: JsonValue, provider: GitHubProviderConfig): DecodedPage => {
+  if (!isJsonArray(body)) {
+    throw trackerResponseError('GitHub issue list is not an array')
   }
-  for (const entry of linkHeader.split(',')) {
-    const [target, ...parameters] = entry.trim().split(';')
-    const relations = parameters.flatMap((parameter) => {
-      const match = /^\s*rel\s*=\s*"([^"]*)"\s*$/iu.exec(parameter)
-      return match?.[1]?.split(/\s+/u) ?? []
-    })
-    if (!relations.includes('next')) {
-      continue
-    }
-    const targetMatch = /^<([^<>]+)>$/u.exec(target ?? '')
-    if (targetMatch?.[1] === undefined) {
-      throw paginationError('GitHub returned an invalid next page link')
-    }
+  const issues: Issue[] = []
+  const malformed: string[] = []
+  for (const [index, item] of body.entries()) {
     try {
-      const nextUrl = new URL(targetMatch[1], requestUrl)
-      if (nextUrl.origin !== new URL(apiBaseUrl).origin) {
-        throw paginationError('GitHub next page URL has an unexpected origin')
+      issues.push(normalizeIssue(decodeGitHubIssue(item), provider))
+    } catch (error: unknown) {
+      if (!(error instanceof TrackerError)) {
+        throw error
       }
-      return nextUrl.href
-    } catch (cause: unknown) {
-      if (cause instanceof TrackerError) {
-        throw cause
-      }
-      throw paginationError('GitHub returned an invalid next page URL', cause)
+      const candidate = isJsonRecord(item) ? item['number'] : undefined
+      malformed.push(
+        `index ${String(index)}${typeof candidate === 'number' ? ` (number ${String(candidate)})` : ''}: ${error.message}`,
+      )
     }
   }
-  return null
+  return { issues, malformed }
 }
-
-const githubRequest = (
-  provider: GitHubProviderConfig,
-  url: string,
-): Effect.Effect<GitHubResponse, TrackerError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(githubRequestTimeoutMs),
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${provider.token}`,
-          'User-Agent': 'symphony-ts/0.1',
-          'X-GitHub-Api-Version': githubApiVersion,
-        },
-      })
-      if (response.status === 403 && response.headers.has('retry-after')) {
-        throw new TrackerError({
-          category: 'tracker_rate_limited',
-          message: 'GitHub rate limit exceeded',
-          retryable: true,
-        })
-      }
-      if (!response.ok) {
-        throw new TrackerError({
-          category: 'tracker_status',
-          message: `GitHub returned HTTP ${String(response.status)}`,
-          retryable: response.status >= 500,
-        })
-      }
-      const body: unknown = await response.json()
-      if (!isJsonValue(body)) {
-        throw new TrackerError({
-          category: 'tracker_response',
-          message: 'GitHub returned non-JSON data',
-          retryable: false,
-        })
-      }
-      return {
-        body,
-        nextUrl: parseNextUrl(response.headers.get('link'), url, provider.apiBaseUrl),
-      }
-    },
-    catch: (cause: unknown) =>
-      cause instanceof TrackerError
-        ? cause
-        : new TrackerError({
-            category: 'tracker_request',
-            message: 'GitHub request failed',
-            retryable: true,
-            cause,
-          }),
-  })
 
 const pullRequestNumberFromUrl = (url: string): number => {
   const match = /\/pulls?\/(\d+)(?:\/)?$/u.exec(url)
   const number = match?.[1] === undefined ? Number.NaN : Number(match[1])
   if (!Number.isSafeInteger(number) || number <= 0) {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub pull request URL has no valid number',
-      retryable: false,
-    })
+    throw trackerResponseError('GitHub pull request URL has no valid number')
   }
   return number
 }
@@ -422,50 +327,16 @@ const githubBranchExists = (
   prefix: string,
   branchName: string,
 ): Effect.Effect<boolean, TrackerError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(
-        `${provider.apiBaseUrl}${prefix}/git/ref/heads/${encodeURIComponent(branchName)}`,
-        {
-          signal: AbortSignal.timeout(githubRequestTimeoutMs),
-          headers: {
-            Accept: 'application/vnd.github+json',
-            Authorization: `Bearer ${provider.token}`,
-            'User-Agent': 'symphony-ts/0.1',
-            'X-GitHub-Api-Version': githubApiVersion,
-          },
-        },
-      )
-      if (response.status === 404) {
-        return false
-      }
-      if (!response.ok) {
-        throw new TrackerError({
-          category: 'tracker_status',
-          message: `GitHub returned HTTP ${String(response.status)}`,
-          retryable: response.status >= 500,
-        })
-      }
-      return true
-    },
-    catch: (cause: unknown) =>
-      cause instanceof TrackerError
-        ? cause
-        : new TrackerError({
-            category: 'tracker_request',
-            message: 'GitHub branch lookup failed',
-            retryable: true,
-            cause,
-          }),
-  })
+  githubJson(
+    provider,
+    `${provider.apiBaseUrl}${prefix}/git/ref/heads/${encodeURIComponent(branchName)}`,
+    undefined,
+    [404],
+  ).pipe(Effect.map(({ status }) => status !== 404))
 
-const decodePullRequestUrl = (value: JsonValue): string => {
+const decodePullRequestUrl = (value: JsonValue | null): string => {
   if (!isJsonRecord(value) || typeof value['html_url'] !== 'string') {
-    throw new TrackerError({
-      category: 'tracker_response',
-      message: 'GitHub pull request is missing html_url',
-      retryable: false,
-    })
+    throw trackerResponseError('GitHub pull request is missing html_url')
   }
   return value['html_url']
 }
@@ -475,22 +346,24 @@ const findPullRequest = (
   prefix: string,
   branchName: string,
 ): Effect.Effect<string | null, TrackerError> =>
-  githubRequest(
+  githubJson(
     provider,
-    `${provider.apiBaseUrl}${prefix}/pulls?state=open&head=${encodeURIComponent(`${provider.owner}:${branchName}`)}&base=${encodeURIComponent(provider.baseBranch)}&per_page=100`,
+    `${provider.apiBaseUrl}${prefix}/pulls?state=open&head=${encodeURIComponent(`${provider.owner}:${branchName}`)}&base=${encodeURIComponent(provider.baseBranch)}&per_page=${String(githubPageSize)}`,
   ).pipe(
     Effect.flatMap(({ body }) => {
       if (!isJsonArray(body)) {
-        return Effect.fail(
-          new TrackerError({
-            category: 'tracker_response',
-            message: 'GitHub pull request list is not an array',
-            retryable: false,
-          }),
-        )
+        return Effect.fail(trackerResponseError('GitHub pull request list is not an array'))
       }
       const first = body[0]
-      return Effect.succeed(first === undefined ? null : decodePullRequestUrl(first))
+      return first === undefined
+        ? Effect.succeed(null)
+        : Effect.try({
+            try: () => decodePullRequestUrl(first),
+            catch: (cause: unknown) =>
+              cause instanceof TrackerError
+                ? cause
+                : trackerResponseError('GitHub pull request is invalid', cause),
+          })
     }),
   )
 
@@ -500,110 +373,90 @@ const createPullRequest = (
   issue: Issue,
   branchName: string,
 ): Effect.Effect<string, TrackerError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(`${provider.apiBaseUrl}${prefix}/pulls`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(githubRequestTimeoutMs),
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${provider.token}`,
-          'Content-Type': 'application/json',
-          'User-Agent': 'symphony-ts/0.1',
-          'X-GitHub-Api-Version': githubApiVersion,
-        },
-        body: JSON.stringify({
-          base: provider.baseBranch,
-          head: branchName,
-          title: issue.title,
-          body: `Closes #${issue.id}`,
-        }),
-      })
-      if (!response.ok) {
-        throw new TrackerError({
-          category: 'tracker_status',
-          message: `GitHub returned HTTP ${String(response.status)}`,
-          retryable: response.status >= 500,
-        })
-      }
-      const body: unknown = await response.json()
-      if (!isJsonValue(body)) {
-        throw new TrackerError({
-          category: 'tracker_response',
-          message: 'GitHub returned non-JSON pull request data',
-          retryable: false,
-        })
-      }
-      return decodePullRequestUrl(body)
-    },
-    catch: (cause: unknown) =>
-      cause instanceof TrackerError
-        ? cause
-        : new TrackerError({
-            category: 'tracker_request',
-            message: 'GitHub pull request creation failed',
-            retryable: true,
-            cause,
-          }),
-  })
+  githubJson(provider, `${provider.apiBaseUrl}${prefix}/pulls`, {
+    method: 'POST',
+    body: JSON.stringify({
+      base: provider.baseBranch,
+      head: branchName,
+      title: issue.title,
+      body: `Closes #${issue.id}`,
+    }),
+  }).pipe(
+    Effect.flatMap(({ body }) =>
+      Effect.try({
+        try: () => decodePullRequestUrl(body),
+        catch: (cause: unknown) =>
+          cause instanceof TrackerError
+            ? cause
+            : trackerResponseError('GitHub pull request is invalid', cause),
+      }),
+    ),
+  )
 
 export const issueBranchName = (issue: Issue): string => `symphony/issue-${issue.id}`
+
+const paginate = <Value>(
+  provider: GitHubProviderConfig,
+  firstUrl: string,
+  decode: (body: JsonValue) => Value,
+  combine: (accumulated: readonly Value[]) => readonly Value[] = (values) => values,
+): Effect.Effect<readonly Value[], TrackerError> => {
+  const fetchPage = (
+    url: string,
+    visitedUrls: ReadonlySet<string>,
+    pageCount: number,
+  ): Effect.Effect<readonly Value[], TrackerError> =>
+    Effect.suspend(() => {
+      if (visitedUrls.has(url)) {
+        return Effect.fail(trackerPaginationError('GitHub pagination contains a cycle'))
+      }
+      if (pageCount > githubMaxPages) {
+        return Effect.fail(
+          trackerPaginationError(
+            `GitHub pagination exceeded ${String(githubMaxPages)} pages for a single scoped read`,
+          ),
+        )
+      }
+      return githubJson(provider, url).pipe(
+        Effect.flatMap(({ body, linkHeader }) =>
+          Effect.try({
+            try: () => ({
+              value: decode(body ?? null),
+              nextUrl: parseNextUrl(linkHeader, url, provider.apiBaseUrl),
+            }),
+            catch: (cause: unknown) =>
+              cause instanceof TrackerError
+                ? cause
+                : trackerResponseError('GitHub returned an undecodable page', cause),
+          }),
+        ),
+        Effect.flatMap(({ value, nextUrl }) =>
+          nextUrl === null
+            ? Effect.succeed([value])
+            : fetchPage(nextUrl, new Set([...visitedUrls, url]), pageCount + 1).pipe(
+                Effect.map((rest) => [value, ...rest]),
+              ),
+        ),
+      )
+    })
+  return fetchPage(firstUrl, new Set(), 1).pipe(Effect.map(combine))
+}
 
 const fetchBlockedBy = (
   provider: GitHubProviderConfig,
   prefix: string,
   issue: Issue,
-): Effect.Effect<readonly BlockerRef[], TrackerError> => {
-  const fetchPage = (
-    url: string,
-    visitedUrls: ReadonlySet<string>,
-  ): Effect.Effect<readonly BlockerRef[], TrackerError> =>
-    Effect.suspend(() => {
-      if (visitedUrls.has(url)) {
-        return Effect.fail(paginationError('GitHub dependency pagination contains a cycle'))
+): Effect.Effect<readonly BlockerRef[], TrackerError> =>
+  paginate(
+    provider,
+    `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(issue.id)}/dependencies/blocked_by?per_page=${String(githubPageSize)}`,
+    (body): readonly BlockerRef[] => {
+      if (!isJsonArray(body)) {
+        throw trackerResponseError('GitHub issue dependency list is not an array')
       }
-      return githubRequest(provider, url).pipe(
-        Effect.flatMap(({ body, nextUrl }) => {
-          if (!isJsonArray(body)) {
-            return Effect.fail(
-              new TrackerError({
-                category: 'tracker_response',
-                message: 'GitHub issue dependency list is not an array',
-                retryable: false,
-              }),
-            )
-          }
-          let blockers: readonly BlockerRef[]
-          try {
-            blockers = body.map((value) =>
-              normalizeDependency(decodeGitHubDependency(value), provider),
-            )
-          } catch (cause: unknown) {
-            return Effect.fail(
-              cause instanceof TrackerError
-                ? cause
-                : new TrackerError({
-                    category: 'tracker_response',
-                    message: 'GitHub issue dependency could not be decoded',
-                    retryable: false,
-                    cause,
-                  }),
-            )
-          }
-          if (nextUrl === null) {
-            return Effect.succeed(blockers)
-          }
-          return fetchPage(nextUrl, new Set([...visitedUrls, url])).pipe(
-            Effect.map((nextBlockers) => [...blockers, ...nextBlockers]),
-          )
-        }),
-      )
-    })
-  return fetchPage(
-    `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(issue.id)}/dependencies/blocked_by?per_page=100`,
-    new Set(),
-  )
-}
+      return body.map((value) => normalizeDependency(decodeGitHubDependency(value), provider))
+    },
+  ).pipe(Effect.map((pages) => pages.flat()))
 
 const hydrateDependencies = (
   provider: GitHubProviderConfig,
@@ -611,19 +464,23 @@ const hydrateDependencies = (
   issues: readonly Issue[],
   dependencyLabels: readonly string[] | null,
   cache: Map<IssueId, DependencyCacheEntry>,
+  useCache = true,
 ): Effect.Effect<readonly Issue[], TrackerError> =>
   Effect.forEach(
     issues,
     (issue) => {
       const shouldHydrate =
-        dependencyLabels === null ||
-        dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))
+        issue.dispatchable &&
+        (dependencyLabels === null ||
+          (dependencyLabels.length > 0 &&
+            dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))))
       if (!shouldHydrate) {
         return Effect.succeed(issue)
       }
       const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
       const cached = cache.get(issue.id)
       if (
+        useCache &&
         dependencyLabels === null &&
         cached !== undefined &&
         cached.issueUpdatedAt === issueUpdatedAt &&
@@ -661,55 +518,33 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
       if (states.length === 0) {
         return Effect.succeed([])
       }
-      const fetchPage = (
-        url: string,
-        visitedUrls: ReadonlySet<string>,
-      ): Effect.Effect<readonly Issue[], TrackerError> =>
-        Effect.suspend(() => {
-          if (visitedUrls.has(url)) {
-            return Effect.fail(paginationError('GitHub pagination contains a cycle'))
-          }
-          return githubRequest(provider, url).pipe(
-            Effect.flatMap(({ body, nextUrl }) => {
-              if (!isJsonArray(body)) {
-                return Effect.fail(
-                  new TrackerError({
-                    category: 'tracker_response',
-                    message: 'GitHub issue list is not an array',
-                    retryable: false,
-                  }),
-                )
-              }
-              const issues: Issue[] = []
-              for (const item of body) {
-                try {
-                  const issue = normalizeIssue(decodeGitHubIssue(item), provider)
-                  if (issue.dispatchable) {
-                    issues.push(issue)
-                  }
-                } catch (error: unknown) {
-                  if (!(error instanceof TrackerError)) {
-                    throw error
-                  }
-                }
-              }
-              if (nextUrl === null) {
-                return Effect.succeed(issues)
-              }
-              return fetchPage(nextUrl, new Set([...visitedUrls, url])).pipe(
-                Effect.map((nextIssues) => [...issues, ...nextIssues]),
-              )
-            }),
-          )
-        })
-      const fetchState = (state: string): Effect.Effect<readonly Issue[], TrackerError> =>
-        fetchPage(
-          `${provider.apiBaseUrl}${prefix}/issues?state=${encodeURIComponent(state.toLowerCase())}&per_page=100`,
-          new Set(),
+      const fetchState = (state: string): Effect.Effect<DecodedPage, TrackerError> =>
+        paginate(
+          provider,
+          `${provider.apiBaseUrl}${prefix}/issues?state=${encodeURIComponent(state.toLowerCase())}&per_page=${String(githubPageSize)}`,
+          (body) => decodeIssuePage(body, provider),
+        ).pipe(
+          Effect.map((pages) => ({
+            issues: pages.flatMap((page) => page.issues),
+            malformed: pages.flatMap((page) => page.malformed),
+          })),
         )
       return Effect.forEach(states, fetchState, { concurrency: 1 }).pipe(
-        Effect.map((groups) => [
-          ...new Map(groups.flat().map((issue) => [issue.id, issue])).values(),
+        Effect.tap((pages) => {
+          const malformed = pages.flatMap((page) => page.malformed)
+          return malformed.length === 0
+            ? Effect.void
+            : Effect.logWarning('tracker state list contained malformed records', {
+                tracker_kind: 'github',
+                provider_scope: `${provider.owner}/${provider.repository}`,
+                skipped: malformed.length,
+                details: malformed.slice(0, 10),
+              })
+        }),
+        Effect.map((pages) => [
+          ...new Map(
+            pages.flatMap((page) => page.issues).map((issue) => [issue.id, issue] as const),
+          ).values(),
         ]),
         Effect.flatMap((issues) =>
           options?.hydrateDependencies === false
@@ -719,22 +554,36 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
       )
     },
     fetchIssuesByIds: (ids, options): Effect.Effect<readonly Issue[], TrackerError> => {
-      if (ids.length === 0) {
+      const uniqueIds = [...new Set(ids)]
+      if (uniqueIds.length === 0) {
         return Effect.succeed([])
       }
       return Effect.forEach(
-        [...new Set(ids)],
+        uniqueIds,
         (id) =>
-          githubRequest(
+          githubJson(
             provider,
             `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
-          ).pipe(Effect.map(({ body }) => normalizeIssue(decodeGitHubIssue(body), provider))),
-        { concurrency: 4 },
+          ).pipe(
+            Effect.flatMap(({ body }) =>
+              Effect.try({
+                try: () => normalizeIssue(decodeGitHubIssue(body ?? null), provider),
+                catch: (cause: unknown) =>
+                  cause instanceof TrackerError
+                    ? cause
+                    : trackerResponseError(`GitHub issue ${id} could not be decoded`, cause),
+              }),
+            ),
+          ),
+        { concurrency: idRefreshConcurrency },
       ).pipe(
+        Effect.map((issues) => [
+          ...new Map(issues.map((issue) => [issue.id, issue] as const)).values(),
+        ]),
         Effect.flatMap((issues) =>
           options?.hydrateDependencies === false
             ? Effect.succeed(issues)
-            : hydrateDependencies(provider, prefix, issues, [], dependencyCache),
+            : hydrateDependencies(provider, prefix, issues, null, dependencyCache, false),
         ),
       )
     },
@@ -751,12 +600,20 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
                 ? createPullRequest(provider, prefix, issue, branchName)
                 : Effect.succeed(existingUrl),
             ),
-            Effect.map((pullRequestUrl): HandoffResult => ({
-              _tag: 'PullRequest',
-              branchName,
-              pullRequestUrl,
-              pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
-            })),
+            Effect.flatMap((pullRequestUrl) =>
+              Effect.try({
+                try: (): HandoffResult => ({
+                  _tag: 'PullRequest',
+                  branchName,
+                  pullRequestUrl,
+                  pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
+                }),
+                catch: (cause: unknown) =>
+                  cause instanceof TrackerError
+                    ? cause
+                    : trackerResponseError('GitHub pull request URL is invalid', cause),
+              }),
+            ),
           )
         }),
       )
@@ -767,50 +624,14 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
   }
 }
 
-const githubMutation = (
-  provider: GitHubProviderConfig,
-  path: string,
-  method: 'POST',
-  body: string | undefined,
-): Effect.Effect<void, TrackerError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(`${provider.apiBaseUrl}${path}`, {
-        method,
-        signal: AbortSignal.timeout(githubRequestTimeoutMs),
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${provider.token}`,
-          'Content-Type': 'application/json',
-          'User-Agent': 'symphony-ts/0.1',
-          'X-GitHub-Api-Version': githubApiVersion,
-        },
-        ...(body === undefined ? {} : { body }),
-      })
-      if (!response.ok) {
-        throw new TrackerError({
-          category: 'tracker_status',
-          message: `GitHub returned HTTP ${String(response.status)}`,
-          retryable: response.status >= 500,
-        })
-      }
-    },
-    catch: (cause: unknown) =>
-      cause instanceof TrackerError
-        ? cause
-        : new TrackerError({
-            category: 'tracker_request',
-            message: 'GitHub mutation failed',
-            retryable: true,
-            cause,
-          }),
-  })
-
 export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIssueControl => {
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const tracker = makeGitHubTracker(provider)
   return {
-    listOpenIssues: () => tracker.fetchIssuesByStates(['open'], null),
+    listOpenIssues: () =>
+      tracker
+        .fetchIssuesByStates(['open'], null)
+        .pipe(Effect.map((issues) => issues.filter((issue) => issue.dispatchable))),
     addLabel: (issueNumber, label) => {
       if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
         return Effect.fail(
@@ -830,12 +651,14 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIs
           }),
         )
       }
-      return githubMutation(
+      return githubJson(
         provider,
-        `${prefix}/issues/${String(issueNumber)}/labels`,
-        'POST',
-        JSON.stringify({ labels: [label] }),
-      )
+        `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}/labels`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ labels: [label] }),
+        },
+      ).pipe(Effect.asVoid)
     },
   }
 }

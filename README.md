@@ -144,6 +144,68 @@ The host removes the configured token's environment-variable name plus the GitHu
 `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environments.
 
 This validation runs at startup, on every workflow reload, and again as a dispatch preflight before
-each agent launch, so a rotated or removed credential is detected before a worker starts.
+each agent launch. When the referenced variable resolves to a different value, the tracker is
+rebuilt from the revalidated provider — including live workers and handoffs — so no request keeps
+using a superseded credential.
+
+## GitHub tracker adapter profile
+
+**Configuration and secrets.** See the provider table above. `token` is the adapter's only declared
+secret and must be a `$VAR` reference. The host keeps the reference's variable name as provenance
+rather than a second plaintext copy, and strips that name plus `GITHUB_TOKEN` and `GH_TOKEN` from
+Codex subprocess environments while always preserving `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`.
+
+**Scope.** Every request is scoped to `/repos/{owner}/{repository}` on the configured
+`api_base_url`. Pagination links to a different origin are rejected, so the token is never sent
+off-origin. Dispatch identity is the opaque issue number; native identity is
+`{ node_id, issue_number, owner, repository }`. The core never parses either.
+
+**Request limits and pagination.** List reads use `per_page=100`, follow only the `rel="next"` link,
+reject a repeated URL as a cycle, and fail after 100 pages for one scoped read. Requests time out
+after 30 s. Identity refresh and dependency hydration run at concurrency 4; state reads run one
+state at a time. Dependency hydration is cached for 60 s per issue, keyed on the issue's
+`updated_at`.
+
+The `dependencyLabels` argument of a state-list read selects blocker hydration: `null` hydrates
+every dispatch candidate, a list hydrates only candidates carrying all of those labels, and an empty
+list hydrates none — which is what a startup terminal sweep wants.
+
+**Normalization (Section 11.3).**
+
+| Field                     | Source                          | Rule                                                        |
+| ------------------------- | ------------------------------- | ----------------------------------------------------------- |
+| `id`                      | `number`                        | Required positive integer, as an opaque string              |
+| `nativeRef`               | `node_id` + provider scope      | Required                                                    |
+| `identifier`              | provider scope + `number`       | `owner/repository#number`                                   |
+| `title`                   | `title`                         | Required, non-empty                                         |
+| `description`             | `body`                          | Nullable                                                    |
+| `priority`                | `priority:1`–`priority:4` label | Nullable                                                    |
+| `state`                   | `state`                         | Required, non-empty                                         |
+| `branchName`              | —                               | Always `null` (GitHub issues carry no branch)               |
+| `url`                     | `html_url`                      | Nullable; empty becomes `null`                              |
+| `assigneeId`              | `assignee.login`                | Nullable; empty becomes `null`                              |
+| `labels`                  | `labels`                        | Object or string entries, trimmed, lowercased, deduplicated |
+| `blockedBy`               | `dependencies/blocked_by`       | Collection; scope-checked repository URLs                   |
+| `dispatchable`            | `pull_request`                  | `false` when the record is a pull request                   |
+| `createdAt` / `updatedAt` | `created_at` / `updated_at`     | Nullable; unparsable becomes `null`                         |
+
+**Dispatchability.** State-list reads return every normalized record in scope, including
+`dispatchable=false`; the orchestrator owns filtering. Dependency hydration is skipped for
+non-dispatchable records, and the operator backlog filters them out for display.
+
+**Malformed records.** A malformed record in a state-list read is skipped with a warning naming its
+index and reason; valid records on the same page are preserved. A malformed record in an identity
+refresh fails the call, because the caller asked for that specific record.
+
+**Portable error mappings.**
+
+| Condition                                                                  | Category               | Retryable | Metadata                                                    |
+| -------------------------------------------------------------------------- | ---------------------- | --------- | ----------------------------------------------------------- |
+| Transport failure or timeout                                               | `tracker_request`      | yes       | —                                                           |
+| `429`, or `403` with `Retry-After` or an exhausted `x-ratelimit-remaining` | `tracker_rate_limited` | yes       | `retryAfterMs` from `Retry-After`, else `x-ratelimit-reset` |
+| `5xx`, `408`, `409`                                                        | `tracker_status`       | yes       | —                                                           |
+| Other non-success status                                                   | `tracker_status`       | no        | —                                                           |
+| Non-JSON or schema-violating payload                                       | `tracker_response`     | no        | —                                                           |
+| Cyclic, off-origin, malformed or unbounded pagination                      | `tracker_pagination`   | no        | —                                                           |
 
 This project is independent of OpenAI and is not an official OpenAI distribution.
