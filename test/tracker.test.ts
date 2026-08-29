@@ -320,6 +320,7 @@ describe('GitHub pull request handoff', (): void => {
       _tag: 'PullRequest',
       branchName: 'symphony/issue-28',
       pullRequestUrl: 'https://example.test/pulls/31',
+      pullRequestNumber: 31,
     })
     expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET', 'POST'])
   })

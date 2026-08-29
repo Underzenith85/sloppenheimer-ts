@@ -232,7 +232,7 @@ export const makeOperatorBackend = (
                   }),
                 )
               }
-              return issues.setLabel(issueNumber, label, true).pipe(
+              return issues.addLabel(issueNumber, label).pipe(
                 Effect.zipRight(orchestrator.setIssuePaused(issueNumber, false)),
                 Effect.tap(() => Effect.sync(() => pausedIssueNumbers.delete(issueNumber))),
               )
