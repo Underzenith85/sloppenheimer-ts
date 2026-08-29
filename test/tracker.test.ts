@@ -9,6 +9,7 @@ const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
   token: 'secret',
+  tokenEnvironmentName: 'CUSTOM_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
 }
@@ -62,6 +63,22 @@ const requestUrl = (input: string | URL | Request): string => {
 
 afterEach((): void => {
   vi.unstubAllGlobals()
+})
+
+describe('GitHub tracker authentication provenance', (): void => {
+  it('declares the configured secret variable and all fallback aliases', (): void => {
+    expect(makeGitHubTracker(provider).secretEnvironmentNames).toEqual([
+      'CUSTOM_GITHUB_TOKEN',
+      'GITHUB_TOKEN',
+      'GH_TOKEN',
+    ])
+  })
+
+  it('deduplicates a configured fallback alias', (): void => {
+    expect(
+      makeGitHubTracker({ ...provider, tokenEnvironmentName: 'GH_TOKEN' }).secretEnvironmentNames,
+    ).toEqual(['GH_TOKEN', 'GITHUB_TOKEN'])
+  })
 })
 
 describe('GitHub tracker pagination', (): void => {

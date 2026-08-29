@@ -200,7 +200,9 @@ export const makeOperatorBackend = (
       loadControl.pipe(
         Effect.flatMap(({ label, issues, terminalStates }) => {
           if (!enabled) {
-            return issues.setLabel(issueNumber, label, false)
+            return issues
+              .setLabel(issueNumber, label, false)
+              .pipe(Effect.zipRight(orchestrator.pauseIssue(issueNumber)))
           }
           return issues.listOpenIssues().pipe(
             Effect.flatMap((openIssues) => {
