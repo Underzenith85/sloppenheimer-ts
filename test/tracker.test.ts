@@ -26,6 +26,15 @@ const githubIssue = (number: number): JsonObject => ({
   updated_at: '2026-01-02T00:00:00.000Z',
 })
 
+const githubDependency = (number: number, state = 'open'): JsonObject => ({
+  id: 10_000 + number,
+  number,
+  title: `Blocker ${String(number)}`,
+  state,
+  repository_url: 'https://api.example.test/repos/example/symphony',
+  html_url: `https://example.test/issues/${String(number)}`,
+})
+
 const handoffIssue: Issue = {
   id: issueId('28'),
   nativeRef: null,
@@ -60,6 +69,9 @@ describe('GitHub tracker pagination', (): void => {
     const secondPageUrl =
       'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100&page=2'
     const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      if (requestUrl(input).includes('/dependencies/blocked_by')) {
+        return Response.json([])
+      }
       if (requestUrl(input) === secondPageUrl) {
         return Response.json([githubIssue(2), githubIssue(3)])
       }
@@ -76,8 +88,8 @@ describe('GitHub tracker pagination', (): void => {
     )
 
     expect(issues.map((issue) => issue.id)).toEqual(['1', '2', '3'])
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(fetchMock.mock.calls.map(([input]) => requestUrl(input))).toEqual([
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(fetchMock.mock.calls.slice(0, 2).map(([input]) => requestUrl(input))).toEqual([
       'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100',
       secondPageUrl,
     ])
@@ -119,6 +131,85 @@ describe('GitHub tracker pagination', (): void => {
 
     expect(error.category).toBe('tracker_pagination')
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('GitHub native issue dependencies', (): void => {
+  it('decodes blockers and follows dependency pagination', async (): Promise<void> => {
+    const next =
+      'https://api.example.test/repos/example/symphony/issues/2/dependencies/blocked_by?per_page=100&page=2'
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url = requestUrl(input)
+        if (url.endsWith('/issues/2')) {
+          return Response.json(githubIssue(2))
+        }
+        if (url === next) {
+          return Response.json([githubDependency(4, 'closed')])
+        }
+        expect(new Headers(init?.headers).get('X-GitHub-Api-Version')).toBe('2026-03-10')
+        return Response.json([githubDependency(3)], { headers: { Link: `<${next}>; rel="next"` } })
+      },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [issue] = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')]),
+    )
+
+    expect(issue?.blockedBy).toEqual([
+      {
+        id: '10003',
+        identifier: 'example/symphony#3',
+        title: 'Blocker 3',
+        state: 'open',
+        url: 'https://example.test/issues/3',
+      },
+      {
+        id: '10004',
+        identifier: 'example/symphony#4',
+        title: 'Blocker 4',
+        state: 'closed',
+        url: 'https://example.test/issues/4',
+      },
+    ])
+  })
+
+  it.each([
+    ['missing state', { ...githubDependency(3), state: undefined }],
+    ['malformed id', { ...githubDependency(3), id: 'not-a-number' }],
+    ['missing repository', { ...githubDependency(3), repository_url: undefined }],
+  ])('fails conservatively for %s', async (_name, dependency): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
+      requestUrl(input).endsWith('/issues/2')
+        ? Response.json(githubIssue(2))
+        : Response.json([dependency]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const error = await Effect.runPromise(
+      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')])),
+    )
+
+    expect(error.category).toBe('tracker_response')
+    expect(error.retryable).toBe(false)
+  })
+
+  it('preserves useful dependency API errors', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
+      requestUrl(input).endsWith('/issues/2')
+        ? Response.json(githubIssue(2))
+        : new Response(null, { status: 503 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const error = await Effect.runPromise(
+      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')])),
+    )
+
+    expect(error.category).toBe('tracker_status')
+    expect(error.retryable).toBe(true)
+    expect(error.message).toContain('503')
   })
 })
 

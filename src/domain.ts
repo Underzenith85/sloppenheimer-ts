@@ -10,9 +10,11 @@ export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[]
 export type JsonObject = Readonly<{ [key: string]: JsonValue }>
 
 export type BlockerRef = Readonly<{
-  id: string | null
-  identifier: string | null
-  state: string | null
+  id: string
+  identifier: IssueIdentifier
+  title: string
+  state: string
+  url: string
 }>
 
 export type Issue = Readonly<{

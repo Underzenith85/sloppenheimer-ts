@@ -1,8 +1,10 @@
 import { Effect } from 'effect'
 
+import { findDependencyCycles, unresolvedBlockers, type DependencyCycle } from './dependencies.js'
+import { normalizeState, type Issue } from './domain.js'
 import type { OrchestratorControl, OrchestratorSnapshot } from './orchestrator.js'
 import { makeGitHubIssueControl } from './tracker.js'
-import { WorkflowError, type TrackerError } from './errors.js'
+import { TrackerError, WorkflowError } from './errors.js'
 import { loadWorkflow, type Workflow } from './workflow.js'
 
 export type BacklogIssue = Readonly<{
@@ -14,11 +16,34 @@ export type BacklogIssue = Readonly<{
   priority: number | null
   createdAt: string | null
   enabled: boolean
+  state: string
+  blockedBy: Issue['blockedBy']
+  readiness: 'ready' | 'blocked' | 'cyclic'
+  reason: string | null
+}>
+
+export type DependencyNode = Readonly<{
+  identifier: string
+  number: number | null
+  title: string
+  url: string | null
+  state: string
+  readiness: 'ready' | 'blocked' | 'cyclic' | 'completed'
+  reason: string | null
+  actionable: boolean
+}>
+
+export type DependencyEdge = Readonly<{
+  blocker: string
+  dependent: string
 }>
 
 export type BacklogSnapshot = Readonly<{
   controlLabel: string
   issues: readonly BacklogIssue[]
+  nodes: readonly DependencyNode[]
+  edges: readonly DependencyEdge[]
+  cycles: readonly DependencyCycle[]
 }>
 
 export type OperatorBackendError = WorkflowError | TrackerError
@@ -46,6 +71,90 @@ const controlLabel = (workflow: Workflow): Effect.Effect<string, WorkflowError> 
   return Effect.succeed(labels[0].trim())
 }
 
+const terminalState = (state: string, terminalStates: readonly string[]): boolean =>
+  terminalStates.some((candidate) => normalizeState(candidate) === normalizeState(state))
+
+const issueNumber = (identifier: string): number | null => {
+  const match = /#(\d+)$/u.exec(identifier)
+  return match?.[1] === undefined ? null : Number(match[1])
+}
+
+export const buildBacklogSnapshot = (
+  openIssues: readonly Issue[],
+  label: string,
+  terminalStates: readonly string[],
+): BacklogSnapshot => {
+  const cycles = findDependencyCycles(openIssues)
+  const cyclic = new Set(cycles.flatMap((cycle) => cycle.members))
+  const issues = openIssues.map((issue): BacklogIssue => {
+    const blockers = unresolvedBlockers(issue, terminalStates)
+    const isCyclic = cyclic.has(issue.identifier)
+    return {
+      number: Number(issue.id),
+      identifier: issue.identifier,
+      title: issue.title,
+      url: issue.url,
+      labels: issue.labels,
+      priority: issue.priority,
+      createdAt: issue.createdAt?.toISOString() ?? null,
+      enabled: issue.labels.includes(label.toLowerCase()),
+      state: issue.state,
+      blockedBy: issue.blockedBy,
+      readiness: isCyclic ? 'cyclic' : blockers.length > 0 ? 'blocked' : 'ready',
+      reason: isCyclic
+        ? (cycles.find((cycle) => cycle.members.includes(issue.identifier))?.message ??
+          'Issue belongs to a dependency cycle')
+        : blockers.length > 0
+          ? `Waiting for ${blockers.map((blocker) => blocker.identifier).join(', ')}`
+          : null,
+    }
+  })
+  const nodes = new Map<string, DependencyNode>()
+  for (const issue of issues) {
+    nodes.set(issue.identifier, {
+      identifier: issue.identifier,
+      number: issue.number,
+      title: issue.title,
+      url: issue.url,
+      state: issue.state,
+      readiness: issue.readiness,
+      reason: issue.reason,
+      actionable: true,
+    })
+  }
+  const edges: DependencyEdge[] = []
+  for (const issue of issues) {
+    for (const blocker of issue.blockedBy) {
+      edges.push({ blocker: blocker.identifier, dependent: issue.identifier })
+      if (!nodes.has(blocker.identifier)) {
+        nodes.set(blocker.identifier, {
+          identifier: blocker.identifier,
+          number: issueNumber(blocker.identifier),
+          title: blocker.title,
+          url: blocker.url,
+          state: blocker.state,
+          readiness: terminalState(blocker.state, terminalStates) ? 'completed' : 'blocked',
+          reason: terminalState(blocker.state, terminalStates)
+            ? null
+            : 'Unresolved blocker outside the open backlog',
+          actionable: false,
+        })
+      }
+    }
+  }
+  return {
+    controlLabel: label,
+    issues,
+    nodes: [...nodes.values()].sort((left, right) =>
+      left.identifier.localeCompare(right.identifier),
+    ),
+    edges: edges.sort((left, right) =>
+      `${left.blocker}\0${left.dependent}`.localeCompare(`${right.blocker}\0${right.dependent}`),
+    ),
+    cycles,
+  }
+}
+
 export const makeOperatorBackend = (
   workflowPath: string,
   orchestrator: OrchestratorControl,
@@ -56,6 +165,7 @@ export const makeOperatorBackend = (
         Effect.map((label) => ({
           label,
           issues: makeGitHubIssueControl(workflow.config.tracker.provider),
+          terminalStates: workflow.config.tracker.terminalStates,
         })),
       ),
     ),
@@ -65,27 +175,47 @@ export const makeOperatorBackend = (
     snapshot: orchestrator.snapshot,
     refresh: orchestrator.refresh,
     backlog: loadControl.pipe(
-      Effect.flatMap(({ label, issues }) =>
-        issues.listOpenIssues().pipe(
-          Effect.map((openIssues) => ({
-            controlLabel: label,
-            issues: openIssues.map((issue) => ({
-              number: Number(issue.id),
-              identifier: issue.identifier,
-              title: issue.title,
-              url: issue.url,
-              labels: issue.labels,
-              priority: issue.priority,
-              createdAt: issue.createdAt?.toISOString() ?? null,
-              enabled: issue.labels.includes(label.toLowerCase()),
-            })),
-          })),
-        ),
+      Effect.flatMap(({ label, issues, terminalStates }) =>
+        issues
+          .listOpenIssues()
+          .pipe(
+            Effect.map((openIssues) => buildBacklogSnapshot(openIssues, label, terminalStates)),
+          ),
       ),
     ),
     setIssueEnabled: (issueNumber, enabled) =>
       loadControl.pipe(
-        Effect.flatMap(({ label, issues }) => issues.setLabel(issueNumber, label, enabled)),
+        Effect.flatMap(({ label, issues, terminalStates }) => {
+          if (!enabled) {
+            return issues.setLabel(issueNumber, label, false)
+          }
+          return issues.listOpenIssues().pipe(
+            Effect.flatMap((openIssues) => {
+              const target = buildBacklogSnapshot(openIssues, label, terminalStates).issues.find(
+                (issue) => issue.number === issueNumber,
+              )
+              if (target === undefined) {
+                return Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_response',
+                    message: 'issue is not present in the open backlog',
+                    retryable: false,
+                  }),
+                )
+              }
+              if (target.readiness !== 'ready') {
+                return Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_response',
+                    message: target.reason ?? 'issue is not ready',
+                    retryable: false,
+                  }),
+                )
+              }
+              return issues.setLabel(issueNumber, label, true)
+            }),
+          )
+        }),
       ),
   }
 }
