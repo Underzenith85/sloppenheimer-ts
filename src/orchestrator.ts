@@ -494,7 +494,7 @@ export const startOrchestrator = (
         ).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: () => ({ _tag: 'Succeeded' as const }),
+            onSuccess: (tracker) => ({ _tag: 'Succeeded' as const, tracker }),
           }),
         )
         if (preflight._tag === 'Failed') {
@@ -505,7 +505,19 @@ export const startOrchestrator = (
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
           return
         }
-        const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
+        const refreshedWorkflow: Workflow = {
+          ...effective.workflow,
+          tracker: preflight.tracker,
+        }
+        const refreshedEffective: EffectiveWorkflow = {
+          ...effective,
+          workflow: refreshedWorkflow,
+          tracker: dependencies.makeTracker(refreshedWorkflow),
+        }
+        if (effective === lastKnownGood) {
+          lastKnownGood = refreshedEffective
+        }
+        const renderedPrompt = yield* renderPrompt(refreshedWorkflow, issue, attempt).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
             onSuccess: (prompt) => ({ _tag: 'Succeeded' as const, prompt }),
@@ -515,7 +527,7 @@ export const startOrchestrator = (
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
           return
         }
-        const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
+        const execution = captureExecutionSnapshot(refreshedEffective, renderedPrompt.prompt)
         const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
           execution.tracker.fetchIssuesByIds([issue.id]).pipe(
             Effect.map((issues) => issues[0] ?? null),

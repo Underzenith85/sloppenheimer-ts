@@ -206,6 +206,7 @@ const makeHarness = (
   initial: Workflow,
   candidates: (workflow: Workflow) => readonly Issue[] = () => [],
   fetchCandidates?: (workflow: Workflow) => Effect.Effect<readonly Issue[], never>,
+  environment: NodeJS.ProcessEnv = testEnvironment,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
   let notifyChanged = (): void => undefined
@@ -262,7 +263,7 @@ const makeHarness = (
         agentRuns.push({ command: config.command, prompt, maxTurns })
         resolveAgentRun()
       }).pipe(Effect.zipRight(Effect.never)),
-    environment: testEnvironment,
+    environment,
     watchWorkflow: (_path, onChange) => {
       notifyChanged = onChange
       return { close: () => Promise.resolve() }
@@ -577,6 +578,31 @@ describe('workflow hot reload', (): void => {
         }),
       ),
     )
+  })
+
+  it('uses the provider returned by dispatch preflight', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const harness = makeHarness(
+      workflow,
+      () => [],
+      () => {
+        environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+        return Effect.succeed([issue])
+      },
+      environment,
+    )
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* harness.awaitAgentRun
+        }),
+      ),
+    )
+
+    expect(harness.trackerWorkflows().at(-1)?.tracker.provider.token).toBe('rotated')
   })
 
   it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
