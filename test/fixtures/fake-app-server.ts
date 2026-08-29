@@ -95,6 +95,18 @@ const handleTurnStart = (id: unknown): void => {
       }, 20)
       return
     }
+    case 'batched-identity': {
+      // Response and a turn-less notification in a single write, so the client reads both from one
+      // chunk and must know the turn id before it dispatches the notification.
+      sendRaw(
+        `${JSON.stringify({ id, result: { turn } })}\n${JSON.stringify({
+          method: 'item/agentMessage',
+          params: { text: 'working' },
+        })}\n`,
+      )
+      completeTurn()
+      return
+    }
     case 'usage': {
       send({ id, result: { turn } })
       send({

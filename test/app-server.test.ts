@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { Effect } from 'effect'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   codexMaxLineBytes,
@@ -126,6 +126,32 @@ describe('App Server framing', (): void => {
     expect(overflowed).toBe(true)
   })
 
+  it('assembles a chunked line without recopying the pending prefix', (): void => {
+    const lines: string[] = []
+    const read = makeLineReader(
+      1024 * 1024,
+      (line) => {
+        lines.push(line)
+      },
+      () => {},
+    )
+    const concat = vi.spyOn(Buffer, 'concat')
+    const part = 'y'.repeat(64 * 1024)
+
+    for (let index = 0; index < 8; index += 1) {
+      read(Buffer.from(part))
+    }
+    read(Buffer.from('\n'))
+
+    const copies = concat.mock.calls.length
+    concat.mockRestore()
+
+    expect(lines).toEqual([part.repeat(8)])
+    // One copy for the whole line rather than one per chunk, so framing stays linear in line size:
+    // a permitted 10 MB frame arriving in pipe-sized chunks must not copy hundreds of megabytes.
+    expect(copies).toBe(1)
+  })
+
   it('keeps the documented 10 MB protocol line limit', (): void => {
     expect(codexMaxLineBytes).toBe(10 * 1024 * 1024)
   })
@@ -150,6 +176,15 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
     expect(started?.message).toBe('https://example.test/issues/14')
   })
+
+  it('attributes a notification batched with the turn/start response to that turn', async (): Promise<void> => {
+    const outcome = await runScenario('batched-identity')
+
+    expect(outcome.error).toBeNull()
+    const message = outcome.events.find((event) => event.event === 'item/agentMessage')
+    expect(message?.turnId).toBe('turn-1')
+    expect(message?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
+  }, 30_000)
 
   it('does not lose a completion that arrives before its waiter exists', async (): Promise<void> => {
     const outcome = await runScenario('immediate-completion')

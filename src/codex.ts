@@ -121,33 +121,54 @@ export const makeLineReader = (
   onLine: (line: string) => void,
   onOverflow: () => void,
 ): ((chunk: Buffer) => void) => {
-  let pending: Buffer = Buffer.alloc(0)
+  let pending: Buffer[] = []
+  let pendingBytes = 0
   let overflowed = false
+  const overflow = (): void => {
+    overflowed = true
+    pending = []
+    pendingBytes = 0
+    onOverflow()
+  }
   return (chunk: Buffer): void => {
     if (overflowed) {
       return
     }
-    pending = pending.byteLength === 0 ? chunk : Buffer.concat([pending, chunk])
+    pending.push(chunk)
+    pendingBytes += chunk.byteLength
+    if (chunk.indexOf(0x0a) < 0) {
+      // No frame boundary here, so hold the chunk whole. Concatenating on every chunk would make
+      // framing quadratic in line size: a permitted 10 MB frame arriving in pipe-sized chunks
+      // would copy hundreds of megabytes before its terminator ever showed up.
+      if (pendingBytes > limitBytes) {
+        overflow()
+      }
+      return
+    }
+    let buffer = pending.length === 1 ? chunk : Buffer.concat(pending, pendingBytes)
+    pending = []
+    pendingBytes = 0
     for (;;) {
-      const index = pending.indexOf(0x0a)
+      const index = buffer.indexOf(0x0a)
       if (index < 0) {
         break
       }
-      const raw = pending.subarray(0, index)
-      pending = pending.subarray(index + 1)
+      const raw = buffer.subarray(0, index)
+      buffer = buffer.subarray(index + 1)
       const line = raw.at(-1) === 0x0d ? raw.subarray(0, raw.byteLength - 1) : raw
       if (line.byteLength > limitBytes) {
-        overflowed = true
-        pending = Buffer.alloc(0)
-        onOverflow()
+        overflow()
         return
       }
       onLine(line.toString('utf8'))
     }
-    if (pending.byteLength > limitBytes) {
-      overflowed = true
-      pending = Buffer.alloc(0)
-      onOverflow()
+    if (buffer.byteLength > limitBytes) {
+      overflow()
+      return
+    }
+    if (buffer.byteLength > 0) {
+      pending.push(buffer)
+      pendingBytes = buffer.byteLength
     }
   }
 }
@@ -464,7 +485,29 @@ class CodexConnection {
       )
       return
     }
+    this.#adoptIdentity(result)
     pending.resolve(result)
+  }
+
+  /**
+   * Adopts the thread and turn ids carried by a response *while settling it*, not in the awaiting
+   * continuation. The App Server may batch a `turn/start` response and the notifications it
+   * triggers into one stdout chunk; those notifications are dispatched synchronously by the line
+   * reader, long before any `await` resumes, so an id adopted by the awaiter would arrive too late
+   * and every batched notification would report the previous turn — or none at all.
+   */
+  #adoptIdentity(result: JsonValue): void {
+    if (!isJsonObject(result)) {
+      return
+    }
+    const thread = result['thread']
+    if (isJsonObject(thread) && typeof thread['id'] === 'string') {
+      this.#threadId = thread['id']
+    }
+    const turn = result['turn']
+    if (isJsonObject(turn) && typeof turn['id'] === 'string') {
+      this.#turnId = turn['id']
+    }
   }
 
   #handleServerRequest(id: number, method: string): void {
