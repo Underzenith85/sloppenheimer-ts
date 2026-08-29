@@ -19,10 +19,15 @@ const parsePort = (value: string): number => {
 export const parseCliArguments = (arguments_: readonly string[]): CliOptions => {
   let workflow = 'WORKFLOW.md'
   let workflowWasSet = false
+  let optionsEnded = false
   let port: number | undefined
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index]
-    if (argument === '--port') {
+    if (!optionsEnded && argument === '--') {
+      optionsEnded = true
+      continue
+    }
+    if (!optionsEnded && argument === '--port') {
       const value = arguments_[index + 1]
       if (value === undefined) {
         throw new Error('--port requires a value')
@@ -31,11 +36,11 @@ export const parseCliArguments = (arguments_: readonly string[]): CliOptions => 
       index += 1
       continue
     }
-    if (argument?.startsWith('--port=') === true) {
+    if (!optionsEnded && argument?.startsWith('--port=') === true) {
       port = parsePort(argument.slice('--port='.length))
       continue
     }
-    if (argument?.startsWith('-') === true) {
+    if (!optionsEnded && argument?.startsWith('-') === true) {
       throw new Error(`unknown option: ${argument}`)
     }
     if (argument !== undefined && !workflowWasSet) {

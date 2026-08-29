@@ -18,6 +18,20 @@ describe('CLI options', (): void => {
     })
   })
 
+  it('accepts the package-manager option separator before the workflow path', (): void => {
+    expect(parseCliArguments(['--', 'WORKFLOW.md'])).toEqual({
+      workflowPath: resolve('WORKFLOW.md'),
+      port: undefined,
+    })
+  })
+
+  it('parses Symphony options before the option separator', (): void => {
+    expect(parseCliArguments(['--port', '0', '--', 'custom.md'])).toEqual({
+      workflowPath: resolve('custom.md'),
+      port: 0,
+    })
+  })
+
   it('rejects unsafe ports and unknown options', (): void => {
     expect(() => parseCliArguments(['--port', '65536'])).toThrow('between 0 and 65535')
     expect(() => parseCliArguments(['--listen-all'])).toThrow('unknown option')
