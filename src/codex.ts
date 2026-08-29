@@ -137,9 +137,17 @@ export const telemetryFrom = (
   return { usage: null, rateLimits: null }
 }
 
-const boundedMessage = (value: string): string => {
+export const boundedMessage = (value: string): string => {
   const redacted = value
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(
+      /"(api[_-]?key|authorization|password|token)"\s*:\s*"(?:\\.|[^"\\])*"/giu,
+      '"$1":"[REDACTED]"',
+    )
+    .replace(
+      /'(api[_-]?key|authorization|password|token)'\s*:\s*'(?:\\.|[^'\\])*'/giu,
+      "'$1':'[REDACTED]'",
+    )
     .replace(/\b(api[_-]?key|authorization|password|token)\s*[:=]\s*\S+/giu, '$1=[REDACTED]')
   return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
 }

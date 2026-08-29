@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { makeCodexEnvironment, telemetryFrom } from '../src/codex.js'
+import { boundedMessage, makeCodexEnvironment, telemetryFrom } from '../src/codex.js'
 
 describe('Codex child environment', (): void => {
   it('removes custom tracker secrets and every GitHub authentication alias', (): void => {
@@ -33,6 +33,14 @@ describe('Codex child environment', (): void => {
       OPENAI_API_KEY: 'openai-key',
       CODEX_ACCESS_TOKEN: 'codex-access-token',
     })
+  })
+})
+
+describe('Codex event message redaction', (): void => {
+  it('redacts quoted JSON and object-like credential fields', (): void => {
+    expect(
+      boundedMessage(String.raw`{"token":"secret","password":"two words",'api_key':'also-secret'}`),
+    ).toBe(String.raw`{"token":"[REDACTED]","password":"[REDACTED]",'api_key':'[REDACTED]'}`)
   })
 })
 
