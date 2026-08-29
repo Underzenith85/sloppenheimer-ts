@@ -325,6 +325,19 @@ export const startOrchestrator = (
           return
         }
         for (const issue of terminalIssues) {
+          const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
+            Effect.matchEffect({
+              onFailure: (error) =>
+                Effect.logWarning('startup workspace inspection failed; continuing', {
+                  ...logContext(issue),
+                  error: error.message,
+                }).pipe(Effect.as<boolean | null>(null)),
+              onSuccess: (exists) => Effect.succeed<boolean | null>(exists),
+            }),
+          )
+          if (workspaceExists !== true) {
+            continue
+          }
           const refreshed = yield* effective.tracker
             .fetchIssuesByIds([issue.id], { hydrateDependencies: false })
             .pipe(

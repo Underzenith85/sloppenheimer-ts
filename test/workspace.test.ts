@@ -62,6 +62,23 @@ describe('workspace safety', (): void => {
     await expect(access(root)).rejects.toThrow()
   })
 
+  it('reports whether a contained workspace exists', async (): Promise<void> => {
+    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+    roots.push(root)
+    const manager = makeWorkspaceManager(root, {
+      afterCreate: null,
+      beforeRun: null,
+      afterRun: null,
+      beforeRemove: null,
+      timeoutMs: 5_000,
+    })
+    const identifier = issueIdentifier('GH-11')
+
+    expect(await Effect.runPromise(manager.exists(identifier))).toBe(false)
+    await Effect.runPromise(manager.create(identifier))
+    expect(await Effect.runPromise(manager.exists(identifier))).toBe(true)
+  })
+
   it('logs and ignores before_remove failure while deleting the workspace', async (): Promise<void> => {
     const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
     roots.push(root)

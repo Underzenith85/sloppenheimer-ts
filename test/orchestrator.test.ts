@@ -249,6 +249,7 @@ const makeHarness = (
       return {
         create: () =>
           Effect.succeed({ path: '/tmp/symphony-test', key: 'test', createdNow: false }),
+        exists: () => Effect.succeed(true),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
         remove: () => Effect.void,
@@ -489,6 +490,38 @@ describe('startup terminal workspace cleanup', (): void => {
     )
 
     expect(removed).toEqual([])
+  })
+
+  it('does not refresh terminal issues without retained workspaces', async (): Promise<void> => {
+    const terminalIssue = { ...makeIssue('GH-8', null, null), state: 'closed' }
+    const harness = makeHarness(workflow)
+    let idFetches = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
+        fetchIssuesByIds: () => {
+          idFetches += 1
+          return Effect.succeed([terminalIssue])
+        },
+      }),
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        exists: () => Effect.succeed(false),
+      }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(idFetches).toBe(0)
   })
 })
 

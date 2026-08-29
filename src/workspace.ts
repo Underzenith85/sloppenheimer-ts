@@ -78,6 +78,7 @@ const runShell = (
 
 export type WorkspaceManager = Readonly<{
   create: (identifier: IssueIdentifier) => Effect.Effect<Workspace, WorkspaceError>
+  exists: (identifier: IssueIdentifier) => Effect.Effect<boolean, WorkspaceError>
   beforeRun: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
   afterRun: (workspace: Workspace) => Effect.Effect<void>
   remove: (identifier: IssueIdentifier) => Effect.Effect<void, WorkspaceError>
@@ -125,6 +126,29 @@ export const makeWorkspaceManager = (root: string, hooks: HooksConfig): Workspac
               message: 'failed to create workspace',
               cause,
             }),
+    }),
+  exists: (identifier) =>
+    Effect.tryPromise({
+      try: async () => {
+        const path = containedWorkspacePath(root, workspaceKey(identifier))
+        try {
+          await lstat(path)
+          return true
+        } catch (cause: unknown) {
+          const code =
+            typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined
+          if (code === 'ENOENT') {
+            return false
+          }
+          throw cause
+        }
+      },
+      catch: (cause: unknown) =>
+        new WorkspaceError({
+          category: 'inspect_failed',
+          message: 'failed to inspect workspace',
+          cause,
+        }),
     }),
   beforeRun: (workspace) =>
     hooks.beforeRun === null
