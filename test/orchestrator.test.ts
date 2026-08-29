@@ -623,3 +623,54 @@ describe('workflow hot reload', (): void => {
     expect(snapshot.counts.running).toBe(0)
   })
 })
+
+describe('tracker credential revalidation', (): void => {
+  it('rebuilds the tracker when the referenced secret is rotated in the environment', async (): Promise<void> => {
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
+    const harness = makeHarness(workflow)
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            environment,
+          })
+          yield* control.refresh
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+        }),
+      ),
+    )
+
+    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+      'secret',
+      'first',
+      'rotated',
+    ])
+  })
+
+  it('retains the last known good tracker when the secret disappears', async (): Promise<void> => {
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
+    const harness = makeHarness(workflow)
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            environment,
+          })
+          yield* control.refresh
+          delete environment['SYMPHONY_TEST_TOKEN']
+          yield* control.refresh
+        }),
+      ),
+    )
+
+    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+      'secret',
+      'first',
+    ])
+  })
+})

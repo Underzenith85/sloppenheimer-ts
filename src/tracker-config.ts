@@ -95,6 +95,19 @@ export const validateGitHubProvider = (
   }
 }
 
+/** Structural equality for a validated selection, used to detect a rotated credential. */
+export const sameTrackerProvider = (
+  left: ValidatedTrackerProvider,
+  right: ValidatedTrackerProvider,
+): boolean =>
+  left.kind === right.kind &&
+  left.provider.owner === right.provider.owner &&
+  left.provider.repository === right.provider.repository &&
+  left.provider.token === right.provider.token &&
+  left.provider.tokenEnvironmentName === right.provider.tokenEnvironmentName &&
+  left.provider.apiBaseUrl === right.provider.apiBaseUrl &&
+  left.provider.baseBranch === right.provider.baseBranch
+
 export const validateTrackerProvider = (
   kind: string,
   provider: JsonObject,

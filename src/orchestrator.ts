@@ -9,6 +9,7 @@ import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
+import { sameTrackerProvider } from './tracker-config.js'
 import { loadWorkflow, preflightWorkflow, renderPrompt, type Workflow } from './workflow.js'
 import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
 
@@ -471,6 +472,37 @@ export const startOrchestrator = (
         })
       })
 
+    /**
+     * Re-runs dispatch preflight validation and, when the referenced secret has been rotated in the
+     * environment without the workflow file changing, rebuilds the tracker from the revalidated
+     * provider so no later request uses the superseded credential.
+     */
+    const revalidateCredentials = (
+      effective: EffectiveWorkflow,
+    ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
+      preflightWorkflow(effective.workflow, dependencies.environment).pipe(
+        Effect.map((validated) => {
+          if (sameTrackerProvider(validated, effective.workflow.tracker)) {
+            return effective
+          }
+          const workflow: Workflow = { ...effective.workflow, tracker: validated }
+          return { ...effective, workflow, tracker: dependencies.makeTracker(workflow) }
+        }),
+      )
+
+    /** Moves live workers and handoffs off a superseded tracker instance. */
+    const adoptTracker = (previous: TrackerAdapter, next: TrackerAdapter): void => {
+      for (const entry of [...state.running.values(), ...state.handoffs.values()]) {
+        if (entry.execution.tracker === previous) {
+          entry.execution = Object.freeze({
+            ...entry.execution,
+            tracker: next,
+            secretEnvironmentNames: Object.freeze([...next.secretEnvironmentNames]),
+          })
+        }
+      }
+    }
+
     const dispatch = (
       issue: Issue,
       attempt: number | null,
@@ -487,14 +519,11 @@ export const startOrchestrator = (
           state.retries.delete(issue.id)
         }
 
-        const effective = effectiveOverride ?? lastKnownGood
-        const preflight = yield* preflightWorkflow(
-          effective.workflow,
-          dependencies.environment,
-        ).pipe(
+        const base = effectiveOverride ?? lastKnownGood
+        const preflight = yield* revalidateCredentials(base).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (tracker) => ({ _tag: 'Succeeded' as const, tracker }),
+            onSuccess: (value) => ({ _tag: 'Succeeded' as const, value }),
           }),
         )
         if (preflight._tag === 'Failed') {
@@ -505,19 +534,13 @@ export const startOrchestrator = (
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
           return
         }
-        const refreshedWorkflow: Workflow = {
-          ...effective.workflow,
-          tracker: preflight.tracker,
+        const effective = preflight.value
+        if (effectiveOverride === undefined && effective !== lastKnownGood) {
+          const previousTracker = lastKnownGood.tracker
+          lastKnownGood = effective
+          adoptTracker(previousTracker, effective.tracker)
         }
-        const refreshedEffective: EffectiveWorkflow = {
-          ...effective,
-          workflow: refreshedWorkflow,
-          tracker: dependencies.makeTracker(refreshedWorkflow),
-        }
-        if (effective === lastKnownGood) {
-          lastKnownGood = refreshedEffective
-        }
-        const renderedPrompt = yield* renderPrompt(refreshedWorkflow, issue, attempt).pipe(
+        const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
             onSuccess: (prompt) => ({ _tag: 'Succeeded' as const, prompt }),
@@ -527,7 +550,7 @@ export const startOrchestrator = (
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
           return
         }
-        const execution = captureExecutionSnapshot(refreshedEffective, renderedPrompt.prompt)
+        const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
         const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
           execution.tracker.fetchIssuesByIds([issue.id]).pipe(
             Effect.map((issues) => issues[0] ?? null),
@@ -810,6 +833,30 @@ export const startOrchestrator = (
 
     const poll = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
+        const revalidated = yield* revalidateCredentials(lastKnownGood).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (value) => ({ _tag: 'Succeeded' as const, value }),
+          }),
+        )
+        if (revalidated._tag === 'Failed') {
+          yield* Effect.logError(
+            'tracker credential validation failed; retaining last known good',
+            {
+              error: revalidated.error.message,
+              effective_fingerprint: lastKnownGood.workflow.fingerprint,
+            },
+          )
+        } else if (revalidated.value !== lastKnownGood) {
+          const previousTracker = lastKnownGood.tracker
+          lastKnownGood = revalidated.value
+          adoptTracker(previousTracker, revalidated.value.tracker)
+          yield* Effect.logInfo('tracker credential refreshed from the environment', {
+            tracker_kind: revalidated.value.workflow.tracker.kind,
+            secret_environment_name:
+              revalidated.value.workflow.tracker.provider.tokenEnvironmentName,
+          })
+        }
         yield* hydrateRestoredHandoffs()
         yield* reconcileHandoffs()
         yield* reconcile()
