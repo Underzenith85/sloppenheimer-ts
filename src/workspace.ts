@@ -137,6 +137,24 @@ const runHookProcess = (
       detached: true,
     })
 
+    /**
+     * Whether the hook's original process group still has a member. Used to decide whether the
+     * forceful escalation is still needed; a group with no members must never be signalled again,
+     * because its leader's PID can be recycled.
+     */
+    const processGroupIsAlive = (): boolean => {
+      const { pid } = child
+      if (pid === undefined) {
+        return false
+      }
+      try {
+        process.kill(-pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+
     const terminate = (signal: NodeJS.Signals): void => {
       const { pid } = child
       if (pid === undefined) {
@@ -153,13 +171,18 @@ const runHookProcess = (
       }
     }
 
-    // The escalation timer is deliberately not cleared on settlement: a descendant that ignores
-    // `SIGTERM` and redirected its inherited pipes lets the shell emit `close` while the process
-    // group is still alive, so the forceful kill must still land.
     const clearTimers = (): void => {
       if (timeoutTimer !== undefined) {
         clearTimeout(timeoutTimer)
         timeoutTimer = undefined
+      }
+      // The escalation survives settlement only while the group still has a member: a descendant
+      // that ignores `SIGTERM` and redirected its inherited pipes lets the shell emit `close` while
+      // the group is alive, so cancelling here would let it run on. Once the group is empty the
+      // timer is cancelled, so a recycled leader PID is never signalled.
+      if (graceTimer !== undefined && !processGroupIsAlive()) {
+        clearTimeout(graceTimer)
+        graceTimer = undefined
       }
     }
 
@@ -226,7 +249,11 @@ const runHookProcess = (
       timedOut = true
       terminate('SIGTERM')
       graceTimer = setTimeout(() => {
-        terminate('SIGKILL')
+        // Re-checked at fire time as well, so an escalation retained at `close` is dropped if the
+        // group emptied during the grace period.
+        if (processGroupIsAlive()) {
+          terminate('SIGKILL')
+        }
         settle(timeoutFailure())
       }, hookTerminationGraceMs)
       graceTimer.unref()
@@ -240,7 +267,9 @@ const runHookProcess = (
       detach()
       terminate('SIGTERM')
       setTimeout(() => {
-        terminate('SIGKILL')
+        if (processGroupIsAlive()) {
+          terminate('SIGKILL')
+        }
       }, hookTerminationGraceMs).unref()
     })
   })
