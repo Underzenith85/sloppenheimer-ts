@@ -168,6 +168,18 @@ const renderState = (snapshot) => {
   }
 }
 
+const handoffStatus = (handoff) => {
+  const labels = {
+    awaiting_checks: 'Awaiting checks',
+    repair_needed: 'Repair needed',
+    ready_to_merge: 'Ready to merge',
+    merging: 'Merging',
+    intervention_required: 'Needs intervention',
+    merged: 'Merged',
+  }
+  return labels[handoff.state] ?? 'PR handoff'
+}
+
 const runtimeStatus = (node) => {
   if (node.readiness === 'cyclic') {
     return 'Cyclic'
@@ -178,11 +190,17 @@ const runtimeStatus = (node) => {
   if ((state?.retrying ?? []).some((entry) => entry.identifier === node.identifier)) {
     return 'Retrying'
   }
+  const handoff = (state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)
+  if (handoff !== undefined) {
+    return handoffStatus(handoff)
+  }
   if (node.readiness === 'completed') {
     return 'Completed'
   }
   return node.readiness === 'blocked' ? 'Blocked' : 'Ready'
 }
+
+const statusClass = (status) => status.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-').replaceAll(/(^-|-$)/g, '')
 
 const graphLayout = (snapshot) => {
   const identifiers = snapshot.nodes.map((node) => node.identifier).sort()
@@ -279,7 +297,7 @@ const renderGraph = (snapshot) => {
     }
     const status = runtimeStatus(node)
     const card = document.createElement('a')
-    card.className = 'graph-node state-' + status.toLowerCase()
+    card.className = 'graph-node state-' + statusClass(status)
     card.href = node.url ?? '#'
     card.style.left = String(position.x) + 'px'
     card.style.top = String(position.y) + 'px'
@@ -346,7 +364,7 @@ const renderBacklog = (snapshot) => {
     const graphNode = snapshot.nodes.find((node) => node.identifier === issue.identifier)
     const stateName = runtimeStatus(graphNode ?? issue)
     const status = text('td', '', stateName)
-    status.append(text('span', 'status-dot state-' + stateName.toLowerCase(), ''))
+    status.append(text('span', 'status-dot state-' + statusClass(stateName), ''))
     if (issue.reason !== null) {
       status.append(text('small', 'status-reason', issue.reason))
     }
@@ -469,6 +487,8 @@ tbody tr:hover { background: rgba(255,255,255,.018); }
 .status-dot.state-blocked { background: #e6ae55; }
 .status-dot.state-running { background: var(--coral); box-shadow: 0 0 0 5px rgba(255,130,107,.1); }
 .status-dot.state-retrying { background: #a98cff; }
+.status-dot.state-awaiting-checks, .status-dot.state-ready-to-merge, .status-dot.state-merging { background: #65c7f7; }
+.status-dot.state-repair-needed, .status-dot.state-needs-intervention { background: #ffb454; }
 .status-dot.state-completed { background: #66d9a6; }
 .status-dot.state-cyclic { background: #ff5d5d; }
 .action { padding: 8px 15px; min-width: 70px; }
