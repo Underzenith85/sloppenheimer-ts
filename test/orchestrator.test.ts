@@ -41,6 +41,7 @@ const makeIssue = (
 const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
+  frontMatter: {},
   promptTemplate: 'test',
   config: {
     tracker: {
@@ -76,6 +77,7 @@ const workflow: Workflow = {
       command: 'codex app-server',
       approvalPolicy: 'never',
       threadSandbox: 'workspace-write',
+      turnSandboxPolicy: null,
       turnTimeoutMs: 60_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 30_000,
@@ -348,7 +350,7 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider.repository).toBe(
+    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider['repository']).toBe(
       'reloaded-repository',
     )
     expect(harness.trackerWorkflows().at(-1)?.config.tracker.activeStates).toEqual([
@@ -371,7 +373,7 @@ describe('workflow hot reload', (): void => {
     ])
   })
 
-  it('keeps invalid reloads visible while reconciling and dispatching with the valid workflow', async (): Promise<void> => {
+  it('keeps invalid reloads visible while reconciling and skipping new dispatch preflight', async (): Promise<void> => {
     const issue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
     const initial = changedWorkflow({ fingerprint: 'last-known-good' })
     const harness = makeHarness(initial, () => [issue])
@@ -393,7 +395,7 @@ describe('workflow hot reload', (): void => {
     expect(snapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
     expect(snapshot.workflowReloadError?.message).toBe('invalid reload')
     expect(harness.idFetches()).toBeGreaterThan(0)
-    expect(harness.stateFetches()).toBeGreaterThan(1)
+    expect(harness.stateFetches()).toBe(1)
   })
 
   it('defensively reloads after a missed watch event', async (): Promise<void> => {

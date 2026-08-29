@@ -2,17 +2,20 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue, type JsonObject } from '../src/domain.js'
-import { issueBranchName, makeGitHubTracker } from '../src/tracker.js'
-import type { GitHubProviderConfig } from '../src/workflow.js'
+import { issueBranchName, makeGitHubTracker, validateGitHubProviderConfig } from '../src/tracker.js'
 
-const provider: GitHubProviderConfig = {
+const provider: JsonObject = {
   owner: 'example',
   repository: 'symphony',
-  token: 'secret',
-  tokenEnvironmentName: 'CUSTOM_GITHUB_TOKEN',
-  apiBaseUrl: 'https://api.example.test',
-  baseBranch: 'main',
+  token: '$CUSTOM_GITHUB_TOKEN',
+  api_base_url: 'https://api.example.test',
+  base_branch: 'main',
 }
+
+const makeTracker = (
+  selectedProvider: JsonObject = provider,
+  environment: NodeJS.ProcessEnv = { CUSTOM_GITHUB_TOKEN: 'secret' },
+): ReturnType<typeof makeGitHubTracker> => makeGitHubTracker(selectedProvider, environment)
 
 const githubIssue = (number: number, labels: readonly string[] = []): JsonObject => ({
   number,
@@ -66,8 +69,59 @@ afterEach((): void => {
 })
 
 describe('GitHub tracker authentication provenance', (): void => {
+  it('owns provider defaults, secret resolution, and unknown-key handling', (): void => {
+    expect(
+      validateGitHubProviderConfig(
+        {
+          owner: 'example',
+          repository: 'symphony',
+          extension_key: { preservedByCore: true },
+        },
+        { GITHUB_TOKEN: 'fallback-secret', GH_TOKEN: 'secondary-secret' },
+      ),
+    ).toEqual({
+      owner: 'example',
+      repository: 'symphony',
+      token: 'fallback-secret',
+      tokenEnvironmentName: 'GITHUB_TOKEN',
+      apiBaseUrl: 'https://api.github.com',
+      baseBranch: 'main',
+    })
+  })
+
+  it('falls back to GH_TOKEN when GITHUB_TOKEN is empty', (): void => {
+    expect(
+      validateGitHubProviderConfig(
+        { owner: 'example', repository: 'symphony' },
+        { GITHUB_TOKEN: '', GH_TOKEN: 'secondary-secret' },
+      ).tokenEnvironmentName,
+    ).toBe('GH_TOKEN')
+  })
+
+  it.each([
+    [{ repository: 'symphony' }, { GITHUB_TOKEN: 'secret' }, 'owner'],
+    [{ owner: 'example' }, { GITHUB_TOKEN: 'secret' }, 'repository'],
+    [
+      { owner: 'example', repository: 'symphony', token: 'literal-secret' },
+      {},
+      'literal credentials',
+    ],
+    [
+      { owner: 'example', repository: 'symphony', token: '$MISSING' },
+      {},
+      'missing environment variable MISSING',
+    ],
+    [
+      { owner: 'example', repository: 'symphony', api_base_url: 'ssh://github.com' },
+      { GITHUB_TOKEN: 'secret' },
+      'absolute HTTP(S) URL',
+    ],
+  ])('rejects invalid adapter provider configuration %#', (invalid, environment, message): void => {
+    expect(() => validateGitHubProviderConfig(invalid, environment)).toThrow(message)
+  })
+
   it('declares the configured secret variable and all fallback aliases', (): void => {
-    expect(makeGitHubTracker(provider).secretEnvironmentNames).toEqual([
+    expect(makeTracker().secretEnvironmentNames).toEqual([
       'CUSTOM_GITHUB_TOKEN',
       'GITHUB_TOKEN',
       'GH_TOKEN',
@@ -76,7 +130,8 @@ describe('GitHub tracker authentication provenance', (): void => {
 
   it('deduplicates a configured fallback alias', (): void => {
     expect(
-      makeGitHubTracker({ ...provider, tokenEnvironmentName: 'GH_TOKEN' }).secretEnvironmentNames,
+      makeTracker({ ...provider, token: '$GH_TOKEN' }, { GH_TOKEN: 'secret' })
+        .secretEnvironmentNames,
     ).toEqual(['GH_TOKEN', 'GITHUB_TOKEN'])
   })
 })
@@ -100,9 +155,7 @@ describe('GitHub tracker pagination', (): void => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
-    )
+    const issues = await Effect.runPromise(makeTracker().fetchIssuesByStates(['open'], null))
 
     expect(issues.map((issue) => issue.id)).toEqual(['1', '2', '3'])
     expect(fetchMock).toHaveBeenCalledTimes(5)
@@ -126,7 +179,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(makeTracker().fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -143,7 +196,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(makeTracker().fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_pagination')
@@ -162,7 +215,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], ['symphony']),
+      makeTracker().fetchIssuesByStates(['open'], ['symphony']),
     )
 
     expect(issues).toHaveLength(2)
@@ -182,7 +235,7 @@ describe('GitHub native issue dependencies', (): void => {
         : Response.json([githubIssue(1)]),
     )
     vi.stubGlobal('fetch', fetchMock)
-    const tracker = makeGitHubTracker(provider)
+    const tracker = makeTracker()
 
     await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
     const [second] = await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
@@ -209,9 +262,7 @@ describe('GitHub native issue dependencies', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const [issue] = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')]),
-    )
+    const [issue] = await Effect.runPromise(makeTracker().fetchIssuesByIds([issueId('2')]))
 
     expect(issue?.blockedBy).toEqual([
       {
@@ -244,7 +295,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')])),
+      Effect.flip(makeTracker().fetchIssuesByIds([issueId('2')])),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -260,7 +311,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')])),
+      Effect.flip(makeTracker().fetchIssuesByIds([issueId('2')])),
     )
 
     expect(error.category).toBe('tracker_status')
@@ -275,7 +326,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+      makeTracker().handoffCompletedWork(handoffIssue, ['symphony']),
     )
 
     expect(result).toEqual({ _tag: 'NoBranch', branchName: 'symphony/issue-28' })
@@ -313,7 +364,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+      makeTracker().handoffCompletedWork(handoffIssue, ['symphony']),
     )
 
     expect(result).toEqual({
@@ -344,7 +395,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+      makeTracker().handoffCompletedWork(handoffIssue, ['symphony']),
     )
 
     expect(result._tag).toBe('PullRequest')

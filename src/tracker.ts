@@ -6,12 +6,28 @@ import {
   type BlockerRef,
   type Issue,
   type IssueId,
+  type JsonObject,
   type JsonValue,
 } from './domain.js'
 import { TrackerError } from './errors.js'
 import type { PullRequestObservation } from './handoff.js'
 import { makeGitHubPullRequestMonitor } from './github-handoff.js'
-import type { GitHubProviderConfig } from './workflow.js'
+
+export type GitHubProviderConfig = Readonly<{
+  owner: string
+  repository: string
+  token: string
+  tokenEnvironmentName: string
+  apiBaseUrl: string
+  baseBranch: string
+}>
+
+export const githubTrackerDefaults = {
+  activeStates: ['open'],
+  terminalStates: ['closed'],
+  apiBaseUrl: 'https://api.github.com',
+  baseBranch: 'main',
+} as const
 
 export type TrackerAdapter = Readonly<{
   fetchIssuesByStates: (
@@ -104,6 +120,112 @@ const githubApiVersion = '2026-03-10'
 const githubAuthenticationEnvironmentNames = ['GITHUB_TOKEN', 'GH_TOKEN'] as const
 const dependencyConcurrency = 4
 const dependencyCacheTtlMs = 60_000
+
+const invalidProviderConfig = (message: string): TrackerError =>
+  new TrackerError({ category: 'invalid_tracker_config', message, retryable: false })
+
+const requiredProviderString = (provider: JsonObject, key: string): string => {
+  const value = provider[key]
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw invalidProviderConfig(`tracker.provider.${key} must be a non-empty string`)
+  }
+  return value
+}
+
+const optionalProviderString = (provider: JsonObject, key: string, fallback: string): string => {
+  const value = provider[key]
+  if (value === undefined) {
+    return fallback
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw invalidProviderConfig(`tracker.provider.${key} must be a non-empty string`)
+  }
+  return value
+}
+
+const resolveGitHubToken = (
+  provider: JsonObject,
+  environment: NodeJS.ProcessEnv,
+): Readonly<{ token: string; environmentName: string }> => {
+  const configured = provider['token']
+  if (configured === undefined) {
+    for (const environmentName of githubAuthenticationEnvironmentNames) {
+      const token = environment[environmentName]
+      if (token !== undefined && token.length > 0) {
+        return { token, environmentName }
+      }
+    }
+    throw new TrackerError({
+      category: 'missing_tracker_secret',
+      message: 'tracker.provider.token is missing; set GITHUB_TOKEN or GH_TOKEN',
+      retryable: false,
+    })
+  }
+  if (typeof configured !== 'string') {
+    throw invalidProviderConfig('tracker.provider.token must reference an environment variable')
+  }
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u.exec(configured)
+  if (match?.[1] === undefined) {
+    throw invalidProviderConfig(
+      'tracker.provider.token must reference an environment variable; literal credentials are not allowed in repository-owned workflow files',
+    )
+  }
+  const environmentName = match[1]
+  if (environmentName === 'OPENAI_API_KEY' || environmentName === 'CODEX_ACCESS_TOKEN') {
+    throw invalidProviderConfig(
+      `tracker.provider.token must not use Codex authentication environment variable ${environmentName}`,
+    )
+  }
+  const token = environment[environmentName]
+  if (token === undefined || token.length === 0) {
+    throw new TrackerError({
+      category: 'missing_tracker_secret',
+      message: `tracker.provider.token references missing environment variable ${environmentName}`,
+      retryable: false,
+    })
+  }
+  return { token, environmentName }
+}
+
+export const validateGitHubProviderConfig = (
+  provider: JsonObject,
+  environment: NodeJS.ProcessEnv = process.env,
+): GitHubProviderConfig => {
+  const owner = requiredProviderString(provider, 'owner')
+  const repository = requiredProviderString(provider, 'repository')
+  const apiBaseUrl = optionalProviderString(
+    provider,
+    'api_base_url',
+    githubTrackerDefaults.apiBaseUrl,
+  ).replace(/\/+$/u, '')
+  const baseBranch = optionalProviderString(
+    provider,
+    'base_branch',
+    githubTrackerDefaults.baseBranch,
+  )
+  let parsedApiBaseUrl: URL
+  try {
+    parsedApiBaseUrl = new URL(apiBaseUrl)
+  } catch {
+    throw invalidProviderConfig('tracker.provider.api_base_url must be an absolute HTTP(S) URL')
+  }
+  if (
+    (parsedApiBaseUrl.protocol !== 'https:' && parsedApiBaseUrl.protocol !== 'http:') ||
+    parsedApiBaseUrl.username.length > 0 ||
+    parsedApiBaseUrl.password.length > 0
+  ) {
+    throw invalidProviderConfig('tracker.provider.api_base_url must be an absolute HTTP(S) URL')
+  }
+  const token = resolveGitHubToken(provider, environment)
+  return {
+    owner,
+    repository,
+    token: token.token,
+    tokenEnvironmentName: token.environmentName,
+    apiBaseUrl,
+    baseBranch,
+  }
+}
 
 type DependencyCacheEntry = Readonly<{
   blockedBy: readonly BlockerRef[]
@@ -633,7 +755,11 @@ const hydrateDependencies = (
     { concurrency: dependencyConcurrency },
   )
 
-export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapter => {
+export const makeGitHubTracker = (
+  rawProvider: JsonObject,
+  environment: NodeJS.ProcessEnv = process.env,
+): TrackerAdapter => {
+  const provider = validateGitHubProviderConfig(rawProvider, environment)
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   const pullRequests = makeGitHubPullRequestMonitor(provider)
@@ -788,9 +914,13 @@ const githubMutation = (
           }),
   })
 
-export const makeGitHubIssueControl = (provider: GitHubProviderConfig): GitHubIssueControl => {
+export const makeGitHubIssueControl = (
+  rawProvider: JsonObject,
+  environment: NodeJS.ProcessEnv = process.env,
+): GitHubIssueControl => {
+  const provider = validateGitHubProviderConfig(rawProvider, environment)
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-  const tracker = makeGitHubTracker(provider)
+  const tracker = makeGitHubTracker(rawProvider, environment)
   return {
     listOpenIssues: () => tracker.fetchIssuesByStates(['open'], null),
     addLabel: (issueNumber, label) => {

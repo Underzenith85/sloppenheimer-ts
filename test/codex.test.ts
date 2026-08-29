@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { makeCodexEnvironment } from '../src/codex.js'
+import { makeCodexEnvironment, makeTurnStartParams } from '../src/codex.js'
+import type { CodexConfig, CodexSandboxPolicy } from '../src/workflow.js'
 
 describe('Codex child environment', (): void => {
   it('removes custom tracker secrets and every GitHub authentication alias', (): void => {
@@ -32,6 +33,49 @@ describe('Codex child environment', (): void => {
     expect(environment).toEqual({
       OPENAI_API_KEY: 'openai-key',
       CODEX_ACCESS_TOKEN: 'codex-access-token',
+    })
+  })
+})
+
+describe('Codex policy payloads', (): void => {
+  const config = (turnSandboxPolicy: CodexSandboxPolicy | null): CodexConfig => ({
+    command: 'codex app-server',
+    approvalPolicy: 'never',
+    threadSandbox: 'workspace-write',
+    turnSandboxPolicy,
+    turnTimeoutMs: 3_600_000,
+    readTimeoutMs: 5_000,
+    stallTimeoutMs: 300_000,
+  })
+
+  it('passes an explicit turn sandbox policy through to App Server unchanged', (): void => {
+    const policy: CodexSandboxPolicy = {
+      type: 'readOnly',
+      networkAccess: false,
+    }
+
+    const params = makeTurnStartParams(
+      'thread-1',
+      { path: '/tmp/workspace', key: 'workspace', createdNow: false },
+      config(policy),
+      'Do the work',
+    )
+
+    expect(params['sandboxPolicy']).toBe(policy)
+  })
+
+  it('uses the documented workspace policy when no override is configured', (): void => {
+    const params = makeTurnStartParams(
+      'thread-1',
+      { path: '/tmp/workspace', key: 'workspace', createdNow: false },
+      config(null),
+      'Do the work',
+    )
+
+    expect(params['sandboxPolicy']).toEqual({
+      type: 'workspaceWrite',
+      writableRoots: ['/tmp/workspace'],
+      networkAccess: true,
     })
   })
 })

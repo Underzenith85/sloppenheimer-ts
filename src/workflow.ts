@@ -6,21 +6,13 @@ import { Effect } from 'effect'
 import { Liquid } from 'liquidjs'
 import { parse } from 'yaml'
 
-import type { Issue, JsonObject } from './domain.js'
+import type { Issue, JsonObject, JsonValue } from './domain.js'
 import { WorkflowError } from './errors.js'
-
-export type GitHubProviderConfig = Readonly<{
-  owner: string
-  repository: string
-  token: string
-  tokenEnvironmentName: string
-  apiBaseUrl: string
-  baseBranch: string
-}>
+import { githubTrackerDefaults, validateGitHubProviderConfig } from './tracker.js'
 
 export type TrackerConfig = Readonly<{
   kind: 'github'
-  provider: GitHubProviderConfig
+  provider: JsonObject
   requiredLabels: readonly string[]
   activeStates: readonly string[]
   terminalStates: readonly string[]
@@ -41,10 +33,39 @@ export type AgentConfig = Readonly<{
   maxConcurrentAgentsByState: ReadonlyMap<string, number>
 }>
 
+export type CodexApprovalPolicy =
+  | 'untrusted'
+  | 'on-request'
+  | 'never'
+  | Readonly<{
+      granular: Readonly<{
+        mcp_elicitations: boolean
+        request_permissions?: boolean
+        rules: boolean
+        sandbox_approval: boolean
+        skill_approval?: boolean
+      }>
+    }>
+
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+
+export type CodexSandboxPolicy =
+  | Readonly<{ type: 'dangerFullAccess' }>
+  | Readonly<{ type: 'readOnly'; networkAccess?: boolean }>
+  | Readonly<{ type: 'externalSandbox'; networkAccess?: 'restricted' | 'enabled' }>
+  | Readonly<{
+      type: 'workspaceWrite'
+      writableRoots?: readonly string[]
+      networkAccess?: boolean
+      excludeSlashTmp?: boolean
+      excludeTmpdirEnvVar?: boolean
+    }>
+
 export type CodexConfig = Readonly<{
   command: string
-  approvalPolicy: string
-  threadSandbox: string
+  approvalPolicy: CodexApprovalPolicy
+  threadSandbox: CodexSandboxMode
+  turnSandboxPolicy: CodexSandboxPolicy | null
   turnTimeoutMs: number
   readTimeoutMs: number
   stallTimeoutMs: number
@@ -63,22 +84,15 @@ export type EffectiveConfig = Readonly<{
 export type Workflow = Readonly<{
   path: string
   fingerprint: string
+  frontMatter: JsonObject
   config: EffectiveConfig
   promptTemplate: string
-}>
-
-type RawGitHubProvider = Readonly<{
-  owner: string
-  repository: string
-  token: string
-  apiBaseUrl: string | undefined
-  baseBranch: string | undefined
 }>
 
 type RawWorkflowConfig = Readonly<{
   tracker: Readonly<{
     kind: string
-    provider: RawGitHubProvider
+    provider: JsonObject
     requiredLabels: readonly string[] | undefined
     activeStates: readonly string[] | undefined
     terminalStates: readonly string[] | undefined
@@ -100,8 +114,9 @@ type RawWorkflowConfig = Readonly<{
   }>
   codex: Readonly<{
     command: string | undefined
-    approvalPolicy: string | undefined
-    threadSandbox: string | undefined
+    approvalPolicy: CodexApprovalPolicy | undefined
+    threadSandbox: CodexSandboxMode | undefined
+    turnSandboxPolicy: CodexSandboxPolicy | undefined
     turnTimeoutMs: number | undefined
     readTimeoutMs: number | undefined
     stallTimeoutMs: number | undefined
@@ -131,7 +146,7 @@ const decodeString = (
   if (value === undefined && !required) {
     return undefined
   }
-  if (typeof value !== 'string' || value.length === 0) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new WorkflowError({
       category: 'invalid_config',
       message: `${name} must be a non-empty string`,
@@ -189,10 +204,125 @@ const decodeConcurrency = (value: unknown): Readonly<Record<string, number>> | u
   )
 }
 
+const isJsonValue = (value: unknown): value is JsonValue => {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  ) {
+    return true
+  }
+  if (Array.isArray(value)) {
+    return value.every(isJsonValue)
+  }
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Object.values(value).every((item) => isJsonValue(item))
+  )
+}
+
+const decodeJsonObject = (value: unknown, name: string): JsonObject => {
+  const record = decodeRecord(value, name)
+  if (!isJsonValue(record)) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must contain only JSON-safe values`,
+    })
+  }
+  return record
+}
+
+const decodeApprovalPolicy = (
+  record: DecodeRecord,
+  key: string,
+  name: string,
+): CodexApprovalPolicy | undefined => {
+  const value = record[key]
+  if (value === undefined) {
+    return undefined
+  }
+  if (value === 'untrusted' || value === 'on-request' || value === 'never') {
+    return value
+  }
+  const policy = decodeRecord(value, name, true)
+  const granular = decodeRecord(policy['granular'], `${name}.granular`, true)
+  const required = ['mcp_elicitations', 'rules', 'sandbox_approval'] as const
+  if (
+    Object.keys(policy).some((policyKey) => policyKey !== 'granular') ||
+    required.some((field) => typeof granular[field] !== 'boolean') ||
+    (granular['request_permissions'] !== undefined &&
+      typeof granular['request_permissions'] !== 'boolean') ||
+    (granular['skill_approval'] !== undefined && typeof granular['skill_approval'] !== 'boolean')
+  ) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must be a Codex AskForApproval value`,
+    })
+  }
+  return value as CodexApprovalPolicy
+}
+
+const decodeSandboxMode = (
+  record: DecodeRecord,
+  key: string,
+  name: string,
+): CodexSandboxMode | undefined => {
+  const value = record[key]
+  if (value === undefined) {
+    return undefined
+  }
+  if (value !== 'read-only' && value !== 'workspace-write' && value !== 'danger-full-access') {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must be a Codex SandboxMode value`,
+    })
+  }
+  return value
+}
+
+const decodeSandboxPolicy = (
+  record: DecodeRecord,
+  key: string,
+  name: string,
+): CodexSandboxPolicy | undefined => {
+  const value = record[key]
+  if (value === undefined) {
+    return undefined
+  }
+  const policy = decodeRecord(value, name, true)
+  const type = policy['type']
+  const booleanFields = ['networkAccess', 'excludeSlashTmp', 'excludeTmpdirEnvVar'] as const
+  if (
+    (type !== 'dangerFullAccess' &&
+      type !== 'readOnly' &&
+      type !== 'externalSandbox' &&
+      type !== 'workspaceWrite') ||
+    (type !== 'externalSandbox' &&
+      booleanFields.some(
+        (field) => policy[field] !== undefined && typeof policy[field] !== 'boolean',
+      )) ||
+    (type === 'externalSandbox' &&
+      policy['networkAccess'] !== undefined &&
+      policy['networkAccess'] !== 'restricted' &&
+      policy['networkAccess'] !== 'enabled') ||
+    (policy['writableRoots'] !== undefined &&
+      (!Array.isArray(policy['writableRoots']) ||
+        !policy['writableRoots'].every((root): root is string => typeof root === 'string')))
+  ) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must be a Codex SandboxPolicy value`,
+    })
+  }
+  return policy as CodexSandboxPolicy
+}
+
 const decodeRawConfig = (value: unknown): RawWorkflowConfig => {
   const root = decodeRecord(value, 'workflow front matter', true)
   const tracker = decodeRecord(root['tracker'], 'tracker', true)
-  const provider = decodeRecord(tracker['provider'], 'tracker.provider', true)
+  const provider = decodeJsonObject(tracker['provider'], 'tracker.provider')
   const polling = decodeRecord(root['polling'], 'polling')
   const workspace = decodeRecord(root['workspace'], 'workspace')
   const hooks = decodeRecord(root['hooks'], 'hooks')
@@ -202,13 +332,7 @@ const decodeRawConfig = (value: unknown): RawWorkflowConfig => {
   return {
     tracker: {
       kind: decodeRequiredString(tracker, 'kind', 'tracker.kind'),
-      provider: {
-        owner: decodeRequiredString(provider, 'owner', 'tracker.provider.owner'),
-        repository: decodeRequiredString(provider, 'repository', 'tracker.provider.repository'),
-        token: decodeRequiredString(provider, 'token', 'tracker.provider.token'),
-        apiBaseUrl: decodeString(provider, 'api_base_url', 'tracker.provider.api_base_url'),
-        baseBranch: decodeString(provider, 'base_branch', 'tracker.provider.base_branch'),
-      },
+      provider,
       requiredLabels: decodeStrings(tracker, 'required_labels', 'tracker.required_labels'),
       activeStates: decodeStrings(tracker, 'active_states', 'tracker.active_states'),
       terminalStates: decodeStrings(tracker, 'terminal_states', 'tracker.terminal_states'),
@@ -234,8 +358,13 @@ const decodeRawConfig = (value: unknown): RawWorkflowConfig => {
     },
     codex: {
       command: decodeString(codex, 'command', 'codex.command'),
-      approvalPolicy: decodeString(codex, 'approval_policy', 'codex.approval_policy'),
-      threadSandbox: decodeString(codex, 'thread_sandbox', 'codex.thread_sandbox'),
+      approvalPolicy: decodeApprovalPolicy(codex, 'approval_policy', 'codex.approval_policy'),
+      threadSandbox: decodeSandboxMode(codex, 'thread_sandbox', 'codex.thread_sandbox'),
+      turnSandboxPolicy: decodeSandboxPolicy(
+        codex,
+        'turn_sandbox_policy',
+        'codex.turn_sandbox_policy',
+      ),
       turnTimeoutMs: decodeNumber(codex, 'turn_timeout_ms', 'codex.turn_timeout_ms'),
       readTimeoutMs: decodeNumber(codex, 'read_timeout_ms', 'codex.read_timeout_ms'),
       stallTimeoutMs: decodeNumber(codex, 'stall_timeout_ms', 'codex.stall_timeout_ms'),
@@ -288,36 +417,6 @@ const resolveEnvironment = (
   return resolved
 }
 
-const codexAuthenticationEnvironmentNames = new Set(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])
-
-const resolveSecretEnvironment = (
-  value: string,
-  name: string,
-  environment: NodeJS.ProcessEnv,
-): Readonly<{ value: string; environmentName: string }> => {
-  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u.exec(value)
-  if (match === null) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
-    })
-  }
-  const environmentName = match[1]
-  if (environmentName === undefined) {
-    throw new WorkflowError({ category: 'invalid_config', message: `${name} is invalid` })
-  }
-  if (codexAuthenticationEnvironmentNames.has(environmentName)) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} must not use Codex authentication environment variable ${environmentName}`,
-    })
-  }
-  return {
-    value: resolveEnvironment(value, name, environment),
-    environmentName,
-  }
-}
-
 const resolveWorkspaceRoot = (
   value: string | undefined,
   workflowPath: string,
@@ -354,7 +453,6 @@ const parseConfig = (
   environment: NodeJS.ProcessEnv,
 ): EffectiveConfig => {
   const { tracker } = raw
-  const { provider } = tracker
   const { kind } = tracker
   if (kind !== 'github') {
     throw new WorkflowError({
@@ -364,26 +462,23 @@ const parseConfig = (
   }
 
   const { polling, workspace, hooks, agent, codex, server } = raw
-  const trackerToken = resolveSecretEnvironment(
-    provider.token,
-    'tracker.provider.token',
-    environment,
-  )
+  try {
+    validateGitHubProviderConfig(tracker.provider, environment)
+  } catch (cause: unknown) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: cause instanceof Error ? cause.message : 'GitHub tracker configuration is invalid',
+      cause,
+    })
+  }
 
   return {
     tracker: {
       kind: 'github',
-      provider: {
-        owner: provider.owner,
-        repository: provider.repository,
-        token: trackerToken.value,
-        tokenEnvironmentName: trackerToken.environmentName,
-        apiBaseUrl: provider.apiBaseUrl ?? 'https://api.github.com',
-        baseBranch: provider.baseBranch ?? 'main',
-      },
+      provider: tracker.provider,
       requiredLabels: (tracker.requiredLabels ?? []).map((label) => label.trim().toLowerCase()),
-      activeStates: tracker.activeStates ?? ['open'],
-      terminalStates: tracker.terminalStates ?? ['closed'],
+      activeStates: tracker.activeStates ?? githubTrackerDefaults.activeStates,
+      terminalStates: tracker.terminalStates ?? githubTrackerDefaults.terminalStates,
     },
     pollingIntervalMs: positiveInteger(polling.intervalMs, 30_000, 'polling.interval_ms'),
     workspaceRoot: resolveWorkspaceRoot(workspace.root, workflowPath, environment),
@@ -412,6 +507,7 @@ const parseConfig = (
       command: codex.command ?? 'codex app-server',
       approvalPolicy: codex.approvalPolicy ?? 'never',
       threadSandbox: codex.threadSandbox ?? 'workspace-write',
+      turnSandboxPolicy: codex.turnSandboxPolicy ?? null,
       turnTimeoutMs: positiveInteger(codex.turnTimeoutMs, 3_600_000, 'codex.turn_timeout_ms'),
       readTimeoutMs: positiveInteger(codex.readTimeoutMs, 5_000, 'codex.read_timeout_ms'),
       stallTimeoutMs: codex.stallTimeoutMs ?? 300_000,
@@ -479,10 +575,12 @@ export const loadWorkflow = (
           message: 'workflow front matter must be a map',
         })
       }
+      const frontMatter = decodeJsonObject(definition.config, 'workflow front matter')
       return {
         path,
         fingerprint: createHash('sha256').update(source).digest('hex'),
-        config: parseConfig(decodeRawConfig(definition.config), path, environment),
+        frontMatter,
+        config: parseConfig(decodeRawConfig(frontMatter), path, environment),
         promptTemplate: definition.prompt,
       }
     },

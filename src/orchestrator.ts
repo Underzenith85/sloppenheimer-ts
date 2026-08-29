@@ -785,6 +785,8 @@ export const startOrchestrator = (
               fingerprint: reloaded.fingerprint,
             })
           }
+        } else {
+          return
         }
         const effective = lastKnownGood
         const candidates = yield* effective.tracker

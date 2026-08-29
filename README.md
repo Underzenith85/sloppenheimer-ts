@@ -80,4 +80,45 @@ removes the Symphony label.
 profile is GitHub Issues; the orchestration interfaces keep tracker and workspace concerns separate
 so additional profiles can be implemented without weakening the domain types.
 
+Unknown top-level keys are retained as JSON-safe extension data and ignored by the core. Likewise,
+`tracker.provider` is retained exactly as written and handed to the selected adapter; the core does
+not resolve, discard, or interpret adapter-owned keys. `$VAR` resolution is limited to declared
+secret and path fields. In core configuration that means `workspace.root`; hook bodies and
+`codex.command` remain shell strings. `workspace.root` also expands `~`, and relative roots resolve
+from the directory containing `WORKFLOW.md`.
+
+### GitHub tracker adapter
+
+The GitHub adapter supports these `tracker.provider` keys:
+
+| Key            | Requirement and default                                                                                                                                                                             |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`        | Required non-empty repository owner.                                                                                                                                                                |
+| `repository`   | Required non-empty repository name.                                                                                                                                                                 |
+| `token`        | Optional `$VAR` secret reference. If omitted, the adapter uses the first non-empty value from `GITHUB_TOKEN`, then `GH_TOKEN`. Literal credentials and Codex authentication variables are rejected. |
+| `api_base_url` | Optional absolute HTTP(S) URL; defaults to `https://api.github.com`.                                                                                                                                |
+| `base_branch`  | Optional non-empty branch; defaults to `main`.                                                                                                                                                      |
+
+Unknown provider keys are preserved by the loader and ignored by this adapter. The adapter defaults
+`active_states` to `[open]` and `terminal_states` to `[closed]`. Startup or dispatch preflight fails
+for a missing/blank owner or repository, a non-string or literal token, an empty/missing referenced
+secret, a non-HTTP(S) API URL, or blank optional string. Adapter secret environment names—including
+the configured name and both fallback aliases—are removed from Codex child environments.
+
+### Codex policy
+
+The default Codex command is `codex app-server`; blank commands fail startup and dispatch
+preflight. This implementation defaults `approval_policy` to `never` and `thread_sandbox` to
+`workspace-write`. When `turn_sandbox_policy` is omitted, each turn receives a `workspaceWrite`
+policy with the issue workspace as its writable root and network access enabled. An explicit
+`turn_sandbox_policy` map is passed through unchanged.
+
+Policy shapes track the generated schema for the targeted Codex App Server: `approval_policy`
+accepts `untrusted`, `on-request`, `never`, or the generated granular object;
+`thread_sandbox` accepts `read-only`, `workspace-write`, or `danger-full-access`; and turn policies
+accept the generated `dangerFullAccess`, `readOnly`, `externalSandbox`, and `workspaceWrite` map
+variants. When upgrading Codex, regenerate schemas with
+`codex app-server generate-json-schema --out <directory>` and compare `v2/ThreadStartParams.json`
+and `v2/TurnStartParams.json`.
+
 This project is independent of OpenAI and is not an official OpenAI distribution.

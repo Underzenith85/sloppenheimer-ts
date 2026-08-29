@@ -2,7 +2,7 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { makeGitHubPullRequestMonitor } from '../src/github-handoff.js'
-import type { GitHubProviderConfig } from '../src/workflow.js'
+import type { GitHubProviderConfig } from '../src/tracker.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

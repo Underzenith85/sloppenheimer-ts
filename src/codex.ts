@@ -71,6 +71,23 @@ type TurnWaiter = Readonly<{
   timeout: NodeJS.Timeout
 }>
 
+export const makeTurnStartParams = (
+  threadId: string,
+  workspace: Workspace,
+  config: CodexConfig,
+  prompt: string,
+): JsonObject => ({
+  threadId,
+  input: [{ type: 'text', text: prompt }],
+  cwd: workspace.path,
+  approvalPolicy: config.approvalPolicy,
+  sandboxPolicy: config.turnSandboxPolicy ?? {
+    type: 'workspaceWrite',
+    writableRoots: [workspace.path],
+    networkAccess: true,
+  },
+})
+
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
     return 'unknown protocol error'
@@ -183,17 +200,10 @@ class CodexConnection {
     config: CodexConfig,
     prompt: string,
   ): Promise<string> {
-    const result = await this.#request('turn/start', {
-      threadId,
-      input: [{ type: 'text', text: prompt }],
-      cwd: workspace.path,
-      approvalPolicy: config.approvalPolicy,
-      sandboxPolicy: {
-        type: 'workspaceWrite',
-        writableRoots: [workspace.path],
-        networkAccess: true,
-      },
-    })
+    const result = await this.#request(
+      'turn/start',
+      makeTurnStartParams(threadId, workspace, config, prompt),
+    )
     if (
       !isJsonObject(result) ||
       !isJsonObject(result['turn']) ||
