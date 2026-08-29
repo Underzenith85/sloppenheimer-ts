@@ -90,6 +90,7 @@ type GitHubDependency = Readonly<{
 }>
 
 const githubApiVersion = '2026-03-10'
+const githubAuthenticationEnvironmentNames = ['GITHUB_TOKEN', 'GH_TOKEN'] as const
 const dependencyConcurrency = 4
 const dependencyCacheTtlMs = 60_000
 
@@ -612,7 +613,9 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   return {
-    secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
+    secretEnvironmentNames: [
+      ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
+    ],
     fetchIssuesByStates: (
       states,
       dependencyLabels,
@@ -693,7 +696,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
         ),
       )
     },
-    handoffCompletedWork: (issue, dispatchLabels) => {
+    handoffCompletedWork: (issue, _dispatchLabels) => {
       const branchName = issueBranchName(issue)
       return githubBranchExists(provider, prefix, branchName).pipe(
         Effect.flatMap((exists) => {
@@ -706,25 +709,11 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
                 ? createPullRequest(provider, prefix, issue, branchName)
                 : Effect.succeed(existingUrl),
             ),
-            Effect.flatMap((pullRequestUrl) =>
-              Effect.forEach(
-                dispatchLabels,
-                (label) =>
-                  githubMutation(
-                    provider,
-                    `${prefix}/issues/${encodeURIComponent(issue.id)}/labels/${encodeURIComponent(label)}`,
-                    'DELETE',
-                    undefined,
-                  ),
-                { concurrency: 1, discard: true },
-              ).pipe(
-                Effect.as<HandoffResult>({
-                  _tag: 'PullRequest',
-                  branchName,
-                  pullRequestUrl,
-                }),
-              ),
-            ),
+            Effect.map((pullRequestUrl): HandoffResult => ({
+              _tag: 'PullRequest',
+              branchName,
+              pullRequestUrl,
+            })),
           )
         }),
       )

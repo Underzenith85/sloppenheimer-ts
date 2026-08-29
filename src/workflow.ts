@@ -1,4 +1,5 @@
-import { readFile, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Effect } from 'effect'
@@ -12,6 +13,7 @@ export type GitHubProviderConfig = Readonly<{
   owner: string
   repository: string
   token: string
+  tokenEnvironmentName: string
   apiBaseUrl: string
   baseBranch: string
 }>
@@ -286,6 +288,36 @@ const resolveEnvironment = (
   return resolved
 }
 
+const codexAuthenticationEnvironmentNames = new Set(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])
+
+const resolveSecretEnvironment = (
+  value: string,
+  name: string,
+  environment: NodeJS.ProcessEnv,
+): Readonly<{ value: string; environmentName: string }> => {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u.exec(value)
+  if (match === null) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
+    })
+  }
+  const environmentName = match[1]
+  if (environmentName === undefined) {
+    throw new WorkflowError({ category: 'invalid_config', message: `${name} is invalid` })
+  }
+  if (codexAuthenticationEnvironmentNames.has(environmentName)) {
+    throw new WorkflowError({
+      category: 'invalid_config',
+      message: `${name} must not use Codex authentication environment variable ${environmentName}`,
+    })
+  }
+  return {
+    value: resolveEnvironment(value, name, environment),
+    environmentName,
+  }
+}
+
 const resolveWorkspaceRoot = (
   value: string | undefined,
   workflowPath: string,
@@ -332,6 +364,11 @@ const parseConfig = (
   }
 
   const { polling, workspace, hooks, agent, codex, server } = raw
+  const trackerToken = resolveSecretEnvironment(
+    provider.token,
+    'tracker.provider.token',
+    environment,
+  )
 
   return {
     tracker: {
@@ -339,7 +376,8 @@ const parseConfig = (
       provider: {
         owner: provider.owner,
         repository: provider.repository,
-        token: resolveEnvironment(provider.token, 'tracker.provider.token', environment),
+        token: trackerToken.value,
+        tokenEnvironmentName: trackerToken.environmentName,
         apiBaseUrl: provider.apiBaseUrl ?? 'https://api.github.com',
         baseBranch: provider.baseBranch ?? 'main',
       },
@@ -420,9 +458,9 @@ export const loadWorkflow = (
 ): Effect.Effect<Workflow, WorkflowError> =>
   Effect.tryPromise({
     try: async () => {
-      let sourceAndMetadata: readonly [string, Awaited<ReturnType<typeof stat>>]
+      let source: string
       try {
-        sourceAndMetadata = await Promise.all([readFile(path, 'utf8'), stat(path)])
+        source = await readFile(path, 'utf8')
       } catch (cause: unknown) {
         throw new WorkflowError({
           category: 'missing_workflow_file',
@@ -430,7 +468,6 @@ export const loadWorkflow = (
           cause,
         })
       }
-      const [source, metadata] = sourceAndMetadata
       const definition = splitWorkflow(source)
       if (
         typeof definition.config !== 'object' ||
@@ -444,7 +481,7 @@ export const loadWorkflow = (
       }
       return {
         path,
-        fingerprint: `${String(metadata.mtimeMs)}:${String(metadata.size)}`,
+        fingerprint: createHash('sha256').update(source).digest('hex'),
         config: parseConfig(decodeRawConfig(definition.config), path, environment),
         promptTemplate: definition.prompt,
       }

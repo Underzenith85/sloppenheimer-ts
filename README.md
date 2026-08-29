@@ -35,9 +35,14 @@ pnpm build
 GITHUB_TOKEN=github_pat_... pnpm start -- WORKFLOW.md
 ```
 
-The workflow token is resolved by the host and removed from agent subprocess environments. Each
-eligible issue must carry the `symphony` label. Workspaces live under `.symphony/workspaces` and are
-never treated as trusted paths until containment checks pass.
+Tracker credentials in repository-owned workflow files must use `$VAR` references; literal tracker
+tokens are rejected. The host retains the reference's environment-variable name as secret
+provenance, without making another plaintext token copy, and removes that name plus the GitHub
+fallback aliases `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environments. Codex's own
+`OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` authentication sources are always preserved, and tracker
+configuration may not reuse those names. Each eligible issue must carry the `symphony` label.
+Workspaces live under `.symphony/workspaces` and are never treated as trusted paths until
+containment checks pass.
 
 The configured operator console is available at `http://127.0.0.1:3000`. It shows live and retrying
 agents, session totals, and the open GitHub backlog. **Start** adds the configured orchestration label;
@@ -53,9 +58,9 @@ ssh -L 3000:127.0.0.1:3000 symphony-host
 ```
 
 After a normal agent turn, Symphony looks for the expected `symphony/issue-<number>` branch. When
-the branch exists, the host creates or reuses an open pull request, removes the dispatch labels, and
-stops continuation turns. Without a pushed branch, Symphony preserves the workspace and continues
-the issue. Pull-request operations use only the host-side GitHub credential.
+the branch exists, the host creates or reuses an open pull request and stops continuation turns.
+Dispatch labels remain unchanged. Without a pushed branch, Symphony preserves the workspace and
+continues the issue. Pull-request operations use only the host-side GitHub credential.
 
 ## Configuration
 

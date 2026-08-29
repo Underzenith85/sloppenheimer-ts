@@ -9,6 +9,7 @@ const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
   token: 'secret',
+  tokenEnvironmentName: 'CUSTOM_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
 }
@@ -62,6 +63,22 @@ const requestUrl = (input: string | URL | Request): string => {
 
 afterEach((): void => {
   vi.unstubAllGlobals()
+})
+
+describe('GitHub tracker authentication provenance', (): void => {
+  it('declares the configured secret variable and all fallback aliases', (): void => {
+    expect(makeGitHubTracker(provider).secretEnvironmentNames).toEqual([
+      'CUSTOM_GITHUB_TOKEN',
+      'GITHUB_TOKEN',
+      'GH_TOKEN',
+    ])
+  })
+
+  it('deduplicates a configured fallback alias', (): void => {
+    expect(
+      makeGitHubTracker({ ...provider, tokenEnvironmentName: 'GH_TOKEN' }).secretEnvironmentNames,
+    ).toEqual(['GH_TOKEN', 'GITHUB_TOKEN'])
+  })
 })
 
 describe('GitHub tracker pagination', (): void => {
@@ -266,7 +283,7 @@ describe('GitHub pull request handoff', (): void => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('creates a pull request and removes dispatch labels after a branch is pushed', async (): Promise<void> => {
+  it('creates a pull request without changing dispatch labels after a branch is pushed', async (): Promise<void> => {
     const requests: Array<Readonly<{ url: string; method: string }>> = []
     const fetchMock = vi.fn(
       async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -290,9 +307,6 @@ describe('GitHub pull request handoff', (): void => {
           )
           return Response.json({ html_url: 'https://example.test/pulls/31' }, { status: 201 })
         }
-        if (url.endsWith('/issues/28/labels/symphony') && method === 'DELETE') {
-          return new Response(null, { status: 204 })
-        }
         return new Response(null, { status: 500 })
       },
     )
@@ -307,10 +321,10 @@ describe('GitHub pull request handoff', (): void => {
       branchName: 'symphony/issue-28',
       pullRequestUrl: 'https://example.test/pulls/31',
     })
-    expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET', 'POST', 'DELETE'])
+    expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET', 'POST'])
   })
 
-  it('reuses an existing pull request and still removes dispatch labels', async (): Promise<void> => {
+  it('reuses an existing pull request without changing dispatch labels', async (): Promise<void> => {
     const methods: string[] = []
     const fetchMock = vi.fn(
       async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -333,6 +347,6 @@ describe('GitHub pull request handoff', (): void => {
     )
 
     expect(result._tag).toBe('PullRequest')
-    expect(methods).toEqual(['GET', 'GET', 'DELETE'])
+    expect(methods).toEqual(['GET', 'GET'])
   })
 })

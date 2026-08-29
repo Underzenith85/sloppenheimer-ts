@@ -11,6 +11,7 @@ const temporaryDirectories: string[] = []
 
 afterEach(async (): Promise<void> => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))
 })
 
@@ -104,42 +105,53 @@ tracker:
   provider:
     owner: example
     repository: symphony
-    token: secret
+    token: $TEST_OPERATOR_GITHUB_TOKEN
     api_base_url: https://api.example.test
   required_labels: [symphony]
 ---
 Do the work
 `,
     )
-    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-      if (url.includes('/dependencies/blocked_by')) {
-        return Response.json([])
-      }
-      return Response.json([
-        {
-          number: 1,
-          node_id: 'node-1',
-          title: 'Issue 1',
-          body: null,
-          state: 'open',
-          html_url: 'https://example.test/issues/1',
-          assignee: null,
-          labels: [],
-          created_at: '2026-01-01T00:00:00.000Z',
-          updated_at: '2026-01-02T00:00:00.000Z',
-        },
-      ])
-    })
+    vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        if ((init?.method ?? 'GET') === 'DELETE') {
+          return new Response(null, { status: 204 })
+        }
+        if (url.includes('/dependencies/blocked_by')) {
+          return Response.json([])
+        }
+        return Response.json([
+          {
+            number: 1,
+            node_id: 'node-1',
+            title: 'Issue 1',
+            body: null,
+            state: 'open',
+            html_url: 'https://example.test/issues/1',
+            assignee: null,
+            labels: [],
+            created_at: '2026-01-01T00:00:00.000Z',
+            updated_at: '2026-01-02T00:00:00.000Z',
+          },
+        ])
+      },
+    )
     vi.stubGlobal('fetch', fetchMock)
+    const setIssuePaused = vi.fn(() => Effect.void)
     const backend = makeOperatorBackend(workflowPath, {
       snapshot: Effect.die('unused'),
       refresh: Effect.void,
+      setIssuePaused,
     })
 
     await Effect.runPromise(backend.backlog)
     await Effect.runPromise(backend.backlog)
+    await Effect.runPromise(backend.setIssueEnabled(1, false))
 
     expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(setIssuePaused).toHaveBeenCalledWith(1, true)
   })
 })
