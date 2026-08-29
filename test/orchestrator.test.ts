@@ -38,20 +38,30 @@ const makeIssue = (
   updatedAt: null,
 })
 
+const testEnvironment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+
 const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
   promptTemplate: 'test',
+  tracker: {
+    kind: 'github',
+    provider: {
+      owner: 'example',
+      repository: 'symphony',
+      token: 'secret',
+      tokenEnvironmentName: 'SYMPHONY_TEST_TOKEN',
+      apiBaseUrl: 'https://api.github.com',
+      baseBranch: 'main',
+    },
+  },
   config: {
     tracker: {
       kind: 'github',
       provider: {
         owner: 'example',
         repository: 'symphony',
-        token: 'secret',
-        tokenEnvironmentName: 'GITHUB_TOKEN',
-        apiBaseUrl: 'https://api.github.com',
-        baseBranch: 'main',
+        token: '$SYMPHONY_TEST_TOKEN',
       },
       requiredLabels: ['symphony', 'ready'],
       activeStates: ['open'],
@@ -76,11 +86,13 @@ const workflow: Workflow = {
       command: 'codex app-server',
       approvalPolicy: 'never',
       threadSandbox: 'workspace-write',
+      turnSandboxPolicy: null,
       turnTimeoutMs: 60_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 30_000,
     },
     serverPort: null,
+    extensions: {},
   },
 }
 
@@ -184,6 +196,7 @@ type TestHarness = Readonly<{
   loads: () => number
   stateFetches: () => number
   idFetches: () => number
+  idFetchTokens: () => readonly string[]
   trackerWorkflows: () => readonly Workflow[]
   workspaceWorkflows: () => readonly Workflow[]
   agentRuns: () => readonly Readonly<{ command: string; prompt: string; maxTurns: number }>[]
@@ -194,12 +207,14 @@ const makeHarness = (
   initial: Workflow,
   candidates: (workflow: Workflow) => readonly Issue[] = () => [],
   fetchCandidates?: (workflow: Workflow) => Effect.Effect<readonly Issue[], never>,
+  environment: NodeJS.ProcessEnv = testEnvironment,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
   let notifyChanged = (): void => undefined
   let loadCount = 0
   let stateFetchCount = 0
   let idFetchCount = 0
+  const idFetchTokens: string[] = []
   const trackerWorkflows: Workflow[] = []
   const workspaceWorkflows: Workflow[] = []
   const agentRuns: Readonly<{ command: string; prompt: string; maxTurns: number }>[] = []
@@ -225,6 +240,7 @@ const makeHarness = (
         fetchIssuesByIds: () =>
           Effect.sync(() => {
             idFetchCount += 1
+            idFetchTokens.push(effectiveWorkflow.tracker.provider.token)
             return candidates(effectiveWorkflow)
           }),
         handoffCompletedWork: () =>
@@ -250,6 +266,7 @@ const makeHarness = (
         agentRuns.push({ command: config.command, prompt, maxTurns })
         resolveAgentRun()
       }).pipe(Effect.zipRight(Effect.never)),
+    environment,
     watchWorkflow: (_path, onChange) => {
       notifyChanged = onChange
       return { close: () => Promise.resolve() }
@@ -267,6 +284,7 @@ const makeHarness = (
     loads: () => loadCount,
     stateFetches: () => stateFetchCount,
     idFetches: () => idFetchCount,
+    idFetchTokens: () => idFetchTokens,
     trackerWorkflows: () => trackerWorkflows,
     workspaceWorkflows: () => workspaceWorkflows,
     agentRuns: () => agentRuns,
@@ -450,7 +468,7 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider.repository).toBe(
+    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider['repository']).toBe(
       'reloaded-repository',
     )
     expect(harness.trackerWorkflows().at(-1)?.config.tracker.activeStates).toEqual([
@@ -566,6 +584,31 @@ describe('workflow hot reload', (): void => {
     )
   })
 
+  it('uses the provider returned by dispatch preflight', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const harness = makeHarness(
+      workflow,
+      () => [],
+      () => {
+        environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+        return Effect.succeed([issue])
+      },
+      environment,
+    )
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* harness.awaitAgentRun
+        }),
+      ),
+    )
+
+    expect(harness.trackerWorkflows().at(-1)?.tracker.provider.token).toBe('rotated')
+  })
+
   it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }), () => [issue])
@@ -582,5 +625,89 @@ describe('workflow hot reload', (): void => {
     )
 
     expect(snapshot.counts.running).toBe(0)
+  })
+})
+
+describe('tracker credential revalidation', (): void => {
+  it('updates the tracker used by an active worker issue refresh', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const harness = makeHarness(workflow, () => [issue])
+    let refreshIssue: Parameters<OrchestratorDependencies['runAgent']>[6] | null = null
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      environment,
+      runAgent: (...arguments_) => {
+        refreshIssue = arguments_[6]
+        return harness.dependencies.runAgent(...arguments_)
+      },
+    }
+    const refreshActiveIssue = (): Effect.Effect<void> =>
+      refreshIssue === null
+        ? Effect.die('worker did not provide an issue refresh callback')
+        : refreshIssue().pipe(Effect.asVoid, Effect.orDie)
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* harness.awaitAgentRun
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+          yield* refreshActiveIssue()
+        }),
+      ),
+    )
+
+    expect(harness.idFetchTokens().at(-1)).toBe('rotated')
+  })
+
+  it('rebuilds the tracker when the referenced secret is rotated in the environment', async (): Promise<void> => {
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
+    const harness = makeHarness(workflow)
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            environment,
+          })
+          yield* control.refresh
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+        }),
+      ),
+    )
+
+    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+      'secret',
+      'first',
+      'rotated',
+    ])
+  })
+
+  it('retains the last known good tracker when the secret disappears', async (): Promise<void> => {
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
+    const harness = makeHarness(workflow)
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            environment,
+          })
+          yield* control.refresh
+          delete environment['SYMPHONY_TEST_TOKEN']
+          yield* control.refresh
+        }),
+      ),
+    )
+
+    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+      'secret',
+      'first',
+    ])
   })
 })

@@ -3,7 +3,7 @@ import { Effect } from 'effect'
 import type { JsonValue } from './domain.js'
 import { TrackerError } from './errors.js'
 import type { PullRequestObservation } from './handoff.js'
-import type { GitHubProviderConfig } from './workflow.js'
+import type { GitHubProviderConfig } from './tracker-config.js'
 
 type JsonRecord = Record<string, JsonValue>
 const githubRequestTimeoutMs = 30_000
