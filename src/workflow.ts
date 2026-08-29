@@ -1,4 +1,5 @@
-import { readFile, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Effect } from 'effect'
@@ -420,9 +421,9 @@ export const loadWorkflow = (
 ): Effect.Effect<Workflow, WorkflowError> =>
   Effect.tryPromise({
     try: async () => {
-      let sourceAndMetadata: readonly [string, Awaited<ReturnType<typeof stat>>]
+      let source: string
       try {
-        sourceAndMetadata = await Promise.all([readFile(path, 'utf8'), stat(path)])
+        source = await readFile(path, 'utf8')
       } catch (cause: unknown) {
         throw new WorkflowError({
           category: 'missing_workflow_file',
@@ -430,7 +431,6 @@ export const loadWorkflow = (
           cause,
         })
       }
-      const [source, metadata] = sourceAndMetadata
       const definition = splitWorkflow(source)
       if (
         typeof definition.config !== 'object' ||
@@ -444,7 +444,7 @@ export const loadWorkflow = (
       }
       return {
         path,
-        fingerprint: `${String(metadata.mtimeMs)}:${String(metadata.size)}`,
+        fingerprint: createHash('sha256').update(source).digest('hex'),
         config: parseConfig(decodeRawConfig(definition.config), path, environment),
         promptTemplate: definition.prompt,
       }
