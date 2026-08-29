@@ -1,8 +1,15 @@
+import { Deferred, Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
 import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
-import { issueIsRoutable, retryDelayMs, sortIssues } from '../src/orchestrator.js'
+import {
+  issueIsRoutable,
+  retryDelayMs,
+  sortIssues,
+  startOrchestrator,
+  type OrchestratorDependencies,
+} from '../src/orchestrator.js'
 import type { Workflow } from '../src/workflow.js'
 
 const makeIssue = (
@@ -83,6 +90,181 @@ describe('orchestrator policies', (): void => {
     ]
 
     expect(sortIssues(issues).map((issue) => issue.identifier)).toEqual(['GH-1', 'GH-2', 'GH-3'])
+  })
+
+  it('keeps active sessions on their dispatch snapshot across workflow reloads', async (): Promise<void> => {
+    const initial: Workflow = {
+      ...workflow,
+      fingerprint: 'initial',
+      promptTemplate: 'Initial prompt for {{ issue.identifier }}',
+      config: {
+        ...workflow.config,
+        tracker: {
+          ...workflow.config.tracker,
+          provider: { ...workflow.config.tracker.provider, token: 'initial-token' },
+          requiredLabels: ['initial'],
+        },
+        workspaceRoot: '/tmp/initial-workspaces',
+        hooks: { ...workflow.config.hooks, beforeRun: 'initial-hook' },
+        agent: { ...workflow.config.agent, maxConcurrentAgents: 1, maxTurns: 2 },
+        codex: { ...workflow.config.codex, command: 'initial-codex app-server' },
+      },
+    }
+    const reloaded: Workflow = {
+      ...initial,
+      fingerprint: 'reloaded',
+      promptTemplate: 'Reloaded prompt for {{ issue.identifier }}',
+      config: {
+        ...initial.config,
+        tracker: {
+          ...initial.config.tracker,
+          provider: { ...initial.config.tracker.provider, token: 'reloaded-token' },
+          requiredLabels: ['reloaded'],
+        },
+        workspaceRoot: '/tmp/reloaded-workspaces',
+        hooks: { ...initial.config.hooks, beforeRun: 'reloaded-hook' },
+        agent: { ...initial.config.agent, maxConcurrentAgents: 2, maxTurns: 7 },
+        codex: { ...initial.config.codex, command: 'reloaded-codex app-server' },
+      },
+    }
+    const initialIssue = makeIssue('GH-1', 1, null, ['initial'])
+    const reloadedIssue = makeIssue('GH-2', 1, null, ['reloaded'])
+    let selectedWorkflow = initial
+    const trackerFactories: string[] = []
+    const trackerRefreshes: string[] = []
+    const workspaceFactories: string[] = []
+    const beforeRuns: string[] = []
+    const agentRuns: Array<
+      Readonly<{
+        identifier: string
+        command: string
+        prompt: string
+        maxTurns: number
+        secrets: readonly string[]
+      }>
+    > = []
+    let initialContinuationRoutable: boolean | null = null
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const initialStarted = yield* Deferred.make<void, never>()
+          const reloadedStarted = yield* Deferred.make<void, never>()
+          const continueInitial = yield* Deferred.make<void, never>()
+          const initialRefreshed = yield* Deferred.make<void, never>()
+          const dependencies: OrchestratorDependencies = {
+            loadWorkflow: () => Effect.succeed(selectedWorkflow),
+            makeTracker: (effectiveWorkflow) => {
+              const name = effectiveWorkflow.fingerprint
+              trackerFactories.push(`${name}:${effectiveWorkflow.config.tracker.provider.token}`)
+              return {
+                fetchIssuesByStates: () =>
+                  Effect.succeed(name === 'initial' ? [initialIssue] : [reloadedIssue]),
+                fetchIssuesByIds: (ids) =>
+                  Effect.sync(() => {
+                    trackerRefreshes.push(`${name}:${ids.join(',')}`)
+                    return ids.includes(initialIssue.id) ? [initialIssue] : [reloadedIssue]
+                  }),
+                handoffCompletedWork: () =>
+                  Effect.succeed({
+                    _tag: 'PullRequest',
+                    branchName: 'branch',
+                    pullRequestUrl: 'url',
+                  }),
+                secretEnvironmentNames: [`${name.toUpperCase()}_TOKEN`],
+              }
+            },
+            makeWorkspaces: (effectiveWorkflow) => {
+              const name = effectiveWorkflow.fingerprint
+              workspaceFactories.push(
+                `${name}:${effectiveWorkflow.config.workspaceRoot}:${effectiveWorkflow.config.hooks.beforeRun ?? ''}`,
+              )
+              return {
+                create: (identifier) =>
+                  Effect.succeed({
+                    path: `/tmp/${name}/${identifier}`,
+                    key: identifier,
+                    createdNow: false,
+                  }),
+                beforeRun: (workspace) =>
+                  Effect.sync(() => {
+                    beforeRuns.push(`${name}:${workspace.key}`)
+                  }),
+                afterRun: () => Effect.void,
+                remove: () => Effect.void,
+              }
+            },
+            runAgent: (
+              issue,
+              _workspace,
+              config,
+              prompt,
+              maxTurns,
+              secretEnvironmentNames,
+              refreshIssue,
+              isRoutable,
+            ) =>
+              Effect.gen(function* () {
+                agentRuns.push({
+                  identifier: issue.identifier,
+                  command: config.command,
+                  prompt,
+                  maxTurns,
+                  secrets: secretEnvironmentNames,
+                })
+                if (issue.id === initialIssue.id) {
+                  yield* Deferred.succeed(initialStarted, undefined)
+                  yield* Deferred.await(continueInitial)
+                  const refreshed = yield* refreshIssue()
+                  initialContinuationRoutable = refreshed !== null && isRoutable(refreshed)
+                  yield* Deferred.succeed(initialRefreshed, undefined)
+                } else {
+                  yield* Deferred.succeed(reloadedStarted, undefined)
+                }
+                return yield* Effect.never
+              }),
+            watchWorkflow: null,
+            pollAutomatically: false,
+          }
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+
+          yield* control.refresh
+          yield* Deferred.await(initialStarted)
+          selectedWorkflow = reloaded
+          yield* control.refresh
+          yield* control.snapshot
+          yield* Deferred.await(reloadedStarted)
+          yield* Deferred.succeed(continueInitial, undefined)
+          yield* Deferred.await(initialRefreshed)
+        }),
+      ),
+    )
+
+    expect(trackerFactories).toEqual(['initial:initial-token', 'reloaded:reloaded-token'])
+    expect(workspaceFactories).toEqual([
+      'initial:/tmp/initial-workspaces:initial-hook',
+      'reloaded:/tmp/reloaded-workspaces:reloaded-hook',
+    ])
+    expect(beforeRuns).toEqual(['initial:GH-1', 'reloaded:GH-2'])
+    expect(agentRuns).toEqual([
+      {
+        identifier: 'GH-1',
+        command: 'initial-codex app-server',
+        prompt: 'Initial prompt for GH-1',
+        maxTurns: 2,
+        secrets: ['INITIAL_TOKEN'],
+      },
+      {
+        identifier: 'GH-2',
+        command: 'reloaded-codex app-server',
+        prompt: 'Reloaded prompt for GH-2',
+        maxTurns: 7,
+        secrets: ['RELOADED_TOKEN'],
+      },
+    ])
+    expect(trackerRefreshes).toContain('initial:GH-1')
+    expect(trackerRefreshes).not.toContain('reloaded:GH-1')
+    expect(initialContinuationRoutable).toBe(true)
   })
 
   it('caps exponential retry backoff', (): void => {

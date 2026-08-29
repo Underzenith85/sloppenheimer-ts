@@ -13,6 +13,7 @@ import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
 type RunningEntry = {
   issue: Issue
   fiber: Fiber.RuntimeFiber<void>
+  execution: ExecutionSnapshot
   attempt: number | null
   startedAt: Date
   lastEventAt: Date | null
@@ -70,6 +71,51 @@ export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
   refresh: Effect.Effect<void>
 }>
+
+type WorkflowWatcher = Readonly<{
+  close: () => Promise<void>
+}>
+
+export type OrchestratorDependencies = Readonly<{
+  loadWorkflow: typeof loadWorkflow
+  makeTracker: (workflow: Workflow) => TrackerAdapter
+  makeWorkspaces: (workflow: Workflow) => WorkspaceManager
+  runAgent: typeof runAgent
+  watchWorkflow: ((path: string, onChange: () => void) => WorkflowWatcher) | null
+  pollAutomatically: boolean
+}>
+
+type ExecutionSnapshot = Readonly<{
+  tracker: TrackerAdapter
+  provider: Workflow['config']['tracker']['provider']
+  requiredLabels: readonly string[]
+  activeStates: readonly string[]
+  terminalStates: readonly string[]
+  secretEnvironmentNames: readonly string[]
+  workspaces: WorkspaceManager
+  workspaceRoot: string
+  hooks: Workflow['config']['hooks']
+  prompt: string
+  codex: Workflow['config']['codex']
+  maxTurns: number
+}>
+
+const defaultDependencies: OrchestratorDependencies = {
+  loadWorkflow,
+  makeTracker: (workflow) => makeGitHubTracker(workflow.config.tracker.provider),
+  makeWorkspaces: (workflow) =>
+    makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
+  runAgent,
+  watchWorkflow: (path, onChange) => {
+    const watcher = chokidar.watch(path, {
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+      ignoreInitial: true,
+    })
+    watcher.on('change', onChange)
+    return watcher
+  },
+  pollAutomatically: true,
+}
 
 type OrchestratorEvent =
   | Readonly<{ _tag: 'Poll' }>
@@ -148,6 +194,41 @@ const issueIsActive = (issue: Issue, workflow: Workflow): boolean =>
   stateIsIn(issue.state, workflow.config.tracker.activeStates) &&
   !stateIsIn(issue.state, workflow.config.tracker.terminalStates)
 
+const issueIsActiveInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean =>
+  stateIsIn(issue.state, snapshot.activeStates) && !stateIsIn(issue.state, snapshot.terminalStates)
+
+const issueIsRoutableInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean => {
+  if (!issue.dispatchable) {
+    return false
+  }
+  if (unresolvedBlockers(issue, snapshot.terminalStates).length > 0) {
+    return false
+  }
+  const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
+  return snapshot.requiredLabels.every((label) => label.length > 0 && labels.has(label))
+}
+
+const captureExecutionSnapshot = (
+  workflow: Workflow,
+  tracker: TrackerAdapter,
+  workspaces: WorkspaceManager,
+  prompt: string,
+): ExecutionSnapshot =>
+  Object.freeze({
+    tracker,
+    provider: Object.freeze({ ...workflow.config.tracker.provider }),
+    requiredLabels: Object.freeze([...workflow.config.tracker.requiredLabels]),
+    activeStates: Object.freeze([...workflow.config.tracker.activeStates]),
+    terminalStates: Object.freeze([...workflow.config.tracker.terminalStates]),
+    secretEnvironmentNames: Object.freeze([...tracker.secretEnvironmentNames]),
+    workspaces,
+    workspaceRoot: workflow.config.workspaceRoot,
+    hooks: Object.freeze({ ...workflow.config.hooks }),
+    prompt,
+    codex: Object.freeze({ ...workflow.config.codex }),
+    maxTurns: workflow.config.agent.maxTurns,
+  })
+
 const stateHasSlot = (issue: Issue, state: RuntimeState, workflow: Workflow): boolean => {
   if (state.running.size >= workflow.config.agent.maxConcurrentAgents) {
     return false
@@ -169,14 +250,16 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
 
 export const startOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
+  dependencyOverrides: Partial<OrchestratorDependencies> = {},
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
   Effect.gen(function* () {
-    let workflow = yield* loadWorkflow(selectedWorkflowPath)
-    let tracker: TrackerAdapter = makeGitHubTracker(workflow.config.tracker.provider)
-    let workspaces: WorkspaceManager = makeWorkspaceManager(
-      workflow.config.workspaceRoot,
-      workflow.config.hooks,
-    )
+    const dependencies: OrchestratorDependencies = {
+      ...defaultDependencies,
+      ...dependencyOverrides,
+    }
+    let workflow = yield* dependencies.loadWorkflow(selectedWorkflowPath)
+    let tracker = dependencies.makeTracker(workflow)
+    let workspaces = dependencies.makeWorkspaces(workflow)
     const state = initialState()
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
 
@@ -184,28 +267,28 @@ export const startOrchestrator = (
       Effect.runFork(Queue.offer(mailbox, event))
     }
 
-    const watcher = yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        const instance = chokidar.watch(selectedWorkflowPath, {
-          awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
-          ignoreInitial: true,
-        })
-        instance.on('change', () => {
-          offerFromCallback({ _tag: 'WorkflowChanged' })
-        })
-        return instance
-      }),
-      (instance) => Effect.promise(() => instance.close()),
-    )
-    void watcher
-
-    yield* Effect.forkScoped(
-      Effect.forever(
-        Queue.offer(mailbox, { _tag: 'Poll' }).pipe(
-          Effect.zipRight(Effect.sleep(workflow.config.pollingIntervalMs)),
+    if (dependencies.watchWorkflow !== null) {
+      const watchWorkflow = dependencies.watchWorkflow
+      const watcher = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          watchWorkflow(selectedWorkflowPath, () => {
+            offerFromCallback({ _tag: 'WorkflowChanged' })
+          }),
         ),
-      ),
-    )
+        (instance) => Effect.promise(() => instance.close()),
+      )
+      void watcher
+    }
+
+    if (dependencies.pollAutomatically) {
+      yield* Effect.forkScoped(
+        Effect.forever(
+          Queue.offer(mailbox, { _tag: 'Poll' }).pipe(
+            Effect.zipRight(Effect.sleep(workflow.config.pollingIntervalMs)),
+          ),
+        ),
+      )
+    }
 
     const scheduleRetry = (
       issue: Issue,
@@ -254,8 +337,25 @@ export const startOrchestrator = (
           state.retries.delete(issue.id)
         }
 
+        const renderedPrompt = yield* renderPrompt(workflow, issue, attempt).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (prompt) => ({ _tag: 'Succeeded' as const, prompt }),
+          }),
+        )
+        if (renderedPrompt._tag === 'Failed') {
+          yield* scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
+          return
+        }
+        const execution = captureExecutionSnapshot(
+          workflow,
+          tracker,
+          workspaces,
+          renderedPrompt.prompt,
+        )
+
         const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
-          tracker.fetchIssuesByIds([issue.id]).pipe(
+          execution.tracker.fetchIssuesByIds([issue.id]).pipe(
             Effect.map((issues) => issues[0] ?? null),
             Effect.mapError(
               (error) =>
@@ -267,27 +367,27 @@ export const startOrchestrator = (
             ),
           )
 
-        const worker = workspaces.create(issue.identifier).pipe(
+        const worker = execution.workspaces.create(issue.identifier).pipe(
           Effect.flatMap((workspace) =>
-            workspaces.beforeRun(workspace).pipe(
-              Effect.zipRight(renderPrompt(workflow, issue, attempt)),
-              Effect.flatMap((prompt) =>
-                runAgent(
+            execution.workspaces.beforeRun(workspace).pipe(
+              Effect.zipRight(
+                dependencies.runAgent(
                   issue,
                   workspace,
-                  workflow.config.codex,
-                  prompt,
-                  workflow.config.agent.maxTurns,
-                  tracker.secretEnvironmentNames,
+                  execution.codex,
+                  execution.prompt,
+                  execution.maxTurns,
+                  execution.secretEnvironmentNames,
                   refreshIssue,
                   (refreshed) =>
-                    issueIsActive(refreshed, workflow) && issueIsRoutable(refreshed, workflow),
+                    issueIsActiveInSnapshot(refreshed, execution) &&
+                    issueIsRoutableInSnapshot(refreshed, execution),
                   (update) => {
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
                 ),
               ),
-              Effect.ensuring(workspaces.afterRun(workspace)),
+              Effect.ensuring(execution.workspaces.afterRun(workspace)),
             ),
           ),
           Effect.matchEffect({
@@ -313,6 +413,7 @@ export const startOrchestrator = (
         state.running.set(issue.id, {
           issue,
           fiber,
+          execution,
           attempt,
           startedAt: new Date(),
           lastEventAt: null,
@@ -380,20 +481,22 @@ export const startOrchestrator = (
     const poll = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         yield* reconcile()
-        const reloaded = yield* loadWorkflow(selectedWorkflowPath).pipe(
-          Effect.catchAll((error) =>
-            Effect.logError('workflow validation failed', { error: error.message }).pipe(
-              Effect.as<Workflow | null>(null),
+        const reloaded = yield* dependencies
+          .loadWorkflow(selectedWorkflowPath)
+          .pipe(
+            Effect.catchAll((error) =>
+              Effect.logError('workflow validation failed', { error: error.message }).pipe(
+                Effect.as<Workflow | null>(null),
+              ),
             ),
-          ),
-        )
+          )
         if (reloaded === null) {
           return
         }
         if (reloaded.fingerprint !== workflow.fingerprint) {
           workflow = reloaded
-          tracker = makeGitHubTracker(workflow.config.tracker.provider)
-          workspaces = makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks)
+          tracker = dependencies.makeTracker(workflow)
+          workspaces = dependencies.makeWorkspaces(workflow)
           yield* Effect.logInfo('workflow reloaded', { path: workflow.path })
         }
         const candidates = yield* tracker
@@ -505,8 +608,8 @@ export const startOrchestrator = (
               secondsRunning: state.totals.secondsRunning + seconds,
             }
             if (event.outcome === 'normal') {
-              const handoff = yield* tracker
-                .handoffCompletedWork(entry.issue, workflow.config.tracker.requiredLabels)
+              const handoff = yield* entry.execution.tracker
+                .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
                 .pipe(
                   Effect.match({
                     onFailure: (error) => ({ _tag: 'Failed' as const, error }),
