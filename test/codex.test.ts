@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect } from 'effect'
@@ -253,6 +253,44 @@ describe('workspace containment at the agent launch boundary', (): void => {
 
     expect(error.category).toBe('invalid_path')
     expect(error.message).toContain('identity changed')
+  })
+
+  it('verifies and re-binds a workspace under a symlinked root', async (): Promise<void> => {
+    const target = await makeRoot()
+    const linkedRoot = join(await makeRoot(), 'root-link')
+    await symlink(target, linkedRoot, 'dir')
+    const path = join(linkedRoot, 'issue-13')
+    await mkdir(path)
+
+    const verified = await Effect.runPromise(
+      verifyWorkspaceForLaunch(linkedRoot, workspaceAt(path, 'issue-13')),
+    )
+
+    expect(verified.rootPath).toBe(await realpath(target))
+    await expect(
+      Effect.runPromise(assertWorkspaceIdentity(linkedRoot, verified)),
+    ).resolves.toBeUndefined()
+  })
+
+  it('rejects a configured root that is repointed after verification', async (): Promise<void> => {
+    const target = await makeRoot()
+    const elsewhere = await makeRoot()
+    const linkedRoot = join(await makeRoot(), 'root-link')
+    await symlink(target, linkedRoot, 'dir')
+    const path = join(linkedRoot, 'issue-13')
+    await mkdir(path)
+    const verified = await Effect.runPromise(
+      verifyWorkspaceForLaunch(linkedRoot, workspaceAt(path, 'issue-13')),
+    )
+
+    await rm(linkedRoot)
+    await symlink(elsewhere, linkedRoot, 'dir')
+    const error = await Effect.runPromise(
+      Effect.flip(assertWorkspaceIdentity(linkedRoot, verified)),
+    )
+
+    expect(error.category).toBe('invalid_path')
+    expect(error.message).toContain('root changed')
   })
 
   it('accepts an unchanged workspace at a later boundary', async (): Promise<void> => {

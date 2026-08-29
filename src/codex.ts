@@ -474,6 +474,9 @@ const runVerifiedAgent = (
           try: async () => {
             await rebind()
             const threadId = await connection.initialize(launch.config, verified.path)
+            // Re-bound after the boundary too: a swap during the request window is then detected
+            // and the session torn down before any turn runs.
+            await rebind()
             let turnId = ''
             let turnCount = 0
             while (turnCount < launch.maxTurns) {
@@ -483,6 +486,7 @@ const runVerifiedAgent = (
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
               await rebind()
               turnId = await connection.runTurn(threadId, verified.path, launch.config, turnPrompt)
+              await rebind()
               turnCount += 1
               const refreshed = await Effect.runPromise(launch.refreshIssue())
               if (refreshed === null || !launch.isRoutable(refreshed)) {
