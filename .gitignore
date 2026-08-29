@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+.env
+.symphony/
+*.log
+.DS_Store
