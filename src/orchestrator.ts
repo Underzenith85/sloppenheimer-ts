@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 import chokidar from 'chokidar'
-import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
+import { Clock, Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
@@ -11,6 +11,7 @@ import { loadWorkflow, renderPrompt, type Workflow } from './workflow.js'
 import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
 
 type RunningEntry = {
+  runId: number
   issue: Issue
   fiber: Fiber.RuntimeFiber<void>
   attempt: number | null
@@ -69,6 +70,17 @@ export type OrchestratorSnapshot = Readonly<{
 export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
   refresh: Effect.Effect<void>
+  settle?: Effect.Effect<void>
+}>
+
+type AgentRunner = typeof runAgent
+
+export type OrchestratorDependencies = Readonly<{
+  makeTracker: (workflow: Workflow) => TrackerAdapter
+  makeWorkspaces: (workflow: Workflow) => WorkspaceManager
+  pollAutomatically: boolean
+  runAgent: AgentRunner
+  watchWorkflow: boolean
 }>
 
 type OrchestratorEvent =
@@ -78,6 +90,7 @@ type OrchestratorEvent =
   | Readonly<{
       _tag: 'WorkerExited'
       issueId: IssueId
+      runId: number
       attempt: number | null
       outcome: 'normal' | 'failed'
       error: string | null
@@ -87,6 +100,7 @@ type OrchestratorEvent =
       _tag: 'Snapshot'
       reply: Deferred.Deferred<OrchestratorSnapshot>
     }>
+  | Readonly<{ _tag: 'Settle'; reply: Deferred.Deferred<void> }>
 
 type RuntimeState = {
   running: Map<IssueId, RunningEntry>
@@ -169,43 +183,55 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
 
 export const startOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
+  dependencyOverrides: Partial<OrchestratorDependencies> = {},
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
   Effect.gen(function* () {
+    const dependencies: OrchestratorDependencies = {
+      makeTracker: (currentWorkflow) => makeGitHubTracker(currentWorkflow.config.tracker.provider),
+      makeWorkspaces: (currentWorkflow) =>
+        makeWorkspaceManager(currentWorkflow.config.workspaceRoot, currentWorkflow.config.hooks),
+      pollAutomatically: true,
+      runAgent,
+      watchWorkflow: true,
+      ...dependencyOverrides,
+    }
     let workflow = yield* loadWorkflow(selectedWorkflowPath)
-    let tracker: TrackerAdapter = makeGitHubTracker(workflow.config.tracker.provider)
-    let workspaces: WorkspaceManager = makeWorkspaceManager(
-      workflow.config.workspaceRoot,
-      workflow.config.hooks,
-    )
+    let tracker = dependencies.makeTracker(workflow)
+    let workspaces = dependencies.makeWorkspaces(workflow)
     const state = initialState()
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
+    let nextRunId = 1
 
     const offerFromCallback = (event: OrchestratorEvent): void => {
       Effect.runFork(Queue.offer(mailbox, event))
     }
 
-    const watcher = yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        const instance = chokidar.watch(selectedWorkflowPath, {
-          awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
-          ignoreInitial: true,
-        })
-        instance.on('change', () => {
-          offerFromCallback({ _tag: 'WorkflowChanged' })
-        })
-        return instance
-      }),
-      (instance) => Effect.promise(() => instance.close()),
-    )
-    void watcher
+    if (dependencies.watchWorkflow) {
+      const watcher = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const instance = chokidar.watch(selectedWorkflowPath, {
+            awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+            ignoreInitial: true,
+          })
+          instance.on('change', () => {
+            offerFromCallback({ _tag: 'WorkflowChanged' })
+          })
+          return instance
+        }),
+        (instance) => Effect.promise(() => instance.close()),
+      )
+      void watcher
+    }
 
-    yield* Effect.forkScoped(
-      Effect.forever(
-        Queue.offer(mailbox, { _tag: 'Poll' }).pipe(
-          Effect.zipRight(Effect.sleep(workflow.config.pollingIntervalMs)),
+    if (dependencies.pollAutomatically) {
+      yield* Effect.forkScoped(
+        Effect.forever(
+          Queue.offer(mailbox, { _tag: 'Poll' }).pipe(
+            Effect.zipRight(Effect.sleep(workflow.config.pollingIntervalMs)),
+          ),
         ),
-      ),
-    )
+      )
+    }
 
     const scheduleRetry = (
       issue: Issue,
@@ -221,7 +247,8 @@ export const startOrchestrator = (
         const delay = continuation
           ? 1_000
           : retryDelayMs(attempt, workflow.config.agent.maxRetryBackoffMs)
-        const dueAt = Date.now() + delay
+        const now = yield* Clock.currentTimeMillis
+        const dueAt = now + delay
         const fiber = yield* Effect.forkScoped(
           Effect.sleep(delay).pipe(
             Effect.zipRight(Queue.offer(mailbox, { _tag: 'RetryDue', issueId: issue.id, attempt })),
@@ -267,12 +294,14 @@ export const startOrchestrator = (
             ),
           )
 
+        const runId = nextRunId
+        nextRunId += 1
         const worker = workspaces.create(issue.identifier).pipe(
           Effect.flatMap((workspace) =>
             workspaces.beforeRun(workspace).pipe(
               Effect.zipRight(renderPrompt(workflow, issue, attempt)),
               Effect.flatMap((prompt) =>
-                runAgent(
+                dependencies.runAgent(
                   issue,
                   workspace,
                   workflow.config.codex,
@@ -295,6 +324,7 @@ export const startOrchestrator = (
               Queue.offer(mailbox, {
                 _tag: 'WorkerExited',
                 issueId: issue.id,
+                runId,
                 attempt,
                 outcome: 'failed',
                 error: error.message,
@@ -303,6 +333,7 @@ export const startOrchestrator = (
               Queue.offer(mailbox, {
                 _tag: 'WorkerExited',
                 issueId: issue.id,
+                runId,
                 attempt,
                 outcome: 'normal',
                 error: null,
@@ -310,11 +341,13 @@ export const startOrchestrator = (
           }),
         )
         const fiber = yield* Effect.forkScoped(worker)
+        const startedAt = yield* Clock.currentTimeMillis
         state.running.set(issue.id, {
+          runId,
           issue,
           fiber,
           attempt,
-          startedAt: new Date(),
+          startedAt: new Date(startedAt),
           lastEventAt: null,
           lastEvent: null,
           processId: null,
@@ -323,56 +356,98 @@ export const startOrchestrator = (
         yield* Effect.logInfo('worker dispatched', logContext(issue))
       })
 
+    const endRunning = (id: IssueId, expectedRunId: number | null): RunningEntry | null => {
+      const entry = state.running.get(id)
+      if (entry === undefined || (expectedRunId !== null && entry.runId !== expectedRunId)) {
+        return null
+      }
+      state.running.delete(id)
+      return entry
+    }
+
+    const accountEndedRuntime = (entry: RunningEntry, now: number): void => {
+      const seconds = Math.max(now - entry.startedAt.getTime(), 0) / 1_000
+      state.totals = {
+        inputTokens: state.totals.inputTokens + entry.tokens.inputTokens,
+        outputTokens: state.totals.outputTokens + entry.tokens.outputTokens,
+        totalTokens: state.totals.totalTokens + entry.tokens.totalTokens,
+        secondsRunning: state.totals.secondsRunning + seconds,
+      }
+    }
+
+    const cancelRunning = (
+      id: IssueId,
+      cleanupWorkspace: boolean,
+    ): Effect.Effect<RunningEntry | null, never> =>
+      Effect.gen(function* () {
+        const entry = endRunning(id, null)
+        if (entry === null) {
+          return null
+        }
+        const now = yield* Clock.currentTimeMillis
+        accountEndedRuntime(entry, now)
+        state.claimed.delete(id)
+        yield* Fiber.interrupt(entry.fiber)
+        if (cleanupWorkspace) {
+          yield* workspaces.remove(entry.issue.identifier).pipe(
+            Effect.catchAll((error) =>
+              Effect.logWarning('terminal workspace cleanup failed', {
+                ...logContext(entry.issue),
+                error: error.message,
+              }),
+            ),
+          )
+        }
+        return entry
+      })
+
     const reconcile = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         if (state.running.size === 0) {
           return
         }
-        const now = Date.now()
+        const now = yield* Clock.currentTimeMillis
         const stallTimeout = workflow.config.codex.stallTimeoutMs
         for (const [id, entry] of state.running) {
           const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
           if (stallTimeout > 0 && now - activeAt > stallTimeout) {
-            yield* Fiber.interrupt(entry.fiber)
-            state.running.delete(id)
-            yield* scheduleRetry(entry.issue, (entry.attempt ?? 0) + 1, 'agent stalled', false)
+            const ended = yield* cancelRunning(id, false)
+            if (ended !== null) {
+              yield* scheduleRetry(ended.issue, (ended.attempt ?? 0) + 1, 'agent stalled', false)
+            }
           }
         }
         if (state.running.size === 0) {
           return
         }
-        const refreshed = yield* tracker
-          .fetchIssuesByIds([...state.running.keys()])
-          .pipe(
-            Effect.catchAll((error) =>
-              Effect.logWarning('reconciliation failed', { error: error.message }).pipe(
-                Effect.as<readonly Issue[]>([]),
-              ),
-            ),
-          )
+        const refreshResult = yield* tracker.fetchIssuesByIds([...state.running.keys()]).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
+          }),
+        )
+        if (refreshResult._tag === 'Failed') {
+          yield* Effect.logWarning('reconciliation failed; keeping workers running', {
+            error: refreshResult.error.message,
+          })
+          return
+        }
+        const refreshed = refreshResult.issues
         const byId = new Map(refreshed.map((issue) => [issue.id, issue] as const))
-        for (const [id, entry] of state.running) {
+        for (const [id] of state.running) {
           const issue = byId.get(id)
           if (issue === undefined) {
+            yield* cancelRunning(id, false)
             continue
           }
           const terminal = stateIsIn(issue.state, workflow.config.tracker.terminalStates)
-          if (terminal || !issueIsActive(issue, workflow) || !issueIsRoutable(issue, workflow)) {
-            yield* Fiber.interrupt(entry.fiber)
-            state.running.delete(id)
-            state.claimed.delete(id)
-            if (terminal) {
-              yield* workspaces.remove(issue.identifier).pipe(
-                Effect.catchAll((error) =>
-                  Effect.logWarning('terminal workspace cleanup failed', {
-                    ...logContext(issue),
-                    error: error.message,
-                  }),
-                ),
-              )
-            }
+          if (terminal || !issueIsActive(issue, workflow)) {
+            yield* cancelRunning(id, terminal)
           } else {
-            entry.issue = issue
+            const entry = state.running.get(id)
+            if (entry !== undefined) {
+              entry.issue = issue
+            }
           }
         }
       })
@@ -392,8 +467,8 @@ export const startOrchestrator = (
         }
         if (reloaded.fingerprint !== workflow.fingerprint) {
           workflow = reloaded
-          tracker = makeGitHubTracker(workflow.config.tracker.provider)
-          workspaces = makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks)
+          tracker = dependencies.makeTracker(workflow)
+          workspaces = dependencies.makeWorkspaces(workflow)
           yield* Effect.logInfo('workflow reloaded', { path: workflow.path })
         }
         const candidates = yield* tracker
@@ -423,8 +498,7 @@ export const startOrchestrator = (
         }
       })
 
-    const createSnapshot = (): OrchestratorSnapshot => {
-      const now = Date.now()
+    const createSnapshot = (now: number): OrchestratorSnapshot => {
       const activeSeconds = [...state.running.values()].reduce(
         (total, entry) => total + (now - entry.startedAt.getTime()) / 1_000,
         0,
@@ -492,18 +566,12 @@ export const startOrchestrator = (
             break
           }
           case 'WorkerExited': {
-            const entry = state.running.get(event.issueId)
-            if (entry === undefined) {
+            const entry = endRunning(event.issueId, event.runId)
+            if (entry === null) {
               break
             }
-            state.running.delete(event.issueId)
-            const seconds = (Date.now() - entry.startedAt.getTime()) / 1_000
-            state.totals = {
-              inputTokens: state.totals.inputTokens + entry.tokens.inputTokens,
-              outputTokens: state.totals.outputTokens + entry.tokens.outputTokens,
-              totalTokens: state.totals.totalTokens + entry.tokens.totalTokens,
-              secondsRunning: state.totals.secondsRunning + seconds,
-            }
+            const now = yield* Clock.currentTimeMillis
+            accountEndedRuntime(entry, now)
             if (event.outcome === 'normal') {
               const handoff = yield* tracker
                 .handoffCompletedWork(entry.issue, workflow.config.tracker.requiredLabels)
@@ -544,16 +612,22 @@ export const startOrchestrator = (
               break
             }
             state.retries.delete(event.issueId)
-            const refreshed = yield* tracker
-              .fetchIssuesByIds([event.issueId])
-              .pipe(
-                Effect.catchAll((error) =>
-                  Effect.logWarning('retry refresh failed', { error: error.message }).pipe(
-                    Effect.as<readonly Issue[]>([]),
-                  ),
-                ),
+            const refreshResult = yield* tracker.fetchIssuesByIds([event.issueId]).pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
+              }),
+            )
+            if (refreshResult._tag === 'Failed') {
+              yield* scheduleRetry(
+                retry.issue,
+                event.attempt + 1,
+                `retry refresh failed: ${refreshResult.error.message}`,
+                false,
               )
-            const issue = refreshed[0]
+              break
+            }
+            const issue = refreshResult.issues.find((candidate) => candidate.id === event.issueId)
             if (issue === undefined) {
               state.claimed.delete(event.issueId)
               break
@@ -587,7 +661,12 @@ export const startOrchestrator = (
             break
           }
           case 'Snapshot': {
-            yield* Deferred.succeed(event.reply, createSnapshot())
+            const now = yield* Clock.currentTimeMillis
+            yield* Deferred.succeed(event.reply, createSnapshot(now))
+            break
+          }
+          case 'Settle': {
+            yield* Deferred.succeed(event.reply, undefined)
             break
           }
         }
@@ -603,6 +682,11 @@ export const startOrchestrator = (
         return yield* Deferred.await(reply)
       }),
       refresh: Queue.offer(mailbox, { _tag: 'Poll' }).pipe(Effect.asVoid),
+      settle: Effect.gen(function* () {
+        const reply = yield* Deferred.make<void>()
+        yield* Queue.offer(mailbox, { _tag: 'Settle', reply })
+        yield* Deferred.await(reply)
+      }),
     }
   })
 
