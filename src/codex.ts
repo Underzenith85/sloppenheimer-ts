@@ -255,6 +255,7 @@ class CodexConnection {
     }
     this.#threadId = result['thread']['id']
     this.#emit('thread_started', null)
+    this.#emit('session_started', null)
     return this.#threadId
   }
 
@@ -289,9 +290,6 @@ class CodexConnection {
     const turnId = result['turn']['id']
     this.#turnId = turnId
     this.#turnCount = turnCount
-    if (turnCount === 1) {
-      this.#emit('session_started', null)
-    }
     this.#emit('turn_started', null)
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {

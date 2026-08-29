@@ -35,6 +35,9 @@ const isSecretKey = (key: string): boolean => {
 const redactQuotedField = (match: string, key: string, quote: string): string =>
   isSecretKey(key) ? `${quote}${key}${quote}:${quote}[REDACTED]${quote}` : match
 
+const redactEscapedQuotedField = (match: string, key: string): string =>
+  isSecretKey(key) ? String.raw`\"${key}\":\"[REDACTED]\"` : match
+
 const redactAssignment = (match: string, key: string): string =>
   isSecretKey(key) ? `${key}=[REDACTED]` : match
 
@@ -42,6 +45,10 @@ export const redactSecretsInString = (value: string): string =>
   value
     .replace(/\b(Authorization)\s*[:=]\s*(?:Basic|Bearer)\s+\S+/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(
+      /\\"([A-Za-z_][A-Za-z0-9_-]*)\\"\s*:\s*\\"(?:[^"\\]|\\(?!"))*\\"/gu,
+      (match: string, key: string): string => redactEscapedQuotedField(match, key),
+    )
     .replace(
       /"([A-Za-z_][A-Za-z0-9_-]*)"\s*:\s*"(?:\\.|[^"\\])*"/gu,
       (match: string, key: string): string => redactQuotedField(match, key, '"'),
