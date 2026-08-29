@@ -325,10 +325,29 @@ export const startOrchestrator = (
           return
         }
         for (const issue of terminalIssues) {
-          yield* effective.workspaces.remove(issue.identifier).pipe(
+          const refreshed = yield* effective.tracker
+            .fetchIssuesByIds([issue.id], { hydrateDependencies: false })
+            .pipe(
+              Effect.matchEffect({
+                onFailure: (error) =>
+                  Effect.logWarning('startup terminal issue recheck failed; continuing', {
+                    ...logContext(issue),
+                    error: error.message,
+                  }).pipe(Effect.as<readonly Issue[] | null>(null)),
+                onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
+              }),
+            )
+          const current = refreshed?.find((candidate) => candidate.id === issue.id)
+          if (
+            current === undefined ||
+            !stateIsIn(current.state, effective.workflow.config.tracker.terminalStates)
+          ) {
+            continue
+          }
+          yield* effective.workspaces.remove(current.identifier).pipe(
             Effect.catchAll((error) =>
               Effect.logWarning('startup terminal workspace cleanup failed; continuing', {
-                ...logContext(issue),
+                ...logContext(current),
                 error: error.message,
               }),
             ),

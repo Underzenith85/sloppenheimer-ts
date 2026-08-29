@@ -324,6 +324,10 @@ describe('startup terminal workspace cleanup', (): void => {
             }
             return Effect.succeed([])
           },
+          fetchIssuesByIds: (ids, options) => {
+            expect(options?.hydrateDependencies).toBe(false)
+            return Effect.succeed(terminalIssues.filter((issue) => ids.includes(issue.id)))
+          },
         }
       },
       makeWorkspaces: (effectiveWorkflow) => {
@@ -427,6 +431,7 @@ describe('startup terminal workspace cleanup', (): void => {
             states.includes('closed')
               ? Effect.succeed([terminalIssue])
               : tracker.fetchIssuesByStates(states, labels),
+          fetchIssuesByIds: () => Effect.succeed([terminalIssue]),
         }
       },
       makeWorkspaces: (effectiveWorkflow) => {
@@ -451,6 +456,39 @@ describe('startup terminal workspace cleanup', (): void => {
     resolveCleanup()
     await running
     expect(harness.agentRuns()).toHaveLength(1)
+  })
+
+  it('preserves the workspace when an issue reopens during startup cleanup', async (): Promise<void> => {
+    const terminalIssue = { ...makeIssue('GH-7', null, null), state: 'closed' }
+    const reopenedIssue = { ...terminalIssue, state: 'open' }
+    const harness = makeHarness(workflow)
+    const removed: string[] = []
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
+        fetchIssuesByIds: (_ids, options) => {
+          expect(options?.hydrateDependencies).toBe(false)
+          return Effect.succeed([reopenedIssue])
+        },
+      }),
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+      }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(removed).toEqual([])
   })
 })
 

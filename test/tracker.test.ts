@@ -169,6 +169,20 @@ describe('GitHub native issue dependencies', (): void => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('skips dependency hydration for metadata-only issue ID refreshes', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> => Response.json(githubIssue(1)))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByIds([issueId('1')], {
+        hydrateDependencies: false,
+      }),
+    )
+
+    expect(issues).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('hydrates dependencies when the label filter is empty', async (): Promise<void> => {
     const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
       requestUrl(input).includes('/dependencies/blocked_by')
