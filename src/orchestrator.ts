@@ -14,7 +14,7 @@ type RunningEntry = {
   runId: number
   issue: Issue
   fiber: Fiber.RuntimeFiber<void>
-  effective: EffectiveWorkflow
+  execution: ExecutionSnapshot
   attempt: number | null
   startedAt: Date
   lastEventAt: Date | null
@@ -123,6 +123,19 @@ type EffectiveWorkflow = Readonly<{
   loadedAt: Date
 }>
 
+type ExecutionSnapshot = Readonly<{
+  tracker: TrackerAdapter
+  requiredLabels: readonly string[]
+  activeStates: readonly string[]
+  terminalStates: readonly string[]
+  secretEnvironmentNames: readonly string[]
+  workspaces: WorkspaceManager
+  prompt: string
+  codex: Workflow['config']['codex']
+  maxTurns: number
+  stallTimeoutMs: number
+}>
+
 type WorkflowReloadError = Readonly<{
   message: string
   observedAt: Date
@@ -203,6 +216,37 @@ export const issueIsRoutable = (issue: Issue, workflow: Workflow): boolean => {
     (label) => label.length > 0 && labels.has(label),
   )
 }
+
+const issueIsActiveInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean =>
+  stateIsIn(issue.state, snapshot.activeStates) && !stateIsIn(issue.state, snapshot.terminalStates)
+
+const issueIsRoutableInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean => {
+  if (!issue.dispatchable) {
+    return false
+  }
+  if (unresolvedBlockers(issue, snapshot.terminalStates).length > 0) {
+    return false
+  }
+  const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
+  return snapshot.requiredLabels.every((label) => label.length > 0 && labels.has(label))
+}
+
+const captureExecutionSnapshot = (
+  effective: EffectiveWorkflow,
+  prompt: string,
+): ExecutionSnapshot =>
+  Object.freeze({
+    tracker: effective.tracker,
+    requiredLabels: Object.freeze([...effective.workflow.config.tracker.requiredLabels]),
+    activeStates: Object.freeze([...effective.workflow.config.tracker.activeStates]),
+    terminalStates: Object.freeze([...effective.workflow.config.tracker.terminalStates]),
+    secretEnvironmentNames: Object.freeze([...effective.tracker.secretEnvironmentNames]),
+    workspaces: effective.workspaces,
+    prompt,
+    codex: Object.freeze({ ...effective.workflow.config.codex }),
+    maxTurns: effective.workflow.config.agent.maxTurns,
+    stallTimeoutMs: effective.workflow.config.codex.stallTimeoutMs,
+  })
 
 const issueIsActive = (issue: Issue, workflow: Workflow): boolean =>
   stateIsIn(issue.state, workflow.config.tracker.activeStates) &&
@@ -334,8 +378,19 @@ export const startOrchestrator = (
         }
 
         const effective = lastKnownGood
+        const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (prompt) => ({ _tag: 'Succeeded' as const, prompt }),
+          }),
+        )
+        if (renderedPrompt._tag === 'Failed') {
+          yield* scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
+          return
+        }
+        const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
         const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
-          effective.tracker.fetchIssuesByIds([issue.id]).pipe(
+          execution.tracker.fetchIssuesByIds([issue.id]).pipe(
             Effect.map((issues) => issues[0] ?? null),
             Effect.mapError(
               (error) =>
@@ -349,28 +404,27 @@ export const startOrchestrator = (
 
         const runId = nextRunId
         nextRunId += 1
-        const worker = effective.workspaces.create(issue.identifier).pipe(
+        const worker = execution.workspaces.create(issue.identifier).pipe(
           Effect.flatMap((workspace) =>
-            effective.workspaces.beforeRun(workspace).pipe(
-              Effect.zipRight(renderPrompt(effective.workflow, issue, attempt)),
-              Effect.flatMap((prompt) =>
+            execution.workspaces.beforeRun(workspace).pipe(
+              Effect.zipRight(
                 dependencies.runAgent(
                   issue,
                   workspace,
-                  effective.workflow.config.codex,
-                  prompt,
-                  effective.workflow.config.agent.maxTurns,
-                  effective.tracker.secretEnvironmentNames,
+                  execution.codex,
+                  execution.prompt,
+                  execution.maxTurns,
+                  execution.secretEnvironmentNames,
                   refreshIssue,
                   (refreshed) =>
-                    issueIsActive(refreshed, effective.workflow) &&
-                    issueIsRoutable(refreshed, effective.workflow),
+                    issueIsActiveInSnapshot(refreshed, execution) &&
+                    issueIsRoutableInSnapshot(refreshed, execution),
                   (update) => {
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
                 ),
               ),
-              Effect.ensuring(effective.workspaces.afterRun(workspace)),
+              Effect.ensuring(execution.workspaces.afterRun(workspace)),
             ),
           ),
           Effect.matchEffect({
@@ -399,7 +453,7 @@ export const startOrchestrator = (
           runId,
           issue,
           fiber,
-          effective,
+          execution,
           attempt,
           startedAt: new Date(),
           lastEventAt: null,
@@ -442,7 +496,7 @@ export const startOrchestrator = (
         state.claimed.delete(id)
         yield* Fiber.interrupt(entry.fiber)
         if (cleanupWorkspace) {
-          yield* entry.effective.workspaces.remove(entry.issue.identifier).pipe(
+          yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
             Effect.catchAll((error) =>
               Effect.logWarning('terminal workspace cleanup failed', {
                 ...logContext(entry.issue),
@@ -461,8 +515,8 @@ export const startOrchestrator = (
         }
         const now = Date.now()
         for (const [id, entry] of state.running) {
-          const effective = entry.effective
-          const stallTimeout = effective.workflow.config.codex.stallTimeoutMs
+          const execution = entry.execution
+          const stallTimeout = execution.stallTimeoutMs
           const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
           if (stallTimeout > 0 && now - activeAt > stallTimeout) {
             const ended = yield* cancelRunning(id, false)
@@ -475,8 +529,8 @@ export const startOrchestrator = (
           return
         }
         for (const [id, entry] of state.running) {
-          const effective = entry.effective
-          const refreshResult = yield* effective.tracker.fetchIssuesByIds([id]).pipe(
+          const execution = entry.execution
+          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
             Effect.match({
               onFailure: (error) => ({ _tag: 'Failed' as const, error }),
               onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
@@ -494,8 +548,8 @@ export const startOrchestrator = (
             yield* cancelRunning(id, false)
             continue
           }
-          const terminal = stateIsIn(issue.state, effective.workflow.config.tracker.terminalStates)
-          if (terminal || !issueIsActive(issue, effective.workflow)) {
+          const terminal = stateIsIn(issue.state, execution.terminalStates)
+          if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
             yield* cancelRunning(id, terminal)
           } else {
             entry.issue = issue
@@ -647,11 +701,8 @@ export const startOrchestrator = (
             }
             accountEndedRuntime(entry, Date.now())
             if (event.outcome === 'normal') {
-              const handoff = yield* entry.effective.tracker
-                .handoffCompletedWork(
-                  entry.issue,
-                  entry.effective.workflow.config.tracker.requiredLabels,
-                )
+              const handoff = yield* entry.execution.tracker
+                .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
                 .pipe(
                   Effect.match({
                     onFailure: (error) => ({ _tag: 'Failed' as const, error }),
