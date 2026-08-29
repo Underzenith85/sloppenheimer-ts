@@ -126,6 +126,28 @@ describe('App Server framing', (): void => {
     expect(overflowed).toBe(true)
   })
 
+  it('accepts a maximum-length line whose CRLF is split across chunks', (): void => {
+    const lines: string[] = []
+    let overflowed = false
+    const read = makeLineReader(
+      8,
+      (line) => {
+        lines.push(line)
+      },
+      () => {
+        overflowed = true
+      },
+    )
+
+    read(Buffer.from('12345678\r'))
+    read(Buffer.from('\n'))
+
+    // The CR is stripped once the line completes, so where the chunk boundary fell must not decide
+    // whether a valid maximum-length line is accepted.
+    expect(overflowed).toBe(false)
+    expect(lines).toEqual(['12345678'])
+  })
+
   it('assembles a chunked line without recopying the pending prefix', (): void => {
     const lines: string[] = []
     const read = makeLineReader(

@@ -124,6 +124,10 @@ export const makeLineReader = (
   let pending: Buffer[] = []
   let pendingBytes = 0
   let overflowed = false
+  // A pending buffer may hold a full-length payload plus the CR of a CRLF whose LF has not arrived
+  // yet. Stripping happens once the line is complete, so the pending limit allows that one byte;
+  // otherwise a valid maximum-length line would be rejected purely for where a chunk boundary fell.
+  const pendingLimitBytes = limitBytes + 1
   const overflow = (): void => {
     overflowed = true
     pending = []
@@ -140,7 +144,7 @@ export const makeLineReader = (
       // No frame boundary here, so hold the chunk whole. Concatenating on every chunk would make
       // framing quadratic in line size: a permitted 10 MB frame arriving in pipe-sized chunks
       // would copy hundreds of megabytes before its terminator ever showed up.
-      if (pendingBytes > limitBytes) {
+      if (pendingBytes > pendingLimitBytes) {
         overflow()
       }
       return
@@ -162,7 +166,7 @@ export const makeLineReader = (
       }
       onLine(line.toString('utf8'))
     }
-    if (buffer.byteLength > limitBytes) {
+    if (buffer.byteLength > pendingLimitBytes) {
       overflow()
       return
     }
@@ -360,13 +364,15 @@ class CodexConnection {
         ? Promise.resolve()
         : Promise.reject(CodexConnection.#turnFailure(turnId, buffered.status))
     }
-    if (this.#terminalError !== null) {
-      return Promise.reject(this.#terminalError)
-    }
+    // A failure recorded before any waiter existed is the reason the turn actually ended, and it
+    // is the actionable one. A terminal error raised afterwards would only mask it.
     if (this.#unattributedTurnFailure !== null) {
       const failure = this.#unattributedTurnFailure
       this.#unattributedTurnFailure = null
       return Promise.reject(failure)
+    }
+    if (this.#terminalError !== null) {
+      return Promise.reject(this.#terminalError)
     }
     return new Promise<void>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
