@@ -105,7 +105,7 @@ newer workflow file stays loadable on an older host without weakening required-f
 | `codex.stall_timeout_ms`      | `300000` (`0` disables stall detection)     |
 | `server.port`                 | unset (no operator console)                 |
 
-`codex.approval_policy` accepts `untrusted`, `on-failure`, `on-request`, or `never`, and
+`codex.approval_policy` accepts `untrusted`, `on-request`, or `never`, and
 `codex.thread_sandbox` accepts `read-only`, `workspace-write`, or `danger-full-access`; both are
 Codex-owned values that must stay aligned with the generated App Server schemas.
 `codex.turn_sandbox_policy` is an escape hatch: when set, the map is passed to `turn/start` as

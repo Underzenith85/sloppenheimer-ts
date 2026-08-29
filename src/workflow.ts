@@ -88,7 +88,7 @@ export const workflowDefaults = Object.freeze({
 })
 
 /** Codex-owned policy values, aligned with the generated App Server schemas. */
-export const codexApprovalPolicies = ['untrusted', 'on-failure', 'on-request', 'never'] as const
+export const codexApprovalPolicies = ['untrusted', 'on-request', 'never'] as const
 export const codexSandboxModes = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
 const knownSections = new Set([

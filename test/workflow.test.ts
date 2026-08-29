@@ -374,6 +374,7 @@ describe('adapter-owned validation', (): void => {
 
   it.each([
     ['polling:\n  interval_ms: 0', 'polling.interval_ms'],
+    ['codex:\n  approval_policy: on-failure', 'codex.approval_policy'],
     ['codex:\n  approval_policy: sometimes', 'codex.approval_policy'],
     ['codex:\n  thread_sandbox: everything', 'codex.thread_sandbox'],
     ['codex:\n  stall_timeout_ms: -1', 'codex.stall_timeout_ms'],
