@@ -40,6 +40,7 @@ const workflow: Workflow = {
         owner: 'example',
         repository: 'symphony',
         token: 'secret',
+        tokenEnvironmentName: 'GITHUB_TOKEN',
         apiBaseUrl: 'https://api.github.com',
         baseBranch: 'main',
       },

@@ -64,6 +64,7 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
     const prompt = await Effect.runPromise(renderPrompt(workflow, issue, 3))
 
     expect(workflow.config.tracker.provider.token).toBe('secret')
+    expect(workflow.config.tracker.provider.tokenEnvironmentName).toBe('TEST_TRACKER_TOKEN')
     expect(workflow.config.tracker.requiredLabels).toEqual(['symphony'])
     expect(workflow.config.tracker.provider.baseBranch).toBe('main')
     expect(workflow.config.workspaceRoot).toBe(join(directory, '.workspaces'))
@@ -105,7 +106,7 @@ tracker:
   provider:
     owner: example
     repository: symphony
-    token: token
+    token: $TEST_TRACKER_TOKEN
 server:
   port: 0
 ---
@@ -113,8 +114,65 @@ Do the work
 `,
     )
 
-    const workflow = await Effect.runPromise(loadWorkflow(path, {}))
+    const workflow = await Effect.runPromise(loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }))
 
     expect(workflow.config.serverPort).toBe(0)
   })
+
+  it('rejects literal tracker credentials without exposing them in the error', async (): Promise<void> => {
+    const directory = await makeTemporaryDirectory()
+    const path = join(directory, 'WORKFLOW.md')
+    const literal = 'github_pat_plaintext_secret'
+    await writeFile(
+      path,
+      `---
+tracker:
+  kind: github
+  provider:
+    owner: example
+    repository: symphony
+    token: ${literal}
+---
+Do the work
+`,
+    )
+
+    const error = await Effect.runPromise(Effect.flip(loadWorkflow(path, {})))
+
+    expect(error.category).toBe('invalid_config')
+    expect(error.message).toContain('literal credentials are not allowed')
+    expect(error.message).not.toContain(literal)
+    expect(String(error)).not.toContain(literal)
+  })
+
+  it.each(['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'])(
+    'rejects tracker reuse of Codex credential source %s without exposing its value',
+    async (environmentName): Promise<void> => {
+      const directory = await makeTemporaryDirectory()
+      const path = join(directory, 'WORKFLOW.md')
+      const secret = `secret-for-${environmentName}`
+      await writeFile(
+        path,
+        `---
+tracker:
+  kind: github
+  provider:
+    owner: example
+    repository: symphony
+    token: $${environmentName}
+---
+Do the work
+`,
+      )
+
+      const error = await Effect.runPromise(
+        Effect.flip(loadWorkflow(path, { [environmentName]: secret })),
+      )
+
+      expect(error.category).toBe('invalid_config')
+      expect(error.message).toContain(environmentName)
+      expect(error.message).not.toContain(secret)
+      expect(String(error)).not.toContain(secret)
+    },
+  )
 })

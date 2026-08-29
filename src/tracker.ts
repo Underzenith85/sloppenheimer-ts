@@ -90,6 +90,7 @@ type GitHubDependency = Readonly<{
 }>
 
 const githubApiVersion = '2026-03-10'
+const githubAuthenticationEnvironmentNames = ['GITHUB_TOKEN', 'GH_TOKEN'] as const
 const dependencyConcurrency = 4
 const dependencyCacheTtlMs = 60_000
 
@@ -612,7 +613,9 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   return {
-    secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
+    secretEnvironmentNames: [
+      ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
+    ],
     fetchIssuesByStates: (
       states,
       dependencyLabels,
