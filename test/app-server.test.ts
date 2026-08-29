@@ -18,7 +18,7 @@ import {
 } from '../src/codex.js'
 import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
 import type { AgentError } from '../src/errors.js'
-import type { CodexConfig } from '../src/workflow.js'
+import { codexApprovalPolicies, codexSandboxModes, type CodexConfig } from '../src/workflow.js'
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -357,6 +357,13 @@ describe('installed Codex App Server schema', (): void => {
     for (const method of ['initialize', 'thread/start', 'turn/start']) {
       expect(schema).toContain(method)
     }
-    expect(schema).not.toContain('"on-failure"')
+    // Every policy this client can send must be declared. A build that also offers values Symphony
+    // never sends is still compatible, so the check is one-directional.
+    for (const policy of codexApprovalPolicies) {
+      expect(schema).toContain(`"${policy}"`)
+    }
+    for (const mode of codexSandboxModes) {
+      expect(schema).toContain(`"${mode}"`)
+    }
   }, 60_000)
 })
