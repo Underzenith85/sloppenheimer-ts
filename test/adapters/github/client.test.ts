@@ -6,6 +6,8 @@ import { Effect, Fiber, Layer, TestClock, TestContext } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { githubJson, type GitHubHttpResult } from '../../../src/adapters/github/client.js'
+import { makeGitHubTracker } from '../../../src/adapters/github/issues.js'
+import { issueId, issueIdentifier } from '../../../src/domain/domain.js'
 import type { GitHubProviderConfig } from '../../../src/config/tracker-config.js'
 import type { TrackerError } from '../../../src/errors.js'
 
@@ -229,5 +231,60 @@ describe('GitHub transport error mapping', (): void => {
 
     expect(error.category).toBe('tracker_request')
     expect(error.retryable).toBe(true)
+  })
+})
+
+describe('GitHub adapter client binding', (): void => {
+  it('runs promise-shaped tool requests through the bound client', async (): Promise<void> => {
+    const unusable = vi.fn((): never => {
+      throw new Error('global fetch must not be used')
+    })
+    vi.stubGlobal('fetch', unusable)
+    const requests: HttpClientRequest.HttpClientRequest[] = []
+    const client = HttpClient.make((request) => {
+      requests.push(request)
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({ html_url: 'https://example.test/comment/1' }, { status: 201 }),
+        ),
+      )
+    })
+
+    const result = await makeGitHubTracker(provider, client).executeTool(
+      'github_add_comment',
+      { body: 'hello' },
+      {
+        issueId: issueId('7'),
+        issueIdentifier: issueIdentifier('example/symphony#7'),
+        nativeRef: { owner: 'example', repository: 'symphony', issue_number: 7 },
+      },
+    )
+
+    expect(unusable).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      success: true,
+      data: { issue_number: 7, comment_url: 'https://example.test/comment/1' },
+    })
+    expect(requests[0]?.url).toBe(
+      'https://api.example.test/repos/example/symphony/issues/7/comments',
+    )
+  })
+
+  it('binds the same client to the operations that stay in Effect', async (): Promise<void> => {
+    const unusable = vi.fn((): never => {
+      throw new Error('global fetch must not be used')
+    })
+    vi.stubGlobal('fetch', unusable)
+    const client = HttpClient.make((request) =>
+      Effect.succeed(HttpClientResponse.fromWeb(request, Response.json([]))),
+    )
+
+    const issues = await Effect.runPromise(
+      makeGitHubTracker(provider, client).fetchIssuesByStates(['open'], null),
+    )
+
+    expect(unusable).not.toHaveBeenCalled()
+    expect(issues).toEqual([])
   })
 })

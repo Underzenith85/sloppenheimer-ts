@@ -144,6 +144,19 @@ const withGitHubHttpClient = <Value, Failure>(
       : Effect.provide(effect, githubHttpClientLayer),
   )
 
+/**
+ * Binds one constructed adapter to a client, for every operation it exposes.
+ *
+ * An operation that stays in Effect can read a client from its caller's context, but `executeTool`
+ * leaves Effect for a promise and has no context to read, so an adapter that must talk through a
+ * particular client has to carry it from construction. A client bound here is the more specific
+ * binding of the two and takes precedence for that adapter's operations.
+ */
+export const withBoundHttpClient =
+  (client: HttpClient.HttpClient | undefined) =>
+  <Value, Failure>(effect: Effect.Effect<Value, Failure>): Effect.Effect<Value, Failure> =>
+    client === undefined ? effect : Effect.provideService(effect, HttpClient.HttpClient, client)
+
 const githubRequest = (
   provider: GitHubProviderConfig,
   url: string,
