@@ -55,10 +55,12 @@ Authorization=[REDACTED]`,
     await Effect.runPromise(
       logInfo('action=test outcome=completed', {
         a: { b: { c: { d: { e: { token: 'deep-secret' } } } } },
+        proxyAuthorization: 'Basic structured-secret',
       }).pipe(Effect.provide(collectingLogger)),
     )
 
     expect(JSON.stringify(entries)).not.toContain('deep-secret')
+    expect(JSON.stringify(entries)).not.toContain('structured-secret')
     expect(JSON.stringify(entries)).toContain('[TRUNCATED]')
   })
 })

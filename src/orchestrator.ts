@@ -416,6 +416,8 @@ export const startOrchestrator = (
     yield* cleanupTerminalWorkspaces(lastKnownGood)
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
+    const pendingUsage = new Map<IssueId, NonNullable<AgentEvent['usage']>>()
+    const pendingRateLimits = new Map<IssueId, JsonObject>()
     const handoffStorePath = resolve(
       lastKnownGood.workflow.config.workspaceRoot,
       '.symphony',
@@ -694,6 +696,12 @@ export const startOrchestrator = (
                     issueIsActiveInSnapshot(refreshed, execution) &&
                     issueIsRoutableInSnapshot(refreshed, execution),
                   onEvent: (update) => {
+                    if (update.usage !== null) {
+                      pendingUsage.set(issue.id, update.usage)
+                    }
+                    if (update.rateLimits !== null) {
+                      pendingRateLimits.set(issue.id, update.rateLimits)
+                    }
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
                 }),
@@ -882,6 +890,24 @@ export const startOrchestrator = (
       }
     }
 
+    const applyPendingTelemetry = (id: IssueId, entry: RunningEntry): void => {
+      const usage = pendingUsage.get(id)
+      if (usage !== undefined) {
+        entry.lastReportedTokens = usage
+        entry.tokens = {
+          inputTokens: Math.max(entry.tokens.inputTokens, usage.inputTokens),
+          outputTokens: Math.max(entry.tokens.outputTokens, usage.outputTokens),
+          totalTokens: Math.max(entry.tokens.totalTokens, usage.totalTokens),
+        }
+      }
+      const rateLimits = pendingRateLimits.get(id)
+      if (rateLimits !== undefined) {
+        state.rateLimits = rateLimits
+      }
+      pendingUsage.delete(id)
+      pendingRateLimits.delete(id)
+    }
+
     const cancelRunning = (
       id: IssueId,
       cleanupWorkspace: boolean,
@@ -900,6 +926,7 @@ export const startOrchestrator = (
             error: null,
           })
         }
+        applyPendingTelemetry(id, entry)
         endRunning(id, null)
         accountEndedRuntime(entry, Date.now())
         state.claimed.delete(id)
@@ -1204,6 +1231,7 @@ export const startOrchestrator = (
               if (
                 entry.sessionId !== null &&
                 (event.update.event === 'turn/completed' ||
+                  event.update.event === 'turn/failed' ||
                   event.update.event === 'turn/terminated') &&
                 event.update.turnStatus !== null
               ) {
@@ -1228,6 +1256,7 @@ export const startOrchestrator = (
             if (entry === null) {
               break
             }
+            applyPendingTelemetry(event.issueId, entry)
             accountEndedRuntime(entry, Date.now())
             if (entry.sessionId !== null) {
               yield* (event.outcome === 'normal' ? logInfo : logError)(
