@@ -34,6 +34,9 @@ const isSnapshot = (value: unknown): value is HandoffSnapshot => {
     (candidate['reviewRequestedHeadSha'] === undefined ||
       candidate['reviewRequestedHeadSha'] === null ||
       typeof candidate['reviewRequestedHeadSha'] === 'string') &&
+    (candidate['reviewCompletedHeadSha'] === undefined ||
+      candidate['reviewCompletedHeadSha'] === null ||
+      typeof candidate['reviewCompletedHeadSha'] === 'string') &&
     typeof candidate['observedAt'] === 'string' &&
     !Number.isNaN(Date.parse(candidate['observedAt']))
   )
