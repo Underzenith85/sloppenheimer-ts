@@ -4,7 +4,7 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
-import { isJsonObject, mergeSparseObject } from './json.js'
+import { isJsonObject, isJsonValue, mergeSparseObject } from './json.js'
 import { makeRedactor, redact, redactionMarker, type Redactor } from './redaction.js'
 import {
   clientPayload,
@@ -37,24 +37,6 @@ const shutdownGraceMs = 5_000
 /** After `SIGKILL`, how long to wait for the group to vanish, and how often to look. */
 const groupReapDeadlineMs = 2_000
 const groupReapPollMs = 25
-
-const isJsonValue = (value: unknown): value is JsonValue => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return true
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonValue)
-  }
-  if (typeof value !== 'object') {
-    return false
-  }
-  return Object.values(value).every(isJsonValue)
-}
 
 /** Session identity remains stable for the lifetime of the App Server thread. */
 export const composeSessionId = (threadId: string, _turnId: string | null): string => threadId

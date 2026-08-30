@@ -10,11 +10,25 @@ export class JsonConversionError extends Error {
   }
 }
 
-export const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
+export const isJsonObject = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
-export const isJsonArray = (value: JsonValue | undefined): value is readonly JsonValue[] =>
-  Array.isArray(value)
+export const isJsonArray = (value: unknown): value is readonly JsonValue[] => Array.isArray(value)
+
+export const isJsonValue = (value: unknown): value is JsonValue => {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  ) {
+    return true
+  }
+  if (isJsonArray(value)) {
+    return value.every(isJsonValue)
+  }
+  return isJsonObject(value) && Object.values(value).every(isJsonValue)
+}
 
 /**
  * Deep-merges a sparse update over a JSON object, so a report that names only the fields that
