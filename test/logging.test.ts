@@ -17,6 +17,9 @@ Authorization=[REDACTED]`,
     expect(redactSecretsInString('Cookie: sessionid=secret\nSet-Cookie: auth=secret')).toBe(
       'Cookie=[REDACTED]\nSet-Cookie=[REDACTED]',
     )
+    expect(redactSecretsInString('DATABASE_URL=postgres://alice:hunter2@example.com/db')).toBe(
+      'DATABASE_URL=postgres://[REDACTED]@example.com/db',
+    )
   })
 
   it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {
