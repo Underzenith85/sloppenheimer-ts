@@ -36,6 +36,7 @@ type RunningEntry = {
   turnId: string | null
   sessionId: string | null
   turnCount: number
+  turnActive: boolean
   tokens: Omit<TokenTotals, 'secondsRunning'>
   lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
 }
@@ -746,6 +747,7 @@ export const startOrchestrator = (
           turnId: null,
           sessionId: null,
           turnCount: 0,
+          turnActive: false,
           tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
           lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         })
@@ -918,7 +920,7 @@ export const startOrchestrator = (
           return null
         }
         yield* Fiber.interrupt(entry.fiber)
-        if (entry.sessionId !== null && entry.turnId !== null) {
+        if (entry.sessionId !== null && entry.turnId !== null && entry.turnActive) {
           yield* logInfo('action=turn outcome=cancelled', {
             ...sessionLogContext(entry),
             action: 'turn',
@@ -1221,6 +1223,7 @@ export const startOrchestrator = (
                 })
               }
               if (entry.sessionId !== null && event.update.event === 'turn_started') {
+                entry.turnActive = true
                 yield* logInfo('action=turn outcome=started', {
                   ...sessionLogContext(entry),
                   action: 'turn',
@@ -1236,6 +1239,7 @@ export const startOrchestrator = (
                 event.update.turnStatus !== null
               ) {
                 const completed = event.update.turnStatus === 'completed'
+                entry.turnActive = false
                 yield* (completed ? logInfo : logError)(
                   completed ? 'action=turn outcome=completed' : 'action=turn outcome=failed',
                   {

@@ -319,6 +319,7 @@ class CodexConnection {
   readonly #settled = new Map<string, TurnSettlement>()
   /** Callers waiting on turns that have not settled yet. */
   readonly #waiters = new Map<string, TurnWaiter>()
+  readonly #turnUsage = new Map<string, NonNullable<AgentEvent['usage']>>()
   #nextId = 1
   #closed = false
   /**
@@ -748,12 +749,29 @@ class CodexConnection {
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? turn?.id ?? this.#turnId
+    let usage = telemetry.usage
+    if (method === 'turn/usage' && usage !== null && turnId !== null) {
+      const previous = this.#turnUsage.get(turnId)
+      this.#turnUsage.set(turnId, {
+        inputTokens: Math.max(previous?.inputTokens ?? 0, usage.inputTokens),
+        outputTokens: Math.max(previous?.outputTokens ?? 0, usage.outputTokens),
+        totalTokens: Math.max(previous?.totalTokens ?? 0, usage.totalTokens),
+      })
+      usage = [...this.#turnUsage.values()].reduce(
+        (total, current) => ({
+          inputTokens: total.inputTokens + current.inputTokens,
+          outputTokens: total.outputTokens + current.outputTokens,
+          totalTokens: total.totalTokens + current.totalTokens,
+        }),
+        { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      )
+    }
     this.#onEvent({
       event: method,
       timestamp: new Date(),
       processId: this.processId,
       message: messageFrom(message, this.#knownSecretValues),
-      usage: telemetry.usage,
+      usage,
       rateLimits: telemetry.rateLimits,
       threadId,
       turnId,
