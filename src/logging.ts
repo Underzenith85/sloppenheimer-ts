@@ -28,13 +28,13 @@ const isSecretKey = (key: string): boolean => {
     return true
   }
   if (
-    /(?:^|[_.-])(?:api[_.-]?key|access[_.-]?key|private[_.-]?key|secret[_.-]?access[_.-]?key|access[_.-]?token|refresh[_.-]?token|auth[_.-]?token|session[_.-]?id|authorization|credentials?|password|secret|token)$/u.test(
+    /(?:^|[_.-])(?:api[_.-]?key|access[_.-]?key|private[_.-]?key|secret[_.-]?access[_.-]?key|access[_.-]?token|refresh[_.-]?token|auth[_.-]?token|session[_.-]?id|set[_.-]?cookie|cookie|authorization|credentials?|password|secret|token)$/u.test(
       lowerKey,
     )
   ) {
     return true
   }
-  return /(?:ApiKey|AccessKey|PrivateKey|SecretAccessKey|AccessToken|RefreshToken|AuthToken|Authorization|Credentials?|Password|Secret|Token)$/u.test(
+  return /(?:ApiKey|AccessKey|PrivateKey|SecretAccessKey|AccessToken|RefreshToken|AuthToken|SetCookie|Cookie|Authorization|Credentials?|Password|Secret|Token)$/u.test(
     key,
   )
 }
