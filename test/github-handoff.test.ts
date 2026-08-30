@@ -128,9 +128,62 @@ describe('GitHub pull request handoff', (): void => {
     expect(result).toMatchObject({ _tag: 'PullRequest', created: false })
     expect(methods).toEqual(['GET', 'GET'])
   })
+
+  it('finds an open pull request for the expected issue branch without creating one', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = requestUrl(input)
+      expect(url).toContain('/pulls?state=open')
+      expect(url).toContain('head=example%3Asymphony%2Fissue-28')
+      expect(url).toContain('base=main')
+      return Response.json([{ html_url: 'https://example.test/pulls/65' }])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(
+      makeGitHubTracker(provider).findExistingHandoff(handoffIssue),
+    )
+
+    expect(result).toEqual({
+      _tag: 'PullRequest',
+      branchName: 'symphony/issue-28',
+      pullRequestUrl: 'https://example.test/pulls/65',
+      pullRequestNumber: 65,
+      created: false,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('GitHub pull request monitor', (): void => {
+  it('recognizes a pull request closed without merge without querying checks or reviews', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> =>
+      Response.json({
+        html_url: 'https://github.test/example/symphony/pull/44',
+        head: { sha: 'closed-head' },
+        merged: false,
+        state: 'closed',
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(44))
+
+    expect(classifyPullRequest(result)).toEqual({
+      state: 'closed_without_merge',
+      reason: 'The pull request was closed without being merged',
+    })
+    expect(result).toMatchObject({
+      number: 44,
+      state: 'closed',
+      headSha: 'closed-head',
+      merged: false,
+      mergeState: null,
+      checks: [],
+      reviewThreads: [],
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('accepts a merged pull request with an omitted merge SHA', async (): Promise<void> => {
     const fetchMock = vi.fn(async (): Promise<Response> =>
       Response.json({
@@ -161,6 +214,12 @@ describe('GitHub pull request monitor', (): void => {
   })
 
   it.each([
+    {
+      name: 'missing state',
+      response: { merged: false },
+      message:
+        'GitHub pull request #44 field "state" is invalid: expected "open" or "closed", received missing',
+    },
     {
       name: 'missing merged status',
       response: { state: 'open', merge_commit_sha: null },
@@ -238,63 +297,61 @@ describe('GitHub pull request monitor', (): void => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('reads the exact head, checks, and unresolved review threads', async (): Promise<void> => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: string | URL | Request): Promise<Response> => {
-        const url =
-          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-        if (url.endsWith('/pulls/41')) {
-          return Response.json({
-            state: 'open',
-            html_url: 'https://github.test/example/symphony/pull/41',
-            head: { sha: 'head-1' },
-            merged: false,
-            merge_commit_sha: null,
-            mergeable: true,
-            mergeable_state: 'clean',
-          })
-        }
-        if (url.includes('/check-runs')) {
-          return Response.json({
-            check_runs: [
-              {
-                name: 'quality',
-                status: 'completed',
-                conclusion: 'success',
-                details_url: 'https://github.test/check/1',
-              },
-            ],
-          })
-        }
+  it('inspects checks and review threads when an open PR omits its merge SHA', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/pulls/41')) {
         return Response.json({
-          data: {
-            repository: {
-              pullRequest: {
-                reviewDecision: null,
-                reviewThreads: {
-                  nodes: [
-                    {
-                      id: 'thread-1',
-                      isResolved: false,
-                      comments: {
-                        nodes: [{ body: 'Fix this', url: 'https://github.test/comment' }],
-                      },
+          state: 'open',
+          html_url: 'https://github.test/example/symphony/pull/41',
+          head: { sha: 'head-1' },
+          merged: false,
+          mergeable: true,
+          mergeable_state: 'clean',
+        })
+      }
+      if (url.includes('/check-runs')) {
+        return Response.json({
+          check_runs: [
+            {
+              name: 'quality',
+              status: 'completed',
+              conclusion: 'success',
+              details_url: 'https://github.test/check/1',
+            },
+          ],
+        })
+      }
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewDecision: null,
+              reviewThreads: {
+                nodes: [
+                  {
+                    id: 'thread-1',
+                    isResolved: false,
+                    comments: {
+                      nodes: [{ body: 'Fix this', url: 'https://github.test/comment' }],
                     },
-                  ],
-                },
+                  },
+                ],
               },
             },
           },
-        })
-      }),
-    )
+        },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(41))
 
     expect(result.headSha).toBe('head-1')
+    expect(result.mergeCommitSha).toBeNull()
     expect(result.checks[0]?.name).toBe('quality')
     expect(result.reviewThreads[0]).toMatchObject({ resolved: false, body: 'Fix this' })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('guards the merge with the observed head SHA', async (): Promise<void> => {

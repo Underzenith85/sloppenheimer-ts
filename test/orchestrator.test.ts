@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Fiber, TestClock, TestContext } from 'effect'
@@ -281,6 +281,8 @@ const makeHarness = (
           }),
         handoffCompletedWork: () =>
           Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
+        findExistingHandoff: () =>
+          Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
         inspectPullRequest: () => Effect.die('unused'),
         mergePullRequest: () => Effect.die('unused'),
         resolveReviewThreads: () => Effect.die('unused'),
@@ -337,6 +339,292 @@ const runWithTestClock = <Value>(effect: Effect.Effect<Value, WorkflowError>): P
   Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
 
 describe('restored pull request handoffs', (): void => {
+  it('rediscovers open pull requests for active issue branches when the store is missing', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-recovered-handoff-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const harness = makeHarness(isolated, () => [issue])
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        findExistingHandoff: (candidate) =>
+          Effect.succeed({
+            _tag: 'PullRequest' as const,
+            branchName: `symphony/issue-${candidate.id}`,
+            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+            pullRequestNumber: 65,
+            created: false,
+          }),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: 'recovered-head',
+            merged: false as const,
+            state: 'open' as const,
+            mergeCommitSha: null,
+            mergeable: null,
+            mergeState: 'unknown',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs).toHaveLength(1)
+    expect(snapshot.handoffs[0]).toMatchObject({
+      issueId: issue.id,
+      pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+      branchName: 'symphony/issue-20',
+      headSha: 'recovered-head',
+      state: 'awaiting_checks',
+    })
+    expect(snapshot.handoffRecovery).toMatchObject({
+      status: 'completed',
+      loaded: 0,
+      recovered: 1,
+      failed: 0,
+    })
+    await expect(
+      Effect.runPromise(loadHandoffs(join(workspaceRoot, '.symphony', 'handoffs.json'))),
+    ).resolves.toHaveLength(1)
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('skips non-dispatchable pull request records during recovery', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-nondispatchable-handoff-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const pullRequestRecord = {
+      ...makeIssue('example/symphony#117', 1, null, ['symphony', 'ready']),
+      dispatchable: false,
+    }
+    const harness = makeHarness(isolated, () => [pullRequestRecord])
+    let discoveries = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        findExistingHandoff: () =>
+          Effect.sync(() => {
+            discoveries += 1
+            return { _tag: 'NoBranch' as const, branchName: 'symphony/issue-117' }
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(discoveries).toBe(0)
+    expect(harness.agentRuns()).toEqual([])
+    expect(snapshot.handoffs).toEqual([])
+    expect(snapshot.handoffRecovery).toMatchObject({ recovered: 0, skipped: 1 })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('supplements a partial store without duplicating its persisted handoff', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-partial-handoff-'))
+    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const first = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const second = {
+      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+      id: issueId('75'),
+    }
+    await Effect.runPromise(
+      saveHandoffs(storePath, [
+        {
+          issueId: first.id,
+          identifier: first.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'awaiting_checks',
+          headSha: 'first-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [first, second])
+    let discoveries = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        findExistingHandoff: (candidate) =>
+          Effect.sync(() => {
+            discoveries += 1
+            expect(candidate.id).toBe(second.id)
+            return {
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-75',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+              pullRequestNumber: 95,
+              created: false,
+            }
+          }),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            url: `https://github.test/example/symphony/pull/${String(number)}`,
+            headSha: number === 65 ? 'first-head' : 'second-head',
+            merged: false as const,
+            state: 'open' as const,
+            mergeCommitSha: null,
+            mergeable: null,
+            mergeState: 'unknown',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(discoveries).toBe(1)
+    expect(snapshot.handoffs.map((handoff) => handoff.issueId).sort()).toEqual(['20', '75'])
+    expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 1 })
+    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toHaveLength(2)
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('reports a malformed store and does not replace it during recovery', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-malformed-handoff-'))
+    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    await mkdir(join(workspaceRoot, '.symphony'))
+    await writeFile(storePath, '{malformed')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const harness = makeHarness(isolated)
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffRecovery.status).toBe('degraded')
+    expect(snapshot.handoffRecovery.storeError).toMatchObject({ operation: 'read' })
+    expect(await readFile(storePath, 'utf8')).toBe('{malformed')
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('retains persisted entries through a transient GitHub hydration failure', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-transient-handoff-'))
+    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+      id: issueId('75'),
+    }
+    await Effect.runPromise(
+      saveHandoffs(storePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+          branchName: 'symphony/issue-75',
+          state: 'awaiting_checks',
+          headSha: 'persisted-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    let hydrationAttempts = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => {
+        const tracker = harness.dependencies.makeTracker(effectiveWorkflow)
+        return {
+          ...tracker,
+          fetchIssuesByIds: (ids, options) => {
+            hydrationAttempts += 1
+            return hydrationAttempts === 1
+              ? Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_request',
+                    message: 'transient GitHub failure',
+                    retryable: true,
+                  }),
+                )
+              : tracker.fetchIssuesByIds(ids, options)
+          },
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              url: 'https://github.test/example/symphony/pull/95',
+              headSha: 'persisted-head',
+              merged: false as const,
+              state: 'open' as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }),
+        }
+      },
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(hydrationAttempts).toBeGreaterThanOrEqual(2)
+    expect(snapshot.handoffs).toHaveLength(1)
+    expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 0 })
+    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toHaveLength(1)
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('removes a restored handoff after its pull request is confirmed merged', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-restored-handoff-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')

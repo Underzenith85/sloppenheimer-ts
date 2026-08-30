@@ -260,7 +260,7 @@ export const makeGitHubPullRequestMonitor = (
           const mergeCommitSha = nullableString(
             number,
             'merge_commit_sha',
-            pull['merge_commit_sha'],
+            pull['merge_commit_sha'] ?? null,
           )
           const mergeable = nullableBoolean(number, 'mergeable', pull['mergeable'])
           const mergeState = requiredString(number, 'mergeable_state', pull['mergeable_state'])

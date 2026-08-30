@@ -29,6 +29,12 @@ export class TrackerError extends Data.TaggedError('TrackerError')<{
   readonly cause?: unknown
 }> {}
 
+export class HandoffStoreError extends Data.TaggedError('HandoffStoreError')<{
+  readonly operation: 'read' | 'write'
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
 export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
   readonly category:
     | 'invalid_path'
