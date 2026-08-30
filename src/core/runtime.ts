@@ -1,7 +1,6 @@
 import { resolve } from 'node:path'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
-import { isCancelledTurnStatus, type AgentEvent, type runAgent } from '../codex.js'
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
   issueId,
@@ -28,10 +27,16 @@ import {
   type AgentDetailRecord,
   type AgentDetailSnapshot,
   type AgentDetailStatus,
+  type AgentEvent,
 } from '../telemetry.js'
 import { issueBranchName, type CodeReviewPort, type TrackerPort } from '../tracker.js'
 import { type loadWorkflow, type Workflow } from '../config/workflow.js'
 import { workspaceKey, type WorkspaceManager } from '../workspace.js'
+import type {
+  AgentEventSemantics,
+  AgentRunnerConfig,
+  AgentRunnerPort,
+} from '../ports/agent-runner.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 
@@ -249,7 +254,7 @@ export type ExecutionSnapshot = Readonly<{
   workspaces: WorkspaceManager
   workspaceRoot: string
   prompt: string
-  codex: Workflow['config']['codex']
+  agentRunner: AgentRunnerConfig
   maxTurns: number
   stallTimeoutMs: number
 }>
@@ -282,7 +287,12 @@ export type OrchestratorDependencies = Readonly<{
   /** Omit the factory to disable pull-request handoff and use continuation turns only. */
   makeCodeReview?: (workflow: Workflow) => CodeReviewPort | null
   makeWorkspaces: (workflow: Workflow) => WorkspaceManager
-  runAgent: typeof runAgent
+  runAgent: AgentRunnerPort['run']
+  /**
+   * The injected runner's own reading of its turn statuses. It travels with `runAgent` so a
+   * non-Codex runner is never interpreted through another runner's status vocabulary.
+   */
+  agentEventSemantics: AgentEventSemantics
   watchWorkflow: (path: string, onChange: () => void) => WorkflowWatcher
   /** Environment used by dispatch preflight validation of secret indirection. */
   environment: NodeJS.ProcessEnv
@@ -446,7 +456,7 @@ const captureExecutionSnapshot = (
     workspaces: effective.workspaces,
     workspaceRoot: effective.workflow.config.workspaceRoot,
     prompt,
-    codex: Object.freeze({ ...effective.workflow.config.codex }),
+    agentRunner: Object.freeze({ ...effective.workflow.config.codex }),
     maxTurns: effective.workflow.config.agent.maxTurns,
     stallTimeoutMs: effective.workflow.config.codex.stallTimeoutMs,
   })
@@ -1223,9 +1233,9 @@ export const startOrchestratorRuntime = (
             update.event === 'turn/terminated') &&
           update.turnStatus !== null
         ) {
-          const completed = update.turnStatus === 'completed'
-          const cancelled = isCancelledTurnStatus(update.turnStatus)
-          const outcome = completed ? 'completed' : cancelled ? 'cancelled' : 'failed'
+          const outcome = dependencies.agentEventSemantics.turnOutcome(update.turnStatus)
+          const completed = outcome === 'completed'
+          const cancelled = outcome === 'cancelled'
           entry.turnActive = false
           yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
             ...sessionLogContext(entry),

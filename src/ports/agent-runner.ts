@@ -1,17 +1,26 @@
 import { Context, Layer, type Effect } from 'effect'
 
-import type { CodexConfig } from '../config/workflow.js'
-import type { Issue, Workspace } from '../domain/domain.js'
+import type { Issue, JsonObject, Workspace } from '../domain/domain.js'
 import type { AgentError } from '../errors.js'
 import type { HostToolSession } from '../host-tools.js'
 import type { AgentEvent } from '../telemetry.js'
 
 /**
- * Session configuration for the agent runner. Only one runner exists today, so the alias resolves
- * to the Codex session config; it exists so a second runner can widen the shape here rather than
- * at every launch site.
+ * Session configuration for the agent runner, declared structurally rather than as an alias to a
+ * concrete runner's config, so a port consumer never depends on one adapter's settings type. The
+ * Codex config satisfies it today; a second runner widens the shape here rather than at every
+ * launch site.
  */
-export type AgentRunnerConfig = CodexConfig
+export type AgentRunnerConfig = Readonly<{
+  command: string
+  approvalPolicy: string
+  threadSandbox: string
+  /** Verbatim pass-through for the runner's turn sandbox policy. */
+  turnSandboxPolicy: JsonObject | null
+  turnTimeoutMs: number
+  readTimeoutMs: number
+  stallTimeoutMs: number
+}>
 
 /** Everything one agent session needs, captured before the session is launched. */
 export type AgentLaunch = Readonly<{
@@ -52,3 +61,13 @@ export class AgentRunner extends Context.Tag('symphony/AgentRunner')<
 
 export const layerAgentRunner = (runner: AgentRunnerPort): Layer.Layer<AgentRunner> =>
   Layer.succeed(AgentRunner, runner)
+
+export type AgentTurnOutcome = 'completed' | 'cancelled' | 'failed'
+
+/**
+ * Adapter-supplied reading of the native turn statuses carried by lifecycle events. The runtime
+ * reacts to the outcome, so normalizing a runner's own status vocabulary stays with that runner.
+ */
+export type AgentEventSemantics = Readonly<{
+  turnOutcome: (status: string) => AgentTurnOutcome
+}>

@@ -22,10 +22,12 @@ export { makeAdapterCell, type AdapterCell, type AdapterRebuild } from './cell.j
 export {
   AgentRunner,
   layerAgentRunner,
+  type AgentEventSemantics,
   type AgentLaunch,
   type AgentResult,
   type AgentRunnerConfig,
   type AgentRunnerPort,
+  type AgentTurnOutcome,
 } from './agent-runner.js'
 export {
   codeReview,

@@ -22,6 +22,7 @@ import {
   retryDelayMs,
   sortIssues,
   startOrchestrator,
+  codexAgentEventSemantics,
   type AgentDetailLookup,
   type OrchestratorControl,
   type OrchestratorDependencies,
@@ -311,6 +312,7 @@ const makeHarness = (
         remove: () => Effect.void,
       }
     },
+    agentEventSemantics: codexAgentEventSemantics,
     runAgent: ({ config, prompt, maxTurns, onEvent }) =>
       Effect.sync(() => {
         agentRuns.push({ command: config.command, prompt, maxTurns })

@@ -107,7 +107,7 @@ export const dispatch = (
               issue,
               workspace,
               workspaceRoot: execution.workspaceRoot,
-              config: execution.codex,
+              config: execution.agentRunner,
               prompt: execution.prompt,
               maxTurns: execution.maxTurns,
               secretEnvironmentNames: execution.secretEnvironmentNames,
