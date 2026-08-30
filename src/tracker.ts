@@ -9,6 +9,7 @@ import {
   type JsonValue,
 } from './domain.js'
 import { TrackerError } from './errors.js'
+import { logWarning } from './logging.js'
 import { makeGitHubPullRequestMonitor } from './github-handoff.js'
 import {
   githubJson,
@@ -534,7 +535,7 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
           const malformed = pages.flatMap((page) => page.malformed)
           return malformed.length === 0
             ? Effect.void
-            : Effect.logWarning('tracker state list contained malformed records', {
+            : logWarning('tracker state list contained malformed records', {
                 tracker_kind: 'github',
                 provider_scope: `${provider.owner}/${provider.repository}`,
                 skipped: malformed.length,

@@ -4,6 +4,7 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
+import { redactSecretsInString } from './logging.js'
 import type { CodexConfig } from './workflow.js'
 import {
   assertWorkspaceIdentity,
@@ -51,9 +52,11 @@ const isJsonValue = (value: unknown): value is JsonValue => {
   return Object.values(value).every(isJsonValue)
 }
 
-/** Composes the session identity the SPEC reports for a thread and its current turn. */
-export const composeSessionId = (threadId: string, turnId: string | null): string =>
-  turnId === null ? threadId : `${threadId}:${turnId}`
+/** Session identity remains stable for the lifetime of the App Server thread. */
+export const composeSessionId = (threadId: string, _turnId: string | null): string => threadId
+
+export const isCancelledTurnStatus = (status: string): boolean =>
+  status === 'cancelled' || status === 'canceled' || status === 'interrupted'
 
 export type AgentEvent = Readonly<{
   event: string
@@ -65,9 +68,12 @@ export type AgentEvent = Readonly<{
     outputTokens: number
     totalTokens: number
   }> | null
+  rateLimits: JsonObject | null
   threadId: string | null
   turnId: string | null
   sessionId: string | null
+  turnCount: number
+  turnStatus: string | null
 }>
 
 export type AgentResult = Readonly<{
@@ -77,6 +83,8 @@ export type AgentResult = Readonly<{
 }>
 
 type PendingRequest = Readonly<{
+  method: string
+  turnCount: number | null
   resolve: (value: JsonValue) => void
   reject: (error: AgentError) => void
   timeout: NodeJS.Timeout
@@ -107,21 +115,102 @@ const errorMessage = (value: JsonValue): string => {
   return typeof message === 'string' ? message : 'unknown protocol error'
 }
 
-const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
+const nonNegativeInteger = (value: JsonValue | undefined): number | null =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+
+const valueAt = (object: JsonObject, camelCase: string, snakeCase: string): number | null =>
+  nonNegativeInteger(object[camelCase] ?? object[snakeCase])
+
+const tokenTotalsFrom = (value: JsonValue | undefined): AgentEvent['usage'] => {
+  if (!isJsonObject(value)) {
+    return null
+  }
+  const inputTokens = valueAt(value, 'inputTokens', 'input_tokens')
+  const outputTokens = valueAt(value, 'outputTokens', 'output_tokens')
+  const totalTokens = valueAt(value, 'totalTokens', 'total_tokens')
+  return inputTokens === null || outputTokens === null || totalTokens === null
+    ? null
+    : { inputTokens, outputTokens, totalTokens }
+}
+
+const wrapperFrom = (params: JsonObject): JsonObject => {
+  const message = params['msg']
+  return isJsonObject(message) ? message : params
+}
+
+const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
+  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
+  for (const [key, value] of Object.entries(update)) {
+    const existing = merged[key]
+    merged[key] =
+      isJsonObject(existing) && isJsonObject(value) ? mergeSparseObject(existing, value) : value
+  }
+  return merged
+}
+
+export const telemetryFrom = (
+  method: string,
+  message: JsonObject,
+): Readonly<{ usage: AgentEvent['usage']; rateLimits: JsonObject | null }> => {
+  const params = message['params']
+  if (!isJsonObject(params)) {
+    return { usage: null, rateLimits: null }
+  }
+  if (method === 'thread/tokenUsage/updated') {
+    const tokenUsage = params['tokenUsage']
+    const total = isJsonObject(tokenUsage) ? tokenUsage['total'] : undefined
+    return { usage: tokenTotalsFrom(total), rateLimits: null }
+  }
+  if (method === 'turn/usage') {
+    return { usage: tokenTotalsFrom(params['usage']), rateLimits: null }
+  }
+  if (method === 'account/rateLimits/updated') {
+    const rateLimits = params['rateLimits']
+    return { usage: null, rateLimits: isJsonObject(rateLimits) ? rateLimits : null }
+  }
+  if (method === 'codex/event/token_count') {
+    const wrapper = wrapperFrom(params)
+    const info = wrapper['info']
+    const total = isJsonObject(info) ? info['total_token_usage'] : undefined
+    const rateLimits = wrapper['rate_limits']
+    return {
+      usage: tokenTotalsFrom(total),
+      rateLimits: isJsonObject(rateLimits) ? rateLimits : null,
+    }
+  }
+  return { usage: null, rateLimits: null }
+}
+
+export const boundedMessage = (
+  value: string,
+  knownSecretValues: readonly string[] = [],
+): string => {
+  const knownSecretsRedacted = [...knownSecretValues]
+    .filter((secret) => secret.length > 0)
+    .sort((left, right) => right.length - left.length)
+    .reduce((message, secret) => message.replaceAll(secret, '[REDACTED]'), value)
+  const redacted = redactSecretsInString(knownSecretsRedacted)
+  return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
+}
+
+const messageFrom = (message: JsonObject, knownSecretValues: readonly string[]): string | null => {
   const params = message['params']
   if (!isJsonObject(params)) {
     return null
   }
-  const usage = params['usage']
-  if (!isJsonObject(usage)) {
-    return null
+  const direct = params['message']
+  if (typeof direct === 'string') {
+    return boundedMessage(direct, knownSecretValues)
   }
-  const input = usage['inputTokens']
-  const output = usage['outputTokens']
-  const total = usage['totalTokens']
-  return typeof input === 'number' && typeof output === 'number' && typeof total === 'number'
-    ? { inputTokens: input, outputTokens: output, totalTokens: total }
-    : null
+  const error = params['error']
+  if (isJsonObject(error) && typeof error['message'] === 'string') {
+    return boundedMessage(error['message'], knownSecretValues)
+  }
+  const item = params['item']
+  if (isJsonObject(item) && item['type'] === 'agentMessage' && typeof item['text'] === 'string') {
+    return boundedMessage(item['text'], knownSecretValues)
+  }
+  return null
 }
 
 /**
@@ -240,11 +329,18 @@ class CodexConnection {
   readonly #readTimeoutMs: number
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
+  readonly #knownSecretValues: readonly string[]
+  readonly #flushStderr: () => void
   readonly #pending = new Map<number, PendingRequest>()
   /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
   readonly #settled = new Map<string, TurnSettlement>()
   /** Callers waiting on turns that have not settled yet. */
   readonly #waiters = new Map<string, TurnWaiter>()
+  readonly #turnUsage = new Map<string, NonNullable<AgentEvent['usage']>>()
+  readonly #startedTurns = new Set<string>()
+  readonly #turnCounts = new Map<string, number>()
+  #pendingRateLimits: JsonObject | null = null
+  #rateLimitsReady = false
   #nextId = 1
   #closed = false
   /**
@@ -254,6 +350,7 @@ class CodexConnection {
   #terminalError: AgentError | null = null
   #threadId: string | null = null
   #turnId: string | null = null
+  #turnCount = 0
 
   constructor(
     command: string,
@@ -262,9 +359,13 @@ class CodexConnection {
     secretEnvironmentNames: readonly string[],
     onEvent: (event: AgentEvent) => void,
   ) {
+    const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
+    this.#knownSecretValues = [...codexAuthenticationEnvironmentNames]
+      .map((name) => environment[name])
+      .filter((value): value is string => value !== undefined && value.length > 0)
     this.#process = spawn('bash', ['-lc', command], {
       cwd,
-      env: makeCodexEnvironment(process.env, secretEnvironmentNames),
+      env: environment,
       stdio: ['pipe', 'pipe', 'pipe'],
       // Its own process group, so shutdown reaches tools the App Server itself started.
       detached: true,
@@ -292,12 +393,54 @@ class CodexConnection {
       readStdout(chunk)
     })
 
-    // stderr is diagnostic only and never parsed as protocol.
-    this.#process.stderr.on('data', (chunk: Buffer) => {
-      const message = chunk.toString('utf8').trim()
+    // stderr is diagnostic only and never parsed as protocol. Buffer complete records before
+    // redaction: a chunk boundary between `Authorization:` and its value must not turn the value
+    // into an unkeyed fragment that can escape the header redactor.
+    let pemEndMarker: string | null = null
+    let pemPrefix = ''
+    const emitDiagnosticLine = (line: string): void => {
+      if (pemEndMarker !== null) {
+        if (line.includes(pemEndMarker)) {
+          this.#emit('diagnostic', `${pemPrefix}[REDACTED PEM PRIVATE KEY]`)
+          pemEndMarker = null
+          pemPrefix = ''
+        }
+        return
+      }
+      const pemStart = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----/u.exec(line)
+      const label = pemStart?.[1]
+      if (pemStart !== null && label !== undefined) {
+        const endMarker = `-----END ${label}-----`
+        if (line.slice(pemStart.index + pemStart[0].length).includes(endMarker)) {
+          this.#emit('diagnostic', line.trim())
+          return
+        }
+        pemPrefix = line.slice(0, pemStart.index)
+        pemEndMarker = endMarker
+        return
+      }
+      const message = line.trim()
       if (message.length > 0) {
         this.#emit('diagnostic', message)
       }
+    }
+    const readStderr = makeLineReader(codexMaxLineBytes, emitDiagnosticLine, () => {
+      this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
+    })
+    this.#flushStderr = (): void => {
+      readStderr(Buffer.from('\n'))
+      if (pemEndMarker !== null) {
+        this.#emit('diagnostic', `${pemPrefix}[REDACTED PEM PRIVATE KEY]`)
+        pemEndMarker = null
+        pemPrefix = ''
+      }
+    }
+    this.#process.stderr.on('data', (chunk: Buffer) => {
+      readStderr(chunk)
+    })
+    this.#process.stderr.once('end', () => {
+      // Treat an unterminated final diagnostic as a complete record once the stream closes.
+      this.#flushStderr()
     })
 
     this.#process.once('error', (cause) => {
@@ -329,6 +472,32 @@ class CodexConnection {
       clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
     })
     this.#notify('initialized', {})
+    const rateLimitsResult = await this.#request('account/rateLimits/read', {})
+    if (!isJsonObject(rateLimitsResult) || !isJsonObject(rateLimitsResult['rateLimits'])) {
+      throw new AgentError({
+        category: 'protocol_error',
+        message: 'account/rateLimits/read returned no rate-limit snapshot',
+      })
+    }
+    const rateLimits = mergeSparseObject(
+      rateLimitsResult['rateLimits'],
+      this.#pendingRateLimits ?? {},
+    )
+    this.#pendingRateLimits = null
+    this.#rateLimitsReady = true
+    this.#onEvent({
+      event: 'account/rateLimits/read',
+      timestamp: new Date(),
+      processId: this.processId,
+      message: null,
+      usage: null,
+      rateLimits,
+      threadId: null,
+      turnId: null,
+      sessionId: null,
+      turnCount: 0,
+      turnStatus: null,
+    })
     const result = await this.#request('thread/start', {
       cwd,
       approvalPolicy: config.approvalPolicy,
@@ -354,18 +523,23 @@ class CodexConnection {
     cwd: string,
     config: CodexConfig,
     prompt: string,
+    turnCount: number,
   ): Promise<string> {
-    const result = await this.#request('turn/start', {
-      threadId,
-      input: [{ type: 'text', text: prompt }],
-      cwd,
-      approvalPolicy: config.approvalPolicy,
-      sandboxPolicy: config.turnSandboxPolicy ?? {
-        type: 'workspaceWrite',
-        writableRoots: [cwd],
-        networkAccess: true,
+    const result = await this.#request(
+      'turn/start',
+      {
+        threadId,
+        input: [{ type: 'text', text: prompt }],
+        cwd,
+        approvalPolicy: config.approvalPolicy,
+        sandboxPolicy: config.turnSandboxPolicy ?? {
+          type: 'workspaceWrite',
+          writableRoots: [cwd],
+          networkAccess: true,
+        },
       },
-    })
+      turnCount,
+    )
     if (
       !isJsonObject(result) ||
       !isJsonObject(result['turn']) ||
@@ -376,8 +550,7 @@ class CodexConnection {
         message: 'turn/start returned no turn id',
       })
     }
-    this.#turnId = result['turn']['id']
-    return this.#turnId
+    return result['turn']['id']
   }
 
   /**
@@ -408,11 +581,20 @@ class CodexConnection {
    * Records how a turn ended and answers anyone waiting on it. The first settlement wins, so a
    * later report — including the session dying — cannot overwrite a decided turn.
    */
-  #settle(turnId: string, settlement: TurnSettlement): void {
+  #settle(turnId: string, settlement: TurnSettlement, reported = false): void {
     if (this.#settled.has(turnId)) {
       return
     }
     this.#settled.set(turnId, settlement)
+    if (!reported) {
+      const status =
+        settlement._tag === 'completed'
+          ? 'completed'
+          : settlement.error.category === 'turn_timeout'
+            ? 'timed_out'
+            : 'failed'
+      this.#emit('turn/terminated', null, { threadId: null, turnId }, status)
+    }
     const waiter = this.#waiters.get(turnId)
     if (waiter === undefined) {
       return
@@ -470,23 +652,12 @@ class CodexConnection {
     this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
   }
 
-  emitSessionStarted(issue: Issue): void {
-    this.#onEvent({
-      event: 'session_started',
-      timestamp: new Date(),
-      processId: this.processId,
-      message: issue.url,
-      usage: null,
-      threadId: this.#threadId,
-      turnId: this.#turnId,
-      sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
-    })
-  }
-
   async stop(): Promise<void> {
     if (this.#closed) {
       return
     }
+    this.#flushStderr()
+    this.#emit('session_stopped', null)
     this.#closed = true
     this.#fail(
       new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
@@ -494,6 +665,7 @@ class CodexConnection {
     )
     this.#process.stdout.removeAllListeners('data')
     this.#process.stderr.removeAllListeners('data')
+    this.#process.stderr.removeAllListeners('end')
     this.#process.stdin.end()
     this.#terminate('SIGTERM')
     await this.#reapGroup()
@@ -565,7 +737,7 @@ class CodexConnection {
   }
 
   static #turnFailure(turnId: string, status: string): AgentError {
-    const cancelled = status === 'cancelled' || status === 'canceled'
+    const cancelled = isCancelledTurnStatus(status)
     return new AgentError({
       category: cancelled ? 'turn_cancelled' : 'turn_failed',
       message: `turn ${turnId} finished with status ${status}`,
@@ -573,7 +745,11 @@ class CodexConnection {
   }
 
   /** Registers the pending entry before writing, so a response can never arrive unowned. */
-  #request(method: string, params: JsonObject): Promise<JsonValue> {
+  #request(
+    method: string,
+    params: JsonObject,
+    turnCount: number | null = null,
+  ): Promise<JsonValue> {
     if (this.#terminalError !== null) {
       return Promise.reject(this.#terminalError)
     }
@@ -586,7 +762,13 @@ class CodexConnection {
           new AgentError({ category: 'read_timeout', message: `${method} response timed out` }),
         )
       }, this.#readTimeoutMs)
-      this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#pending.set(id, {
+        method,
+        turnCount,
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        timeout,
+      })
       this.#write({ id, method, params })
     })
   }
@@ -653,7 +835,12 @@ class CodexConnection {
     this.#pending.delete(id)
     const error = parsed['error']
     if (error !== undefined) {
-      pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
+      pending.reject(
+        new AgentError({
+          category: 'protocol_error',
+          message: boundedMessage(errorMessage(error), this.#knownSecretValues),
+        }),
+      )
       return
     }
     const result = parsed['result']
@@ -664,6 +851,13 @@ class CodexConnection {
       return
     }
     this.#adoptIdentity(result)
+    if (pending.method === 'thread/start' && this.#threadId !== null) {
+      this.#emit('thread_started', null)
+      this.#emit('session_started', null)
+    }
+    if (pending.method === 'turn/start' && pending.turnCount !== null && this.#turnId !== null) {
+      this.#ensureTurnStarted(this.#turnId, pending.turnCount, this.#threadId)
+    }
     pending.resolve(result)
   }
 
@@ -686,6 +880,17 @@ class CodexConnection {
     if (isJsonObject(turn) && typeof turn['id'] === 'string') {
       this.#turnId = turn['id']
     }
+  }
+
+  #ensureTurnStarted(turnId: string, turnCount: number, threadId: string | null): void {
+    if (this.#startedTurns.has(turnId)) {
+      return
+    }
+    this.#startedTurns.add(turnId)
+    this.#turnCounts.set(turnId, turnCount)
+    this.#turnId = turnId
+    this.#turnCount = turnCount
+    this.#emit('turn_started', null, { threadId, turnId })
   }
 
   /** `id` is echoed back in whichever form the server sent it. */
@@ -729,10 +934,47 @@ class CodexConnection {
   #handleNotification(method: string, message: JsonObject): void {
     const turn = this.#turnFrom(message)
     const carried = notificationIdentity(message)
+    const telemetry = telemetryFrom(method, message)
+    let rateLimits = telemetry.rateLimits
+    if (rateLimits !== null && !this.#rateLimitsReady) {
+      this.#pendingRateLimits = mergeSparseObject(this.#pendingRateLimits, rateLimits)
+      rateLimits = null
+    }
     // A notification that names its own thread and turn is attributable even when it arrives before
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? turn?.id ?? this.#turnId
+    const isTerminal = method === 'turn/completed' || method === 'turn/failed'
+    const terminalStatus =
+      isTerminal && turn !== null
+        ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
+        : null
+    if (isTerminal && turn !== null && this.#settled.has(turn.id)) {
+      return
+    }
+    const pendingTurnStart = [...this.#pending.values()].find(
+      (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
+    )
+    if (turnId !== null && pendingTurnStart !== undefined && pendingTurnStart.turnCount !== null) {
+      this.#ensureTurnStarted(turnId, pendingTurnStart.turnCount, threadId)
+    }
+    let usage = telemetry.usage
+    if (method === 'turn/usage' && usage !== null && turnId !== null) {
+      const previous = this.#turnUsage.get(turnId)
+      this.#turnUsage.set(turnId, {
+        inputTokens: Math.max(previous?.inputTokens ?? 0, usage.inputTokens),
+        outputTokens: Math.max(previous?.outputTokens ?? 0, usage.outputTokens),
+        totalTokens: Math.max(previous?.totalTokens ?? 0, usage.totalTokens),
+      })
+      usage = [...this.#turnUsage.values()].reduce(
+        (total, current) => ({
+          inputTokens: total.inputTokens + current.inputTokens,
+          outputTokens: total.outputTokens + current.outputTokens,
+          totalTokens: total.totalTokens + current.totalTokens,
+        }),
+        { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      )
+    }
     // Re-arm the turn this notification names, not whichever turn happens to be waiting.
     const attributed = carried.turnId ?? turn?.id
     if (attributed !== undefined) {
@@ -742,13 +984,17 @@ class CodexConnection {
       event: method,
       timestamp: new Date(),
       processId: this.processId,
-      message: null,
-      usage: usageFrom(message),
+      message: messageFrom(message, this.#knownSecretValues),
+      usage,
+      rateLimits,
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+      turnCount:
+        turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
+      turnStatus: terminalStatus,
     })
-    if (method !== 'turn/completed' && method !== 'turn/failed') {
+    if (!isTerminal) {
       return
     }
     if (turn === null) {
@@ -756,17 +1002,20 @@ class CodexConnection {
     }
     // The reported status is the specific one — `cancelled`, say — so it always wins. `turn/failed`
     // supplies `failed` only when the notification omitted it, since there the method says enough.
-    const status = turn.status ?? (method === 'turn/failed' ? 'failed' : null)
-    if (status === null) {
+    if (turn.status === null && method === 'turn/completed') {
       // The Turn schema requires `status`. Reading a missing one as success would hand off work
       // the server never reported as complete, so the turn fails with a legible reason instead.
       this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
     }
     this.#settle(
       turn.id,
-      status === 'completed'
+      terminalStatus === 'completed'
         ? { _tag: 'completed' }
-        : { _tag: 'failed', error: CodexConnection.#turnFailure(turn.id, status ?? 'unreported') },
+        : {
+            _tag: 'failed',
+            error: CodexConnection.#turnFailure(turn.id, terminalStatus ?? 'unreported'),
+          },
+      true,
     )
   }
 
@@ -790,11 +1039,12 @@ class CodexConnection {
    */
   #emit(
     event: string,
-    message: string,
+    message: string | null,
     carried: Readonly<{ threadId: string | null; turnId: string | null }> = {
       threadId: null,
       turnId: null,
     },
+    turnStatus: string | null = null,
   ): void {
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? this.#turnId
@@ -802,11 +1052,15 @@ class CodexConnection {
       event,
       timestamp: new Date(),
       processId: this.processId,
-      message,
+      message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
       usage: null,
+      rateLimits: null,
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+      turnCount:
+        turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
+      turnStatus,
     })
   }
 
@@ -910,11 +1164,9 @@ const runVerifiedAgent = (
                 verified.path,
                 launch.config,
                 turnPrompt,
+                turnCount + 1,
               )
               await rebind()
-              if (turnCount === 0) {
-                connection.emitSessionStarted(launch.issue)
-              }
               await connection.awaitTurn(turnId)
               turnCount += 1
               const refreshed = await Effect.runPromise(launch.refreshIssue())

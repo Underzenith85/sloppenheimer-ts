@@ -2,6 +2,7 @@
 import { Cause, Effect, Exit } from 'effect'
 
 import { parseCliArguments, type CliOptions } from './cli-options.js'
+import { logInfo } from './logging.js'
 import { makeOperatorBackend } from './operator.js'
 import { startOrchestrator } from './orchestrator.js'
 import { startOperatorServer } from './server.js'
@@ -54,7 +55,7 @@ const main = async (): Promise<number> => {
           port,
           makeOperatorBackend(options.workflowPath, orchestrator),
         )
-        yield* Effect.logInfo('operator console listening', { url: server.url })
+        yield* logInfo('operator console listening', { url: server.url })
       }
       return yield* orchestrator.awaitTermination
     }),
