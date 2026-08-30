@@ -107,6 +107,19 @@ issue URL. Every event is attributed from the `threadId` and `turnId` the provok
 where it has them, so a message that arrives before the response introducing those ids is still
 recorded against the right turn.
 
+Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
+`codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
+re-arms it, so a long but active turn never expires while a genuinely silent one does.
+`codex.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
+
+The App Server runs in its own process group. Shutdown, cancellation and interruption signal the
+whole tree — `SIGTERM`, then `SIGKILL` after a bounded grace — so tools the App Server itself
+started are not left behind, and every outstanding request and turn settles exactly once.
+
+Failures map onto stable categories: `spawn_failed`, `workspace_rejected`, `protocol_error`,
+`read_timeout`, `turn_timeout`, `turn_failed`, `turn_cancelled`, `input_required`, and
+`process_exited`.
+
 ### Trust and safety posture
 
 SPEC §10.5 leaves approval, sandbox, and operator-confirmation behaviour implementation-defined and

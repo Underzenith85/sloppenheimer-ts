@@ -26,6 +26,9 @@ export const makeCodexEnvironment = (
 /** The App Server framing limit for one protocol line. */
 export const codexMaxLineBytes = 10 * 1024 * 1024
 const shutdownGraceMs = 5_000
+/** After `SIGKILL`, how long to wait for the group to vanish, and how often to look. */
+const groupReapDeadlineMs = 2_000
+const groupReapPollMs = 25
 
 const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -263,6 +266,8 @@ class CodexConnection {
       cwd,
       env: makeCodexEnvironment(process.env, secretEnvironmentNames),
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Its own process group, so shutdown reaches tools the App Server itself started.
+      detached: true,
     })
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
@@ -391,13 +396,11 @@ class CodexConnection {
       return Promise.reject(this.#terminalError)
     }
     return new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.#settle(turnId, {
-          _tag: 'failed',
-          error: new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
-        })
-      }, this.#turnTimeoutMs)
-      this.#waiters.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#waiters.set(turnId, {
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        timeout: this.#armTurnTimer(turnId),
+      })
     })
   }
 
@@ -437,6 +440,36 @@ class CodexConnection {
     this.#settle(target, { _tag: 'failed', error })
   }
 
+  #armTurnTimer(turnId: string): NodeJS.Timeout {
+    return setTimeout(() => {
+      this.#settle(turnId, {
+        _tag: 'failed',
+        error: new AgentError({
+          category: 'turn_timeout',
+          message: `turn ${turnId} produced no output for ${String(this.#turnTimeoutMs)}ms`,
+        }),
+      })
+    }, this.#turnTimeoutMs)
+  }
+
+  /**
+   * `codex.turn_timeout_ms` is a silence timeout, not a total turn budget: protocol output that
+   * belongs to a turn re-arms that turn's timer, so a long but active turn never expires.
+   *
+   * Only output that names its own turn counts. There is no fallback to the turn in flight:
+   * anything parseable would otherwise hold a turn open forever — `{}` emitted faster than the
+   * timeout, responses matching nothing, unsupported requests, or session-level notifications that
+   * have no bearing on the turn at all.
+   */
+  #noteActivity(turnId: string): void {
+    const waiter = this.#waiters.get(turnId)
+    if (waiter === undefined) {
+      return
+    }
+    clearTimeout(waiter.timeout)
+    this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
+  }
+
   emitSessionStarted(issue: Issue): void {
     this.#onEvent({
       event: 'session_started',
@@ -462,26 +495,79 @@ class CodexConnection {
     this.#process.stdout.removeAllListeners('data')
     this.#process.stderr.removeAllListeners('data')
     this.#process.stdin.end()
-    this.#process.kill('SIGTERM')
-    await new Promise<void>((resolvePromise) => {
-      if (this.#process.exitCode !== null || this.#process.signalCode !== null) {
-        resolvePromise()
-        return
+    this.#terminate('SIGTERM')
+    await this.#reapGroup()
+  }
+
+  /**
+   * Waits for the App Server's process group to empty, escalating to `SIGKILL` once the grace has
+   * passed. Polling rather than waiting on the leader's `exit`: the group emptying is not an event
+   * Node reports, so a tree whose last member leaves a moment after the leader would otherwise sit
+   * out the whole grace before anyone noticed, delaying workspace cleanup for ordinary sessions.
+   *
+   * Both phases are bounded, and the poll timers are referenced on purpose — an awaited promise
+   * does not hold the event loop open, so an unreferenced wait would let the host exit before the
+   * escalation ever fired and leave behind the descendant this exists to kill.
+   */
+  async #reapGroup(): Promise<void> {
+    const escalateAt = Date.now() + shutdownGraceMs
+    while (this.#processGroupIsAlive()) {
+      if (Date.now() >= escalateAt) {
+        this.#terminate('SIGKILL')
+        break
       }
-      const timeout = setTimeout(() => {
-        this.#process.kill('SIGKILL')
-        resolvePromise()
-      }, shutdownGraceMs)
-      this.#process.once('exit', () => {
-        clearTimeout(timeout)
-        resolvePromise()
-      })
+      await CodexConnection.#pause(groupReapPollMs)
+    }
+    // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
+    // finalizer complete — and terminal reconciliation start removing the workspace — while a
+    // descendant is still running in it.
+    const deadline = Date.now() + groupReapDeadlineMs
+    while (this.#processGroupIsAlive() && Date.now() < deadline) {
+      await CodexConnection.#pause(groupReapPollMs)
+    }
+  }
+
+  static #pause(milliseconds: number): Promise<void> {
+    return new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, milliseconds)
     })
   }
 
+  /** Whether the App Server's process group still has a member. */
+  #processGroupIsAlive(): boolean {
+    const { pid } = this.#process
+    if (pid === undefined) {
+      return false
+    }
+    try {
+      process.kill(-pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Signals the whole App Server process group, not only the shell that started it. */
+  #terminate(signal: NodeJS.Signals): void {
+    const { pid } = this.#process
+    if (pid === undefined) {
+      return
+    }
+    try {
+      process.kill(-pid, signal)
+    } catch {
+      try {
+        this.#process.kill(signal)
+      } catch {
+        // The process tree is already gone.
+      }
+    }
+  }
+
   static #turnFailure(turnId: string, status: string): AgentError {
+    const cancelled = status === 'cancelled' || status === 'canceled'
     return new AgentError({
-      category: 'turn_failed',
+      category: cancelled ? 'turn_cancelled' : 'turn_failed',
       message: `turn ${turnId} finished with status ${status}`,
     })
   }
@@ -558,6 +644,8 @@ class CodexConnection {
   #settleResponse(id: number, parsed: JsonObject): void {
     const pending = this.#pending.get(id)
     if (pending === undefined) {
+      // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
+      // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
       this.#emit('unmatched_response', `no pending request for response id ${String(id)}`)
       return
     }
@@ -606,6 +694,10 @@ class CodexConnection {
     // request rather than from connection state, which is null on the first turn and names the
     // previous one afterwards.
     const identity = notificationIdentity(message)
+    // Only when the request names its turn; an unattributed one is not evidence that turn is alive.
+    if (identity.turnId !== null) {
+      this.#noteActivity(identity.turnId)
+    }
     if (isPermissionsApproval(method)) {
       this.#write({ id, result: withheldPermissionsGrant })
       this.#emit('permissions_grant_withheld', method, identity)
@@ -641,6 +733,11 @@ class CodexConnection {
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? turn?.id ?? this.#turnId
+    // Re-arm the turn this notification names, not whichever turn happens to be waiting.
+    const attributed = carried.turnId ?? turn?.id
+    if (attributed !== undefined) {
+      this.#noteActivity(attributed)
+    }
     this.#onEvent({
       event: method,
       timestamp: new Date(),
