@@ -1194,7 +1194,8 @@ export const startOrchestrator = (
               }
               if (
                 entry.sessionId !== null &&
-                event.update.event === 'turn/completed' &&
+                (event.update.event === 'turn/completed' ||
+                  event.update.event === 'turn/terminated') &&
                 event.update.turnStatus !== null
               ) {
                 const completed = event.update.turnStatus === 'completed'

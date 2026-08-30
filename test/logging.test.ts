@@ -20,6 +20,9 @@ Authorization=[REDACTED]`,
     expect(redactSecretsInString('DATABASE_URL=postgres://alice:hunter2@example.com/db')).toBe(
       'DATABASE_URL=postgres://[REDACTED]@example.com/db',
     )
+    expect(redactSecretsInString('safe=value PASSWORD=two words hidden')).toBe(
+      'safe=value PASSWORD=[REDACTED]',
+    )
   })
 
   it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {

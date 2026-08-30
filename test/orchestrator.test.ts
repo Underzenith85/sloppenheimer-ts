@@ -1127,9 +1127,9 @@ describe('session telemetry accounting', (): void => {
           )
           harness.emitAgentEvent(
             makeAgentEvent({
-              event: 'turn/completed',
+              event: 'turn/terminated',
               message: null,
-              turnStatus: 'completed',
+              turnStatus: 'timed_out',
               usage: null,
             }),
           )

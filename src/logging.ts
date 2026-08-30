@@ -48,8 +48,38 @@ const redactEscapedQuotedField = (match: string, key: string): string =>
 const redactAssignment = (match: string, key: string): string =>
   isSecretKey(key) ? `${key}=[REDACTED]` : match
 
+const redactUnquotedAssignments = (value: string): string => {
+  const assignment = /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*/gu
+  let result = ''
+  let copiedThrough = 0
+  let match: RegExpExecArray | null
+  while ((match = assignment.exec(value)) !== null) {
+    const key = match[1]
+    if (key === undefined || !isSecretKey(key)) {
+      continue
+    }
+    const valueStart = assignment.lastIndex
+    const first = value[valueStart]
+    if (first === '"' || first === "'") {
+      continue
+    }
+    const carriageReturn = value.indexOf('\r', valueStart)
+    const newline = value.indexOf('\n', valueStart)
+    const candidates = [carriageReturn, newline].filter((index) => index >= 0)
+    const lineEnd = candidates.length === 0 ? value.length : Math.min(...candidates)
+    const nextAssignment = /\s+[A-Za-z_][A-Za-z0-9_.-]*\s*[:=]/u.exec(
+      value.slice(valueStart, lineEnd),
+    )
+    const redactionEnd = nextAssignment === null ? lineEnd : valueStart + nextAssignment.index
+    result += `${value.slice(copiedThrough, match.index)}${key}=[REDACTED]`
+    copiedThrough = redactionEnd
+    assignment.lastIndex = redactionEnd
+  }
+  return `${result}${value.slice(copiedThrough)}`
+}
+
 export const redactSecretsInString = (value: string): string =>
-  value
+  redactUnquotedAssignments(value)
     .replace(/\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/\s@]+@/gu, '$1[REDACTED]@')
     .replace(/\b((?:Proxy-)?Authorization|Set-Cookie|Cookie)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
@@ -72,9 +102,6 @@ export const redactSecretsInString = (value: string): string =>
     .replace(
       /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*'(?:\\.|[^'\\])*'/gu,
       (match: string, key: string): string => redactAssignment(match, key),
-    )
-    .replace(/\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*\S+/gu, (match: string, key: string): string =>
-      redactAssignment(match, key),
     )
 
 const boundedString = (value: string): string => {

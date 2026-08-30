@@ -184,6 +184,7 @@ class CodexConnection {
   readonly #knownSecretValues: readonly string[]
   readonly #pending = new Map<number, PendingRequest>()
   readonly #turns = new Map<string, TurnWaiter>()
+  readonly #reportedTerminalTurns = new Set<string>()
   #nextId = 1
   #closed = false
   #threadId: string | null = null
@@ -299,15 +300,25 @@ class CodexConnection {
     this.#turnId = turnId
     this.#turnCount = turnCount
     this.#emit('turn_started', null)
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.#turns.delete(turnId)
-        rejectPromise(
-          new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
-        )
-      }, this.#turnTimeoutMs)
-      this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
-    })
+    try {
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const timeout = setTimeout(() => {
+          this.#turns.delete(turnId)
+          rejectPromise(
+            new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
+          )
+        }, this.#turnTimeoutMs)
+        this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      })
+    } catch (cause: unknown) {
+      if (!this.#reportedTerminalTurns.delete(turnId)) {
+        const status =
+          cause instanceof AgentError && cause.category === 'turn_timeout' ? 'timed_out' : 'failed'
+        this.#emit('turn/terminated', null, status)
+      }
+      throw cause
+    }
+    this.#reportedTerminalTurns.delete(turnId)
     return turnId
   }
 
@@ -505,6 +516,7 @@ class CodexConnection {
     }
     clearTimeout(waiter.timeout)
     this.#turns.delete(turnId)
+    this.#reportedTerminalTurns.add(turnId)
     if (status === 'completed') {
       waiter.resolve()
     } else {
@@ -517,7 +529,7 @@ class CodexConnection {
     }
   }
 
-  #emit(event: string, message: string | null): void {
+  #emit(event: string, message: string | null, turnStatus: string | null = null): void {
     this.#onEvent({
       event,
       timestamp: new Date(),
@@ -527,7 +539,7 @@ class CodexConnection {
       turnId: this.#turnId,
       sessionId: this.#threadId,
       turnCount: this.#turnCount,
-      turnStatus: null,
+      turnStatus,
       usage: null,
       rateLimits: null,
     })
