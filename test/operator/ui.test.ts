@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { Window, type HTMLButtonElement, type HTMLInputElement } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -13,7 +15,12 @@ import {
   type AgentDetailRecord,
   type AgentDetailSnapshot,
 } from '../../src/telemetry.js'
-import { appJavaScript, appTemplate } from '../../src/operator/ui-assets.js'
+
+const builtAsset = (name: string): string =>
+  readFileSync(new URL(`../../dist/operator/ui/${name}`, import.meta.url), 'utf8')
+
+const appJavaScript = builtAsset('app.js')
+const appTemplate = builtAsset('index.html')
 
 const runningIdentifier = 'example/symphony#17'
 const retryingIdentifier = 'example/symphony#18'

@@ -8,18 +8,18 @@
   },
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "dev": "tsx src/cli.ts",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint --type-aware --deny-warnings",
     "start": "node dist/cli.js",
-    "test": "vitest run",
+    "test": "pnpm build && vitest run --configLoader runner",
     "test:conformance": "vitest run --config vitest.conformance.config.ts",
     "test:real-integration": "vitest run --config vitest.real-integration.config.ts",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json --noEmit"
   },
   "dependencies": {
     "@effect/platform": "0.97.1",
