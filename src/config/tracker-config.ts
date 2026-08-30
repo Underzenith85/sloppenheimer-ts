@@ -1,6 +1,6 @@
-import type { JsonObject, JsonValue } from './domain.js'
+import type { JsonObject, JsonValue } from '../domain/domain.js'
 import { resolveSecretReference } from './env-reference.js'
-import { WorkflowError } from './errors.js'
+import { WorkflowError } from '../errors.js'
 
 export type GitHubProviderConfig = Readonly<{
   owner: string

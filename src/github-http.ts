@@ -1,9 +1,9 @@
 import { Effect } from 'effect'
 
-import type { JsonValue } from './domain.js'
+import type { JsonValue } from './domain/domain.js'
 import { TrackerError } from './errors.js'
-import { isJsonValue } from './json.js'
-import type { GitHubProviderConfig } from './tracker-config.js'
+import { isJsonValue } from './support/json.js'
+import type { GitHubProviderConfig } from './config/tracker-config.js'
 
 export const githubApiVersion = '2026-03-10'
 export const githubRequestTimeoutMs = 30_000
@@ -14,8 +14,8 @@ export const githubPageSize = 100
 export const githubMaxPages = 100
 
 /** GitHub-boundary aliases retained for readability in tracker and handoff parsing. */
-export type { JsonObject as JsonRecord } from './domain.js'
-export { isJsonObject as isJsonRecord } from './json.js'
+export type { JsonObject as JsonRecord } from './domain/domain.js'
+export { isJsonObject as isJsonRecord } from './support/json.js'
 
 export const trackerResponseError = (message: string, cause?: unknown): TrackerError =>
   new TrackerError({

@@ -5,7 +5,7 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
-import type { HandoffSnapshot } from '../src/handoff.js'
+import type { HandoffSnapshot } from '../src/domain/handoff.js'
 
 const directories: string[] = []
 

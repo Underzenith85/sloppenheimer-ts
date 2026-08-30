@@ -1,15 +1,19 @@
 import { Effect } from 'effect'
 
-import { findDependencyCycles, unresolvedBlockers, type DependencyCycle } from './dependencies.js'
-import { normalizeState, type Issue } from './domain.js'
+import {
+  findDependencyCycles,
+  unresolvedBlockers,
+  type DependencyCycle,
+} from '../domain/dependencies.js'
+import { normalizeState, type Issue } from '../domain/domain.js'
 import type {
   AgentDetailLookup,
   OrchestratorControl,
   OrchestratorSnapshot,
-} from './orchestrator.js'
-import { makeGitHubIssueControl } from './tracker.js'
-import { TrackerError, WorkflowError } from './errors.js'
-import { loadWorkflow, type Workflow } from './workflow.js'
+} from '../orchestrator.js'
+import { makeGitHubIssueControl } from '../tracker.js'
+import { TrackerError, WorkflowError } from '../errors.js'
+import { loadWorkflow, type Workflow } from '../config/workflow.js'
 
 export type BacklogIssue = Readonly<{
   number: number

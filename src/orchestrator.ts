@@ -3,7 +3,7 @@ import chokidar from 'chokidar'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { isCancelledTurnStatus, runAgent, type AgentEvent } from './codex.js'
-import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
+import { cyclicIssueIdentifiers, unresolvedBlockers } from './domain/dependencies.js'
 import {
   issueId,
   normalizeState,
@@ -12,13 +12,13 @@ import {
   type IssueIdentifier,
   type JsonObject,
   type TokenTotals,
-} from './domain.js'
+} from './domain/domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
-import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
+import { classifyPullRequest, type HandoffSnapshot } from './domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import type { HostToolSession } from './host-tools.js'
-import { mergeSparseObject, toJsonObject } from './json.js'
-import { logError, logInfo, logWarning } from './logging.js'
+import { mergeSparseObject, toJsonObject } from './support/json.js'
+import { logError, logInfo, logWarning } from './support/logging.js'
 import {
   agentDetailPath,
   buildAgentDetail,
@@ -34,8 +34,8 @@ import {
   type AgentDetailStatus,
 } from './telemetry.js'
 import { issueBranchName, makeGitHubTracker, type TrackerAdapter } from './tracker.js'
-import { sameTrackerProvider } from './tracker-config.js'
-import { loadWorkflow, preflightWorkflow, renderPrompt, type Workflow } from './workflow.js'
+import { sameTrackerProvider } from './config/tracker-config.js'
+import { loadWorkflow, preflightWorkflow, renderPrompt, type Workflow } from './config/workflow.js'
 import { makeWorkspaceManager, workspaceKey, type WorkspaceManager } from './workspace.js'
 
 type RunningEntry = {

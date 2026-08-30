@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 
-import type { Issue, IssueId, JsonValue } from '../../src/domain.js'
-import type { PullRequestObservation } from '../../src/handoff.js'
+import type { Issue, IssueId, JsonValue } from '../../src/domain/domain.js'
+import type { PullRequestObservation } from '../../src/domain/handoff.js'
 import type { HostToolContext, HostToolResult, HostToolSpec } from '../../src/host-tools.js'
 import type { HandoffResult, IssueFetchOptions, TrackerAdapter } from '../../src/tracker.js'
 

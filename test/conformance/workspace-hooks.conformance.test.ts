@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { issueIdentifier } from '../../src/domain.js'
-import type { HooksConfig } from '../../src/workflow.js'
+import { issueIdentifier } from '../../src/domain/domain.js'
+import type { HooksConfig } from '../../src/config/workflow.js'
 import { makeWorkspaceManager } from '../../src/workspace.js'
 
 const directories: string[] = []

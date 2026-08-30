@@ -4,9 +4,14 @@ import { join } from 'node:path'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
-import { JsonConversionError, toJsonValue } from '../src/json.js'
-import { loadWorkflow, preflightWorkflow, renderPrompt, workflowDefaults } from '../src/workflow.js'
+import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
+import { JsonConversionError, toJsonValue } from '../../src/support/json.js'
+import {
+  loadWorkflow,
+  preflightWorkflow,
+  renderPrompt,
+  workflowDefaults,
+} from '../../src/config/workflow.js'
 
 const temporaryDirectories: string[] = []
 
