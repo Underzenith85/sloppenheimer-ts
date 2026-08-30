@@ -66,6 +66,10 @@ export type TrackerAdapter = Readonly<{
     pullRequestNumber: number,
     expectedHeadSha: string,
   ) => Effect.Effect<string, TrackerError>
+  requestPullRequestReview: (
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+  ) => Effect.Effect<void, TrackerError>
   resolveReviewThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
   /** Provider-native mutations advertised only to sessions using this adapter instance. */
   toolSpecs: readonly HostToolSpec[]
@@ -954,6 +958,7 @@ export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): Tra
     },
     inspectPullRequest: pullRequests.inspect,
     mergePullRequest: pullRequests.merge,
+    requestPullRequestReview: pullRequests.requestReview,
     resolveReviewThreads: pullRequests.resolveThreads,
   }
 }

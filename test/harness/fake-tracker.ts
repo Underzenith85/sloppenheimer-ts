@@ -21,6 +21,11 @@ export type TrackerCall =
   | Readonly<{ operation: 'findExistingHandoff'; issue: Issue }>
   | Readonly<{ operation: 'inspectPullRequest'; pullRequestNumber: number }>
   | Readonly<{ operation: 'mergePullRequest'; pullRequestNumber: number; expectedHeadSha: string }>
+  | Readonly<{
+      operation: 'requestPullRequestReview'
+      pullRequestNumber: number
+      expectedHeadSha: string
+    }>
   | Readonly<{ operation: 'resolveReviewThreads'; threadIds: readonly string[] }>
 
 /** Exact in-memory implementation of the production TrackerAdapter boundary. */
@@ -86,6 +91,14 @@ export class FakeTracker implements TrackerAdapter {
   mergePullRequest(pullRequestNumber: number, expectedHeadSha: string): Effect.Effect<string> {
     this.calls.push({ operation: 'mergePullRequest', pullRequestNumber, expectedHeadSha })
     return Effect.succeed(expectedHeadSha)
+  }
+
+  requestPullRequestReview(
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+  ): Effect.Effect<void> {
+    this.calls.push({ operation: 'requestPullRequestReview', pullRequestNumber, expectedHeadSha })
+    return Effect.void
   }
 
   resolveReviewThreads(threadIds: readonly string[]): Effect.Effect<void> {

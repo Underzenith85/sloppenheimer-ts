@@ -9,7 +9,7 @@ import {
   trackerResponseError,
   type JsonRecord,
 } from './github-http.js'
-import type { PullRequestObservation } from './handoff.js'
+import type { CodexReviewObservation, PullRequestObservation } from './handoff.js'
 import { isJsonArray } from './json.js'
 import type { GitHubProviderConfig } from './tracker-config.js'
 
@@ -168,18 +168,58 @@ const decodeThreads = (value: JsonValue | undefined): PullRequestObservation['re
     }
     const first = nodes[0]
     const comment = first === undefined ? null : record(first, 'GitHub review comment is invalid')
+    const commit = comment !== null && isJsonRecord(comment['commit']) ? comment['commit'] : null
     return {
       id,
       resolved,
       body: comment !== null && typeof comment['body'] === 'string' ? comment['body'] : '',
       url: comment !== null && typeof comment['url'] === 'string' ? comment['url'] : null,
+      commentHeadSha: commit !== null && typeof commit['oid'] === 'string' ? commit['oid'] : null,
     }
   })
+}
+
+const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation | null => {
+  if (!isArray(value)) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub pull request comment list is missing',
+      retryable: false,
+    })
+  }
+  for (const item of [...value].reverse()) {
+    const comment = record(item, 'GitHub pull request comment is invalid')
+    const author = comment['author']
+    const body = comment['body']
+    if (!isJsonRecord(author) || typeof body !== 'string') {
+      continue
+    }
+    const login = author['login']
+    if (
+      typeof login !== 'string' ||
+      !login.startsWith('chatgpt-codex-connector') ||
+      !body.includes('<!-- codex-pull-request-review-summary -->')
+    ) {
+      continue
+    }
+    const head = /\|\s*`([0-9a-f]{7,40})`\s*\|/u.exec(body)?.[1]
+    if (head === undefined) {
+      continue
+    }
+    if (body.includes('✅ **Completed**')) {
+      return { headShaPrefix: head, status: 'completed' }
+    }
+    if (body.includes('🔄 **Running**')) {
+      return { headShaPrefix: head, status: 'pending' }
+    }
+  }
+  return null
 }
 
 export type GitHubPullRequestMonitor = Readonly<{
   inspect: (number: number) => Effect.Effect<PullRequestObservation, TrackerError>
   merge: (number: number, expectedHeadSha: string) => Effect.Effect<string, TrackerError>
+  requestReview: (number: number, expectedHeadSha: string) => Effect.Effect<void, TrackerError>
   resolveThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
 }>
 
@@ -228,6 +268,7 @@ export const makeGitHubPullRequestMonitor = (
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
+              codexReview: null,
             }
           }
           if (state === 'closed') {
@@ -249,6 +290,7 @@ export const makeGitHubPullRequestMonitor = (
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
+              codexReview: null,
             }
           }
           const headValue = pull['head']
@@ -276,7 +318,7 @@ export const makeGitHubPullRequestMonitor = (
               method: 'POST',
               body: JSON.stringify({
                 query:
-                  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url}}}}}}}',
+                  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision comments(first:100){nodes{body author{login}}} reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
                 variables: { owner: provider.owner, name: provider.repository, number },
               }),
             }),
@@ -289,6 +331,7 @@ export const makeGitHubPullRequestMonitor = (
             'GitHub GraphQL pull request is missing',
           )
           const reviewDecision = graphPull['reviewDecision']
+          const comments = record(graphPull['comments'], 'GitHub pull request comments are missing')
           const threads = record(graphPull['reviewThreads'], 'GitHub review threads are missing')
           if (reviewDecision !== null && typeof reviewDecision !== 'string') {
             throw new TrackerError({
@@ -309,6 +352,7 @@ export const makeGitHubPullRequestMonitor = (
             checks: decodeChecks(checksResponse['check_runs']),
             reviewDecision,
             reviewThreads: decodeThreads(threads['nodes']),
+            codexReview: decodeCodexReview(comments['nodes']),
           }
         }),
       ),
@@ -336,6 +380,29 @@ export const makeGitHubPullRequestMonitor = (
             return Effect.succeed(sha)
           }),
         ),
+      ),
+    requestReview: (number, expectedHeadSha) =>
+      guarded(
+        Effect.gen(function* () {
+          const pull = record(
+            yield* json(provider, `${prefix}/pulls/${String(number)}`),
+            'GitHub pull request response is invalid',
+          )
+          const head = record(pull['head'], 'GitHub pull request head is missing')
+          if (head['sha'] !== expectedHeadSha) {
+            return yield* Effect.fail(
+              new TrackerError({
+                category: 'tracker_status',
+                message: 'GitHub pull request head changed before Codex review was requested',
+                retryable: true,
+              }),
+            )
+          }
+          yield* json(provider, `${prefix}/issues/${String(number)}/comments`, {
+            method: 'POST',
+            body: JSON.stringify({ body: '@codex review' }),
+          })
+        }),
       ),
     resolveThreads: (threadIds) =>
       Effect.forEach(
