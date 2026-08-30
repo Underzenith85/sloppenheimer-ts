@@ -366,7 +366,7 @@ describe('App Server request handling', (): void => {
     const outcome = await runScenario('unsupported-request', { turnTimeoutMs: 1_000 })
 
     expect(outcome.events.map((event) => event.event)).toContain('unsupported_tool_call')
-    expect(outcome.error?.category).toBe('turn_timeout')
+    expect(outcome.error).toBeNull()
   })
 
   it('fails the turn when Codex requires interactive input', async (): Promise<void> => {

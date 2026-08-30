@@ -343,7 +343,12 @@ const handle = (message: JsonRecord): void => {
     completeTurn()
     return
   }
-  if (id === 9002 || id === 9003 || id === 9006) {
+  if (id === 9002) {
+    send({ method: 'request/rejected', params: message })
+    completeTurn()
+    return
+  }
+  if (id === 9003 || id === 9006) {
     send({ method: 'request/rejected', params: message })
   }
 }

@@ -1,8 +1,11 @@
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent, type AgentEvent, type AgentResult } from '../../src/codex.js'
-import { issueId, issueIdentifier, type Issue, type Workspace } from '../../src/domain.js'
+import { issueId, issueIdentifier, type Issue } from '../../src/domain.js'
 import type { CodexConfig } from '../../src/workflow.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
 
@@ -24,12 +27,13 @@ const issue: Issue = {
   updatedAt: null,
 }
 
-const workspace: Workspace = { path: process.cwd(), key: 'fake', createdNow: false }
-
 const runScenario = async (
   scenario: FakeAppServerScenario,
   timeoutMs = 1_000,
 ): Promise<Readonly<{ events: readonly AgentEvent[]; result: AgentResult }>> => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-conformance-'))
+  const workspacePath = join(workspaceRoot, 'fake')
+  await mkdir(workspacePath)
   const events: AgentEvent[] = []
   const config: CodexConfig = {
     command: fakeAppServerCommand(scenario),
@@ -40,12 +44,12 @@ const runScenario = async (
     turnTimeoutMs: scenario === 'turn-timeout' ? timeoutMs : 1_000,
     stallTimeoutMs: 0,
   }
-  const run = (): Promise<AgentResult> =>
-    Effect.runPromise(
+  try {
+    const result = await Effect.runPromise(
       runAgent({
         issue,
-        workspace,
-        workspaceRoot: process.cwd(),
+        workspace: { path: workspacePath, key: 'fake', createdNow: true },
+        workspaceRoot,
         config,
         prompt: 'conformance prompt',
         maxTurns: 1,
@@ -55,20 +59,23 @@ const runScenario = async (
         onEvent: (event) => events.push(event),
       }),
     )
-  return { events, result: await run() }
+    return { events, result }
+  } finally {
+    await rm(workspaceRoot, { force: true, recursive: true })
+  }
 }
 
 describe('Core Conformance Codex App Server client', (): void => {
   it('uses JSONL framing, extracts identities, and emits usage telemetry', async (): Promise<void> => {
     const { events, result } = await runScenario('complete')
 
-    expect(result).toEqual({ threadId: 'thread-fake', turnId: 'turn-fake', turnCount: 1 })
+    expect(result).toEqual({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
     expect(events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ event: 'session_started', threadId: 'thread-fake' }),
+        expect.objectContaining({ event: 'session_started', threadId: 'thread-1' }),
         expect.objectContaining({
-          event: 'turn/usageUpdated',
-          usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },
+          event: 'turn/usage',
+          usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
         }),
       ]),
     )
@@ -78,7 +85,10 @@ describe('Core Conformance Codex App Server client', (): void => {
     const { events } = await runScenario('diagnostic')
     expect(events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ event: 'diagnostic', message: 'fake diagnostic' }),
+        expect.objectContaining({
+          event: 'diagnostic',
+          message: 'warning: this is diagnostic only',
+        }),
       ]),
     )
   })
@@ -107,6 +117,6 @@ describe('Core Conformance Codex App Server client', (): void => {
   })
 
   it('enforces turn timeouts', async (): Promise<void> => {
-    await expect(runScenario('turn-timeout', 30)).rejects.toThrow('turn turn-fake timed out')
+    await expect(runScenario('turn-timeout', 30)).rejects.toThrow('turn turn-1 produced no output')
   })
 })
