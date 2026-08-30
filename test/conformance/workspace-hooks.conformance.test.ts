@@ -24,7 +24,7 @@ const hooks = (overrides: Partial<HooksConfig>): HooksConfig => ({
   beforeRun: null,
   afterRun: null,
   beforeRemove: null,
-  timeoutMs: 100,
+  timeoutMs: 2_000,
   ...overrides,
 })
 

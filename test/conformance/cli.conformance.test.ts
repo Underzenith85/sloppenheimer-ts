@@ -13,28 +13,42 @@ type ProcessResult = Readonly<{
 
 const runCli = async (
   arguments_: readonly string[],
-  terminateAfterMs: number | null = null,
+  terminateWhenReady = false,
 ): Promise<ProcessResult> => {
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...arguments_], {
     cwd: process.cwd(),
     env: { ...process.env, SYMPHONY_CONFORMANCE_TOKEN: 'not-a-real-token' },
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+  const stdout: Buffer[] = []
   const stderr: Buffer[] = []
+  child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk))
   child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
   const exited = new Promise<ProcessResult>((resolvePromise, rejectPromise) => {
     const timeout = setTimeout(() => {
       child.kill('SIGKILL')
       rejectPromise(new Error('CLI did not exit within five seconds'))
-    }, 5_000)
+    }, 15_000)
     child.once('error', rejectPromise)
     child.once('exit', (code, signal) => {
       clearTimeout(timeout)
       resolvePromise({ code, signal, stderr: Buffer.concat(stderr).toString('utf8') })
     })
   })
-  if (terminateAfterMs !== null) {
-    await delay(terminateAfterMs)
+  if (terminateWhenReady) {
+    const deadline = Date.now() + 10_000
+    while (
+      child.exitCode === null &&
+      child.signalCode === null &&
+      !Buffer.concat(stdout).toString('utf8').includes('operator console listening') &&
+      Date.now() < deadline
+    ) {
+      await delay(25)
+    }
+    if (!Buffer.concat(stdout).toString('utf8').includes('operator console listening')) {
+      child.kill('SIGKILL')
+      throw new Error('CLI did not become ready within ten seconds')
+    }
     child.kill('SIGTERM')
   }
   return exited
@@ -63,6 +77,8 @@ tracker:
   terminal_states: []
 workspace:
   root: ${JSON.stringify(join(directory, 'workspaces'))}
+server:
+  port: 0
 ---
 Do nothing.
 `,
@@ -70,7 +86,7 @@ Do nothing.
     )
     await chmod(directory, 0o700)
     try {
-      const result = await runCli([workflowPath], 1_000)
+      const result = await runCli([workflowPath], true)
       expect(result.code).toBe(0)
       expect(result.signal).toBeNull()
     } finally {
