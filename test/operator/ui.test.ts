@@ -1,8 +1,8 @@
 import { Window, type HTMLButtonElement, type HTMLInputElement } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier } from '../src/domain.js'
-import type { OrchestratorSnapshot } from '../src/orchestrator.js'
+import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import type { OrchestratorSnapshot } from '../../src/orchestrator.js'
 import {
   buildAgentDetail,
   timelineCategories,
@@ -12,8 +12,8 @@ import {
   recordRetryScheduled,
   type AgentDetailRecord,
   type AgentDetailSnapshot,
-} from '../src/telemetry.js'
-import { appJavaScript, appTemplate } from '../src/ui-assets.js'
+} from '../../src/telemetry.js'
+import { appJavaScript, appTemplate } from '../../src/operator/ui-assets.js'
 
 const runningIdentifier = 'example/symphony#17'
 const retryingIdentifier = 'example/symphony#18'

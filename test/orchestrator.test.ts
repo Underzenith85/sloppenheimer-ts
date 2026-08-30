@@ -5,17 +5,17 @@ import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/codex.js'
-import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
+import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
 import {
   issueId,
   issueIdentifier,
   type BlockerRef,
   type Issue,
   type JsonObject,
-} from '../src/domain.js'
+} from '../src/domain/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
-import type { CodexReviewObservation } from '../src/handoff.js'
+import type { CodexReviewObservation } from '../src/domain/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -26,10 +26,10 @@ import {
   type OrchestratorControl,
   type OrchestratorDependencies,
 } from '../src/orchestrator.js'
-import { makeRedactor } from '../src/redaction.js'
+import { makeRedactor } from '../src/support/redaction.js'
 import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
 import type { TrackerAdapter } from '../src/tracker.js'
-import type { Workflow } from '../src/workflow.js'
+import type { Workflow } from '../src/config/workflow.js'
 
 const makeIssue = (
   identifier: string,
@@ -383,6 +383,7 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
+            codexReview: { headShaPrefix: 'recovered-head', status: 'pending' as const },
           }),
       }),
     }
@@ -513,6 +514,10 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
+            codexReview: {
+              headShaPrefix: number === 65 ? 'first-head' : 'second-head',
+              status: 'pending' as const,
+            },
           }),
       }),
     }
@@ -614,6 +619,7 @@ describe('restored pull request handoffs', (): void => {
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
+              codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
             }),
         }
       },
@@ -784,6 +790,116 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('awaits Codex review of the initial head before merging', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-initial-review-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const initialHead = 'abcdef1234567890abcdef1234567890abcdef12'
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'awaiting_checks',
+          headSha: initialHead,
+          reason: null,
+          repairAttempts: 0,
+          reviewRequestedHeadSha: null,
+          reviewCompletedHeadSha: null,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    let codexReview: CodexReviewObservation = {
+      headShaPrefix: initialHead.slice(0, 7),
+      status: 'pending',
+    }
+    const requestedHeads: string[] = []
+    const mergedHeads: string[] = []
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: initialHead,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [
+              {
+                name: 'quality',
+                status: 'completed' as const,
+                conclusion: 'success',
+                url: null,
+              },
+            ],
+            reviewDecision: null,
+            reviewThreads: [],
+            codexReview,
+          }),
+        requestPullRequestReview: (_number, expectedHeadSha) =>
+          Effect.sync(() => {
+            requestedHeads.push(expectedHeadSha)
+          }),
+        mergePullRequest: (_number, expectedHeadSha) =>
+          Effect.sync(() => {
+            mergedHeads.push(expectedHeadSha)
+            return 'merged-head'
+          }),
+      }),
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          let snapshot = yield* control.snapshot
+          expect(requestedHeads).toEqual([])
+          expect(mergedHeads).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({
+            state: 'awaiting_checks',
+            reviewRequestedHeadSha: initialHead,
+            reviewCompletedHeadSha: null,
+            reason: 'Waiting for Codex review of the current head to complete',
+          })
+
+          codexReview = { headShaPrefix: initialHead.slice(0, 7), status: 'completed' }
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(mergedHeads).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({
+            state: 'awaiting_checks',
+            reviewCompletedHeadSha: initialHead,
+            reason:
+              'Codex review completed for the current head; waiting for review state to settle',
+          })
+
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(mergedHeads).toEqual([initialHead])
+          expect(snapshot.handoffs).toEqual([])
+        }),
+      ),
+    )
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('requests and awaits Codex review of the repaired head before merging', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repaired-review-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
@@ -872,10 +988,20 @@ describe('restored pull request handoffs', (): void => {
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
           expect(snapshot.handoffs[0]?.reason).toBe(
-            'Waiting for Codex review of the repaired head to complete',
+            'Waiting for Codex review of the current head to complete',
           )
 
           codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'completed' }
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(mergedHeads).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({
+            state: 'awaiting_checks',
+            reviewCompletedHeadSha: repairedHead,
+            reason:
+              'Codex review completed for the current head; waiting for review state to settle',
+          })
+
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([repairedHead])
@@ -909,7 +1035,8 @@ describe('restored pull request handoffs', (): void => {
           headSha: reviewedHead,
           reason: 'Unresolved review feedback',
           repairAttempts: 0,
-          reviewRequestedHeadSha: null,
+          reviewRequestedHeadSha: reviewedHead,
+          reviewCompletedHeadSha: reviewedHead,
           observedAt: new Date(0).toISOString(),
         },
       ]),
@@ -947,6 +1074,10 @@ describe('restored pull request handoffs', (): void => {
                 commentHeadSha: reviewedHead,
               },
             ],
+            codexReview: {
+              headShaPrefix: reviewedHead.slice(0, 7),
+              status: 'completed' as const,
+            },
           }),
       }),
     }
@@ -967,7 +1098,8 @@ describe('restored pull request handoffs', (): void => {
         issueId: '20',
         state: 'repair_needed',
         repairAttempts: 1,
-        reviewRequestedHeadSha: null,
+        reviewRequestedHeadSha: reviewedHead,
+        reviewCompletedHeadSha: reviewedHead,
       }),
     ])
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([

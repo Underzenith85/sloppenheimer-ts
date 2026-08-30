@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '../../src/domain.js'
+import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { FakeClock } from '../harness/fake-clock.js'
 import { FakeTracker } from '../harness/fake-tracker.js'
 import { FakeWorkspaceProcess } from '../harness/fake-workspace-process.js'

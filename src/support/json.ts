@@ -1,4 +1,4 @@
-import type { JsonObject, JsonValue } from './domain.js'
+import type { JsonObject, JsonValue } from '../domain/domain.js'
 
 export class JsonConversionError extends Error {
   readonly path: string

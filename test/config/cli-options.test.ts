@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { parseCliArguments } from '../src/cli-options.js'
+import { parseCliArguments } from '../../src/config/cli-options.js'
 
 describe('CLI options', (): void => {
   it('supports a workflow path and ephemeral port', (): void => {

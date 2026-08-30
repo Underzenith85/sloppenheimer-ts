@@ -1,10 +1,10 @@
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { parseCliArguments } from '../../src/cli-options.js'
-import type { OperatorBackend } from '../../src/operator.js'
+import { parseCliArguments } from '../../src/config/cli-options.js'
+import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { OrchestratorSnapshot } from '../../src/orchestrator.js'
-import { startOperatorServer } from '../../src/server.js'
+import { startOperatorServer } from '../../src/operator/server.js'
 
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T00:00:00.000Z',

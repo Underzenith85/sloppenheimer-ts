@@ -5,8 +5,8 @@ import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent, type AgentEvent, type AgentResult } from '../../src/codex.js'
-import { issueId, issueIdentifier, type Issue } from '../../src/domain.js'
-import type { CodexConfig } from '../../src/workflow.js'
+import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
+import type { CodexConfig } from '../../src/config/workflow.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
 
 const issue: Issue = {

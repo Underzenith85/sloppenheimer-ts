@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 
-import type { JsonValue } from './domain.js'
+import type { JsonValue } from './domain/domain.js'
 import { TrackerError } from './errors.js'
 import {
   githubJson,
@@ -12,9 +12,9 @@ import {
   trackerResponseError,
   type JsonRecord,
 } from './github-http.js'
-import type { CodexReviewObservation, PullRequestObservation } from './handoff.js'
-import { isJsonArray } from './json.js'
-import type { GitHubProviderConfig } from './tracker-config.js'
+import type { CodexReviewObservation, PullRequestObservation } from './domain/handoff.js'
+import { isJsonArray } from './support/json.js'
+import type { GitHubProviderConfig } from './config/tracker-config.js'
 
 const isArray = isJsonArray
 
@@ -198,11 +198,9 @@ const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation
       continue
     }
     const login = author['login']
-    if (
-      typeof login !== 'string' ||
-      login !== 'chatgpt-codex-connector' ||
-      !body.includes('<!-- codex-pull-request-review-summary -->')
-    ) {
+    const isCodexConnector =
+      login === 'chatgpt-codex-connector' || login === 'chatgpt-codex-connector[bot]'
+    if (!isCodexConnector || !body.includes('<!-- codex-pull-request-review-summary -->')) {
       continue
     }
     const head = /\|\s*`([0-9a-f]{7,40})`\s*\|/u.exec(body)?.[1]

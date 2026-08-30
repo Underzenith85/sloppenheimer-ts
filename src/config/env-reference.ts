@@ -1,6 +1,6 @@
 import { homedir } from 'node:os'
 
-import { WorkflowError } from './errors.js'
+import { WorkflowError } from '../errors.js'
 
 const referencePattern = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u
 

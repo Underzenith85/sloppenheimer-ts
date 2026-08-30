@@ -2,17 +2,17 @@ import { Effect } from 'effect'
 import { createServer, request } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 
-import { issueId, issueIdentifier } from '../src/domain.js'
-import { TrackerError } from '../src/errors.js'
-import type { OperatorBackend } from '../src/operator.js'
-import type { AgentDetailLookup, OrchestratorSnapshot } from '../src/orchestrator.js'
-import { startOperatorServer } from '../src/server.js'
+import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import { TrackerError } from '../../src/errors.js'
+import type { OperatorBackend } from '../../src/operator/operator.js'
+import type { AgentDetailLookup, OrchestratorSnapshot } from '../../src/orchestrator.js'
+import { startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
   recordAgentEvent,
   type AgentDetailSnapshot,
-} from '../src/telemetry.js'
+} from '../../src/telemetry.js'
 
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T12:00:00.000Z',

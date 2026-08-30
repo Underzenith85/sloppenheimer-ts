@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 
-import type { IssueIdentifier, Workspace } from '../../src/domain.js'
+import type { IssueIdentifier, Workspace } from '../../src/domain/domain.js'
 import type { WorkspaceManager } from '../../src/workspace.js'
 
 export type WorkspaceOperation = Readonly<{
