@@ -1,16 +1,25 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
+import type { AgentResult } from '../src/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
 import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
-import { TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
+import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import {
+  flattenRateLimits,
   issueIsRoutable,
   retryDelayMs,
   sortIssues,
   startOrchestrator,
+  type AgentDetailLookup,
+  type OrchestratorControl,
   type OrchestratorDependencies,
 } from '../src/orchestrator.js'
+import { makeRedactor } from '../src/redaction.js'
+import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
 import type { TrackerAdapter } from '../src/tracker.js'
 import type { Workflow } from '../src/workflow.js'
 
@@ -1075,5 +1084,457 @@ describe('scheduler dependency hydration', (): void => {
     )
 
     expect(requested).toContainEqual(['symphony', 'ready'])
+  })
+})
+
+type FakeAgent = Readonly<{
+  notify: (method: string, params: Record<string, unknown>) => void
+  settle: (outcome: 'completed' | 'failed') => void
+}>
+
+const secretRedactor = makeRedactor(['s3cret-token-value'])
+
+/**
+ * A stand-in worker that exposes the same `onEvent` contract the Codex client uses, with payloads
+ * built by the same normalizer, so what the orchestrator retains is what a real session would
+ * produce.
+ */
+const makeAgentFactory = (): Readonly<{
+  agents: Map<string, FakeAgent>
+  runAgent: OrchestratorDependencies['runAgent']
+}> => {
+  const agents = new Map<string, FakeAgent>()
+  return {
+    agents,
+    runAgent: (launch) =>
+      Effect.async<AgentResult, AgentError>((resume) => {
+        agents.set(launch.issue.identifier, {
+          notify: (method, params) => {
+            launch.onEvent({
+              event: method,
+              timestamp: new Date(),
+              processId: 4242,
+              message: null,
+              usage: null,
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              sessionId: 'thread-1:turn-1',
+              payload: normalizePayload(
+                method,
+                params as Parameters<typeof normalizePayload>[1],
+                secretRedactor,
+              ),
+            })
+          },
+          settle: (outcome) => {
+            resume(
+              outcome === 'completed'
+                ? Effect.succeed({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
+                : Effect.fail(new AgentError({ category: 'turn_failed', message: 'turn failed' })),
+            )
+          },
+        })
+      }),
+  }
+}
+
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5))
+
+const waitUntil = async <Value>(produce: () => Value | null, what: string): Promise<Value> => {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const value = produce()
+    if (value !== null) {
+      return value
+    }
+    await settle()
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+const awaitAgent = (agents: Map<string, FakeAgent>, identifier: string): Promise<FakeAgent> =>
+  waitUntil(() => agents.get(identifier) ?? null, `agent ${identifier}`)
+
+const readDetail = (control: OrchestratorControl, identifier: string): AgentDetailLookup =>
+  Effect.runSync(control.agentDetail(identifier))
+
+const awaitDetail = (
+  control: OrchestratorControl,
+  identifier: string,
+  predicate: (detail: AgentDetailSnapshot) => boolean,
+  what: string,
+): Promise<AgentDetailSnapshot> =>
+  waitUntil(() => {
+    const lookup = readDetail(control, identifier)
+    return lookup._tag === 'Found' && predicate(lookup.detail) ? lookup.detail : null
+  }, what)
+
+describe('live agent detail', (): void => {
+  it('publishes an ordered, redacted, bounded timeline for a running agent', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#7', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#7'),
+          )
+          agent.notify('item/completed', {
+            item: { type: 'agentMessage', text: 'pushed with s3cret-token-value' },
+          })
+          agent.notify('item/started', {
+            item: { type: 'commandExecution', command: 'pnpm check', status: 'in_progress' },
+          })
+          agent.notify('item/completed', {
+            item: {
+              type: 'fileChange',
+              path: 'src/telemetry.ts',
+              kind: 'updated',
+              addedLines: 9,
+              deletedLines: 1,
+            },
+          })
+          agent.notify('turn/usage', {
+            usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+            rateLimits: { primary: { usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 } },
+          })
+          const detail = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#7',
+              (candidate) => candidate.timeline.events.length >= 4,
+              'four retained events',
+            ),
+          )
+          const snapshot = yield* control.snapshot
+          return { detail, snapshot }
+        }),
+      ),
+    )
+
+    const detail = observed.detail
+    expect(detail.status).toBe('running')
+    expect(detail.self).toBe('/api/v1/agents/example%2Fsymphony%237')
+    expect(observed.snapshot.running[0]?.detailUrl).toBe(detail.self)
+    expect(detail.timeline.events.map((event) => event.category)).toEqual([
+      'message',
+      'command',
+      'file',
+      'usage',
+    ])
+    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4])
+    expect(JSON.stringify(detail)).toContain('[redacted]')
+    expect(JSON.stringify(detail)).not.toContain('s3cret-token-value')
+    expect(detail.identity).toMatchObject({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      sessionId: 'thread-1:turn-1',
+      processId: 4242,
+      turnNumber: 1,
+      workerHost: 'local',
+    })
+    expect(detail.usage.totalTokens).toBe(18)
+    expect(detail.rateLimits).toEqual([
+      { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
+    ])
+    expect(detail.workspace).toMatchObject({ dirtyFileCount: 1, addedLines: 9, deletedLines: 1 })
+    expect(detail.activity.stallTimeoutMs).toBe(30_000)
+    expect(observed.snapshot.rateLimits).toEqual(
+      flattenRateLimits([
+        { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
+      ]),
+    )
+  })
+
+  it('separates attempts across a retry while keeping one rising sequence', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#8', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const first = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#8'),
+          )
+          first.notify('item/completed', { item: { type: 'reasoning' } })
+          yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#8',
+              (candidate) => candidate.timeline.events.length === 1,
+              'the first attempt event',
+            ),
+          )
+          factory.agents.delete('example/symphony#8')
+          first.settle('failed')
+          const retrying = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#8',
+              (candidate) => candidate.status === 'retrying',
+              'the scheduled retry',
+            ),
+          )
+          expect(retrying.retry?.attempt).toBe(1)
+          expect(retrying.phase.phase).toBe('retrying')
+          yield* TestClock.adjust('20 seconds')
+          const second = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#8'),
+          )
+          second.notify('item/completed', {
+            item: { type: 'commandExecution', command: 'pnpm test', status: 'completed' },
+          })
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#8',
+              (candidate) =>
+                candidate.attempt.current === 1 &&
+                candidate.status === 'running' &&
+                candidate.timeline.events.length === 4,
+              'the second attempt',
+            ),
+          )
+        }),
+      ).pipe(Effect.provide(TestContext.TestContext)),
+    )
+
+    expect(detail.timeline.events.map((event) => [event.attempt, event.category])).toEqual([
+      [0, 'reasoning'],
+      [0, 'retry'],
+      [1, 'session'],
+      [1, 'command'],
+    ])
+    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4])
+    expect(detail.attempt.attempts.map((attempt) => attempt.outcome)).toEqual([
+      'retrying',
+      'running',
+    ])
+    expect(detail.attempt.retries).toBe(1)
+  })
+
+  it('keeps concurrent agents in separate records', async (): Promise<void> => {
+    const issues = [
+      makeIssue('example/symphony#11', 1, null, ['symphony', 'ready']),
+      makeIssue('example/symphony#12', 1, null, ['symphony', 'ready']),
+    ]
+    const harness = makeHarness(
+      changedWorkflow({ fingerprint: 'test', maxConcurrentAgents: 2 }),
+      () => issues,
+    )
+    const factory = makeAgentFactory()
+
+    const details = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const first = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#11'),
+          )
+          const second = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#12'),
+          )
+          first.notify('item/completed', { item: { type: 'reasoning' } })
+          second.notify('item/completed', {
+            item: { type: 'commandExecution', command: 'pnpm lint', status: 'completed' },
+          })
+          second.notify('item/completed', {
+            item: { type: 'fileChange', path: 'src/server.ts', kind: 'add', addedLines: 4 },
+          })
+          const left = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#11',
+              (candidate) => candidate.timeline.events.length === 1,
+              'the first record',
+            ),
+          )
+          const right = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#12',
+              (candidate) => candidate.timeline.events.length === 2,
+              'the second record',
+            ),
+          )
+          return { left, right }
+        }),
+      ),
+    )
+
+    expect(details.left.timeline.events.map((event) => event.category)).toEqual(['reasoning'])
+    expect(details.right.timeline.events.map((event) => event.category)).toEqual([
+      'command',
+      'file',
+    ])
+    expect(details.left.workspace.dirtyFileCount).toBe(0)
+    expect(details.right.workspace.dirtyFileCount).toBe(1)
+  })
+
+  it('records handoff progress and keeps the completed record readable', async (): Promise<void> => {
+    // A handoff is persisted, so this run gets a workspace root of its own.
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-handoff-detail-'))
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#13', 1, null, ['symphony', 'ready']),
+      id: issueId('13'),
+    }
+    const harness = makeHarness(isolated, () => [issue])
+    const factory = makeAgentFactory()
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: factory.runAgent,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: () =>
+          Effect.succeed({
+            _tag: 'PullRequest',
+            branchName: 'symphony/issue-13',
+            pullRequestUrl: 'https://example.test/pull/61',
+            pullRequestNumber: 61,
+            created: true,
+          }),
+      }),
+    }
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#13'),
+          )
+          agent.settle('completed')
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#13',
+              (candidate) => candidate.status === 'completed',
+              'the completed session',
+            ),
+          )
+        }),
+      ),
+    )
+
+    expect(detail.handoff).toMatchObject({
+      expectedBranch: 'symphony/issue-13',
+      remoteBranch: { status: 'observed', name: 'symphony/issue-13' },
+      pullRequest: {
+        status: 'created',
+        number: 61,
+        url: 'https://example.test/pull/61',
+        state: 'awaiting_checks',
+      },
+      dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
+      outcome: 'pull_request_open',
+    })
+    expect(detail.timeline.events.map((event) => event.category)).toEqual([
+      'handoff',
+      'handoff',
+      'handoff',
+    ])
+    expect(detail.activity.stallDeadline).toBeNull()
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('answers unknown, sessionless, and starting identifiers distinctly', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#14', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const lookups = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          yield* Effect.promise(() => awaitAgent(factory.agents, 'example/symphony#14'))
+          yield* Effect.promise(() =>
+            awaitDetail(control, 'example/symphony#14', () => true, 'the running agent'),
+          )
+          return {
+            unknown: readDetail(control, 'example/symphony#404'),
+            running: readDetail(control, 'example/symphony#14'),
+          }
+        }),
+      ),
+    )
+
+    expect(lookups.unknown._tag).toBe('Unknown')
+    expect(lookups.running._tag).toBe('Found')
+  })
+
+  it('serves detail while a tracker poll is blocked, and hands out immutable snapshots', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
+    let blockPolling = false
+    const harness = makeHarness(
+      workflow,
+      () => [issue],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open')) {
+          return Effect.succeed([])
+        }
+        return blockPolling ? Effect.never : Effect.succeed([issue])
+      },
+    )
+    const factory = makeAgentFactory()
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#15'),
+          )
+          agent.notify('item/completed', { item: { type: 'reasoning' } })
+          const before = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#15',
+              (candidate) => candidate.timeline.events.length === 1,
+              'the first event',
+            ),
+          )
+          // The scheduler is now parked inside a poll. A detail read must still answer, and must
+          // not be able to change anything the scheduler owns.
+          blockPolling = true
+          yield* Effect.forkScoped(control.refresh)
+          yield* Effect.promise(settle)
+          const during = readDetail(control, 'example/symphony#15')
+          expect(during._tag).toBe('Found')
+          const events = before.timeline.events as unknown as { push: (value: unknown) => number }
+          expect(() => events.push('tampered')).toThrow()
+          const after = readDetail(control, 'example/symphony#15')
+          return { during, after }
+        }),
+      ),
+    )
+
+    expect(observed.after._tag).toBe('Found')
+    if (observed.after._tag === 'Found') {
+      expect(observed.after.detail.timeline.events).toHaveLength(1)
+      expect(observed.after.detail.activity.elapsedMs).toBeGreaterThanOrEqual(0)
+    }
   })
 })

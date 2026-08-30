@@ -13,6 +13,9 @@ export class JsonConversionError extends Error {
 export const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
+export const isJsonArray = (value: JsonValue | undefined): value is readonly JsonValue[] =>
+  Array.isArray(value)
+
 const isPlainObject = (value: object): boolean => {
   const prototype: unknown = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null

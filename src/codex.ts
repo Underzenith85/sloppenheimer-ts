@@ -4,6 +4,14 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
+import { makeRedactor, type Redactor } from './redaction.js'
+import {
+  clientPayload,
+  decodeTokenCounts,
+  normalizePayload,
+  type AgentEvent,
+  type AgentEventPayload,
+} from './telemetry.js'
 import type { CodexConfig } from './workflow.js'
 import {
   assertWorkspaceIdentity,
@@ -55,20 +63,27 @@ const isJsonValue = (value: unknown): value is JsonValue => {
 export const composeSessionId = (threadId: string, turnId: string | null): string =>
   turnId === null ? threadId : `${threadId}:${turnId}`
 
-export type AgentEvent = Readonly<{
-  event: string
-  timestamp: Date
-  processId: number | null
-  message: string | null
-  usage: Readonly<{
-    inputTokens: number
-    outputTokens: number
-    totalTokens: number
-  }> | null
-  threadId: string | null
-  turnId: string | null
-  sessionId: string | null
-}>
+export type { AgentEvent } from './telemetry.js'
+
+/**
+ * The environment values a session's telemetry must never echo. The tracker's own secret names come
+ * from the workflow; Codex's authentication sources are added because they are present in the
+ * subprocess environment by design and could be printed by any tool the agent runs.
+ */
+export const sessionSecretValues = (
+  environment: NodeJS.ProcessEnv,
+  secretEnvironmentNames: readonly string[],
+): readonly string[] => {
+  const names = new Set([
+    ...secretEnvironmentNames,
+    ...codexAuthenticationEnvironmentNames,
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+  ])
+  return [...names]
+    .map((name) => environment[name])
+    .filter((value): value is string => value !== undefined && value.length > 0)
+}
 
 export type AgentResult = Readonly<{
   threadId: string
@@ -109,19 +124,7 @@ const errorMessage = (value: JsonValue): string => {
 
 const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
   const params = message['params']
-  if (!isJsonObject(params)) {
-    return null
-  }
-  const usage = params['usage']
-  if (!isJsonObject(usage)) {
-    return null
-  }
-  const input = usage['inputTokens']
-  const output = usage['outputTokens']
-  const total = usage['totalTokens']
-  return typeof input === 'number' && typeof output === 'number' && typeof total === 'number'
-    ? { inputTokens: input, outputTokens: output, totalTokens: total }
-    : null
+  return isJsonObject(params) ? decodeTokenCounts(params['usage']) : null
 }
 
 /**
@@ -240,6 +243,11 @@ class CodexConnection {
   readonly #readTimeoutMs: number
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
+  /**
+   * Redaction happens here, at the parser, so a credential a message carried is gone before any
+   * consumer — the timeline, a log, an HTTP response — can retain it.
+   */
+  readonly #redact: Redactor
   readonly #pending = new Map<number, PendingRequest>()
   /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
   readonly #settled = new Map<string, TurnSettlement>()
@@ -272,6 +280,7 @@ class CodexConnection {
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
     this.#onEvent = onEvent
+    this.#redact = makeRedactor(sessionSecretValues(process.env, secretEnvironmentNames))
 
     // stdout carries protocol framing only.
     const readStdout = makeLineReader(
@@ -480,6 +489,7 @@ class CodexConnection {
       threadId: this.#threadId,
       turnId: this.#turnId,
       sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
+      payload: { kind: 'session' },
     })
   }
 
@@ -747,6 +757,7 @@ class CodexConnection {
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+      payload: normalizePayload(method, message['params'], this.#redact),
     })
     if (method !== 'turn/completed' && method !== 'turn/failed') {
       return
@@ -798,15 +809,17 @@ class CodexConnection {
   ): void {
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? this.#turnId
+    const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
     this.#onEvent({
       event,
       timestamp: new Date(),
       processId: this.processId,
-      message,
+      message: this.#redact(message),
       usage: null,
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+      payload,
     })
   }
 

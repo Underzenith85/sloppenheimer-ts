@@ -372,6 +372,7 @@ describe('GitHub pull request handoff', (): void => {
       branchName: 'symphony/issue-28',
       pullRequestUrl: 'https://example.test/pulls/31',
       pullRequestNumber: 31,
+      created: true,
     })
     expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET', 'POST'])
   })
@@ -398,7 +399,7 @@ describe('GitHub pull request handoff', (): void => {
       makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
     )
 
-    expect(result._tag).toBe('PullRequest')
+    expect(result).toMatchObject({ _tag: 'PullRequest', created: false })
     expect(methods).toEqual(['GET', 'GET'])
   })
 })

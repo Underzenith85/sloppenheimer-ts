@@ -148,6 +148,51 @@ separate test compares the methods, policy values, and permission types this cli
 `codex app-server generate-json-schema` when Codex is installed, and is inert when it is not, so no
 machine-specific schema is committed.
 
+## Live agent inspection
+
+Every running and retrying agent has a detail resource at
+`GET /api/v1/agents/<url-encoded issue identifier>`, and each running and retrying entry in
+`/api/v1/state` carries that link as `detailUrl`, identical to the `self` link inside the detail
+itself. The console turns each live work card into an inspector: a phase header, elapsed time, last
+activity, the stall countdown, thread/turn/session identity, process and worker, attempt and retry
+timing, token totals, rate limits, an aggregate workspace summary, handoff state, and a bounded
+chronological timeline with per-category filters. The panel has a copyable deep link
+(`#/agents/<identifier>`), closes on `Escape` with focus returned to the card that opened it, and
+polls on its own timer and its own request, so opening it cannot delay tracker polling or the
+dashboard. Elapsed time and the stall countdown are recomputed in the browser from the absolute
+timestamps the snapshot carries, so they stay live between fetches.
+
+The four outcomes a detail request can have are distinguished rather than collapsed into one
+"missing": `404 agent_not_found` for an identifier this session has never run, `409
+agent_not_active` for an issue with no live session, `410 agent_session_completed` once a finished
+session's timeline has aged out of retention, and `503 agent_detail_unavailable` while a dispatch is
+still starting. A finished session that is still retained answers `200` with `status: "completed"`,
+so a post-mortem is available for the most recent agents.
+
+Handoff detail tracks the expected branch, whether the remote branch was found, whether the pull
+request was opened by this handoff or adopted from an existing one, its observed disposition through
+merge, and the dispatch-label step. The GitHub adapter does not remove dispatch labels at handoff, so
+that step reports `not_performed` with that reason instead of sitting pending forever.
+
+Telemetry is one pipeline. The Codex client normalizes each protocol message into a bounded,
+already-redacted payload — the categories are session, reasoning, message, tool, file, command,
+usage, retry, error, cancellation, and handoff — and the orchestrator folds those payloads, plus the
+scheduling facts only it knows, into actor-owned state. Snapshot requests read an immutable index
+the actor publishes; no consumer touches a scheduler map, and a published snapshot is frozen.
+
+Redaction happens at the parser, before anything is retained, not when a response is serialized: a
+credential a message carried is gone before the timeline, a log, or an HTTP response can hold it.
+Shape-based patterns cover provider tokens, bearer headers, URL credentials, credential query
+parameters, private keys, and environment-like assignments, and the resolved values of the
+environment variables the host treats as secret — the tracker's own secret, plus `GITHUB_TOKEN`,
+`GH_TOKEN`, `OPENAI_API_KEY`, and `CODEX_ACCESS_TOKEN` — are removed literally. Private reasoning is
+never retained, not even truncated; tool input and output are reduced to byte counts; a command is
+reduced to its program name, an argument count, and an allowlisted quality-phase label; a file
+change is reduced to a workspace-relative path and its added and deleted line counts. Retention is
+bounded per issue — 200 timeline events, 50 changed paths, 10 errors, 20 attempts and sessions — and
+every retained string is cut to 240 characters. Truncation and dropped events are reported
+explicitly rather than being silent.
+
 ## Configuration
 
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are

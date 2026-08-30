@@ -42,6 +42,27 @@ export const appTemplate = `<!doctype html>
         </article>
       </section>
 
+      <aside id="agent-detail" class="detail-panel" role="region" aria-labelledby="detail-title" hidden>
+        <div class="detail-head">
+          <div>
+            <p class="eyebrow"><span id="detail-pulse" class="pulse"></span> <span id="detail-phase">Agent detail</span></p>
+            <h2 id="detail-title" tabindex="-1">Select an agent</h2>
+            <p id="detail-operation" class="detail-operation"></p>
+          </div>
+          <div class="detail-actions">
+            <button id="detail-copy" class="refresh" type="button">Copy link</button>
+            <button id="detail-close" class="refresh" type="button">Close</button>
+          </div>
+        </div>
+        <p id="detail-status" class="detail-status" role="status" aria-live="polite"></p>
+        <dl id="detail-facts" class="detail-facts"></dl>
+        <div class="detail-filters">
+          <p class="eyebrow" id="filter-label">Timeline</p>
+          <div id="detail-filters" role="group" aria-labelledby="filter-label"></div>
+        </div>
+        <ol id="detail-timeline" class="detail-timeline" aria-labelledby="filter-label"><li class="empty">No events yet.</li></ol>
+      </aside>
+
       <section class="panel graph-panel" aria-labelledby="dependency-heading">
         <div class="panel-heading">
           <div><p class="eyebrow">Dependency graph</p><h2 id="dependency-heading">Native issue dependencies</h2></div>
@@ -114,21 +135,379 @@ const formatTime = (value) => new Intl.DateTimeFormat(undefined, {
   second: '2-digit',
 }).format(new Date(value))
 
+const detailPanel = element('#agent-detail')
+const detailStatus = element('#detail-status')
+const detailTimeline = element('#detail-timeline')
+const detailFacts = element('#detail-facts')
+const detailFilters = element('#detail-filters')
+const detailTitle = element('#detail-title')
+
+const timelineCategories = ['session', 'reasoning', 'message', 'tool', 'file', 'command', 'usage', 'retry', 'error', 'cancellation', 'handoff']
+const categoryLabels = {
+  session: 'Session',
+  reasoning: 'Thinking',
+  message: 'Messages',
+  tool: 'Tools',
+  file: 'Files',
+  command: 'Commands',
+  usage: 'Usage',
+  retry: 'Retries',
+  error: 'Errors',
+  cancellation: 'Cancellations',
+  handoff: 'Handoff',
+}
+const phaseLabels = {
+  starting: 'Starting',
+  reasoning: 'Thinking',
+  responding: 'Replying',
+  running_tool: 'Running a tool',
+  running_command: 'Running a command',
+  editing: 'Editing files',
+  awaiting_model: 'Waiting for the model',
+  retrying: 'Retrying',
+  handing_off: 'Handing off',
+  cancelled: 'Cancelled',
+  stalled: 'Stalled',
+}
+
+const activeCategories = new Set(timelineCategories)
+let detail = null
+let detailIdentifier = null
+let detailTrigger = null
+let detailNotice = ''
+let announcedStatus = ''
+
+const formatClock = (milliseconds) => {
+  const total = Math.max(Math.round(milliseconds / 1000), 0)
+  const minutes = Math.floor(total / 60)
+  if (minutes === 0) {
+    return String(total) + 's'
+  }
+  return String(minutes) + 'm ' + String(total % 60).padStart(2, '0') + 's'
+}
+
+const deepLink = (identifier) => '#/agents/' + encodeURIComponent(identifier)
+
+const identifierFromHash = () => {
+  const raw = window.location.hash
+  if (!raw.startsWith('#/agents/')) {
+    return null
+  }
+  try {
+    const decoded = decodeURIComponent(raw.slice('#/agents/'.length))
+    return decoded.length === 0 ? null : decoded
+  } catch (error) {
+    return null
+  }
+}
+
+const requestStatus = async (path) => {
+  const response = await fetch(path)
+  const payload = await response.json().catch(() => null)
+  return { ok: response.ok, status: response.status, payload }
+}
+
+const describeEvent = (event) => {
+  if (event.category === 'message') {
+    const who = event.role === 'user' ? 'User message' : 'Agent message'
+    return event.text === null ? who : who + ': ' + event.text + (event.truncated ? '…' : '')
+  }
+  if (event.category === 'reasoning') {
+    return 'Thinking (private reasoning is never retained)'
+  }
+  if (event.category === 'tool') {
+    const bytes = event.outputBytes === null ? '' : ' · ' + String(event.outputBytes) + " output bytes"
+    return 'Tool ' + event.name + ' · ' + event.state + bytes
+  }
+  if (event.category === 'command') {
+    const exit = event.exitCode === null ? '' : ' · exit ' + String(event.exitCode)
+    const quality = event.quality === null ? '' : ' · ' + event.quality
+    return 'Command ' + event.program + ' (' + String(event.argumentCount) + ' arguments)' + quality + ' · ' + event.state + exit
+  }
+  if (event.category === 'file') {
+    const added = event.addedLines === null ? 0 : event.addedLines
+    const deleted = event.deletedLines === null ? 0 : event.deletedLines
+    return event.change + ' ' + event.path + ' (+' + String(added) + ' / −' + String(deleted) + ')'
+  }
+  if (event.category === 'usage') {
+    const tokens = event.tokens === null ? 'no token totals' : String(event.tokens.totalTokens) + ' tokens'
+    const limits = event.rateLimits.map((window) => window.name + ' ' + String(window.usedPercent ?? 0) + '%').join(', ')
+    return 'Usage · ' + tokens + (limits.length === 0 ? '' : ' · ' + limits)
+  }
+  if (event.category === 'retry') {
+    const due = event.dueAt === null ? '' : ' · due ' + formatTime(event.dueAt)
+    return 'Retry attempt ' + String(event.attemptNumber) + due + (event.reason === null ? '' : ' · ' + event.reason)
+  }
+  if (event.category === 'error') {
+    return event.severity + (event.code === null ? '' : ' [' + event.code + ']') + ': ' + event.message
+  }
+  if (event.category === 'cancellation') {
+    return 'Cancelled: ' + event.reason
+  }
+  if (event.category === 'handoff') {
+    return 'Handoff ' + event.step.replaceAll('_', ' ') + ' · ' + event.status + (event.message === null ? '' : ' · ' + event.message)
+  }
+  return event.event + (event.turnNumber === undefined ? '' : ' · turn ' + String(event.turnNumber))
+}
+
+// The published snapshot carries absolute timestamps, so the console decides for itself whether the
+// deadline has passed since the last fetch rather than waiting for the next one to say so.
+const stalledNow = (snapshot) => {
+  if (snapshot.activity.stalled) {
+    return true
+  }
+  return snapshot.activity.stallDeadline !== null && new Date(snapshot.activity.stallDeadline).getTime() <= Date.now()
+}
+
+const idleNow = (snapshot) => {
+  if (snapshot.activity.lastActivityAt === null) {
+    return Date.now() - new Date(snapshot.activity.startedAt).getTime()
+  }
+  return Date.now() - new Date(snapshot.activity.lastActivityAt).getTime()
+}
+
+const waitingExplanation = (snapshot) => {
+  if (snapshot.status === 'retrying' && snapshot.retry !== null) {
+    const remaining = new Date(snapshot.retry.dueAt).getTime() - Date.now()
+    const because = snapshot.retry.reason === null ? 'the attempt did not complete' : snapshot.retry.reason
+    return 'Retrying because ' + because + '. Attempt ' + String(snapshot.retry.attempt) + ' starts in ' + formatClock(remaining) + '.'
+  }
+  if (snapshot.status === 'completed') {
+    return 'The agent session has ended. ' + (snapshot.handoff.reason ?? 'No further work is scheduled.')
+  }
+  if (stalledNow(snapshot)) {
+    return 'Stalled: no protocol activity for ' + formatClock(idleNow(snapshot)) + '.'
+  }
+  if (snapshot.activity.stallDeadline === null) {
+    return (snapshot.phase.operation ?? phaseLabels[snapshot.phase.phase]) + '. Stall detection is disabled.'
+  }
+  const remaining = new Date(snapshot.activity.stallDeadline).getTime() - Date.now()
+  return (snapshot.phase.operation ?? phaseLabels[snapshot.phase.phase] ?? 'Working') + '. Considered stalled in ' + formatClock(remaining) + '.'
+}
+
+const renderDetailStatus = () => {
+  if (detailNotice.length > 0) {
+    detailStatus.textContent = detailNotice
+    detailPanel.dataset.state = 'error'
+    return
+  }
+  if (detail === null) {
+    detailStatus.textContent = 'Loading agent detail…'
+    return
+  }
+  const stalled = stalledNow(detail)
+  const phase = stalled ? 'stalled' : detail.phase.phase
+  element('#detail-phase').textContent = (phaseLabels[phase] ?? phase) + ' · ' + detail.status
+  const elapsed = Date.now() - new Date(detail.activity.startedAt).getTime()
+  const message = waitingExplanation(detail) + ' Running for ' + formatClock(elapsed) + '.'
+  // Only a changed message is written, so a screen reader is not told the same thing every second.
+  if (message !== announcedStatus) {
+    announcedStatus = message
+    detailStatus.textContent = message
+  }
+  detailPanel.dataset.state = stalled ? 'stalled' : detail.status
+}
+
+const fact = (list, term, value, href) => {
+  list.append(text('dt', '', term))
+  const definition = document.createElement('dd')
+  if (href === undefined || href === null) {
+    definition.textContent = value
+  } else {
+    const link = text('a', '', value)
+    link.href = href
+    definition.append(link)
+  }
+  list.append(definition)
+}
+
+const renderDetailFacts = () => {
+  const list = document.createElement('dl')
+  list.className = 'detail-facts'
+  if (detail === null) {
+    detailFacts.replaceChildren()
+    return
+  }
+  const identity = detail.identity
+  fact(list, 'Issue', detail.identifier, detail.url)
+  fact(list, 'Attempt', String(detail.attempt.current) + ' · ' + String(detail.attempt.retries) + ' retries')
+  fact(list, 'Session', identity.sessionId ?? 'not started')
+  fact(list, 'Thread', identity.threadId ?? '—')
+  fact(list, 'Turn', (identity.turnId ?? '—') + ' · #' + String(identity.turnNumber))
+  fact(list, 'Process', identity.processId === null ? '—' : String(identity.processId))
+  fact(list, 'Worker', identity.workerHost)
+  fact(list, 'Tokens', new Intl.NumberFormat().format(detail.usage.totalTokens) + ' (' + String(detail.usage.inputTokens) + ' in / ' + String(detail.usage.outputTokens) + ' out)')
+  fact(list, 'Rate limits', detail.rateLimits.length === 0 ? 'none reported' : detail.rateLimits.map((window) => window.name + ' ' + String(window.usedPercent ?? 0) + '%').join(' · '))
+  fact(list, 'Last activity', detail.activity.lastActivityAt === null ? 'no events yet' : formatTime(detail.activity.lastActivityAt))
+  fact(list, 'Workspace', detail.workspace.pathKey + ' · ' + String(detail.workspace.dirtyFileCount) + ' files (+' + String(detail.workspace.addedLines) + ' / −' + String(detail.workspace.deletedLines) + ')')
+  fact(list, 'Quality command', detail.workspace.qualityPhase === null ? 'not observed' : detail.workspace.qualityPhase + ' · ' + (detail.workspace.qualityCommandState ?? 'unknown'))
+  fact(list, 'Expected branch', detail.handoff.expectedBranch ?? '—')
+  fact(list, 'Remote branch', detail.handoff.remoteBranch.status + (detail.handoff.remoteBranch.name === null ? '' : ' · ' + detail.handoff.remoteBranch.name))
+  if (detail.handoff.pullRequest.url === null) {
+    fact(list, 'Pull request', detail.handoff.pullRequest.status)
+  } else {
+    fact(list, 'Pull request', detail.handoff.pullRequest.status + ' · #' + String(detail.handoff.pullRequest.number), detail.handoff.pullRequest.url)
+  }
+  fact(list, 'Dispatch labels', detail.handoff.dispatchLabels.labels.join(', ') + ' · ' + detail.handoff.dispatchLabels.status)
+  fact(list, 'Handoff outcome', detail.handoff.outcome.replaceAll('_', ' '))
+  detailFacts.replaceChildren(...list.childNodes)
+}
+
+const renderTimeline = () => {
+  if (detail === null) {
+    detailTimeline.replaceChildren(text('li', 'empty', detailNotice.length > 0 ? detailNotice : 'No events yet.'))
+    return
+  }
+  const events = detail.timeline.events.filter((event) => activeCategories.has(event.category))
+  if (events.length === 0) {
+    detailTimeline.replaceChildren(text('li', 'empty', 'No events match the selected filters.'))
+    return
+  }
+  const items = events.map((event) => {
+    const item = document.createElement('li')
+    item.className = 'timeline-event category-' + event.category
+    item.append(text('span', 'timeline-time', formatTime(event.at)))
+    item.append(text('span', 'timeline-category', categoryLabels[event.category] ?? event.category))
+    item.append(text('span', 'timeline-body', describeEvent(event)))
+    item.append(text('small', 'timeline-meta', 'attempt ' + String(event.attempt) + ' · #' + String(event.sequence)))
+    return item
+  })
+  if (detail.timeline.dropped > 0) {
+    items.unshift(text('li', 'timeline-dropped', String(detail.timeline.dropped) + ' earlier events were dropped to keep retention bounded.'))
+  }
+  detailTimeline.replaceChildren(...items)
+}
+
+const renderDetail = () => {
+  detailTitle.textContent = detail === null ? (detailIdentifier ?? 'Agent detail') : detail.title
+  element('#detail-operation').textContent = detail === null ? '' : (detail.phase.operation ?? '')
+  renderDetailStatus()
+  renderDetailFacts()
+  renderTimeline()
+}
+
+const loadDetail = async () => {
+  if (detailIdentifier === null) {
+    return
+  }
+  const target = detailIdentifier
+  try {
+    const result = await requestStatus('/api/v1/agents/' + encodeURIComponent(target))
+    if (target !== detailIdentifier) {
+      return
+    }
+    if (result.ok) {
+      detail = result.payload.detail
+      detailNotice = ''
+    } else {
+      detail = null
+      detailNotice = result.payload?.error?.message ?? 'Detail request failed with HTTP ' + String(result.status)
+    }
+  } catch (error) {
+    // A transport failure keeps the last known detail on screen and retries on the next tick.
+    detailNotice = 'Agent detail is temporarily unreachable. Retrying…'
+  }
+  renderDetail()
+}
+
+const buildFilters = () => {
+  const controls = timelineCategories.map((category) => {
+    const label = document.createElement('label')
+    label.className = 'filter'
+    const input = document.createElement('input')
+    input.type = 'checkbox'
+    input.checked = true
+    input.value = category
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        activeCategories.add(category)
+      } else {
+        activeCategories.delete(category)
+      }
+      renderTimeline()
+    })
+    label.append(input, text('span', '', categoryLabels[category]))
+    return label
+  })
+  detailFilters.replaceChildren(...controls)
+}
+
+const openDetail = (identifier, trigger) => {
+  if (trigger !== undefined && trigger !== null) {
+    detailTrigger = trigger
+  }
+  const changed = detailIdentifier !== identifier
+  detailIdentifier = identifier
+  if (changed) {
+    detail = null
+    detailNotice = ''
+    announcedStatus = ''
+  }
+  detailPanel.hidden = false
+  if (window.location.hash !== deepLink(identifier)) {
+    window.location.hash = deepLink(identifier)
+  }
+  for (const card of document.querySelectorAll('.work-card')) {
+    card.setAttribute('aria-expanded', String(card.dataset.identifier === identifier))
+  }
+  renderDetail()
+  if (changed) {
+    detailTitle.focus()
+  }
+  loadDetail().catch(() => undefined)
+}
+
+const closeDetail = () => {
+  detailIdentifier = null
+  detail = null
+  detailNotice = ''
+  announcedStatus = ''
+  detailPanel.hidden = true
+  for (const card of document.querySelectorAll('.work-card')) {
+    card.setAttribute('aria-expanded', 'false')
+  }
+  if (window.location.hash.startsWith('#/agents/')) {
+    window.location.hash = ''
+  }
+  if (detailTrigger !== null && document.contains(detailTrigger)) {
+    detailTrigger.focus()
+  }
+  detailTrigger = null
+}
+
+const syncFromHash = () => {
+  const identifier = identifierFromHash()
+  if (identifier === null) {
+    if (detailIdentifier !== null) {
+      closeDetail()
+    }
+    return
+  }
+  if (identifier !== detailIdentifier) {
+    openDetail(identifier, null)
+  }
+}
+
 const renderWork = (container, entries, retrying) => {
   if (entries.length === 0) {
     container.replaceChildren(text('p', 'empty', retrying ? 'No retries are scheduled.' : 'No agents are running.'))
     return
   }
   const cards = entries.map((entry) => {
-    const card = document.createElement('a')
+    const card = document.createElement('button')
+    card.type = 'button'
     card.className = 'work-card'
-    card.href = entry.url ?? '#'
+    card.dataset.identifier = entry.identifier
+    card.setAttribute('aria-controls', 'agent-detail')
+    card.setAttribute('aria-expanded', String(detailIdentifier === entry.identifier))
     const copy = document.createElement('div')
     copy.append(text('strong', '', entry.title), text('span', '', entry.identifier))
-    const detail = retrying
+    const summary = retrying
       ? 'Attempt ' + String(entry.attempt) + ' · ' + (entry.error ?? 'continuing')
       : (entry.lastEvent ?? 'Starting agent') + ' · ' + formatTime(entry.startedAt)
-    card.append(copy, text('small', '', detail))
+    card.append(copy, text('small', '', summary))
+    card.setAttribute('aria-label', 'Inspect ' + entry.identifier + ': ' + entry.title + '. ' + summary)
+    card.addEventListener('click', () => openDetail(entry.identifier, card))
     return card
   })
   container.replaceChildren(...cards)
@@ -397,11 +776,47 @@ element('#refresh').addEventListener('click', async () => {
   }
 })
 
+element('#detail-close').addEventListener('click', () => closeDetail())
+
+element('#detail-copy').addEventListener('click', async () => {
+  if (detailIdentifier === null) {
+    return
+  }
+  const link = window.location.origin + window.location.pathname + deepLink(detailIdentifier)
+  try {
+    await navigator.clipboard.writeText(link)
+    notice.textContent = 'Deep link copied.'
+  } catch (error) {
+    notice.textContent = 'Copy the link from the address bar: ' + link
+  }
+})
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && detailIdentifier !== null) {
+    closeDetail()
+  }
+})
+
+window.addEventListener('hashchange', syncFromHash)
+
+buildFilters()
+syncFromHash()
+
 Promise.all([loadState(), loadBacklog()]).catch((error) => {
   notice.textContent = error instanceof Error ? error.message : 'Could not load operator state'
 })
 setInterval(() => loadState().catch(() => undefined), 3000)
 setInterval(() => loadBacklog().catch(() => undefined), 15000)
+// Detail polling runs on its own timer and its own request: an open panel can never delay the
+// dashboard, and the dashboard can never delay the panel.
+setInterval(() => loadDetail().catch(() => undefined), 2000)
+// Elapsed time and the stall countdown are derived from absolute timestamps, so they stay live
+// between fetches without asking the orchestrator for anything.
+setInterval(() => {
+  if (detailIdentifier !== null && detail !== null) {
+    renderDetailStatus()
+  }
+}, 1000)
 `
 
 export const appStyles = String.raw`:root {
@@ -451,6 +866,39 @@ h2 { font: 500 23px/1.1 Georgia, serif; margin: 0; }
 .work-card strong, .work-card span { display: block; }
 .work-card span, .work-card small { color: var(--muted); margin-top: 5px; font-size: 12px; }
 .empty { color: var(--muted); text-align: center; padding: 42px 24px !important; }
+button.work-card { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; font: inherit; }
+button.work-card[aria-expanded="true"] { background: rgba(215,255,100,.07); }
+.detail-panel { position: fixed; z-index: 3; top: 0; right: 0; width: min(560px, 100%); height: 100vh; overflow-y: auto; padding: 26px; border-left: 1px solid var(--line); background: #131413; box-shadow: -22px 0 60px rgba(0,0,0,.45); }
+.detail-panel[hidden] { display: none; }
+.detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.detail-head h2 { margin: 0; outline: none; }
+.detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.detail-actions .refresh { padding: 8px 14px; font-size: 12px; }
+.detail-operation, .detail-status { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.detail-panel[data-state="stalled"] .detail-status { color: var(--coral); }
+.detail-panel[data-state="error"] .detail-status { color: #ffb2a4; }
+.detail-panel[data-state="retrying"] .detail-status { color: #c7b3ff; }
+.detail-facts { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 5px 14px; margin: 22px 0; font-size: 12px; }
+.detail-facts dt { color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; padding-top: 2px; }
+.detail-facts dd { margin: 0; overflow-wrap: anywhere; }
+.detail-facts a { color: var(--acid); }
+.detail-filters { border-top: 1px solid var(--line); padding-top: 16px; }
+.detail-filters > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.filter { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; color: var(--muted); cursor: pointer; }
+.filter:focus-within { outline: 2px solid var(--acid); outline-offset: 2px; }
+.detail-timeline { list-style: none; margin: 16px 0 0; padding: 0; }
+.timeline-event { display: grid; grid-template-columns: 66px minmax(0, 1fr); gap: 2px 12px; padding: 10px 0 10px 12px; border-left: 3px solid var(--line); border-bottom: 1px solid var(--line); }
+.timeline-time { color: var(--muted); font: 11px/1.6 ui-monospace, monospace; }
+.timeline-category { color: var(--acid); font: 700 9px/1.8 ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
+.timeline-body { grid-column: 2; font-size: 12px; overflow-wrap: anywhere; }
+.timeline-meta { grid-column: 2; color: var(--muted); font-size: 10px; }
+.timeline-dropped { color: var(--muted); font-size: 11px; padding: 8px 0; }
+.timeline-event.category-error { border-left-color: var(--coral); }
+.timeline-event.category-retry { border-left-color: #a98cff; }
+.timeline-event.category-handoff { border-left-color: #65c7f7; }
+.timeline-event.category-file { border-left-color: #66d9a6; }
+.timeline-event.category-command { border-left-color: #e6ae55; }
+.timeline-event.category-cancellation { border-left-color: #ff5d5d; }
 .cycle-diagnostics { padding: 0 26px; background: rgba(255, 130, 107, .08); color: #ffb2a4; font-size: 13px; }
 .cycle-diagnostics p { margin: 0; padding: 12px 0; }
 .dependency-graph { min-height: 220px; overflow: auto; outline: none; }
@@ -499,6 +947,7 @@ tbody tr:hover { background: rgba(255,255,255,.018); }
 .notice { position: fixed; z-index: 2; bottom: 18px; right: 22px; margin: 0; padding: 10px 15px; border-radius: 999px; background: #252724; color: var(--muted); font-size: 12px; min-height: 34px; }
 .notice:empty { display: none; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (max-width: 1180px) { .detail-panel { position: static; width: auto; height: auto; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 18px; box-shadow: none; } }
 @media (max-width: 900px) { .metrics { grid-template-columns: repeat(2, 1fr); } .metrics article:nth-child(2) { border-right: 0; } .metrics article:nth-child(-n+2) { border-bottom: 1px solid var(--line); } .live-grid { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { main { width: min(100% - 24px, 1480px); padding-top: 30px; } .masthead { display: block; } .refresh { margin-top: 24px; } .metrics { grid-template-columns: 1fr 1fr; } .metrics article { padding: 18px; } .metrics strong { font-size: 34px; } .panel-heading { align-items: flex-start; padding: 20px; } .label-note { max-width: 150px; text-align: right; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }

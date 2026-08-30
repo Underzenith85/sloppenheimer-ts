@@ -67,6 +67,8 @@ export type HandoffResult =
       branchName: string
       pullRequestUrl: string
       pullRequestNumber: number
+      /** Whether this handoff opened the pull request or adopted one that already existed. */
+      created: boolean
     }>
 
 export type GitHubIssueControl = Readonly<{
@@ -597,16 +599,19 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
           return findPullRequest(provider, prefix, branchName).pipe(
             Effect.flatMap((existingUrl) =>
               existingUrl === null
-                ? createPullRequest(provider, prefix, issue, branchName)
-                : Effect.succeed(existingUrl),
+                ? createPullRequest(provider, prefix, issue, branchName).pipe(
+                    Effect.map((pullRequestUrl) => ({ pullRequestUrl, created: true })),
+                  )
+                : Effect.succeed({ pullRequestUrl: existingUrl, created: false }),
             ),
-            Effect.flatMap((pullRequestUrl) =>
+            Effect.flatMap(({ pullRequestUrl, created }) =>
               Effect.try({
                 try: (): HandoffResult => ({
                   _tag: 'PullRequest',
                   branchName,
                   pullRequestUrl,
                   pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
+                  created,
                 }),
                 catch: (cause: unknown) =>
                   cause instanceof TrackerError

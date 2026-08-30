@@ -4,14 +4,36 @@ import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
-import { issueId, normalizeState, type Issue, type IssueId, type TokenTotals } from './domain.js'
+import {
+  issueId,
+  normalizeState,
+  type Issue,
+  type IssueId,
+  type IssueIdentifier,
+  type TokenTotals,
+} from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
-import { makeGitHubTracker, type TrackerAdapter } from './tracker.js'
+import {
+  agentDetailPath,
+  buildAgentDetail,
+  createAgentDetailRecord,
+  recordAgentEvent,
+  recordAttemptStarted,
+  recordCancellation,
+  recordHandoff,
+  recordRetryScheduled,
+  type AgentDetailContext,
+  type AgentDetailRecord,
+  type AgentDetailSnapshot,
+  type AgentDetailStatus,
+  type RateLimitWindow,
+} from './telemetry.js'
+import { issueBranchName, makeGitHubTracker, type TrackerAdapter } from './tracker.js'
 import { sameTrackerProvider } from './tracker-config.js'
 import { loadWorkflow, preflightWorkflow, renderPrompt, type Workflow } from './workflow.js'
-import { makeWorkspaceManager, type WorkspaceManager } from './workspace.js'
+import { makeWorkspaceManager, workspaceKey, type WorkspaceManager } from './workspace.js'
 
 type RunningEntry = {
   runId: number
@@ -59,6 +81,8 @@ export type RunningSnapshot = Readonly<{
   processId: number | null
   tokens: Omit<TokenTotals, 'secondsRunning'>
   workerHost: 'local'
+  /** Stable link to the versioned detail resource for this agent. */
+  detailUrl: string
 }>
 
 export type RetrySnapshot = Readonly<{
@@ -70,7 +94,19 @@ export type RetrySnapshot = Readonly<{
   dueAt: string
   error: string | null
   workerHost: 'local'
+  detailUrl: string
 }>
+
+/**
+ * The four answers a detail request can receive. They are distinguished here, in the actor, rather
+ * than inferred by the HTTP layer from a missing value.
+ */
+export type AgentDetailLookup =
+  | Readonly<{ _tag: 'Found'; detail: AgentDetailSnapshot }>
+  | Readonly<{ _tag: 'Completed'; identifier: string }>
+  | Readonly<{ _tag: 'NoSession'; identifier: string }>
+  | Readonly<{ _tag: 'Unavailable'; identifier: string; reason: string }>
+  | Readonly<{ _tag: 'Unknown'; identifier: string }>
 
 export type OrchestratorSnapshot = Readonly<{
   generatedAt: string
@@ -98,6 +134,12 @@ export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
   refresh: Effect.Effect<void>
   setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
+  /**
+   * Reads the published detail for one issue. The published index is built by the actor and is
+   * immutable, so a detail request neither observes a partial update nor takes a turn in the
+   * scheduler's mailbox: opening the panel can never delay polling.
+   */
+  agentDetail: (identifier: string) => Effect.Effect<AgentDetailLookup>
 }>
 
 type OrchestratorEvent =
@@ -119,6 +161,24 @@ type OrchestratorEvent =
       reply: Deferred.Deferred<void>
     }>
 
+/**
+ * One issue's published detail. The record is an immutable copy taken by the actor; the reader
+ * supplies only the current instant, so elapsed time and the stall countdown stay live without any
+ * consumer touching scheduler state.
+ */
+type PublishedDetail =
+  | Readonly<{
+      _tag: 'Found'
+      record: AgentDetailRecord
+      context: Omit<AgentDetailContext, 'now'>
+    }>
+  | Readonly<{ _tag: 'Completed' }>
+  | Readonly<{ _tag: 'NoSession' }>
+  | Readonly<{ _tag: 'Unavailable'; reason: string }>
+
+/** How many finished agents keep their timeline for post-mortem inspection. */
+const retainedCompletedDetails = 16
+
 type RuntimeState = {
   running: Map<IssueId, RunningEntry>
   claimed: Set<IssueId>
@@ -128,6 +188,11 @@ type RuntimeState = {
   handoffs: Map<IssueId, HandoffEntry>
   totals: TokenTotals
   rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  /** Actor-owned agent telemetry, keyed by issue and preserved across that issue's retries. */
+  details: Map<IssueId, AgentDetailRecord>
+  /** Issues whose detail record outlived its session, oldest first. */
+  finishedDetails: IssueId[]
+  identifiers: Map<IssueId, IssueIdentifier>
 }
 
 type EffectiveWorkflow = Readonly<{
@@ -197,7 +262,31 @@ const initialState = (): RuntimeState => ({
   handoffs: new Map(),
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
   rateLimits: null,
+  details: new Map(),
+  finishedDetails: [],
+  identifiers: new Map(),
 })
+
+/**
+ * Flattens typed rate-limit windows into the runtime snapshot's scalar map, so the existing
+ * operator contract keeps its shape while finally carrying observed values.
+ */
+export const flattenRateLimits = (
+  windows: readonly RateLimitWindow[],
+): Readonly<Record<string, string | number | boolean | null>> | null => {
+  if (windows.length === 0) {
+    return null
+  }
+  const entries: [string, number | null][] = []
+  for (const window of windows) {
+    entries.push(
+      [`${window.name}.used_percent`, window.usedPercent],
+      [`${window.name}.window_minutes`, window.windowMinutes],
+      [`${window.name}.resets_in_seconds`, window.resetsInSeconds],
+    )
+  }
+  return Object.freeze(Object.fromEntries(entries))
+}
 
 export const retryDelayMs = (attempt: number, maximumMs: number): number =>
   Math.min(10_000 * 2 ** Math.max(attempt - 1, 0), maximumMs)
@@ -380,6 +469,136 @@ export const startOrchestrator = (
     yield* cleanupTerminalWorkspaces(lastKnownGood)
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
+    /**
+     * The immutable detail index published by the actor. Every consumer reads this; nothing outside
+     * the event loop ever reaches `state.details`.
+     */
+    let publishedDetails: ReadonlyMap<string, PublishedDetail> = new Map()
+
+    /** How many issue identifiers are remembered for answering detail requests. */
+    const rememberedIdentifiers = 500
+
+    const noteIssue = (issue: Issue): void => {
+      state.identifiers.set(issue.id, issue.identifier)
+      if (state.identifiers.size > rememberedIdentifiers) {
+        const oldest = state.identifiers.keys().next()
+        if (!oldest.done) {
+          state.identifiers.delete(oldest.value)
+        }
+      }
+    }
+
+    /** An exact copy, so a published snapshot can never observe a later mutation of the original. */
+    const copyDetail = (record: AgentDetailRecord): AgentDetailRecord => ({
+      ...record,
+      events: [...record.events],
+      attempts: [...record.attempts],
+      sessions: [...record.sessions],
+      errors: [...record.errors],
+      turnIds: new Set(record.turnIds),
+      changedPaths: new Map(record.changedPaths),
+      tokens: { ...record.tokens },
+      rateLimits: [...record.rateLimits],
+      handoff: {
+        ...record.handoff,
+        remoteBranch: { ...record.handoff.remoteBranch },
+        pullRequest: { ...record.handoff.pullRequest },
+        dispatchLabels: {
+          ...record.handoff.dispatchLabels,
+          labels: [...record.handoff.dispatchLabels.labels],
+        },
+      },
+    })
+
+    const detailRecord = (
+      issue: Issue,
+      attempt: number | null,
+      execution: ExecutionSnapshot,
+    ): AgentDetailRecord => {
+      noteIssue(issue)
+      const now = new Date()
+      const existing = state.details.get(issue.id)
+      if (existing !== undefined) {
+        existing.title = issue.title
+        existing.url = issue.url
+        // The same record carries every attempt for the issue, so ordering and session identity
+        // survive the boundary that separates them.
+        recordAttemptStarted(existing, now, attempt ?? 0)
+        return existing
+      }
+      const record = createAgentDetailRecord({
+        issueId: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        url: issue.url,
+        attempt,
+        startedAt: now,
+        workspacePathKey: workspaceKey(issue.identifier),
+        expectedBranch: issue.branchName ?? issueBranchName(issue),
+        dispatchLabels: execution.requiredLabels,
+      })
+      state.details.set(issue.id, record)
+      return record
+    }
+
+    const publishDetails = (): void => {
+      const next = new Map<string, PublishedDetail>()
+      for (const [id, record] of state.details) {
+        const running = state.running.get(id)
+        const retry = state.retries.get(id)
+        const status: AgentDetailStatus =
+          running !== undefined ? 'running' : retry !== undefined ? 'retrying' : 'completed'
+        if (status === 'completed') {
+          if (!state.finishedDetails.includes(id)) {
+            state.finishedDetails.push(id)
+          }
+        } else {
+          state.finishedDetails = state.finishedDetails.filter((finished) => finished !== id)
+        }
+        next.set(record.identifier, {
+          _tag: 'Found',
+          record: copyDetail(record),
+          context: {
+            self: agentDetailPath(record.identifier),
+            status,
+            stallTimeoutMs: running?.execution.stallTimeoutMs ?? 0,
+            workerHost: 'local',
+            branch: record.handoff.expectedBranch,
+            retry:
+              retry === undefined
+                ? null
+                : { attempt: retry.attempt, dueAt: new Date(retry.dueAt), reason: retry.error },
+          },
+        })
+      }
+      while (state.finishedDetails.length > retainedCompletedDetails) {
+        const evicted = state.finishedDetails.shift()
+        const record = evicted === undefined ? undefined : state.details.get(evicted)
+        if (evicted !== undefined && record !== undefined) {
+          state.details.delete(evicted)
+          next.set(record.identifier, { _tag: 'Completed' })
+        }
+      }
+      for (const [id, identifier] of state.identifiers) {
+        if (next.has(identifier)) {
+          continue
+        }
+        if (state.completed.has(id)) {
+          next.set(identifier, { _tag: 'Completed' })
+          continue
+        }
+        next.set(
+          identifier,
+          state.claimed.has(id) &&
+            !state.running.has(id) &&
+            !state.retries.has(id) &&
+            !state.handoffs.has(id)
+            ? { _tag: 'Unavailable', reason: 'The agent session is still starting' }
+            : { _tag: 'NoSession' },
+        )
+      }
+      publishedDetails = next
+    }
     const handoffStorePath = resolve(
       lastKnownGood.workflow.config.workspaceRoot,
       '.symphony',
@@ -442,6 +661,7 @@ export const startOrchestrator = (
             observedAt: new Date(restored.observedAt),
           })
           state.claimed.add(issue.id)
+          noteIssue(issue)
           hydrated.add(restored.issueId)
         }
         pendingRestoredHandoffs = pendingRestoredHandoffs.filter(
@@ -449,6 +669,7 @@ export const startOrchestrator = (
         )
       })
     yield* hydrateRestoredHandoffs()
+    publishDetails()
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
     let nextRunId = 1
     let tickQueued = false
@@ -531,6 +752,11 @@ export const startOrchestrator = (
         )
         state.retries.set(issue.id, { issue, attempt, dueAt, error, fiber })
         state.claimed.add(issue.id)
+        noteIssue(issue)
+        const record = state.details.get(issue.id)
+        if (record !== undefined) {
+          recordRetryScheduled(record, new Date(), attempt, new Date(dueAt), error)
+        }
         yield* Effect.logInfo('retry scheduled', {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
@@ -683,6 +909,7 @@ export const startOrchestrator = (
           }),
         )
         const fiber = yield* Effect.forkScoped(worker)
+        detailRecord(issue, attempt, execution)
         state.running.set(issue.id, {
           runId,
           issue,
@@ -697,6 +924,33 @@ export const startOrchestrator = (
         })
         yield* Effect.logInfo('worker dispatched', logContext(issue))
       })
+
+    /** Mirrors an observed pull-request disposition onto the issue's retained handoff detail. */
+    const noteHandoffOutcome = (
+      id: IssueId,
+      handoff: HandoffEntry,
+      outcome: 'pull_request_open' | 'merged' | 'intervention_required',
+    ): void => {
+      const record = state.details.get(id)
+      if (record === undefined) {
+        return
+      }
+      recordHandoff(record, handoff.observedAt, {
+        step: 'outcome',
+        status: outcome === 'intervention_required' ? 'failed' : 'observed',
+        message: handoff.reason,
+        pullRequest: {
+          status:
+            record.handoff.pullRequest.status === 'pending'
+              ? 'reused'
+              : record.handoff.pullRequest.status,
+          number: handoff.pullRequestNumber,
+          url: handoff.pullRequestUrl,
+          state: handoff.state,
+        },
+        outcome,
+      })
+    }
 
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
@@ -753,6 +1007,7 @@ export const startOrchestrator = (
           handoff.headSha = inspected.observation.headSha
           handoff.reason = 'reason' in disposition ? disposition.reason : null
           if (disposition.state === 'merged') {
+            noteHandoffOutcome(id, handoff, 'merged')
             state.handoffs.delete(id)
             state.completed.add(id)
             state.claimed.delete(id)
@@ -773,6 +1028,8 @@ export const startOrchestrator = (
               handoff.reason = merged.error.message
               continue
             }
+            handoff.state = 'merged'
+            noteHandoffOutcome(id, handoff, 'merged')
             state.handoffs.delete(id)
             state.completed.add(id)
             state.claimed.delete(id)
@@ -807,6 +1064,19 @@ export const startOrchestrator = (
             yield* dispatch(repairIssue, handoff.repairAttempts + 1, effective)
           }
         }
+        // One timeline entry per observed transition, not one per poll: an unchanged disposition is
+        // not news, and the timeline is a bounded resource.
+        for (const [id, handoff] of state.handoffs) {
+          if (state.details.get(id)?.handoff.pullRequest.state !== handoff.state) {
+            noteHandoffOutcome(
+              id,
+              handoff,
+              handoff.state === 'intervention_required'
+                ? 'intervention_required'
+                : 'pull_request_open',
+            )
+          }
+        }
         yield* persistHandoffs()
       })
 
@@ -832,6 +1102,7 @@ export const startOrchestrator = (
     const cancelRunning = (
       id: IssueId,
       cleanupWorkspace: boolean,
+      reason = 'the orchestrator cancelled the run',
     ): Effect.Effect<RunningEntry | null, never> =>
       Effect.gen(function* () {
         const entry = endRunning(id, null)
@@ -839,6 +1110,10 @@ export const startOrchestrator = (
           return null
         }
         accountEndedRuntime(entry, Date.now())
+        const record = state.details.get(id)
+        if (record !== undefined) {
+          recordCancellation(record, new Date(), reason)
+        }
         state.claimed.delete(id)
         yield* Fiber.interrupt(entry.fiber)
         if (cleanupWorkspace) {
@@ -865,7 +1140,11 @@ export const startOrchestrator = (
           const stallTimeout = execution.stallTimeoutMs
           const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
           if (stallTimeout > 0 && now - activeAt > stallTimeout) {
-            const ended = yield* cancelRunning(id, false)
+            const ended = yield* cancelRunning(
+              id,
+              false,
+              `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
+            )
             if (ended !== null) {
               yield* scheduleRetry(ended.issue, (ended.attempt ?? 0) + 1, 'agent stalled', false)
             }
@@ -891,12 +1170,18 @@ export const startOrchestrator = (
           }
           const issue = refreshResult.issues.find((candidate) => candidate.id === id)
           if (issue === undefined) {
-            yield* cancelRunning(id, false)
+            yield* cancelRunning(id, false, 'the tracker no longer reports the issue')
             continue
           }
           const terminal = stateIsIn(issue.state, execution.terminalStates)
           if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
-            yield* cancelRunning(id, terminal)
+            yield* cancelRunning(
+              id,
+              terminal,
+              terminal
+                ? `the issue reached the terminal state ${issue.state}`
+                : `the issue left its active states as ${issue.state}`,
+            )
           } else {
             entry.issue = issue
           }
@@ -1029,6 +1314,7 @@ export const startOrchestrator = (
           processId: entry.processId,
           tokens: entry.tokens,
           workerHost: 'local',
+          detailUrl: agentDetailPath(entry.issue.identifier),
         })),
         retrying: [...state.retries.values()].map((entry) => ({
           issueId: entry.issue.id,
@@ -1039,6 +1325,7 @@ export const startOrchestrator = (
           dueAt: new Date(entry.dueAt).toISOString(),
           error: entry.error,
           workerHost: 'local',
+          detailUrl: agentDetailPath(entry.issue.identifier),
         })),
         totals: {
           ...state.totals,
@@ -1047,6 +1334,31 @@ export const startOrchestrator = (
         rateLimits: state.rateLimits,
       }
     }
+
+    const agentDetail = (identifier: string): Effect.Effect<AgentDetailLookup> =>
+      Effect.sync(() => {
+        const published = publishedDetails.get(identifier)
+        if (published === undefined) {
+          return { _tag: 'Unknown', identifier }
+        }
+        switch (published._tag) {
+          case 'Found': {
+            return {
+              _tag: 'Found',
+              detail: buildAgentDetail(published.record, { ...published.context, now: new Date() }),
+            }
+          }
+          case 'Completed': {
+            return { _tag: 'Completed', identifier }
+          }
+          case 'Unavailable': {
+            return { _tag: 'Unavailable', identifier, reason: published.reason }
+          }
+          case 'NoSession': {
+            return { _tag: 'NoSession', identifier }
+          }
+        }
+      })
 
     const eventLoop = Effect.gen(function* () {
       for (;;) {
@@ -1081,6 +1393,15 @@ export const startOrchestrator = (
                 entry.tokens = event.update.usage
               }
             }
+            const record = state.details.get(event.issueId)
+            // Only a live run contributes to the timeline: output from a worker the orchestrator
+            // has already ended belongs to no attempt.
+            if (entry !== undefined && record !== undefined) {
+              recordAgentEvent(record, event.update)
+              if (record.rateLimits.length > 0) {
+                state.rateLimits = flattenRateLimits(record.rateLimits)
+              }
+            }
             break
           }
           case 'WorkerExited': {
@@ -1089,6 +1410,7 @@ export const startOrchestrator = (
               break
             }
             accountEndedRuntime(entry, Date.now())
+            const record = state.details.get(event.issueId)
             if (event.outcome === 'normal') {
               const handoff = yield* entry.execution.tracker
                 .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
@@ -1099,6 +1421,14 @@ export const startOrchestrator = (
                   }),
                 )
               if (handoff._tag === 'Failed') {
+                if (record !== undefined) {
+                  recordHandoff(record, new Date(), {
+                    step: 'remote_branch',
+                    status: 'failed',
+                    message: handoff.error.message,
+                    outcome: 'failed',
+                  })
+                }
                 yield* scheduleRetry(
                   entry.issue,
                   (event.attempt ?? 0) + 1,
@@ -1108,8 +1438,45 @@ export const startOrchestrator = (
                 break
               }
               if (handoff.result._tag === 'NoBranch') {
+                if (record !== undefined) {
+                  recordHandoff(record, new Date(), {
+                    step: 'remote_branch',
+                    status: 'absent',
+                    message: `No remote branch ${handoff.result.branchName} exists yet; continuing the session`,
+                    remoteBranch: handoff.result.branchName,
+                    outcome: 'no_branch',
+                  })
+                }
                 yield* scheduleRetry(entry.issue, 1, null, true)
                 break
+              }
+              if (record !== undefined) {
+                const observedAt = new Date()
+                recordHandoff(record, observedAt, {
+                  step: 'remote_branch',
+                  status: 'observed',
+                  message: `Remote branch ${handoff.result.branchName} is present`,
+                  remoteBranch: handoff.result.branchName,
+                })
+                recordHandoff(record, observedAt, {
+                  step: 'pull_request',
+                  status: 'observed',
+                  message: handoff.result.created
+                    ? 'Opened a pull request for the completed work'
+                    : 'Reused the pull request already open for this branch',
+                  pullRequest: {
+                    status: handoff.result.created ? 'created' : 'reused',
+                    number: handoff.result.pullRequestNumber,
+                    url: handoff.result.pullRequestUrl,
+                    state: 'awaiting_checks',
+                  },
+                  outcome: 'pull_request_open',
+                })
+                recordHandoff(record, observedAt, {
+                  step: 'dispatch_label',
+                  status: record.handoff.dispatchLabels.status,
+                  message: record.handoff.dispatchLabels.reason,
+                })
               }
               state.handoffs.set(event.issueId, {
                 issue: entry.issue,
@@ -1197,7 +1564,7 @@ export const startOrchestrator = (
               state.pausedIssueNumbers.add(event.issueNumber)
               for (const [id, entry] of state.running) {
                 if (identifierIssueNumber(entry.issue.identifier) === event.issueNumber) {
-                  yield* cancelRunning(id, false)
+                  yield* cancelRunning(id, false, 'the operator paused the issue')
                 }
               }
               for (const [id, retry] of state.retries) {
@@ -1214,6 +1581,9 @@ export const startOrchestrator = (
             break
           }
         }
+        // Every mutation of runtime state is followed by exactly one publication, so a consumer
+        // never sees an index that disagrees with the scheduler it was derived from.
+        publishDetails()
       }
     })
 
@@ -1223,6 +1593,7 @@ export const startOrchestrator = (
     return {
       snapshot: Effect.sync(createSnapshot),
       refresh: requestRefresh,
+      agentDetail,
       setIssuePaused: (issueNumber, paused) =>
         Effect.gen(function* () {
           const reply = yield* Deferred.make<void>()

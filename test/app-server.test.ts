@@ -220,6 +220,48 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.message).toBe('https://example.test/issues/14')
   })
 
+  it('redacts credentials from telemetry before any consumer receives it', async (): Promise<void> => {
+    const outcome = await runScenario('secret-message')
+    const serialized = JSON.stringify(outcome.events)
+
+    expect(outcome.error).toBeNull()
+    expect(serialized).not.toContain('github_pat_')
+    expect(serialized).toContain('[redacted]')
+    const message = outcome.events.find((event) => event.payload.kind === 'message')
+    expect(message?.payload).toMatchObject({ kind: 'message', role: 'assistant' })
+  }, 30_000)
+
+  it('redacts the resolved value of a host credential the agent echoes', async (): Promise<void> => {
+    const previous = process.env['GITHUB_TOKEN']
+    process.env['GITHUB_TOKEN'] = 'literal-host-credential-value'
+    try {
+      const outcome = await runScenario('secret-environment')
+      const serialized = JSON.stringify(outcome.events)
+
+      expect(outcome.error).toBeNull()
+      expect(serialized).not.toContain('literal-host-credential-value')
+      expect(serialized).toContain('[redacted]')
+    } finally {
+      if (previous === undefined) {
+        delete process.env['GITHUB_TOKEN']
+      } else {
+        process.env['GITHUB_TOKEN'] = previous
+      }
+    }
+  }, 30_000)
+
+  it('normalizes protocol items into bounded timeline payloads', async (): Promise<void> => {
+    const outcome = await runScenario('usage')
+    const usage = outcome.events.find((event) => event.payload.kind === 'usage')
+
+    expect(outcome.error).toBeNull()
+    expect(usage?.payload).toEqual({
+      kind: 'usage',
+      tokens: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+      rateLimits: [],
+    })
+  }, 30_000)
+
   it('attributes a notification from the thread and turn ids it carries', async (): Promise<void> => {
     const outcome = await runScenario('carried-identity')
 
