@@ -19,5 +19,99 @@
     "typescript/no-unsafe-member-access": "error",
     "typescript/no-unsafe-return": "error",
     "typescript/switch-exhaustiveness-check": "error"
-  }
+  },
+
+  // Module import direction (#86).  Each layer under `src/` denies every import that leaves the
+  // layer and then re-admits the layers below it by negation, so a directory added later is
+  // forbidden until it is named here.  The groups match the import specifier as written; every
+  // cross-layer import in this tree is relative, so leaving the layer always starts with `../`.
+  //
+  //   support/  <-  domain/  <-  ports/  <-  core/  <-  config/, operator/, adapters/, src root
+  //
+  // `src/` root is the composition root: it binds concrete adapters and is deliberately
+  // unrestricted.  `adapters/` is restricted only as an import target, never as a source.
+  "overrides": [
+    {
+      "files": ["src/support/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**"],
+                "message": "support/ is the bottom layer: it may import only from support/ itself and from third-party or Node packages."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/domain/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**", "!../support/**"],
+                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, operator/, adapters/, or the composition root."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/ports/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**", "!../domain/**", "!../support/**"],
+                "message": "ports/ may import only from domain/ and support/."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/core/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**",
+                  "!../config/**",
+                  "!../domain/**",
+                  "!../ports/**",
+                  "!../support/**",
+                  "!../errors.js",
+
+                  // Migration allow-list.  These modules are adapters and infrastructure that still
+                  // sit at the `src/` root because #84 moved only the leaf modules.  Each entry is
+                  // removed by the issue under #76 named beside it; none of them may be replaced by
+                  // an import of `../adapters/**`, which stays denied.
+                  "!../codex.js", // #89 introduces the AgentRunner port and moves Codex under adapters/
+                  "!../tracker.js", // #90 splits tracker.ts into the tracker port and the GitHub adapter
+                  "!../workspace.js", // #91 splits workspace.ts into containment policy, hooks, and manager
+                  "!../telemetry.js", // #98 converts the telemetry record to pure reducers
+                  "!../handoff-store.js", // #109 moves the remaining root modules into their layers
+                  "!../host-tools.js" // #109 moves the remaining root modules into their layers
+                ],
+                "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }

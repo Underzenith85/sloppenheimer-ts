@@ -32,3 +32,33 @@ executable.
 Issues #84 and #86 establish the source layout and import rules first. Issue #109 then performs the
 package migration without reopening those boundaries. If that migration is too large for one safe
 pull request, split it into independently buildable steps; do not land a half-migrated workspace.
+
+## Module import direction
+
+The directories under `src/` are layers, and imports may only ever point downwards:
+
+```
+support/  <-  domain/  <-  ports/  <-  core/  <-  config/, operator/, adapters/, src/ root
+```
+
+- `support/` is the bottom layer. It may import only from `support/` itself and from third-party or
+  Node packages.
+- `domain/` may import from `support/` only.
+- `ports/` may import from `domain/` and `support/` only.
+- `core/` holds orchestration policy. It may import from `config/`, `ports/`, `domain/`, and
+  `support/`, and it may never name a concrete adapter — it depends on a port and lets the
+  composition root bind the implementation.
+- `adapters/` is restricted as an import target, never as a source.
+- The `src/` root is the composition root. It binds the concrete adapters and is unrestricted.
+
+`.oxlintrc.json` enforces this with `no-restricted-imports` overrides, one per layer, so `pnpm lint`
+— and therefore `pnpm check` — fails on a violation. Each layer denies everything that leaves it and
+then re-admits the layers below it by name, so a directory added later is forbidden until the rule
+names it. `test/import-boundaries.test.ts` lints a fixture tree with that same configuration and
+asserts the rule still fires.
+
+Modules that #84 left at the `src/` root are adapters and infrastructure that have not moved into a
+layer yet. `core/` reaches them through a migration allow-list in `.oxlintrc.json`, where each entry
+names the issue under [#76](https://github.com/Underzenith85/symphony-ts/issues/76) that removes it.
+Add to that allow-list only when a module has not moved yet; never to admit an import of
+`adapters/`.

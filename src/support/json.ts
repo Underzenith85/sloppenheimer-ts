@@ -1,4 +1,6 @@
-import type { JsonObject, JsonValue } from '../domain/domain.js'
+export type JsonPrimitive = string | number | boolean | null
+export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[]
+export type JsonObject = Readonly<{ [key: string]: JsonValue }>
 
 export class JsonConversionError extends Error {
   readonly path: string
