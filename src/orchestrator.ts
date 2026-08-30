@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import chokidar from 'chokidar'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
-import { runAgent, type AgentEvent } from './codex.js'
+import { isCancelledTurnStatus, runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
 import {
   issueId,
@@ -986,7 +986,7 @@ export const startOrchestrator = (
           update.turnStatus !== null
         ) {
           const completed = update.turnStatus === 'completed'
-          const cancelled = update.turnStatus === 'cancelled' || update.turnStatus === 'canceled'
+          const cancelled = isCancelledTurnStatus(update.turnStatus)
           const outcome = completed ? 'completed' : cancelled ? 'cancelled' : 'failed'
           entry.turnActive = false
           yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {

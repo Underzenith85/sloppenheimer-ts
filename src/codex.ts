@@ -55,6 +55,9 @@ const isJsonValue = (value: unknown): value is JsonValue => {
 /** Session identity remains stable for the lifetime of the App Server thread. */
 export const composeSessionId = (threadId: string, _turnId: string | null): string => threadId
 
+export const isCancelledTurnStatus = (status: string): boolean =>
+  status === 'cancelled' || status === 'canceled' || status === 'interrupted'
+
 export type AgentEvent = Readonly<{
   event: string
   timestamp: Date
@@ -133,6 +136,19 @@ const tokenTotalsFrom = (value: JsonValue | undefined): AgentEvent['usage'] => {
 const wrapperFrom = (params: JsonObject): JsonObject => {
   const message = params['msg']
   return isJsonObject(message) ? message : params
+}
+
+const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
+  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
+  for (const [key, value] of Object.entries(update)) {
+    const existing = merged[key]
+    if (value === null && existing !== undefined) {
+      continue
+    }
+    merged[key] =
+      isJsonObject(existing) && isJsonObject(value) ? mergeSparseObject(existing, value) : value
+  }
+  return merged
 }
 
 export const telemetryFrom = (
@@ -325,6 +341,8 @@ class CodexConnection {
   readonly #turnUsage = new Map<string, NonNullable<AgentEvent['usage']>>()
   readonly #startedTurns = new Set<string>()
   readonly #turnCounts = new Map<string, number>()
+  #pendingRateLimits: JsonObject | null = null
+  #rateLimitsReady = false
   #nextId = 1
   #closed = false
   /**
@@ -414,6 +432,32 @@ class CodexConnection {
       clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
     })
     this.#notify('initialized', {})
+    const rateLimitsResult = await this.#request('account/rateLimits/read', {})
+    if (!isJsonObject(rateLimitsResult) || !isJsonObject(rateLimitsResult['rateLimits'])) {
+      throw new AgentError({
+        category: 'protocol_error',
+        message: 'account/rateLimits/read returned no rate-limit snapshot',
+      })
+    }
+    const rateLimits = mergeSparseObject(
+      rateLimitsResult['rateLimits'],
+      this.#pendingRateLimits ?? {},
+    )
+    this.#pendingRateLimits = null
+    this.#rateLimitsReady = true
+    this.#onEvent({
+      event: 'account/rateLimits/read',
+      timestamp: new Date(),
+      processId: this.processId,
+      message: null,
+      usage: null,
+      rateLimits,
+      threadId: null,
+      turnId: null,
+      sessionId: null,
+      turnCount: 0,
+      turnStatus: null,
+    })
     const result = await this.#request('thread/start', {
       cwd,
       approvalPolicy: config.approvalPolicy,
@@ -651,7 +695,7 @@ class CodexConnection {
   }
 
   static #turnFailure(turnId: string, status: string): AgentError {
-    const cancelled = status === 'cancelled' || status === 'canceled'
+    const cancelled = isCancelledTurnStatus(status)
     return new AgentError({
       category: cancelled ? 'turn_cancelled' : 'turn_failed',
       message: `turn ${turnId} finished with status ${status}`,
@@ -849,6 +893,11 @@ class CodexConnection {
     const turn = this.#turnFrom(message)
     const carried = notificationIdentity(message)
     const telemetry = telemetryFrom(method, message)
+    let rateLimits = telemetry.rateLimits
+    if (rateLimits !== null && !this.#rateLimitsReady) {
+      this.#pendingRateLimits = mergeSparseObject(this.#pendingRateLimits, rateLimits)
+      rateLimits = null
+    }
     // A notification that names its own thread and turn is attributable even when it arrives before
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
@@ -895,7 +944,7 @@ class CodexConnection {
       processId: this.processId,
       message: messageFrom(message, this.#knownSecretValues),
       usage,
-      rateLimits: telemetry.rateLimits,
+      rateLimits,
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),

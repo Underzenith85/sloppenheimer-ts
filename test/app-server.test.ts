@@ -530,6 +530,29 @@ describe('App Server timeouts and shutdown', (): void => {
     expect(outcome.error?.category).toBe('turn_cancelled')
   })
 
+  it('reports the current protocol interrupted status as cancellation', async (): Promise<void> => {
+    const outcome = await runScenario('turn-interrupted')
+
+    expect(outcome.error?.category).toBe('turn_cancelled')
+  })
+
+  it('merges sparse rate-limit notifications into the initial full snapshot', async (): Promise<void> => {
+    const outcome = await runScenario('sparse-rate-limit-before-read')
+    const baseline = outcome.events.find((event) => event.event === 'account/rateLimits/read')
+
+    expect(baseline?.rateLimits).toEqual({
+      limitId: 'codex',
+      credits: { hasCredits: true, unlimited: false, balance: '20' },
+      primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_730_948_100 },
+      secondary: { usedPercent: 5, windowDurationMins: 1_440, resetsAt: 1_730_948_200 },
+    })
+    expect(
+      outcome.events.filter(
+        (event) => event.event === 'account/rateLimits/updated' && event.rateLimits !== null,
+      ),
+    ).toEqual([])
+  })
+
   it('terminates the whole App Server process tree on shutdown', async (): Promise<void> => {
     const outcome = await runScenario('spawn-grandchild', { turnTimeoutMs: 400 })
     const pidFile = join(outcome.path, 'grandchild.pid')

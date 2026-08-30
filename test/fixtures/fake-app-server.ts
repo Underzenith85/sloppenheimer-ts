@@ -76,6 +76,11 @@ const handleTurnStart = (id: unknown): void => {
       send({ method: 'turn/failed', params: { turn: { ...turn, status: 'cancelled' } } })
       return
     }
+    case 'turn-interrupted': {
+      send({ id, result: { turn } })
+      send({ method: 'turn/failed', params: { turn: { ...turn, status: 'interrupted' } } })
+      return
+    }
     case 'approval': {
       send({ id, result: { turn } })
       send({ id: 9001, method: 'item/commandExecution/requestApproval', params: { command: 'ls' } })
@@ -317,6 +322,26 @@ const handle = (message: JsonRecord): void => {
     return
   }
   if (method === 'initialized') {
+    return
+  }
+  if (method === 'account/rateLimits/read') {
+    if (scenario === 'sparse-rate-limit-before-read') {
+      send({
+        method: 'account/rateLimits/updated',
+        params: { rateLimits: { primary: { usedPercent: 42 } } },
+      })
+    }
+    send({
+      id,
+      result: {
+        rateLimits: {
+          limitId: 'codex',
+          credits: { hasCredits: true, unlimited: false, balance: '20' },
+          primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 1_730_948_100 },
+          secondary: { usedPercent: 5, windowDurationMins: 1_440, resetsAt: 1_730_948_200 },
+        },
+      },
+    })
     return
   }
   if (method === 'thread/start') {
