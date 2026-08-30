@@ -887,13 +887,22 @@ export const startOrchestrator = (
       cleanupWorkspace: boolean,
     ): Effect.Effect<RunningEntry | null, never> =>
       Effect.gen(function* () {
-        const entry = endRunning(id, null)
-        if (entry === null) {
+        const entry = state.running.get(id)
+        if (entry === undefined) {
           return null
         }
+        yield* Fiber.interrupt(entry.fiber)
+        if (entry.sessionId !== null && entry.turnId !== null) {
+          yield* logInfo('action=turn outcome=cancelled', {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome: 'cancelled',
+            error: null,
+          })
+        }
+        endRunning(id, null)
         accountEndedRuntime(entry, Date.now())
         state.claimed.delete(id)
-        yield* Fiber.interrupt(entry.fiber)
         if (entry.sessionId !== null) {
           yield* logInfo('action=session outcome=cancelled', {
             ...sessionLogContext(entry),

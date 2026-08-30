@@ -197,6 +197,12 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.turnId).toBeNull()
     expect(started?.sessionId).toBe(composeSessionId('thread-1', null))
     expect(started?.message).toBeNull()
+    const turnStartedIndex = outcome.events.findIndex((event) => event.event === 'turn_started')
+    const turnCompletedIndex = outcome.events.findIndex((event) => event.event === 'turn/completed')
+    expect(turnStartedIndex).toBeGreaterThanOrEqual(0)
+    expect(turnStartedIndex).toBeLessThan(turnCompletedIndex)
+    expect(outcome.events[turnStartedIndex]?.turnCount).toBe(1)
+    expect(outcome.events[turnCompletedIndex]?.turnCount).toBe(1)
   })
 
   it('attributes a notification from the thread and turn ids it carries', async (): Promise<void> => {

@@ -77,6 +77,8 @@ export type AgentResult = Readonly<{
 }>
 
 type PendingRequest = Readonly<{
+  method: string
+  turnCount: number | null
   resolve: (value: JsonValue) => void
   reject: (error: AgentError) => void
   timeout: NodeJS.Timeout
@@ -421,8 +423,6 @@ class CodexConnection {
       })
     }
     this.#threadId = result['thread']['id']
-    this.#emit('thread_started', null)
-    this.#emit('session_started', null)
     return this.#threadId
   }
 
@@ -433,17 +433,21 @@ class CodexConnection {
     prompt: string,
     turnCount: number,
   ): Promise<string> {
-    const result = await this.#request('turn/start', {
-      threadId,
-      input: [{ type: 'text', text: prompt }],
-      cwd,
-      approvalPolicy: config.approvalPolicy,
-      sandboxPolicy: config.turnSandboxPolicy ?? {
-        type: 'workspaceWrite',
-        writableRoots: [cwd],
-        networkAccess: true,
+    const result = await this.#request(
+      'turn/start',
+      {
+        threadId,
+        input: [{ type: 'text', text: prompt }],
+        cwd,
+        approvalPolicy: config.approvalPolicy,
+        sandboxPolicy: config.turnSandboxPolicy ?? {
+          type: 'workspaceWrite',
+          writableRoots: [cwd],
+          networkAccess: true,
+        },
       },
-    })
+      turnCount,
+    )
     if (
       !isJsonObject(result) ||
       !isJsonObject(result['turn']) ||
@@ -454,10 +458,7 @@ class CodexConnection {
         message: 'turn/start returned no turn id',
       })
     }
-    this.#turnId = result['turn']['id']
-    this.#turnCount = turnCount
-    this.#emit('turn_started', null)
-    return this.#turnId
+    return result['turn']['id']
   }
 
   /**
@@ -569,7 +570,11 @@ class CodexConnection {
   }
 
   /** Registers the pending entry before writing, so a response can never arrive unowned. */
-  #request(method: string, params: JsonObject): Promise<JsonValue> {
+  #request(
+    method: string,
+    params: JsonObject,
+    turnCount: number | null = null,
+  ): Promise<JsonValue> {
     if (this.#terminalError !== null) {
       return Promise.reject(this.#terminalError)
     }
@@ -582,7 +587,13 @@ class CodexConnection {
           new AgentError({ category: 'read_timeout', message: `${method} response timed out` }),
         )
       }, this.#readTimeoutMs)
-      this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#pending.set(id, {
+        method,
+        turnCount,
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        timeout,
+      })
       this.#write({ id, method, params })
     })
   }
@@ -663,6 +674,14 @@ class CodexConnection {
       return
     }
     this.#adoptIdentity(result)
+    if (pending.method === 'thread/start' && this.#threadId !== null) {
+      this.#emit('thread_started', null)
+      this.#emit('session_started', null)
+    }
+    if (pending.method === 'turn/start' && pending.turnCount !== null && this.#turnId !== null) {
+      this.#turnCount = pending.turnCount
+      this.#emit('turn_started', null)
+    }
     pending.resolve(result)
   }
 
