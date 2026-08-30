@@ -67,8 +67,10 @@ never rejecting a compliant one. Prefer flat layers.
 `test/import-boundaries.test.ts` lints a fixture tree with that same configuration, at both depths,
 and asserts the rule still fires.
 
-Modules that #84 left at the `src/` root are adapters and infrastructure that have not moved into a
-layer yet. `core/` reaches them through a migration allow-list in `.oxlintrc.json`, where each entry
-names the issue under [#76](https://github.com/Underzenith85/symphony-ts/issues/76) that removes it.
-Add to that allow-list only when a module has not moved yet; never to admit an import of
-`adapters/`.
+Some vocabulary has not been placed in a layer yet: the modules #84 left at the `src/` root, and the
+workflow configuration types that #88 declared the ports against. `core/` and `ports/` reach them
+through migration allow-lists in `.oxlintrc.json`, where each entry names the issue under
+[#76](https://github.com/Underzenith85/symphony-ts/issues/76) that removes it. The entries name
+files rather than directories, so the rest of each directory stays denied. Add to an allow-list only
+for a type that has not moved yet; never to admit an import of `adapters/`, which stays denied at
+both tiers.

@@ -27,9 +27,12 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/domain/permitted.ts': "import '../support/json.js'\n",
 
   // ports/ may use domain/ and support/ and nothing else.
-  'src/ports/violates-config.ts': "import '../config/workflow.js'\n",
+  'src/ports/violates-config.ts': "import '../config/cli-options.js'\n",
   'src/ports/violates-root.ts': "import '../tracker.js'\n",
   'src/ports/permitted.ts': "import '../domain/domain.js'\nimport '../support/json.js'\n",
+  // The migration allow-list keeps the vocabulary #88 declared the ports against reachable.
+  'src/ports/permitted-allow-list.ts':
+    "import '../config/tracker-config.js'\nimport '../config/workflow.js'\nimport '../errors.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\n",
 
   // core/ holds policy and may not name a concrete adapter.  This is the drift the rule exists to
   // stop: the composition root importing `makeGitHubTracker` by name from inside core.
@@ -62,7 +65,7 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/domain/nested/violates-core.ts': "import '../../core/runtime.js'\n",
   'src/domain/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
   'src/domain/nested/permitted.ts': "import '../domain.js'\nimport '../../support/json.js'\n",
-  'src/ports/nested/violates-config.ts': "import '../../config/workflow.js'\n",
+  'src/ports/nested/violates-config.ts': "import '../../config/cli-options.js'\n",
   'src/ports/nested/permitted.ts':
     "import '../../domain/domain.js'\nimport '../../support/json.js'\n",
   'src/core/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
