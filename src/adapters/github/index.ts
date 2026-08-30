@@ -3,4 +3,9 @@
  * Nothing in `core/` or `ports/` may name this module.
  */
 export { makeGitHubCodeReview } from './code-review.js'
-export { makeGitHubIssueControl, makeGitHubTracker } from './issues.js'
+export {
+  gitHubIssueControlFactory,
+  layerGitHubIssueControl,
+  makeGitHubIssueControl,
+  makeGitHubTracker,
+} from './issues.js'
