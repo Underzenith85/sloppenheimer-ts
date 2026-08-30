@@ -11,7 +11,7 @@ import type {
   OrchestratorControl,
   OrchestratorSnapshot,
 } from '../core/orchestrator.js'
-import { makeGitHubIssueControl } from '../adapters/github/index.js'
+import { CurrentIssueControl, type IssueControlPort } from '../ports/issue-control.js'
 import { TrackerError, WorkflowError } from '../errors.js'
 import { loadWorkflow, type Workflow } from '../config/workflow.js'
 
@@ -173,86 +173,86 @@ export const buildBacklogSnapshot = (
 export const makeOperatorBackend = (
   workflowPath: string,
   orchestrator: OrchestratorControl,
-): OperatorBackend => {
-  type LoadedControl = Readonly<{
-    label: string
-    issues: ReturnType<typeof makeGitHubIssueControl>
-    terminalStates: readonly string[]
-  }>
-  let cachedControl: Readonly<{ fingerprint: string; control: LoadedControl }> | null = null
-  const pausedIssueNumbers = new Set<number>()
-  const loadControl = loadWorkflow(workflowPath).pipe(
-    Effect.flatMap((workflow) =>
-      controlLabel(workflow).pipe(
-        Effect.map((label) => {
-          if (cachedControl?.fingerprint === workflow.fingerprint) {
-            return cachedControl.control
-          }
-          const control: LoadedControl = {
-            label,
-            issues: makeGitHubIssueControl(workflow.tracker.provider),
-            terminalStates: workflow.config.tracker.terminalStates,
-          }
-          cachedControl = { fingerprint: workflow.fingerprint, control }
-          return control
+): Effect.Effect<OperatorBackend, never, CurrentIssueControl> =>
+  Effect.map(CurrentIssueControl, (issueControl): OperatorBackend => {
+    type LoadedControl = Readonly<{
+      label: string
+      issues: IssueControlPort
+      terminalStates: readonly string[]
+    }>
+    /**
+     * The workflow is reloaded per request, so the console reflects an edit without a restart. The
+     * issue control itself is not rebuilt per request: the cell hands back the instance already in
+     * force unless the workflow now names a different provider, which keeps the adapter's
+     * dependency-hydration cache warm across requests while a credential rotation still takes
+     * effect.
+     */
+    const loadControl: Effect.Effect<LoadedControl, OperatorBackendError> = loadWorkflow(
+      workflowPath,
+    ).pipe(
+      Effect.flatMap((workflow) =>
+        Effect.all({
+          label: controlLabel(workflow),
+          issues: issueControl.forProvider(workflow.tracker),
+          terminalStates: Effect.succeed(workflow.config.tracker.terminalStates),
         }),
       ),
-    ),
-  )
+    )
 
-  return {
-    snapshot: orchestrator.snapshot,
-    refresh: orchestrator.refresh,
-    agentDetail: orchestrator.agentDetail,
-    backlog: loadControl.pipe(
-      Effect.flatMap(({ label, issues, terminalStates }) =>
-        issues
-          .listOpenIssues()
-          .pipe(
-            Effect.map((openIssues) =>
-              buildBacklogSnapshot(openIssues, label, terminalStates, pausedIssueNumbers),
-            ),
-          ),
-      ),
-    ),
-    setIssueEnabled: (issueNumber, enabled) =>
-      loadControl.pipe(
-        Effect.flatMap(({ label, issues, terminalStates }) => {
-          if (!enabled) {
-            return orchestrator
-              .setIssuePaused(issueNumber, true)
-              .pipe(Effect.tap(() => Effect.sync(() => pausedIssueNumbers.add(issueNumber))))
-          }
-          return issues.listOpenIssues().pipe(
-            Effect.flatMap((openIssues) => {
-              const target = buildBacklogSnapshot(openIssues, label, terminalStates).issues.find(
-                (issue) => issue.number === issueNumber,
-              )
-              if (target === undefined) {
-                return Effect.fail(
-                  new TrackerError({
-                    category: 'tracker_response',
-                    message: 'issue is not present in the open backlog',
-                    retryable: false,
-                  }),
+    /**
+     * Paused issues are read from the orchestrator's snapshot rather than tracked here. The
+     * orchestrator owns the set that decides dispatch, so a second copy in the console could only
+     * ever disagree with the behaviour the operator is looking at.
+     */
+    const pausedIssueNumbers = Effect.map(
+      orchestrator.snapshot,
+      (snapshot) => new Set(snapshot.pausedIssueNumbers),
+    )
+
+    return {
+      snapshot: orchestrator.snapshot,
+      refresh: orchestrator.refresh,
+      agentDetail: orchestrator.agentDetail,
+      backlog: Effect.gen(function* () {
+        const { label, issues, terminalStates } = yield* loadControl
+        const openIssues = yield* issues.listOpenIssues()
+        return buildBacklogSnapshot(openIssues, label, terminalStates, yield* pausedIssueNumbers)
+      }),
+      setIssueEnabled: (issueNumber, enabled) =>
+        loadControl.pipe(
+          Effect.flatMap(({ label, issues, terminalStates }) => {
+            if (!enabled) {
+              return orchestrator.setIssuePaused(issueNumber, true)
+            }
+            return issues.listOpenIssues().pipe(
+              Effect.flatMap((openIssues) => {
+                const target = buildBacklogSnapshot(openIssues, label, terminalStates).issues.find(
+                  (issue) => issue.number === issueNumber,
                 )
-              }
-              if (target.readiness !== 'ready') {
-                return Effect.fail(
-                  new TrackerError({
-                    category: 'tracker_response',
-                    message: target.reason ?? 'issue is not ready',
-                    retryable: false,
-                  }),
-                )
-              }
-              return issues.addLabel(issueNumber, label).pipe(
-                Effect.zipRight(orchestrator.setIssuePaused(issueNumber, false)),
-                Effect.tap(() => Effect.sync(() => pausedIssueNumbers.delete(issueNumber))),
-              )
-            }),
-          )
-        }),
-      ),
-  }
-}
+                if (target === undefined) {
+                  return Effect.fail(
+                    new TrackerError({
+                      category: 'tracker_response',
+                      message: 'issue is not present in the open backlog',
+                      retryable: false,
+                    }),
+                  )
+                }
+                if (target.readiness !== 'ready') {
+                  return Effect.fail(
+                    new TrackerError({
+                      category: 'tracker_response',
+                      message: target.reason ?? 'issue is not ready',
+                      retryable: false,
+                    }),
+                  )
+                }
+                return issues
+                  .addLabel(issueNumber, label)
+                  .pipe(Effect.zipRight(orchestrator.setIssuePaused(issueNumber, false)))
+              }),
+            )
+          }),
+        ),
+    }
+  })

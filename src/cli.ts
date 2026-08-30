@@ -3,7 +3,12 @@ import chokidar from 'chokidar'
 import { Cause, Effect, Exit, Layer } from 'effect'
 
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
-import { makeGitHubCodeReview, makeGitHubTracker } from './adapters/github/index.js'
+import {
+  layerGitHubIssueControl,
+  makeGitHubCodeReview,
+  makeGitHubTracker,
+} from './adapters/github/index.js'
+import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { loadWorkflow, preflightWorkflow } from './config/workflow.js'
 import { startOrchestrator, type OrchestratorServices } from './core/orchestrator.js'
@@ -12,8 +17,10 @@ import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
 import {
   CodeReviewFactory,
+  CurrentIssueControl,
   layerAgentRunner,
   layerCodeReviewPorts,
+  layerCurrentIssueControl,
   layerPorts,
   layerWorkflowLoader,
   layerWorkflowWatcher,
@@ -25,7 +32,6 @@ import {
   type CodeReviewServices,
 } from './ports/index.js'
 import { logInfo } from './support/logging.js'
-import { makeWorkspaceManager } from './workspace.js'
 
 const shutdownTimeoutMs = 10_000
 
@@ -66,20 +72,29 @@ const codeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFacto
   make: (validated) => Effect.succeed(makeGitHubCodeReview(validated.provider)),
 })
 
+/** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
+const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.pipe(
+  Layer.provide(layerGitHubIssueControl),
+)
+
 /**
  * The production layer. The first instance of each rebuildable port is built from the workflow as
  * it stands at startup; every later reload and credential rotation replaces it through its cell.
  */
 const ports = (
   workflowPath: string,
-): Layer.Layer<OrchestratorServices | CodeReviewServices, WorkflowError | TrackerError> =>
+): Layer.Layer<
+  OrchestratorServices | CodeReviewServices | CurrentIssueControl,
+  WorkflowError | TrackerError
+> =>
   Layer.unwrapEffect(
     loadWorkflow(workflowPath).pipe(
       Effect.map((workflow) => {
         const configuration = portsConfiguration(workflow)
-        return Layer.merge(
+        return Layer.mergeAll(
           layerPorts(configuration, adapters),
           layerCodeReviewPorts(configuration, codeReview),
+          issueControl,
         )
       }),
     ),
@@ -128,10 +143,8 @@ const main = async (): Promise<number> => {
       const workflow = yield* loader.load(options.workflowPath)
       const port = options.port ?? workflow.config.serverPort
       if (port !== null) {
-        const server = yield* startOperatorServer(
-          port,
-          makeOperatorBackend(options.workflowPath, orchestrator),
-        )
+        const backend = yield* makeOperatorBackend(options.workflowPath, orchestrator)
+        const server = yield* startOperatorServer(port, backend)
         yield* logInfo('operator console listening', { url: server.url })
       }
       return yield* orchestrator.awaitTermination

@@ -30,7 +30,7 @@ import {
   type AgentEvent,
 } from '../telemetry.js'
 import type { Workflow } from '../config/workflow.js'
-import { workspaceKey } from '../workspace.js'
+import { workspaceKey } from '../domain/workspace-containment.js'
 import {
   AgentRunner,
   CurrentCodeReview,
