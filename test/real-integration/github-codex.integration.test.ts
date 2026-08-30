@@ -9,10 +9,16 @@ import { issueId, issueIdentifier, type Issue } from '../../src/domain.js'
 import type { CodexConfig } from '../../src/workflow.js'
 
 const environment = process.env
+const nonEmptyEnvironmentValue = (name: string): string | undefined => {
+  const value = environment[name]?.trim()
+  return value === undefined || value.length === 0 ? undefined : value
+}
+
 const enabledInCi = environment['CI'] === 'true' && environment['SYMPHONY_REAL_INTEGRATION'] === '1'
-const repository = environment['SYMPHONY_INTEGRATION_REPOSITORY']
-const githubToken = environment['GITHUB_TOKEN']
-const codexToken = environment['OPENAI_API_KEY'] ?? environment['CODEX_ACCESS_TOKEN']
+const repository = nonEmptyEnvironmentValue('SYMPHONY_INTEGRATION_REPOSITORY')
+const githubToken = nonEmptyEnvironmentValue('GITHUB_TOKEN')
+const codexToken =
+  nonEmptyEnvironmentValue('OPENAI_API_KEY') ?? nonEmptyEnvironmentValue('CODEX_ACCESS_TOKEN')
 const missing = [
   repository === undefined ? 'SYMPHONY_INTEGRATION_REPOSITORY' : null,
   githubToken === undefined ? 'GITHUB_TOKEN' : null,
@@ -90,7 +96,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
             config,
             prompt: 'This is an integration smoke test. Reply briefly without changing files.',
             maxTurns: 1,
-            secretEnvironmentNames: ['GITHUB_TOKEN'],
+            secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
             refreshIssue: () => Effect.succeed(null),
             isRoutable: () => false,
             onEvent: () => {},
