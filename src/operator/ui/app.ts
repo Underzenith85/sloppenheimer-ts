@@ -1,4 +1,4 @@
-type OrchestratorSnapshot = import('../../orchestrator.js').OrchestratorSnapshot
+type OrchestratorSnapshot = import('../../core/orchestrator.js').OrchestratorSnapshot
 type BacklogSnapshot = import('../operator.js').BacklogSnapshot
 type AgentDetailSnapshot = import('../../telemetry.js').AgentDetailSnapshot
 type AgentTimelineCategory = import('../../telemetry.js').AgentTimelineCategory

@@ -45,23 +45,6 @@ export type AgentResult = Readonly<{
   turnCount: number
 }>
 
-/**
- * Runs one agent session to completion. Unlike the tracker and the workspace manager, the runner
- * holds no per-workflow state: everything that varies arrives in the launch, so a single instance
- * serves the whole run and no cell is needed.
- */
-export type AgentRunnerPort = Readonly<{
-  run: (launch: AgentLaunch) => Effect.Effect<AgentResult, AgentError>
-}>
-
-export class AgentRunner extends Context.Tag('symphony/AgentRunner')<
-  AgentRunner,
-  AgentRunnerPort
->() {}
-
-export const layerAgentRunner = (runner: AgentRunnerPort): Layer.Layer<AgentRunner> =>
-  Layer.succeed(AgentRunner, runner)
-
 export type AgentTurnOutcome = 'completed' | 'cancelled' | 'failed'
 
 /**
@@ -71,3 +54,25 @@ export type AgentTurnOutcome = 'completed' | 'cancelled' | 'failed'
 export type AgentEventSemantics = Readonly<{
   turnOutcome: (status: string) => AgentTurnOutcome
 }>
+
+/**
+ * Runs one agent session to completion. Unlike the tracker and the workspace manager, the runner
+ * holds no per-workflow state: everything that varies arrives in the launch, so a single instance
+ * serves the whole run and no cell is needed.
+ */
+export type AgentRunnerPort = Readonly<{
+  run: (launch: AgentLaunch) => Effect.Effect<AgentResult, AgentError>
+  /**
+   * This runner's own reading of its turn statuses. It travels with `run` so a non-Codex runner is
+   * never interpreted through another runner's status vocabulary.
+   */
+  semantics: AgentEventSemantics
+}>
+
+export class AgentRunner extends Context.Tag('symphony/AgentRunner')<
+  AgentRunner,
+  AgentRunnerPort
+>() {}
+
+export const layerAgentRunner = (runner: AgentRunnerPort): Layer.Layer<AgentRunner> =>
+  Layer.succeed(AgentRunner, runner)

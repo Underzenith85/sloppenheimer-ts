@@ -83,12 +83,15 @@ export type AdapterServices =
   | WorkspaceManagerFactory
 
 /** What the orchestrator consumes: the adapter services plus the rebuildable instances. */
-export type PortServices =
-  | AdapterServices
-  | CodeReviewFactory
-  | CurrentCodeReview
-  | CurrentTracker
-  | CurrentWorkspaceManager
+export type PortServices = AdapterServices | CurrentTracker | CurrentWorkspaceManager
+
+/**
+ * The optional code-review half. It is a separate composition because its absence is meaningful:
+ * an application wired without these services has pull-request handoff disabled and follows the
+ * core continuation lifecycle, while one wired with them treats a provider that supplies no
+ * `CodeReviewPort` as an operator-visible configuration error.
+ */
+export type CodeReviewServices = CodeReviewFactory | CurrentCodeReview
 
 /** The workflow-derived inputs the first instance of each rebuildable port is built from. */
 export type PortsConfiguration = Readonly<{
@@ -105,18 +108,23 @@ export const portsConfiguration = (workflow: Workflow): PortsConfiguration => ({
  * The wiring shape: adapter layers supply the factories, the cells turn them into the instances in
  * force, and both halves are visible to the orchestrator. The adapter layers themselves belong to
  * the adapter issues that follow; nothing here selects a provider.
- *
- * `codeReview` defaults to the absence marker, so a tracker provider with no review capability
- * composes without implementing any code-review wiring. It is merged beneath `adapters`, so an
- * adapter set that supplies its own code-review factory keeps it.
  */
 export const layerPorts = (
   configuration: PortsConfiguration,
   adapters: Layer.Layer<AdapterServices>,
-  codeReview: Layer.Layer<CodeReviewFactory> = layerNoCodeReview,
 ): Layer.Layer<PortServices, TrackerError> =>
   Layer.mergeAll(
     layerCurrentTracker(configuration.tracker),
-    layerCurrentCodeReview(configuration.tracker),
     layerCurrentWorkspaceManager(configuration.workspaces),
-  ).pipe(Layer.provideMerge(Layer.merge(codeReview, adapters)))
+  ).pipe(Layer.provideMerge(adapters))
+
+/**
+ * The code-review half, composed only when pull-request handoff is enabled. `factory` defaults to
+ * the absence marker, so a provider with no review capability still composes — and then reports the
+ * configuration error the application owes an operator who enabled handoff without one.
+ */
+export const layerCodeReviewPorts = (
+  configuration: PortsConfiguration,
+  factory: Layer.Layer<CodeReviewFactory> = layerNoCodeReview,
+): Layer.Layer<CodeReviewServices, TrackerError> =>
+  layerCurrentCodeReview(configuration.tracker).pipe(Layer.provideMerge(factory))

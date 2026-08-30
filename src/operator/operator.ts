@@ -10,7 +10,7 @@ import type {
   AgentDetailLookup,
   OrchestratorControl,
   OrchestratorSnapshot,
-} from '../orchestrator.js'
+} from '../core/orchestrator.js'
 import { makeGitHubIssueControl } from '../adapters/github/index.js'
 import { TrackerError, WorkflowError } from '../errors.js'
 import { loadWorkflow, type Workflow } from '../config/workflow.js'

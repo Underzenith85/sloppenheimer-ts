@@ -73,11 +73,13 @@ export class CodeReviewFactory extends Context.Tag('symphony/CodeReviewFactory')
 >() {}
 
 /**
- * The absence marker: a provider that supplies no code review at all.
+ * The absence marker: a provider that supplies no code review at all. Such a provider is not asked
+ * to implement code-review wiring merely to say it has none.
  *
- * A tracker without code-review concepts is a legitimate configuration, so this is what the
- * composition root wires when no code-review adapter is supplied — such a provider is not asked to
- * implement code-review wiring merely to say it has none.
+ * A tracker without code-review concepts is a legitimate configuration, expressed by composing no
+ * code-review services at all rather than by this marker. Composing this one instead says that
+ * handoff is enabled and the provider cannot serve it, which is the configuration error the
+ * application reports to an operator.
  */
 export const layerNoCodeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFactory, {
   make: () => Effect.succeed(null),

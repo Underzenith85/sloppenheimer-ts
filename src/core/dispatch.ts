@@ -77,7 +77,7 @@ export const dispatch = (
     if (effectiveOverride === undefined && effective !== context.lastKnownGood) {
       const previous = context.lastKnownGood
       context.lastKnownGood = effective
-      adoptPorts(context, previous, effective)
+      yield* adoptPorts(context, previous, effective)
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
       Effect.match({
@@ -118,7 +118,7 @@ export const dispatch = (
       Effect.flatMap((workspace) =>
         execution.workspaces.beforeRun(workspace).pipe(
           Effect.zipRight(
-            context.dependencies.runAgent({
+            context.ports.agentRunner.run({
               issue,
               workspace,
               workspaceRoot: execution.workspaceRoot,

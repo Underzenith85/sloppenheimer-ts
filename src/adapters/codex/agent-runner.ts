@@ -18,9 +18,6 @@ import {
 } from '../../ports/agent-runner.js'
 import { isCancelledTurnStatus, runAgent } from './codex.js'
 
-/** The Codex agent runner, satisfying the port with the App Server session as its one operation. */
-export const codexAgentRunner: AgentRunnerPort = { run: runAgent }
-
 /**
  * Codex's own turn-status vocabulary, kept with the adapter so the core runtime reacts to an
  * outcome rather than matching one runner's status strings.
@@ -28,6 +25,12 @@ export const codexAgentRunner: AgentRunnerPort = { run: runAgent }
 export const codexAgentEventSemantics: AgentEventSemantics = {
   turnOutcome: (status) =>
     status === 'completed' ? 'completed' : isCancelledTurnStatus(status) ? 'cancelled' : 'failed',
+}
+
+/** The Codex agent runner, satisfying the port with the App Server session as its one operation. */
+export const codexAgentRunner: AgentRunnerPort = {
+  run: runAgent,
+  semantics: codexAgentEventSemantics,
 }
 
 /** Provides {@link AgentRunner} from this adapter, for a composition root that selects Codex. */
