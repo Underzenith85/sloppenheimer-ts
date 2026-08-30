@@ -395,12 +395,27 @@ class CodexConnection {
       readStdout(chunk)
     })
 
-    // stderr is diagnostic only and never parsed as protocol.
+    // stderr is diagnostic only and never parsed as protocol. Buffer complete records before
+    // redaction: a chunk boundary between `Authorization:` and its value must not turn the value
+    // into an unkeyed fragment that can escape the header redactor.
+    const readStderr = makeLineReader(
+      codexMaxLineBytes,
+      (line) => {
+        const message = line.trim()
+        if (message.length > 0) {
+          this.#emit('diagnostic', message)
+        }
+      },
+      () => {
+        this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
+      },
+    )
     this.#process.stderr.on('data', (chunk: Buffer) => {
-      const message = chunk.toString('utf8').trim()
-      if (message.length > 0) {
-        this.#emit('diagnostic', message)
-      }
+      readStderr(chunk)
+    })
+    this.#process.stderr.once('end', () => {
+      // Treat an unterminated final diagnostic as a complete record once the stream closes.
+      readStderr(Buffer.from('\n'))
     })
 
     this.#process.once('error', (cause) => {
@@ -624,6 +639,7 @@ class CodexConnection {
     )
     this.#process.stdout.removeAllListeners('data')
     this.#process.stderr.removeAllListeners('data')
+    this.#process.stderr.removeAllListeners('end')
     this.#process.stdin.end()
     this.#terminate('SIGTERM')
     await this.#reapGroup()

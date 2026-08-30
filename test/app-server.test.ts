@@ -409,6 +409,16 @@ describe('App Server request handling', (): void => {
     expect(diagnostic?.message).toContain('diagnostic only')
   })
 
+  it('buffers split stderr records before redacting credentials', async (): Promise<void> => {
+    const outcome = await runScenario('split-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('Authorization=[REDACTED]')
+    expect(JSON.stringify(diagnostics)).not.toContain('split-secret')
+  })
+
   it('records absolute token usage reported during a turn', async (): Promise<void> => {
     const outcome = await runScenario('usage')
 

@@ -34,6 +34,14 @@ const handleInitialize = (id: unknown): void => {
   if (scenario === 'stderr-noise') {
     process.stderr.write('warning: this is diagnostic only\n')
   }
+  if (scenario === 'split-stderr-secret') {
+    process.stderr.write('Authorization:')
+    setTimeout(() => {
+      process.stderr.write(' Bearer split-secret\n')
+      send({ id, result: { userAgent: 'fake-app-server/1.0' } })
+    }, 20)
+    return
+  }
   if (scenario === 'malformed') {
     sendRaw('this is not json\n')
     sendRaw('[1,2,3]\n')
