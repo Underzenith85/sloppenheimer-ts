@@ -5,4 +5,9 @@
  */
 export { githubHttpClientLayer } from './client.js'
 export { makeGitHubCodeReview } from './code-review.js'
-export { makeGitHubIssueControl, makeGitHubTracker } from './issues.js'
+export {
+  gitHubIssueControlFactory,
+  layerGitHubIssueControl,
+  makeGitHubIssueControl,
+  makeGitHubTracker,
+} from './issues.js'

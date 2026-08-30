@@ -8,6 +8,7 @@ import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
 import type { HooksConfig } from '../src/config/workflow.js'
 import { makeWorkspaceManager } from '../src/adapters/node/workspace-manager.js'
 import { containedWorkspacePath, workspaceKey } from '../src/domain/workspace-containment.js'
+import { processIsAlive } from './harness/processes.js'
 
 const roots: string[] = []
 
@@ -59,15 +60,6 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<bo
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25))
   }
   return predicate()
-}
-
-const processIsAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
 }
 
 const makeRoot = (): string => {
