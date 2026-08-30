@@ -28,6 +28,13 @@ The codebase uses TypeScript 7's native compiler directly. Oxlint runs its nativ
 and Oxfmt enforces no-semicolon formatting. Strict compiler options, `no-explicit-any`, the
 type-aware unsafe-operation rules, and mandatory braces are CI errors.
 
+The operator console's markup, styles, and browser script live as real source files under
+`src/operator/ui/`, so all three are linted, formatted, and typechecked. `pnpm build` compiles
+`app.ts` against a DOM-only `tsconfig.browser.json` and writes the served assets into
+`dist/operator/ui/`; running from source strips the same file's types in memory, so `pnpm dev` and
+the test suites need no build first. The console's timeline categories come from
+`src/telemetry.ts` at load time rather than being restated in the browser script.
+
 The `effect`, `@effect/platform`, and `@effect/platform-node` versions are pinned as a compatible
 Effect 3 set. Update them together: Platform releases declare Effect-line peer ranges, and a partial
 upgrade can produce incompatible HTTP runtime types or behavior.
