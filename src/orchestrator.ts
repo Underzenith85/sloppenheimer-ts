@@ -16,7 +16,8 @@ import {
 import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
-import { mergeSparseObject } from './json.js'
+import type { HostToolSession } from './host-tools.js'
+import { mergeSparseObject, toJsonObject } from './json.js'
 import { logError, logInfo, logWarning } from './logging.js'
 import {
   agentDetailPath,
@@ -952,6 +953,18 @@ export const startOrchestrator = (
           return
         }
         const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
+        const hostTools: HostToolSession = Object.freeze({
+          specs: Object.freeze([...execution.tracker.toolSpecs]),
+          context: Object.freeze({
+            issueId: issue.id,
+            issueIdentifier: issue.identifier,
+            nativeRef:
+              issue.nativeRef === null
+                ? null
+                : toJsonObject(issue.nativeRef, 'session.issue.nativeRef'),
+          }),
+          execute: execution.tracker.executeTool,
+        })
         const runId = nextRunId
         nextRunId += 1
         const refreshIssue = (): Effect.Effect<Issue | null, AgentError> => {
@@ -982,6 +995,7 @@ export const startOrchestrator = (
                   prompt: execution.prompt,
                   maxTurns: execution.maxTurns,
                   secretEnvironmentNames: execution.secretEnvironmentNames,
+                  hostTools,
                   refreshIssue,
                   isRoutable: (refreshed) =>
                     issueIsActiveInSnapshot(refreshed, execution) &&

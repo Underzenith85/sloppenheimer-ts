@@ -5,6 +5,8 @@ import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from './json.js'
+import type { HostToolResult, HostToolSession } from './host-tools.js'
+import { unsupportedHostTool } from './host-tools.js'
 import { makeRedactor, redact, redactionMarker, type Redactor } from './redaction.js'
 import {
   clientPayload,
@@ -312,6 +314,7 @@ class CodexConnection {
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
   readonly #knownSecretValues: readonly string[]
+  readonly #hostTools: HostToolSession | null
   /**
    * Shape-based redaction over the same known secret values, applied at the parser so a credential
    * a message carried is gone before any consumer — the timeline, a log, an HTTP response — can
@@ -345,6 +348,7 @@ class CodexConnection {
     cwd: string,
     config: CodexConfig,
     secretEnvironmentNames: readonly string[],
+    hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
   ) {
     const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
@@ -352,6 +356,7 @@ class CodexConnection {
     // stripped from what Codex inherits, and a value the agent never receives is exactly the one
     // most worth removing if some tool prints it back.
     this.#knownSecretValues = sessionSecretValues(process.env, secretEnvironmentNames)
+    this.#hostTools = hostTools
     this.#redact = makeRedactor(this.#knownSecretValues)
     this.#process = spawn('bash', ['-lc', command], {
       cwd,
@@ -494,6 +499,10 @@ class CodexConnection {
       approvalPolicy: config.approvalPolicy,
       sandbox: config.threadSandbox,
       serviceName: 'symphony_ts',
+      dynamicTools:
+        this.#hostTools === null
+          ? []
+          : this.#hostTools.specs.map((spec) => ({ type: 'function', ...spec })),
     })
     if (
       !isJsonObject(result) ||
@@ -918,8 +927,58 @@ class CodexConnection {
       )
       return
     }
+    if (method === 'item/tool/call') {
+      void this.#handleHostToolCall(id, message, identity)
+      return
+    }
     this.#write({ id, error: { code: -32601, message: `Unsupported client request: ${method}` } })
     this.#emit('unsupported_tool_call', method, identity)
+  }
+
+  async #handleHostToolCall(
+    id: string | number,
+    message: JsonObject,
+    identity: Readonly<{ threadId: string | null; turnId: string | null }>,
+  ): Promise<void> {
+    const params = message['params']
+    const tool = isJsonObject(params) ? params['tool'] : undefined
+    const argumentsValue = isJsonObject(params) ? params['arguments'] : undefined
+    let result: HostToolResult
+    if (typeof tool !== 'string' || argumentsValue === undefined) {
+      result = {
+        success: false,
+        error: {
+          code: 'invalid_arguments',
+          message: 'Host tool request is missing tool or arguments',
+          retryable: false,
+        },
+      }
+    } else if (this.#hostTools === null) {
+      result = unsupportedHostTool(tool)
+    } else {
+      try {
+        result = await this.#hostTools.execute(tool, argumentsValue, this.#hostTools.context)
+      } catch {
+        result = {
+          success: false,
+          error: {
+            code: 'transport_error',
+            message: 'Host tool execution failed unexpectedly',
+            retryable: true,
+          },
+        }
+      }
+    }
+    const text = JSON.stringify(result)
+    this.#write({
+      id,
+      result: { success: result.success, contentItems: [{ type: 'inputText', text }] },
+    })
+    this.#emit(
+      result.success ? 'host_tool_succeeded' : 'host_tool_failed',
+      typeof tool === 'string' ? tool : null,
+      identity,
+    )
   }
 
   #handleNotification(method: string, message: JsonObject): void {
@@ -1095,6 +1154,8 @@ export type AgentLaunch = Readonly<{
   prompt: string
   maxTurns: number
   secretEnvironmentNames: readonly string[]
+  /** Immutable adapter/tool/context selection for this session. */
+  hostTools?: HostToolSession
   refreshIssue: () => Effect.Effect<Issue | null, AgentError>
   isRoutable: (issue: Issue) => boolean
   onEvent: (event: AgentEvent) => void
@@ -1132,6 +1193,7 @@ const runVerifiedAgent = (
             verified.path,
             launch.config,
             launch.secretEnvironmentNames,
+            launch.hostTools ?? null,
             launch.onEvent,
           ),
       ),

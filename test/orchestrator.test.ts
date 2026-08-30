@@ -286,6 +286,15 @@ const makeHarness = (
         inspectPullRequest: () => Effect.die('unused'),
         mergePullRequest: () => Effect.die('unused'),
         resolveReviewThreads: () => Effect.die('unused'),
+        toolSpecs: [],
+        executeTool: async (name) => ({
+          success: false,
+          error: {
+            code: 'unsupported_tool',
+            message: `Unsupported host tool: ${name}`,
+            retryable: false,
+          },
+        }),
         secretEnvironmentNames: [],
       }
     },
