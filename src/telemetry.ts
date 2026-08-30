@@ -1142,9 +1142,19 @@ export const recordAttemptStarted = (
   })
 }
 
-export const recordCancellation = (record: AgentDetailRecord, at: Date, reason: string): void => {
+/**
+ * Records a cancellation. A queued retry that is dropped before it runs has already closed its
+ * attempt as `retrying`, so that outcome is relabelled rather than left contradicting the
+ * cancelled phase; a cancellation of a live attempt closes the still-open attempt as usual.
+ */
+export const recordCancellation = (
+  record: AgentDetailRecord,
+  at: Date,
+  reason: string,
+  relabelEndedAttempt = false,
+): void => {
   const summary = boundRedacted(reason).text
-  endAttempt(record, at, 'cancelled', summary)
+  endAttempt(record, at, 'cancelled', summary, relabelEndedAttempt)
   setPhase(record, /stall/iu.test(reason) ? 'stalled' : 'cancelled', summary, at)
   push(record, {
     sequence: nextSequence(record),

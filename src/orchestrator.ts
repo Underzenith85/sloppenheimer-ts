@@ -1814,6 +1814,13 @@ export const startOrchestrator = (
                   yield* Fiber.interrupt(retry.fiber)
                   state.retries.delete(id)
                   state.claimed.delete(id)
+                  // Dropping the queued retry ends the agent, so its detail has to say so: without
+                  // this the record would publish as completed while still claiming to be waiting
+                  // to retry, and the retry it pointed at would never arrive.
+                  const record = state.details.get(id)
+                  if (record !== undefined) {
+                    recordCancellation(record, new Date(), 'the operator paused the issue', true)
+                  }
                 }
               }
             } else {

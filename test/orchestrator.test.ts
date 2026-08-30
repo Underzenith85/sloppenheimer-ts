@@ -1604,6 +1604,51 @@ describe('live agent detail', (): void => {
     }
   })
 
+  it('closes the detail of a queued retry an operator pauses away', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+    // The same pre-launch failure as above, so the issue is waiting to retry with no session behind
+    // it when the pause drops the queued retry.
+    const harness = makeHarness(workflow, () => [issue], undefined, {})
+    const factory = makeAgentFactory()
+
+    const lookup = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          yield* Effect.promise(() =>
+            waitUntil(() => {
+              const found = readDetail(control, 'example/symphony#17')
+              return found._tag === 'Found' && found.detail.status === 'retrying' ? found : null
+            }, 'the pre-launch retry to be inspectable'),
+          )
+
+          yield* control.setIssuePaused(17, true)
+
+          return readDetail(control, 'example/symphony#17')
+        }),
+      ),
+    )
+
+    expect(lookup._tag).toBe('Found')
+    if (lookup._tag === 'Found') {
+      // The retry will never run, so nothing may still describe the agent as waiting for it.
+      expect(lookup.detail.status).toBe('completed')
+      expect(lookup.detail.retry).toBeNull()
+      expect(lookup.detail.phase.phase).toBe('cancelled')
+      expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
+        outcome: 'cancelled',
+        reason: 'the operator paused the issue',
+      })
+      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual([
+        'retry',
+        'cancellation',
+      ])
+    }
+  })
+
   it('serves detail while a tracker poll is blocked, and hands out immutable snapshots', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
     let blockPolling = false
