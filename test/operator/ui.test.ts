@@ -607,3 +607,37 @@ describe('operator console agent detail', (): void => {
     expect(page.document.activeElement?.getAttribute('data-identifier')).toBe(runningIdentifier)
   })
 })
+
+describe('operator console dependency status', (): void => {
+  it('shows completed dependencies as satisfied without calling a ready issue blocked', async (): Promise<void> => {
+    const completedIdentifier = 'example/symphony#16'
+    serveOverride = (path): Promise<Response> | null =>
+      path === '/api/v1/backlog'
+        ? Promise.resolve(
+            jsonResponse(200, {
+              ...backlog,
+              nodes: [
+                ...backlog.nodes,
+                {
+                  identifier: completedIdentifier,
+                  number: 16,
+                  title: 'Completed foundation',
+                  url: 'https://example.test/issues/16',
+                  state: 'closed',
+                  readiness: 'completed',
+                  reason: null,
+                  actionable: false,
+                },
+              ],
+              edges: [{ blocker: completedIdentifier, dependent: runningIdentifier }],
+            }),
+          )
+        : null
+
+    await boot()
+
+    expect(textOf('#backlog')).not.toContain('Blocked by')
+    expect(page.document.querySelectorAll('.graph-edges path.satisfied')).toHaveLength(1)
+    expect(page.document.querySelectorAll('.graph-edges path.active')).toHaveLength(0)
+  })
+})

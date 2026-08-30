@@ -1,3 +1,4 @@
+import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
@@ -18,7 +19,7 @@ import {
   type IssueControlPort,
 } from '../../ports/issue-control.js'
 import type { TrackerPort } from '../../ports/tracker.js'
-import { githubJson, githubPageSize, trackerResponseError } from './client.js'
+import { githubJson, githubPageSize, trackerResponseError, withBoundHttpClient } from './client.js'
 import {
   decodeGitHubDependency,
   decodeGitHubIssue,
@@ -108,7 +109,11 @@ const labelList = (value: JsonValue | undefined): readonly string[] | null => {
 }
 
 const makeGitHubTrackerToolExecutor =
-  (provider: GitHubProviderConfig, prefix: string): TrackerPort['executeTool'] =>
+  (
+    provider: GitHubProviderConfig,
+    prefix: string,
+    httpClient: HttpClient.HttpClient | undefined,
+  ): TrackerPort['executeTool'] =>
   async (name, argumentsValue, context): Promise<HostToolResult> => {
     if (!githubTrackerToolSpecs.some((spec) => spec.name === name)) {
       return unsupportedHostTool(name)
@@ -150,6 +155,7 @@ const makeGitHubTrackerToolExecutor =
             }),
           ),
         ),
+        httpClient,
       )
     }
     if (name === 'github_handoff_issue') {
@@ -207,6 +213,7 @@ const makeGitHubTrackerToolExecutor =
             removed_labels: removeLabels,
           }),
         ),
+        httpClient,
       )
     }
     return unsupportedHostTool(name)
@@ -272,13 +279,21 @@ const hydrateDependencies = (
     { concurrency: dependencyConcurrency },
   )
 
-export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): TrackerPort => {
+/**
+ * `httpClient` binds this tracker to one client. An operation that stays in Effect otherwise reads
+ * the client from its caller's context; `executeTool` has no context to read, so it uses this one.
+ */
+export const makeGitHubTracker = (
+  configuredProvider: GitHubProviderConfig,
+  httpClient?: HttpClient.HttpClient,
+): TrackerPort => {
   const provider = Object.freeze({ ...configuredProvider })
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
+  const bindClient = withBoundHttpClient(httpClient)
   return {
     toolSpecs: githubTrackerToolSpecs,
-    executeTool: makeGitHubTrackerToolExecutor(provider, prefix),
+    executeTool: makeGitHubTrackerToolExecutor(provider, prefix, httpClient),
     secretEnvironmentNames: [
       ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
     ],
@@ -301,27 +316,29 @@ export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): Tra
             malformed: pages.flatMap((page) => page.malformed),
           })),
         )
-      return Effect.forEach(states, fetchState, { concurrency: 1 }).pipe(
-        Effect.tap((pages) => {
-          const malformed = pages.flatMap((page) => page.malformed)
-          return malformed.length === 0
-            ? Effect.void
-            : logWarning('tracker state list contained malformed records', {
-                tracker_kind: 'github',
-                provider_scope: `${provider.owner}/${provider.repository}`,
-                skipped: malformed.length,
-                details: malformed.slice(0, 10),
-              })
-        }),
-        Effect.map((pages) => [
-          ...new Map(
-            pages.flatMap((page) => page.issues).map((issue) => [issue.id, issue] as const),
-          ).values(),
-        ]),
-        Effect.flatMap((issues) =>
-          options?.hydrateDependencies === false
-            ? Effect.succeed(issues)
-            : hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
+      return bindClient(
+        Effect.forEach(states, fetchState, { concurrency: 1 }).pipe(
+          Effect.tap((pages) => {
+            const malformed = pages.flatMap((page) => page.malformed)
+            return malformed.length === 0
+              ? Effect.void
+              : logWarning('tracker state list contained malformed records', {
+                  tracker_kind: 'github',
+                  provider_scope: `${provider.owner}/${provider.repository}`,
+                  skipped: malformed.length,
+                  details: malformed.slice(0, 10),
+                })
+          }),
+          Effect.map((pages) => [
+            ...new Map(
+              pages.flatMap((page) => page.issues).map((issue) => [issue.id, issue] as const),
+            ).values(),
+          ]),
+          Effect.flatMap((issues) =>
+            options?.hydrateDependencies === false
+              ? Effect.succeed(issues)
+              : hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
+          ),
         ),
       )
     },
@@ -330,41 +347,47 @@ export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): Tra
       if (uniqueIds.length === 0) {
         return Effect.succeed([])
       }
-      return Effect.forEach(
-        uniqueIds,
-        (id) =>
-          githubJson(
-            provider,
-            `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
-          ).pipe(
-            Effect.flatMap(({ body }) =>
-              Effect.try({
-                try: () => normalizeIssue(decodeGitHubIssue(body ?? null), provider),
-                catch: (cause: unknown) =>
-                  cause instanceof TrackerError
-                    ? cause
-                    : trackerResponseError(`GitHub issue ${id} could not be decoded`, cause),
-              }),
+      return bindClient(
+        Effect.forEach(
+          uniqueIds,
+          (id) =>
+            githubJson(
+              provider,
+              `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
+            ).pipe(
+              Effect.flatMap(({ body }) =>
+                Effect.try({
+                  try: () => normalizeIssue(decodeGitHubIssue(body ?? null), provider),
+                  catch: (cause: unknown) =>
+                    cause instanceof TrackerError
+                      ? cause
+                      : trackerResponseError(`GitHub issue ${id} could not be decoded`, cause),
+                }),
+              ),
             ),
+          { concurrency: idRefreshConcurrency },
+        ).pipe(
+          Effect.map((issues) => [
+            ...new Map(issues.map((issue) => [issue.id, issue] as const)).values(),
+          ]),
+          Effect.flatMap((issues) =>
+            options?.hydrateDependencies === false
+              ? Effect.succeed(issues)
+              : hydrateDependencies(provider, prefix, issues, null, dependencyCache, false),
           ),
-        { concurrency: idRefreshConcurrency },
-      ).pipe(
-        Effect.map((issues) => [
-          ...new Map(issues.map((issue) => [issue.id, issue] as const)).values(),
-        ]),
-        Effect.flatMap((issues) =>
-          options?.hydrateDependencies === false
-            ? Effect.succeed(issues)
-            : hydrateDependencies(provider, prefix, issues, null, dependencyCache, false),
         ),
       )
     },
   }
 }
 
-export const makeGitHubIssueControl = (provider: GitHubProviderConfig): IssueControlPort => {
+export const makeGitHubIssueControl = (
+  provider: GitHubProviderConfig,
+  httpClient?: HttpClient.HttpClient,
+): IssueControlPort => {
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-  const tracker = makeGitHubTracker(provider)
+  const tracker = makeGitHubTracker(provider, httpClient)
+  const bindClient = withBoundHttpClient(httpClient)
   return {
     listOpenIssues: () =>
       tracker
@@ -389,14 +412,16 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): IssueCon
           }),
         )
       }
-      return githubJson(
-        provider,
-        `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}/labels`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ labels: [label] }),
-        },
-      ).pipe(Effect.asVoid)
+      return bindClient(
+        githubJson(
+          provider,
+          `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}/labels`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ labels: [label] }),
+          },
+        ).pipe(Effect.asVoid),
+      )
     },
   }
 }

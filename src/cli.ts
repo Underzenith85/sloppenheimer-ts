@@ -4,6 +4,7 @@ import { Cause, Effect, Exit, Layer } from 'effect'
 
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
 import {
+  githubHttpClientLayer,
   layerGitHubIssueControl,
   makeGitHubCodeReview,
   makeGitHubTracker,
@@ -135,6 +136,10 @@ const main = async (): Promise<number> => {
   process.once('SIGINT', requestShutdown)
   process.once('SIGTERM', requestShutdown)
 
+  /**
+   * The composition root binds the HTTP transport the GitHub adapter talks through. The adapter
+   * falls back to this same layer when it is run without one, so a test can substitute a client.
+   */
   const program = Effect.scoped(
     Effect.gen(function* () {
       const orchestrator = yield* startOrchestrator(options.workflowPath)
@@ -150,8 +155,9 @@ const main = async (): Promise<number> => {
       return yield* orchestrator.awaitTermination
     }),
     // Provided around the whole program, not around the start: the cells the orchestrator rebuilds
-    // through live as long as the host does.
-  ).pipe(Effect.provide(ports(options.workflowPath)))
+    // through live as long as the host does. The GitHub adapter reads its HTTP transport from the
+    // same context, so the client bound here reaches every request its ports make.
+  ).pipe(Effect.provide(ports(options.workflowPath)), Effect.provide(githubHttpClientLayer))
 
   const exit = await Effect.runPromiseExit(program, {
     signal: controller.signal,
