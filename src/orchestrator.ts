@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import chokidar from 'chokidar'
 import type { Effect, Scope } from 'effect'
 
-import { isCancelledTurnStatus, runAgent } from './codex.js'
+import { codexAgentEventSemantics, codexAgentRunner } from './adapters/codex/agent-runner.js'
 import { loadWorkflow } from './config/workflow.js'
 import {
   runOrchestrator as runOrchestratorCore,
@@ -10,7 +10,6 @@ import {
   type OrchestratorControl,
   type OrchestratorDependencies,
 } from './core/orchestrator.js'
-import type { AgentEventSemantics, AgentRunnerPort } from './ports/agent-runner.js'
 import type { WorkflowError } from './errors.js'
 import { makeGitHubCodeReview, makeGitHubTracker } from './adapters/github/index.js'
 import { makeWorkspaceManager } from './workspace.js'
@@ -33,24 +32,13 @@ export {
  * The composition root binds the concrete adapters.  `src/core` depends on these only through
  * `OrchestratorDependencies`, so the core runtime never imports an adapter implementation.
  */
-const codexAgentRunner: AgentRunnerPort['run'] = runAgent
-
-/**
- * Codex's own turn-status vocabulary, kept with the adapter so the core runtime reacts to an
- * outcome rather than matching one runner's status strings.
- */
-export const codexAgentEventSemantics: AgentEventSemantics = {
-  turnOutcome: (status) =>
-    status === 'completed' ? 'completed' : isCancelledTurnStatus(status) ? 'cancelled' : 'failed',
-}
-
 const defaultDependencies: OrchestratorDependencies = {
   loadWorkflow,
   makeTracker: (workflow) => makeGitHubTracker(workflow.tracker.provider),
   makeCodeReview: (workflow) => makeGitHubCodeReview(workflow.tracker.provider),
   makeWorkspaces: (workflow) =>
     makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
-  runAgent: codexAgentRunner,
+  runAgent: codexAgentRunner.run,
   agentEventSemantics: codexAgentEventSemantics,
   watchWorkflow: (path, onChange) => {
     const watcher = chokidar.watch(path, {

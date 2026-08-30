@@ -230,7 +230,6 @@
                   // sit at the `src/` root because #84 moved only the leaf modules.  Each entry is
                   // removed by the issue under #76 named beside it; none of them may be replaced by
                   // an import of `../adapters/**`, which stays denied above.
-                  "!../codex.js", // #89 introduces the AgentRunner port and moves Codex under adapters/
                   "!../workspace.js", // #91 splits workspace.ts into containment policy, hooks, and manager
                   "!../telemetry.js", // #98 converts the telemetry record to pure reducers
                   "!../errors.js", // #109 moves the remaining root modules into their layers
