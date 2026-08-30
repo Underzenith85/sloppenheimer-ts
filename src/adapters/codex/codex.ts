@@ -6,6 +6,7 @@ import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.
 import { AgentError, type WorkspaceError } from '../../errors.js'
 import type { AgentLaunch, AgentResult, AgentRunnerConfig } from '../../ports/agent-runner.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from '../../support/json.js'
+import { processGroupIsAlive } from '../../support/subprocess.js'
 import type { HostToolResult, HostToolSession } from '../../host-tools.js'
 import { unsupportedHostTool } from '../../host-tools.js'
 import { makeRedactor, redact, redactionMarker, type Redactor } from '../../support/redaction.js'
@@ -698,18 +699,14 @@ class CodexConnection {
     })
   }
 
-  /** Whether the App Server's process group still has a member. */
+  /**
+   * Whether the App Server's process group still has a member that can run. Zombies left behind by
+   * a host that does not reap orphans are not members: counting them would keep a killed tree
+   * reporting alive and hold the reap loop open for its whole bound.
+   */
   #processGroupIsAlive(): boolean {
     const { pid } = this.#process
-    if (pid === undefined) {
-      return false
-    }
-    try {
-      process.kill(-pid, 0)
-      return true
-    } catch {
-      return false
-    }
+    return pid !== undefined && processGroupIsAlive(pid)
   }
 
   /** Signals the whole App Server process group, not only the shell that started it. */
