@@ -101,11 +101,12 @@ result, and a later session-level error cannot relabel finished work. A process 
 to start settles every outstanding request and turn once, including the turn in flight, so no call
 waits out its timeout after the session is already gone.
 
-Malformed protocol data is reported as an event rather than ending the session, and
-`session_started` carries the thread id, turn id, the composed `thread:turn` session id, and the
-issue URL. Every event is attributed from the `threadId` and `turnId` the provoking message carries
-where it has them, so a message that arrives before the response introducing those ids is still
-recorded against the right turn.
+Malformed protocol data is reported as an event rather than ending the session. A session is one
+App Server thread, so `session_started` carries the thread id as both `threadId` and the stable
+`sessionId`; its `message` is null. Turn identity is reported independently through `turnId` and
+`turnCount`. Every event is attributed from the `threadId` and `turnId` the provoking message
+carries where it has them, so a message that arrives before the response introducing those ids is
+still recorded against the right turn.
 
 Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
 `codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output

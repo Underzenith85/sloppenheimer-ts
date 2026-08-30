@@ -34,6 +34,27 @@ const handleInitialize = (id: unknown): void => {
   if (scenario === 'stderr-noise') {
     process.stderr.write('warning: this is diagnostic only\n')
   }
+  if (scenario === 'split-stderr-secret') {
+    process.stderr.write('Authorization:')
+    setTimeout(() => {
+      process.stderr.write(' Bearer split-secret\n')
+      send({ id, result: { userAgent: 'fake-app-server/1.0' } })
+    }, 20)
+    return
+  }
+  if (scenario === 'pem-stderr-secret') {
+    process.stderr.write('PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n')
+    process.stderr.write('c2VjcmV0LXByaXZhdGUta2V5LWJvZHk=\n')
+    process.stderr.write('-----END PRIVATE KEY-----\n')
+  }
+  if (scenario === 'pgp-stderr-secret') {
+    process.stderr.write('-----BEGIN PGP PRIVATE KEY BLOCK-----\n')
+    process.stderr.write('c2VjcmV0LXBncC1wcml2YXRlLWtleQ==\n')
+    process.stderr.write('-----END PGP PRIVATE KEY BLOCK-----\n')
+  }
+  if (scenario === 'unterminated-stderr-secret') {
+    process.stderr.write('Authorization: Bearer final-secret')
+  }
   if (scenario === 'malformed') {
     sendRaw('this is not json\n')
     sendRaw('[1,2,3]\n')
@@ -74,6 +95,11 @@ const handleTurnStart = (id: unknown): void => {
     case 'turn-cancelled': {
       send({ id, result: { turn } })
       send({ method: 'turn/failed', params: { turn: { ...turn, status: 'cancelled' } } })
+      return
+    }
+    case 'turn-interrupted': {
+      send({ id, result: { turn } })
+      send({ method: 'turn/failed', params: { turn: { ...turn, status: 'interrupted' } } })
       return
     }
     case 'approval': {
@@ -317,6 +343,26 @@ const handle = (message: JsonRecord): void => {
     return
   }
   if (method === 'initialized') {
+    return
+  }
+  if (method === 'account/rateLimits/read') {
+    if (scenario === 'sparse-rate-limit-before-read') {
+      send({
+        method: 'account/rateLimits/updated',
+        params: { rateLimits: { primary: { usedPercent: 42 } } },
+      })
+    }
+    send({
+      id,
+      result: {
+        rateLimits: {
+          limitId: 'codex',
+          credits: { hasCredits: true, unlimited: false, balance: '20' },
+          primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 1_730_948_100 },
+          secondary: { usedPercent: 5, windowDurationMins: 1_440, resetsAt: 1_730_948_200 },
+        },
+      },
+    })
     return
   }
   if (method === 'thread/start') {
