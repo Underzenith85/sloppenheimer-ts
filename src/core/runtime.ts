@@ -747,7 +747,11 @@ export const startOrchestratorRuntime = (
     )
     let handoffStoreError: HandoffStoreError | null = null
     let storeReadFailed = false
-    const loadedHandoffs = yield* lastKnownGood.codeReview === null
+    // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
+    // never be written back over it. A later handoff-enabled run still has to restore those
+    // pull requests.
+    const handoffStoreDisabled = lastKnownGood.codeReview === null
+    const loadedHandoffs = yield* handoffStoreDisabled
       ? Effect.succeed<readonly HandoffSnapshot[]>([])
       : loadHandoffs(handoffStorePath).pipe(
           Effect.matchEffect({
@@ -797,7 +801,7 @@ export const startOrchestratorRuntime = (
       })),
     ]
     const persistHandoffs = (): Effect.Effect<void> => {
-      if (!startupRecoveryFinished || storeReadFailed) {
+      if (handoffStoreDisabled || !startupRecoveryFinished || storeReadFailed) {
         return Effect.void
       }
       return saveHandoffs(handoffStorePath, handoffSnapshots()).pipe(

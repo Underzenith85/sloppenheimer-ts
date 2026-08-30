@@ -2870,6 +2870,41 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('preserves the persisted handoff store while handoff is disabled', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-disabled-handoff-'))
+    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const persisted = {
+      issueId: issueId('75'),
+      identifier: issueIdentifier('example/symphony#75'),
+      pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+      branchName: 'symphony/issue-75',
+      state: 'awaiting_checks' as const,
+      headSha: 'persisted-head',
+      reason: null,
+      repairAttempts: 0,
+      observedAt: new Date(0).toISOString(),
+    }
+    await Effect.runPromise(saveHandoffs(storePath, [persisted]))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const harness = makeHarness(isolated)
+    const { makeCodeReview: omittedCodeReview, ...trackerOnlyDependencies } = harness.dependencies
+    void omittedCodeReview
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', trackerOnlyDependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs).toEqual([])
+    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toEqual([persisted])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('rejects enabled handoff when the provider does not supply CodeReviewPort', async (): Promise<void> => {
     const harness = makeHarness(workflow)
     const dependencies: OrchestratorDependencies = {
