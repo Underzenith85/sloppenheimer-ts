@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/codex.js'
+import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
+import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/adapters/codex/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
 import {
   issueId,
@@ -22,7 +23,6 @@ import {
   retryDelayMs,
   sortIssues,
   startOrchestrator,
-  codexAgentEventSemantics,
   type AgentDetailLookup,
   type OrchestratorControl,
   type OrchestratorDependencies,
