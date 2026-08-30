@@ -98,6 +98,26 @@ describe('GitHub provider-native tool extension', (): void => {
     })
   })
 
+  it.each([
+    {
+      name: 'case-insensitive duplicate labels',
+      argumentsValue: { add_labels: ['Ready', 'ready'] },
+    },
+    {
+      name: 'case-insensitive overlap between added and removed labels',
+      argumentsValue: { add_labels: ['Ready'], remove_labels: ['ready'] },
+    },
+  ])('rejects $name', async ({ argumentsValue }): Promise<void> => {
+    const tracker = makeGitHubTracker(provider)
+
+    await expect(
+      tracker.executeTool('github_handoff_issue', argumentsValue, toolContext),
+    ).resolves.toMatchObject({
+      success: false,
+      error: { code: 'invalid_arguments', retryable: false },
+    })
+  })
+
   it('maps auth, authorization, rate-limit, and transport errors to structured failures', async (): Promise<void> => {
     const missingAuth = makeGitHubTracker({ ...provider, token: '' })
     await expect(

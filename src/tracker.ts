@@ -216,7 +216,7 @@ const labelList = (value: JsonValue | undefined): readonly string[] | null => {
     if (typeof item !== 'string' || item.trim().length === 0 || item.length > 100) {
       return null
     }
-    labels.push(item)
+    labels.push(item.trim().toLowerCase())
   }
   return new Set(labels).size === labels.length ? labels : null
 }
