@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect } from 'effect'
@@ -61,6 +61,8 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
     async (): Promise<void> => {
       const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-real-integration-'))
       const identifier = `real-integration-${process.pid}-${Date.now().toString(36)}`
+      const workspacePath = join(workspaceRoot, identifier)
+      await mkdir(workspacePath)
       const issue: Issue = {
         id: issueId(identifier),
         nativeRef: null,
@@ -91,7 +93,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
         const result = await Effect.runPromise(
           runAgent({
             issue,
-            workspace: { path: workspaceRoot, key: identifier, createdNow: true },
+            workspace: { path: workspacePath, key: identifier, createdNow: true },
             workspaceRoot,
             config,
             prompt: 'This is an integration smoke test. Reply briefly without changing files.',
