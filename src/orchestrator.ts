@@ -956,7 +956,9 @@ export const startOrchestrator = (
         }
         entry.processId = update.processId
         entry.threadId = update.threadId ?? entry.threadId
-        entry.turnId = update.turnId ?? entry.turnId
+        if (update.turnId !== null && update.turnCount >= entry.turnCount) {
+          entry.turnId = update.turnId
+        }
         entry.sessionId = update.sessionId ?? entry.sessionId
         entry.turnCount = Math.max(entry.turnCount, update.turnCount)
         if (entry.sessionId !== null && update.event === 'session_started') {

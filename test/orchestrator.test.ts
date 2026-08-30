@@ -1139,7 +1139,27 @@ describe('session telemetry accounting', (): void => {
           )
           harness.emitAgentEvent(
             makeAgentEvent({
+              event: 'turn_started',
+              turnId: 'turn-2',
+              turnCount: 2,
+              message: null,
+              usage: null,
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'turn/usage',
+              turnId: 'turn-1',
+              turnCount: 1,
+              message: null,
+              usage: null,
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
               event: 'turn/terminated',
+              turnId: 'turn-2',
+              turnCount: 2,
               message: null,
               turnStatus: 'timed_out',
               usage: null,
@@ -1151,9 +1171,9 @@ describe('session telemetry accounting', (): void => {
           const live = yield* control.snapshot
           expect(live.running[0]).toMatchObject({
             threadId: 'thread-1',
-            turnId: 'turn-1',
+            turnId: 'turn-2',
             sessionId: 'thread-1',
-            turnCount: 1,
+            turnCount: 2,
             processId: 123,
             lastMessage: 'meaningful update',
             tokens: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },

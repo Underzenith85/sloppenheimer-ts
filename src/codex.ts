@@ -324,6 +324,7 @@ class CodexConnection {
   readonly #waiters = new Map<string, TurnWaiter>()
   readonly #turnUsage = new Map<string, NonNullable<AgentEvent['usage']>>()
   readonly #startedTurns = new Set<string>()
+  readonly #turnCounts = new Map<string, number>()
   #nextId = 1
   #closed = false
   /**
@@ -800,6 +801,7 @@ class CodexConnection {
       return
     }
     this.#startedTurns.add(turnId)
+    this.#turnCounts.set(turnId, turnCount)
     this.#turnId = turnId
     this.#turnCount = turnCount
     this.#emit('turn_started', null, { threadId, turnId })
@@ -897,7 +899,8 @@ class CodexConnection {
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
-      turnCount: this.#turnCount,
+      turnCount:
+        turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
       turnStatus: terminalStatus,
     })
     if (!isTerminal) {
@@ -964,7 +967,8 @@ class CodexConnection {
       threadId,
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
-      turnCount: this.#turnCount,
+      turnCount:
+        turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
       turnStatus,
     })
   }
