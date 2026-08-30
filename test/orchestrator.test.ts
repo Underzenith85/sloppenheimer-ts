@@ -4,12 +4,17 @@ import { join } from 'node:path'
 import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import type { AgentResult } from '../src/codex.js'
+import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
-import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
+import {
+  issueId,
+  issueIdentifier,
+  type BlockerRef,
+  type Issue,
+  type JsonObject,
+} from '../src/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import {
-  flattenRateLimits,
   issueIsRoutable,
   retainedCompletedDetails,
   retryDelayMs,
@@ -211,6 +216,7 @@ type TestHarness = Readonly<{
   workspaceWorkflows: () => readonly Workflow[]
   agentRuns: () => readonly Readonly<{ command: string; prompt: string; maxTurns: number }>[]
   awaitAgentRun: Effect.Effect<void>
+  emitAgentEvent: (event: AgentEvent) => void
 }>
 
 const makeHarness = (
@@ -232,6 +238,7 @@ const makeHarness = (
   const workspaceWorkflows: Workflow[] = []
   const agentRuns: Readonly<{ command: string; prompt: string; maxTurns: number }>[] = []
   let resolveAgentRun = (): void => undefined
+  let onAgentEvent = (_event: AgentEvent): void => undefined
   const agentRun = new Promise<void>((resolve) => {
     resolveAgentRun = resolve
   })
@@ -281,9 +288,10 @@ const makeHarness = (
         remove: () => Effect.void,
       }
     },
-    runAgent: ({ config, prompt, maxTurns }) =>
+    runAgent: ({ config, prompt, maxTurns, onEvent }) =>
       Effect.sync(() => {
         agentRuns.push({ command: config.command, prompt, maxTurns })
+        onAgentEvent = onEvent
         resolveAgentRun()
       }).pipe(Effect.zipRight(Effect.never)),
     environment,
@@ -309,6 +317,9 @@ const makeHarness = (
     workspaceWorkflows: () => workspaceWorkflows,
     agentRuns: () => agentRuns,
     awaitAgentRun: Effect.promise(() => agentRun),
+    emitAgentEvent: (event) => {
+      onAgentEvent(event)
+    },
   }
 }
 
@@ -1111,15 +1122,19 @@ const makeAgentFactory = (): Readonly<{
       Effect.async<AgentResult, AgentError>((resume) => {
         agents.set(launch.issue.identifier, {
           notify: (method, params) => {
+            const telemetry = telemetryFrom(method, { params: params as JsonObject })
             launch.onEvent({
               event: method,
               timestamp: new Date(),
               processId: 4242,
               message: null,
-              usage: null,
+              usage: telemetry.usage,
+              rateLimits: telemetry.rateLimits,
               threadId: 'thread-1',
               turnId: 'turn-1',
-              sessionId: 'thread-1:turn-1',
+              sessionId: 'thread-1',
+              turnCount: 1,
+              turnStatus: null,
               payload: normalizePayload(
                 method,
                 params as Parameters<typeof normalizePayload>[1],
@@ -1202,14 +1217,16 @@ describe('live agent detail', (): void => {
           })
           agent.notify('turn/usage', {
             usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+          })
+          agent.notify('account/rateLimits/updated', {
             rateLimits: { primary: { usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 } },
           })
           const detail = yield* Effect.promise(() =>
             awaitDetail(
               control,
               'example/symphony#7',
-              (candidate) => candidate.timeline.events.length >= 4,
-              'four retained events',
+              (candidate) => candidate.timeline.events.length >= 5,
+              'five retained events',
             ),
           )
           const snapshot = yield* control.snapshot
@@ -1227,14 +1244,16 @@ describe('live agent detail', (): void => {
       'command',
       'file',
       'usage',
+      'usage',
     ])
-    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4])
-    expect(JSON.stringify(detail)).toContain('[redacted]')
+    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5])
+    expect(JSON.stringify(detail)).toContain('[REDACTED]')
     expect(JSON.stringify(detail)).not.toContain('s3cret-token-value')
     expect(detail.identity).toMatchObject({
       threadId: 'thread-1',
       turnId: 'turn-1',
-      sessionId: 'thread-1:turn-1',
+      // Session identity is the thread, stable for the session's whole lifetime.
+      sessionId: 'thread-1',
       processId: 4242,
       turnNumber: 1,
       workerHost: 'local',
@@ -1245,11 +1264,9 @@ describe('live agent detail', (): void => {
     ])
     expect(detail.workspace).toMatchObject({ dirtyFileCount: 1, addedLines: 9, deletedLines: 1 })
     expect(detail.activity.stallTimeoutMs).toBe(30_000)
-    expect(observed.snapshot.rateLimits).toEqual(
-      flattenRateLimits([
-        { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
-      ]),
-    )
+    // The runtime snapshot keeps the client's own merged rate-limit object; the per-agent detail
+    // is the typed view of the same reading.
+    expect(observed.snapshot.rateLimits).toMatchObject({ primary: { usedPercent: 40 } })
   })
 
   it('separates attempts across a retry while keeping one rising sequence', async (): Promise<void> => {
@@ -1632,5 +1649,191 @@ describe('aged-out agent detail', (): void => {
 
     expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
     await rm(workspaceRoot, { force: true, recursive: true })
+  })
+})
+
+const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
+  event: 'thread/tokenUsage/updated',
+  timestamp: new Date(),
+  processId: 123,
+  message: 'working',
+  threadId: 'thread-1',
+  turnId: 'turn-1',
+  sessionId: 'thread-1',
+  turnCount: 1,
+  turnStatus: null,
+  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  rateLimits: null,
+  payload: { kind: 'none' },
+  ...overrides,
+})
+
+describe('session telemetry accounting', (): void => {
+  it('tracks metadata and rate limits without double-counting repeated absolute totals', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* harness.awaitAgentRun
+          harness.emitAgentEvent(makeAgentEvent({ event: 'session_started', usage: null }))
+          harness.emitAgentEvent(makeAgentEvent())
+          harness.emitAgentEvent(makeAgentEvent())
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              usage: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
+              rateLimits: {
+                limitId: 'codex',
+                credits: { hasCredits: true, balance: '20' },
+                primary: { usedPercent: 25, windowDurationMins: 300 },
+              },
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({ event: 'item/completed', message: 'meaningful update', usage: null }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'account/rateLimits/updated',
+              message: null,
+              usage: null,
+              rateLimits: {
+                secondary: { usedPercent: 5, windowDurationMins: 1_440 },
+              },
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'account/rateLimits/updated',
+              message: null,
+              usage: null,
+              rateLimits: { credits: { balance: null } },
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'turn_started',
+              turnId: 'turn-2',
+              turnCount: 2,
+              message: null,
+              usage: null,
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'turn/usage',
+              turnId: 'turn-1',
+              turnCount: 1,
+              message: null,
+              usage: null,
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'turn/terminated',
+              turnId: 'turn-2',
+              turnCount: 2,
+              message: null,
+              turnStatus: 'timed_out',
+              usage: null,
+            }),
+          )
+          yield* Effect.yieldNow()
+          yield* Effect.yieldNow()
+
+          const live = yield* control.snapshot
+          expect(live.running[0]).toMatchObject({
+            threadId: 'thread-1',
+            turnId: 'turn-2',
+            sessionId: 'thread-1',
+            turnCount: 2,
+            processId: 123,
+            lastMessage: 'meaningful update',
+            tokens: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
+          })
+          expect(live.totals).toMatchObject({ inputTokens: 14, outputTokens: 7, totalTokens: 21 })
+          expect(live.rateLimits).toMatchObject({
+            limitId: 'codex',
+            credits: { hasCredits: true, balance: null },
+            primary: { usedPercent: 25, windowDurationMins: 300 },
+            secondary: { usedPercent: 5, windowDurationMins: 1_440 },
+          })
+
+          yield* control.setIssuePaused(16, true)
+          const cancelled = yield* control.snapshot
+          expect(cancelled.running).toEqual([])
+          expect(cancelled.totals).toMatchObject({
+            inputTokens: 14,
+            outputTokens: 7,
+            totalTokens: 21,
+          })
+        }),
+      ),
+    )
+  })
+
+  it('retains ended usage while a retry starts a fresh absolute counter', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let runCount = 0
+    let resolveSecondRun = (): void => undefined
+    const secondRun = new Promise<void>((resolve) => {
+      resolveSecondRun = resolve
+    })
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: ({ onEvent }) =>
+        Effect.suspend(() => {
+          runCount += 1
+          onEvent(
+            makeAgentEvent({
+              threadId: `thread-${String(runCount)}`,
+              sessionId: `thread-${String(runCount)}`,
+              usage:
+                runCount === 1
+                  ? { inputTokens: 8, outputTokens: 2, totalTokens: 10 }
+                  : { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+            }),
+          )
+          if (runCount === 1) {
+            return Effect.fail(
+              new AgentError({ category: 'process_exited', message: 'test process exited' }),
+            )
+          }
+          resolveSecondRun()
+          return Effect.never
+        }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          while (runCount < 1) {
+            yield* Effect.yieldNow()
+          }
+          yield* Effect.yieldNow()
+          const retrying = yield* control.snapshot
+          expect(retrying.totals).toMatchObject({
+            inputTokens: 8,
+            outputTokens: 2,
+            totalTokens: 10,
+          })
+          expect(retrying.retrying[0]?.attempt).toBe(1)
+
+          yield* TestClock.adjust(10_000)
+          yield* Effect.promise(() => secondRun)
+          yield* Effect.yieldNow()
+          const retried = yield* control.snapshot
+          expect(retried.totals).toMatchObject({
+            inputTokens: 12,
+            outputTokens: 3,
+            totalTokens: 15,
+          })
+        }),
+      ),
+    )
   })
 })

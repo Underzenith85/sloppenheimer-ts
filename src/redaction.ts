@@ -6,9 +6,17 @@
  * resident in memory, visible to any later consumer, and dependent on every response path
  * remembering to apply it; redacting at ingest means the retained value never held the secret at
  * all.
+ *
+ * This composes the host's structural redactor from `logging.ts` — secret-named keys in any quoting
+ * style, `Authorization` and `Cookie` headers, bearer tokens, URL credentials, and PEM blocks —
+ * rather than restating it. What is added here is what retained telemetry needs beyond it: values
+ * that are credentials by *shape* wherever they appear, the resolved values of the environment
+ * variables the host treats as secret, and the bounding every retained string is subject to.
  */
 
-export const redactionMarker = '[redacted]'
+import { redactSecretsInString } from './logging.js'
+
+export const redactionMarker = '[REDACTED]'
 
 /** The longest retained free-text summary. Anything longer is cut and reported as truncated. */
 export const summaryLimit = 240
@@ -24,7 +32,6 @@ export type BoundedText = Readonly<{
  * from most specific to least so a longer match is consumed before a shorter one inside it.
  */
 const credentialPatterns: readonly RegExp[] = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
   /\b(?:github_pat_|ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9_]{16,}/gu,
   /\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}/gu,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/gu,
@@ -32,22 +39,9 @@ const credentialPatterns: readonly RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gu,
 ]
 
-/** `Authorization: Bearer …`, `token …`, and the equivalent forms tools print when they trace. */
-const bearerPattern = /\b(authorization|bearer|token)([:=]?\s+)[A-Za-z0-9._~+/-]{8,}={0,2}/giu
-
-/** Credentials embedded in a URL authority, keeping the scheme and host legible. */
-const urlCredentialPattern = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/giu
-
 /** Query-string parameters that carry a credential by convention. */
 const queryCredentialPattern =
   /([?&](?:access_token|api_key|apikey|auth|code|key|password|secret|sig|signature|token)=)[^&\s]+/giu
-
-/**
- * Environment-like assignments. The *name* is kept — an operator needs to know which value was
- * withheld — and only the value is replaced, including quoted and exported forms.
- */
-const assignmentPattern =
-  /\b((?:export\s+)?[A-Za-z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|AUTH|COOKIE|SESSION|PRIVATE)[A-Za-z0-9_]*)(\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/giu
 
 const escapeLiteral = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 
@@ -61,15 +55,11 @@ const literalMinimumLength = 8
 export type Redactor = (value: string) => string
 
 const applyPatterns = (value: string): string => {
-  let result = value
+  let result = redactSecretsInString(value)
   for (const pattern of credentialPatterns) {
     result = result.replace(pattern, redactionMarker)
   }
-  result = result.replace(urlCredentialPattern, `$1${redactionMarker}@`)
-  result = result.replace(queryCredentialPattern, `$1${redactionMarker}`)
-  result = result.replace(bearerPattern, `$1$2${redactionMarker}`)
-  result = result.replace(assignmentPattern, `$1$2${redactionMarker}`)
-  return result
+  return result.replace(queryCredentialPattern, `$1${redactionMarker}`)
 }
 
 /**

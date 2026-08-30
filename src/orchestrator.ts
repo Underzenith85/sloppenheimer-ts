@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import chokidar from 'chokidar'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
-import { runAgent, type AgentEvent } from './codex.js'
+import { isCancelledTurnStatus, runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
 import {
   issueId,
@@ -10,11 +10,13 @@ import {
   type Issue,
   type IssueId,
   type IssueIdentifier,
+  type JsonObject,
   type TokenTotals,
 } from './domain.js'
 import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
+import { logError, logInfo, logWarning } from './logging.js'
 import {
   agentDetailPath,
   buildAgentDetail,
@@ -28,7 +30,6 @@ import {
   type AgentDetailRecord,
   type AgentDetailSnapshot,
   type AgentDetailStatus,
-  type RateLimitWindow,
 } from './telemetry.js'
 import { issueBranchName, makeGitHubTracker, type TrackerAdapter } from './tracker.js'
 import { sameTrackerProvider } from './tracker-config.js'
@@ -44,8 +45,15 @@ type RunningEntry = {
   startedAt: Date
   lastEventAt: Date | null
   lastEvent: string | null
+  lastMessage: string | null
   processId: number | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
+  turnActive: boolean
   tokens: Omit<TokenTotals, 'secondsRunning'>
+  lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
 }
 
 type RetryEntry = {
@@ -78,8 +86,14 @@ export type RunningSnapshot = Readonly<{
   startedAt: string
   lastEventAt: string | null
   lastEvent: string | null
+  lastMessage: string | null
   processId: number | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
   tokens: Omit<TokenTotals, 'secondsRunning'>
+  lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
   workerHost: 'local'
   /** Stable link to the versioned detail resource for this agent. */
   detailUrl: string
@@ -127,7 +141,7 @@ export type OrchestratorSnapshot = Readonly<{
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
   totals: TokenTotals
-  rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  rateLimits: JsonObject | null
 }>
 
 export type OrchestratorControl = Readonly<{
@@ -187,7 +201,7 @@ type RuntimeState = {
   pausedIssueNumbers: Set<number>
   handoffs: Map<IssueId, HandoffEntry>
   totals: TokenTotals
-  rateLimits: Readonly<Record<string, string | number | boolean | null>> | null
+  rateLimits: JsonObject | null
   /** Actor-owned agent telemetry, keyed by issue and preserved across that issue's retries. */
   details: Map<IssueId, AgentDetailRecord>
   /** Issues whose detail record outlived its session, oldest first. */
@@ -273,27 +287,6 @@ const initialState = (): RuntimeState => ({
   agedOutDetails: new Set(),
   identifiers: new Map(),
 })
-
-/**
- * Flattens typed rate-limit windows into the runtime snapshot's scalar map, so the existing
- * operator contract keeps its shape while finally carrying observed values.
- */
-export const flattenRateLimits = (
-  windows: readonly RateLimitWindow[],
-): Readonly<Record<string, string | number | boolean | null>> | null => {
-  if (windows.length === 0) {
-    return null
-  }
-  const entries: [string, number | null][] = []
-  for (const window of windows) {
-    entries.push(
-      [`${window.name}.used_percent`, window.usedPercent],
-      [`${window.name}.window_minutes`, window.windowMinutes],
-      [`${window.name}.resets_in_seconds`, window.resetsInSeconds],
-    )
-  }
-  return Object.freeze(Object.fromEntries(entries))
-}
 
 export const retryDelayMs = (attempt: number, maximumMs: number): number =>
   Math.min(10_000 * 2 ** Math.max(attempt - 1, 0), maximumMs)
@@ -389,6 +382,31 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_identifier: issue.identifier,
 })
 
+const isJsonObjectValue = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
+  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
+  for (const [key, value] of Object.entries(update)) {
+    const existing = merged[key]
+    merged[key] =
+      isJsonObjectValue(existing) && isJsonObjectValue(value)
+        ? mergeSparseObject(existing, value)
+        : value
+  }
+  return merged
+}
+
+const sessionLogContext = (
+  entry: RunningEntry,
+): Readonly<Record<string, string | number | null>> => ({
+  ...logContext(entry.issue),
+  session_id: entry.sessionId,
+  thread_id: entry.threadId,
+  turn_id: entry.turnId,
+  turn_count: entry.turnCount,
+})
+
 const identifierIssueNumber = (identifier: string): number | null => {
   const match = /#(\d+)$/u.exec(identifier)
   return match?.[1] === undefined ? null : Number(match[1])
@@ -418,7 +436,7 @@ export const startOrchestrator = (
               .pipe(
                 Effect.matchEffect({
                   onFailure: (error) =>
-                    Effect.logWarning('startup terminal issue fetch failed; continuing', {
+                    logWarning('startup terminal issue fetch failed; continuing', {
                       state,
                       error: error.message,
                     }).pipe(Effect.as<readonly Issue[]>([])),
@@ -434,8 +452,10 @@ export const startOrchestrator = (
           const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
             Effect.matchEffect({
               onFailure: (error) =>
-                Effect.logWarning('startup workspace inspection failed; continuing', {
+                logWarning('startup workspace inspection failed; continuing', {
                   ...logContext(issue),
+                  action: 'workspace_inspection',
+                  outcome: 'failed',
                   error: error.message,
                 }).pipe(Effect.as<boolean | null>(null)),
               onSuccess: (exists) => Effect.succeed<boolean | null>(exists),
@@ -449,8 +469,10 @@ export const startOrchestrator = (
             .pipe(
               Effect.matchEffect({
                 onFailure: (error) =>
-                  Effect.logWarning('startup terminal issue recheck failed; continuing', {
+                  logWarning('startup terminal issue recheck failed; continuing', {
                     ...logContext(issue),
+                    action: 'terminal_recheck',
+                    outcome: 'failed',
                     error: error.message,
                   }).pipe(Effect.as<readonly Issue[] | null>(null)),
                 onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
@@ -465,8 +487,10 @@ export const startOrchestrator = (
           }
           yield* effective.workspaces.remove(current.identifier).pipe(
             Effect.catchAll((error) =>
-              Effect.logWarning('startup terminal workspace cleanup failed; continuing', {
+              logWarning('startup terminal workspace cleanup failed; continuing', {
                 ...logContext(current),
+                action: 'workspace_cleanup',
+                outcome: 'failed',
                 error: error.message,
               }),
             ),
@@ -476,6 +500,9 @@ export const startOrchestrator = (
     yield* cleanupTerminalWorkspaces(lastKnownGood)
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
+    const pendingUsage = new Map<IssueId, NonNullable<AgentEvent['usage']>>()
+    const pendingLifecycle = new Map<IssueId, AgentEvent[]>()
+    let pendingRateLimits: JsonObject | null = null
     /**
      * The immutable detail index published by the actor. Every consumer reads this; nothing outside
      * the event loop ever reaches `state.details`.
@@ -502,7 +529,6 @@ export const startOrchestrator = (
       attempts: [...record.attempts],
       sessions: [...record.sessions],
       errors: [...record.errors],
-      turnIds: new Set(record.turnIds),
       changedPaths: new Map(record.changedPaths),
       tokens: { ...record.tokens },
       rateLimits: [...record.rateLimits],
@@ -693,7 +719,7 @@ export const startOrchestrator = (
     const nextRefreshWaiters: Deferred.Deferred<void>[] = []
 
     const offerFromCallback = (event: OrchestratorEvent): void => {
-      Effect.runFork(Queue.offer(mailbox, event))
+      Effect.runSync(Queue.offer(mailbox, event))
     }
 
     const requestTick = (source: 'startup' | 'timer' | 'change'): Effect.Effect<void> =>
@@ -770,9 +796,11 @@ export const startOrchestrator = (
         if (record !== undefined) {
           recordRetryScheduled(record, new Date(), attempt, new Date(dueAt), error)
         }
-        yield* Effect.logInfo('retry scheduled', {
+        yield* logInfo('action=retry outcome=scheduled', {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
+          action: 'retry',
+          outcome: 'scheduled',
           attempt,
           due_at: new Date(dueAt).toISOString(),
           error,
@@ -838,8 +866,10 @@ export const startOrchestrator = (
           }),
         )
         if (preflight._tag === 'Failed') {
-          yield* Effect.logError('dispatch preflight failed', {
+          yield* logError('action=dispatch outcome=failed', {
             ...logContext(issue),
+            action: 'dispatch',
+            outcome: 'failed',
             error: preflight.error.message,
           })
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
@@ -897,6 +927,31 @@ export const startOrchestrator = (
                     issueIsActiveInSnapshot(refreshed, execution) &&
                     issueIsRoutableInSnapshot(refreshed, execution),
                   onEvent: (update) => {
+                    if (update.usage !== null) {
+                      const previous = pendingUsage.get(issue.id)
+                      pendingUsage.set(issue.id, {
+                        inputTokens: Math.max(previous?.inputTokens ?? 0, update.usage.inputTokens),
+                        outputTokens: Math.max(
+                          previous?.outputTokens ?? 0,
+                          update.usage.outputTokens,
+                        ),
+                        totalTokens: Math.max(previous?.totalTokens ?? 0, update.usage.totalTokens),
+                      })
+                    }
+                    if (update.rateLimits !== null) {
+                      pendingRateLimits = mergeSparseObject(pendingRateLimits, update.rateLimits)
+                    }
+                    if (
+                      update.event === 'session_started' ||
+                      update.event === 'turn_started' ||
+                      update.event === 'turn/completed' ||
+                      update.event === 'turn/failed' ||
+                      update.event === 'turn/terminated'
+                    ) {
+                      const queued = pendingLifecycle.get(issue.id) ?? []
+                      queued.push(update)
+                      pendingLifecycle.set(issue.id, queued)
+                    }
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
                 }),
@@ -935,10 +990,21 @@ export const startOrchestrator = (
           startedAt: new Date(),
           lastEventAt: null,
           lastEvent: null,
+          lastMessage: null,
           processId: null,
+          threadId: null,
+          turnId: null,
+          sessionId: null,
+          turnCount: 0,
+          turnActive: false,
           tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         })
-        yield* Effect.logInfo('worker dispatched', logContext(issue))
+        yield* logInfo('action=dispatch outcome=started', {
+          ...logContext(issue),
+          action: 'dispatch',
+          outcome: 'started',
+        })
       })
 
     /** Mirrors an observed pull-request disposition onto the issue's retained handoff detail. */
@@ -1049,8 +1115,11 @@ export const startOrchestrator = (
             state.handoffs.delete(id)
             state.completed.add(id)
             state.claimed.delete(id)
-            yield* Effect.logInfo('pull request merged', {
+            yield* logInfo('pull request merged', {
               ...logContext(handoff.issue),
+              action: 'pull_request_merge',
+              outcome: 'completed',
+              error: null,
               pull_request_url: handoff.pullRequestUrl,
               merge_commit_sha: merged.sha,
             })
@@ -1115,28 +1184,132 @@ export const startOrchestrator = (
       }
     }
 
+    const applyPendingTelemetry = (id: IssueId, entry: RunningEntry): void => {
+      const usage = pendingUsage.get(id)
+      if (usage !== undefined) {
+        entry.lastReportedTokens = usage
+        entry.tokens = {
+          inputTokens: Math.max(entry.tokens.inputTokens, usage.inputTokens),
+          outputTokens: Math.max(entry.tokens.outputTokens, usage.outputTokens),
+          totalTokens: Math.max(entry.tokens.totalTokens, usage.totalTokens),
+        }
+      }
+      if (pendingRateLimits !== null) {
+        state.rateLimits = mergeSparseObject(state.rateLimits, pendingRateLimits)
+        pendingRateLimits = null
+      }
+      pendingUsage.delete(id)
+    }
+
+    const applyLifecycleUpdate = (entry: RunningEntry, update: AgentEvent): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        entry.lastEvent = update.event
+        entry.lastEventAt = update.timestamp
+        if (update.message !== null) {
+          entry.lastMessage = update.message
+        }
+        entry.processId = update.processId
+        entry.threadId = update.threadId ?? entry.threadId
+        if (update.turnId !== null && update.turnCount >= entry.turnCount) {
+          entry.turnId = update.turnId
+        }
+        entry.sessionId = update.sessionId ?? entry.sessionId
+        entry.turnCount = Math.max(entry.turnCount, update.turnCount)
+        if (entry.sessionId !== null && update.event === 'session_started') {
+          yield* logInfo('action=session outcome=started', {
+            ...sessionLogContext(entry),
+            action: 'session',
+            outcome: 'started',
+            error: null,
+          })
+        }
+        if (entry.sessionId !== null && update.event === 'turn_started') {
+          entry.turnActive = true
+          yield* logInfo('action=turn outcome=started', {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome: 'started',
+            error: null,
+          })
+        }
+        if (
+          entry.sessionId !== null &&
+          (update.event === 'turn/completed' ||
+            update.event === 'turn/failed' ||
+            update.event === 'turn/terminated') &&
+          update.turnStatus !== null
+        ) {
+          const completed = update.turnStatus === 'completed'
+          const cancelled = isCancelledTurnStatus(update.turnStatus)
+          const outcome = completed ? 'completed' : cancelled ? 'cancelled' : 'failed'
+          entry.turnActive = false
+          yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome,
+            error: completed || cancelled ? null : `turn finished with status ${update.turnStatus}`,
+          })
+        }
+      })
+
+    const takePendingLifecycle = (id: IssueId): readonly AgentEvent[] => {
+      const updates = pendingLifecycle.get(id) ?? []
+      pendingLifecycle.delete(id)
+      return updates
+    }
+
     const cancelRunning = (
       id: IssueId,
       cleanupWorkspace: boolean,
       reason = 'the orchestrator cancelled the run',
     ): Effect.Effect<RunningEntry | null, never> =>
       Effect.gen(function* () {
-        const entry = endRunning(id, null)
-        if (entry === null) {
+        const entry = state.running.get(id)
+        if (entry === undefined) {
           return null
         }
+        const queuedBeforeInterruption = pendingLifecycle.get(id)?.length ?? 0
+        yield* Fiber.interrupt(entry.fiber)
+        const queuedLifecycle = takePendingLifecycle(id)
+        yield* Effect.forEach(
+          queuedLifecycle.slice(0, queuedBeforeInterruption),
+          (update) => applyLifecycleUpdate(entry, update),
+          {
+            discard: true,
+          },
+        )
+        if (entry.sessionId !== null && entry.turnId !== null && entry.turnActive) {
+          yield* logInfo('action=turn outcome=cancelled', {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome: 'cancelled',
+            error: null,
+          })
+          entry.turnActive = false
+        }
+        applyPendingTelemetry(id, entry)
+        endRunning(id, null)
         accountEndedRuntime(entry, Date.now())
         const record = state.details.get(id)
         if (record !== undefined) {
           recordCancellation(record, new Date(), reason)
         }
         state.claimed.delete(id)
-        yield* Fiber.interrupt(entry.fiber)
+        if (entry.sessionId !== null) {
+          yield* logInfo('action=session outcome=cancelled', {
+            ...sessionLogContext(entry),
+            action: 'session',
+            outcome: 'cancelled',
+            error: null,
+          })
+        }
         if (cleanupWorkspace) {
           yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
             Effect.catchAll((error) =>
-              Effect.logWarning('terminal workspace cleanup failed', {
+              logWarning('terminal workspace cleanup failed', {
                 ...logContext(entry.issue),
+                action: 'workspace_cleanup',
+                outcome: 'failed',
                 error: error.message,
               }),
             ),
@@ -1178,8 +1351,10 @@ export const startOrchestrator = (
             }),
           )
           if (refreshResult._tag === 'Failed') {
-            yield* Effect.logWarning('reconciliation failed; keeping worker running', {
+            yield* logWarning('reconciliation failed; keeping worker running', {
               ...logContext(entry.issue),
+              action: 'reconciliation',
+              outcome: 'failed',
               error: refreshResult.error.message,
             })
             continue
@@ -1213,18 +1388,15 @@ export const startOrchestrator = (
           }),
         )
         if (revalidated._tag === 'Failed') {
-          yield* Effect.logError(
-            'tracker credential validation failed; retaining last known good',
-            {
-              error: revalidated.error.message,
-              effective_fingerprint: lastKnownGood.workflow.fingerprint,
-            },
-          )
+          yield* logError('tracker credential validation failed; retaining last known good', {
+            error: revalidated.error.message,
+            effective_fingerprint: lastKnownGood.workflow.fingerprint,
+          })
         } else if (revalidated.value !== lastKnownGood) {
           const previousTracker = lastKnownGood.tracker
           lastKnownGood = revalidated.value
           adoptTracker(previousTracker, revalidated.value.tracker)
-          yield* Effect.logInfo('tracker credential refreshed from the environment', {
+          yield* logInfo('tracker credential refreshed from the environment', {
             tracker_kind: revalidated.value.workflow.tracker.kind,
             secret_environment_name:
               revalidated.value.workflow.tracker.provider.tokenEnvironmentName,
@@ -1237,7 +1409,7 @@ export const startOrchestrator = (
           Effect.matchEffect({
             onFailure: (error) => {
               workflowReloadError = { message: error.message, observedAt: new Date() }
-              return Effect.logError('workflow validation failed; retaining last known good', {
+              return logError('workflow validation failed; retaining last known good', {
                 error: error.message,
                 effective_fingerprint: lastKnownGood.workflow.fingerprint,
               }).pipe(Effect.as<Workflow | null>(null))
@@ -1249,7 +1421,7 @@ export const startOrchestrator = (
           workflowReloadError = null
           if (reloaded.fingerprint !== lastKnownGood.workflow.fingerprint) {
             lastKnownGood = makeEffectiveWorkflow(reloaded)
-            yield* Effect.logInfo('workflow reloaded', {
+            yield* logInfo('workflow reloaded', {
               path: reloaded.path,
               fingerprint: reloaded.fingerprint,
             })
@@ -1266,7 +1438,7 @@ export const startOrchestrator = (
           )
           .pipe(
             Effect.catchAll((error) =>
-              Effect.logError('candidate fetch failed', { error: error.message }).pipe(
+              logError('candidate fetch failed', { error: error.message }).pipe(
                 Effect.as<readonly Issue[]>([]),
               ),
             ),
@@ -1294,6 +1466,14 @@ export const startOrchestrator = (
       const activeSeconds = [...state.running.values()].reduce(
         (total, entry) => total + (now - entry.startedAt.getTime()) / 1_000,
         0,
+      )
+      const activeTokens = [...state.running.values()].reduce(
+        (totals, entry) => ({
+          inputTokens: totals.inputTokens + entry.tokens.inputTokens,
+          outputTokens: totals.outputTokens + entry.tokens.outputTokens,
+          totalTokens: totals.totalTokens + entry.tokens.totalTokens,
+        }),
+        { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
       )
       return {
         generatedAt: new Date(now).toISOString(),
@@ -1327,8 +1507,14 @@ export const startOrchestrator = (
           startedAt: entry.startedAt.toISOString(),
           lastEventAt: entry.lastEventAt?.toISOString() ?? null,
           lastEvent: entry.lastEvent,
+          lastMessage: entry.lastMessage,
           processId: entry.processId,
+          threadId: entry.threadId,
+          turnId: entry.turnId,
+          sessionId: entry.sessionId,
+          turnCount: entry.turnCount,
           tokens: entry.tokens,
+          lastReportedTokens: entry.lastReportedTokens,
           workerHost: 'local',
           detailUrl: agentDetailPath(entry.issue.identifier),
         })),
@@ -1344,7 +1530,9 @@ export const startOrchestrator = (
           detailUrl: agentDetailPath(entry.issue.identifier),
         })),
         totals: {
-          ...state.totals,
+          inputTokens: state.totals.inputTokens + activeTokens.inputTokens,
+          outputTokens: state.totals.outputTokens + activeTokens.outputTokens,
+          totalTokens: state.totals.totalTokens + activeTokens.totalTokens,
           secondsRunning: state.totals.secondsRunning + activeSeconds,
         },
         rateLimits: state.rateLimits,
@@ -1402,11 +1590,33 @@ export const startOrchestrator = (
           case 'AgentUpdate': {
             const entry = state.running.get(event.issueId)
             if (entry !== undefined) {
-              entry.lastEvent = event.update.event
-              entry.lastEventAt = event.update.timestamp
-              entry.processId = event.update.processId
+              yield* applyLifecycleUpdate(entry, event.update)
+              const queued = pendingLifecycle.get(event.issueId)
+              if (queued !== undefined) {
+                const index = queued.indexOf(event.update)
+                if (index >= 0) {
+                  queued.splice(index, 1)
+                }
+                if (queued.length === 0) {
+                  pendingLifecycle.delete(event.issueId)
+                }
+              }
               if (event.update.usage !== null) {
-                entry.tokens = event.update.usage
+                entry.lastReportedTokens = event.update.usage
+                entry.tokens = {
+                  inputTokens: Math.max(entry.tokens.inputTokens, event.update.usage.inputTokens),
+                  outputTokens: Math.max(
+                    entry.tokens.outputTokens,
+                    event.update.usage.outputTokens,
+                  ),
+                  totalTokens: Math.max(entry.tokens.totalTokens, event.update.usage.totalTokens),
+                }
+              }
+              if (event.update.rateLimits !== null) {
+                state.rateLimits = mergeSparseObject(state.rateLimits, event.update.rateLimits)
+                if (pendingRateLimits === event.update.rateLimits) {
+                  pendingRateLimits = null
+                }
               }
             }
             const record = state.details.get(event.issueId)
@@ -1414,9 +1624,6 @@ export const startOrchestrator = (
             // has already ended belongs to no attempt.
             if (entry !== undefined && record !== undefined) {
               recordAgentEvent(record, event.update)
-              if (record.rateLimits.length > 0) {
-                state.rateLimits = flattenRateLimits(record.rateLimits)
-              }
             }
             break
           }
@@ -1425,8 +1632,22 @@ export const startOrchestrator = (
             if (entry === null) {
               break
             }
+            applyPendingTelemetry(event.issueId, entry)
             accountEndedRuntime(entry, Date.now())
             const record = state.details.get(event.issueId)
+            if (entry.sessionId !== null) {
+              yield* (event.outcome === 'normal' ? logInfo : logError)(
+                event.outcome === 'normal'
+                  ? 'action=session outcome=completed'
+                  : 'action=session outcome=failed',
+                {
+                  ...sessionLogContext(entry),
+                  action: 'session',
+                  outcome: event.outcome === 'normal' ? 'completed' : 'failed',
+                  error: event.error,
+                },
+              )
+            }
             if (event.outcome === 'normal') {
               const handoff = yield* entry.execution.tracker
                 .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
@@ -1507,8 +1728,11 @@ export const startOrchestrator = (
                 observedAt: new Date(),
               })
               yield* persistHandoffs()
-              yield* Effect.logInfo('worker handed off pull request', {
+              yield* logInfo('worker handed off pull request', {
                 ...logContext(entry.issue),
+                action: 'pull_request_handoff',
+                outcome: 'completed',
+                error: null,
                 branch: handoff.result.branchName,
                 pull_request_url: handoff.result.pullRequestUrl,
               })
@@ -1547,8 +1771,10 @@ export const startOrchestrator = (
             if (stateIsIn(issue.state, effective.workflow.config.tracker.terminalStates)) {
               yield* effective.workspaces.remove(issue.identifier).pipe(
                 Effect.catchAll((error) =>
-                  Effect.logWarning('terminal workspace cleanup failed', {
+                  logWarning('terminal workspace cleanup failed', {
                     ...logContext(issue),
+                    action: 'workspace_cleanup',
+                    outcome: 'failed',
                     error: error.message,
                   }),
                 ),

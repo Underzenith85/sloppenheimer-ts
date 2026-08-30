@@ -215,9 +215,15 @@ describe('App Server session lifecycle', (): void => {
     expect(outcome.result).toEqual({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
     const started = outcome.events.find((event) => event.event === 'session_started')
     expect(started?.threadId).toBe('thread-1')
-    expect(started?.turnId).toBe('turn-1')
-    expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
-    expect(started?.message).toBe('https://example.test/issues/14')
+    expect(started?.turnId).toBeNull()
+    expect(started?.sessionId).toBe(composeSessionId('thread-1', null))
+    expect(started?.message).toBeNull()
+    const turnStartedIndex = outcome.events.findIndex((event) => event.event === 'turn_started')
+    const turnCompletedIndex = outcome.events.findIndex((event) => event.event === 'turn/completed')
+    expect(turnStartedIndex).toBeGreaterThanOrEqual(0)
+    expect(turnStartedIndex).toBeLessThan(turnCompletedIndex)
+    expect(outcome.events[turnStartedIndex]?.turnCount).toBe(1)
+    expect(outcome.events[turnCompletedIndex]?.turnCount).toBe(1)
   })
 
   it('redacts credentials from telemetry before any consumer receives it', async (): Promise<void> => {
@@ -226,7 +232,7 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.error).toBeNull()
     expect(serialized).not.toContain('github_pat_')
-    expect(serialized).toContain('[redacted]')
+    expect(serialized).toContain('[REDACTED]')
     const message = outcome.events.find((event) => event.payload.kind === 'message')
     expect(message?.payload).toMatchObject({ kind: 'message', role: 'assistant' })
   }, 30_000)
@@ -240,7 +246,7 @@ describe('App Server session lifecycle', (): void => {
 
       expect(outcome.error).toBeNull()
       expect(serialized).not.toContain('literal-host-credential-value')
-      expect(serialized).toContain('[redacted]')
+      expect(serialized).toContain('[REDACTED]')
     } finally {
       if (previous === undefined) {
         delete process.env['GITHUB_TOKEN']
@@ -250,16 +256,15 @@ describe('App Server session lifecycle', (): void => {
     }
   }, 30_000)
 
-  it('normalizes protocol items into bounded timeline payloads', async (): Promise<void> => {
+  it('reports token usage on the event rather than in a competing payload', async (): Promise<void> => {
     const outcome = await runScenario('usage')
-    const usage = outcome.events.find((event) => event.payload.kind === 'usage')
+    const usage = outcome.events.find((event) => event.usage !== null)
 
     expect(outcome.error).toBeNull()
-    expect(usage?.payload).toEqual({
-      kind: 'usage',
-      tokens: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
-      rateLimits: [],
-    })
+    expect(usage?.usage).toEqual({ inputTokens: 11, outputTokens: 7, totalTokens: 18 })
+    // Usage is extracted once, by the client, so the payload adds nothing beyond the lifecycle
+    // classification of the method that carried it.
+    expect(usage?.payload).toEqual({ kind: 'session' })
   }, 30_000)
 
   it('attributes a notification from the thread and turn ids it carries', async (): Promise<void> => {
@@ -302,6 +307,11 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.result).toBeNull()
     expect(outcome.error?.category).toBe('turn_failed')
+    expect(
+      outcome.events
+        .filter((event) => event.event === 'turn/failed' || event.event === 'turn/completed')
+        .map((event) => event.event),
+    ).toEqual(['turn/failed'])
   }, 30_000)
 
   it('fails a turn whose completion omitted a status', async (): Promise<void> => {
@@ -317,6 +327,9 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.result).toBeNull()
     expect(outcome.error?.category).toBe('input_required')
+    expect(
+      outcome.events.filter((event) => event.event.startsWith('turn/')).map((event) => event.event),
+    ).toEqual(['turn/terminated'])
   }, 30_000)
 
   it('answers a permissions approval with a grant that widens nothing', async (): Promise<void> => {
@@ -346,6 +359,11 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.error).toBeNull()
     expect(outcome.result?.turnCount).toBe(1)
+    const startedIndex = outcome.events.findIndex((event) => event.event === 'turn_started')
+    const completedIndex = outcome.events.findIndex((event) => event.event === 'turn/completed')
+    expect(startedIndex).toBeGreaterThanOrEqual(0)
+    expect(startedIndex).toBeLessThan(completedIndex)
+    expect(outcome.events[completedIndex]?.turnCount).toBe(1)
   })
 
   it('reports a failed turn', async (): Promise<void> => {
@@ -430,6 +448,48 @@ describe('App Server request handling', (): void => {
     expect(outcome.error).toBeNull()
     const diagnostic = outcome.events.find((event) => event.event === 'diagnostic')
     expect(diagnostic?.message).toContain('diagnostic only')
+  })
+
+  it('buffers split stderr records before redacting credentials', async (): Promise<void> => {
+    const outcome = await runScenario('split-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('Authorization=[REDACTED]')
+    expect(JSON.stringify(diagnostics)).not.toContain('split-secret')
+  })
+
+  it('suppresses every line of a multiline PEM diagnostic', async (): Promise<void> => {
+    const outcome = await runScenario('pem-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('PRIVATE_KEY=[REDACTED]')
+    expect(JSON.stringify(diagnostics)).not.toContain('c2VjcmV0LXByaXZhdGUta2V5LWJvZHk')
+    expect(JSON.stringify(diagnostics)).not.toContain('END PRIVATE KEY')
+  })
+
+  it('suppresses every line of an ASCII-armored PGP private key', async (): Promise<void> => {
+    const outcome = await runScenario('pgp-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('[REDACTED PEM PRIVATE KEY]')
+    expect(JSON.stringify(diagnostics)).not.toContain('c2VjcmV0LXBncC1wcml2YXRlLWtleQ')
+    expect(JSON.stringify(diagnostics)).not.toContain('PGP PRIVATE KEY BLOCK')
+  })
+
+  it('flushes an unterminated final stderr record before shutdown', async (): Promise<void> => {
+    const outcome = await runScenario('unterminated-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('Authorization=[REDACTED]')
+    expect(JSON.stringify(diagnostics)).not.toContain('final-secret')
   })
 
   it('records absolute token usage reported during a turn', async (): Promise<void> => {
@@ -551,6 +611,29 @@ describe('App Server timeouts and shutdown', (): void => {
     const outcome = await runScenario('turn-cancelled')
 
     expect(outcome.error?.category).toBe('turn_cancelled')
+  })
+
+  it('reports the current protocol interrupted status as cancellation', async (): Promise<void> => {
+    const outcome = await runScenario('turn-interrupted')
+
+    expect(outcome.error?.category).toBe('turn_cancelled')
+  })
+
+  it('merges sparse rate-limit notifications into the initial full snapshot', async (): Promise<void> => {
+    const outcome = await runScenario('sparse-rate-limit-before-read')
+    const baseline = outcome.events.find((event) => event.event === 'account/rateLimits/read')
+
+    expect(baseline?.rateLimits).toEqual({
+      limitId: 'codex',
+      credits: { hasCredits: true, unlimited: false, balance: '20' },
+      primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_730_948_100 },
+      secondary: { usedPercent: 5, windowDurationMins: 1_440, resetsAt: 1_730_948_200 },
+    })
+    expect(
+      outcome.events.filter(
+        (event) => event.event === 'account/rateLimits/updated' && event.rateLimits !== null,
+      ),
+    ).toEqual([])
   })
 
   it('terminates the whole App Server process tree on shutdown', async (): Promise<void> => {

@@ -8,6 +8,7 @@ import { createServer } from 'node:http'
 import { Cause, Effect, type Scope } from 'effect'
 
 import { ServerError } from './errors.js'
+import { logError } from './logging.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
 
@@ -277,7 +278,7 @@ const makeApp = (backend: OperatorBackend, csrfToken: string): HttpApp.Default<n
     HttpRouter.withRouterConfig({ maxParamLength: maxIdentifierParamLength }),
     Effect.catchTag('RouteNotFound', () => Effect.succeed(notFound)),
     Effect.catchAllCause((cause) =>
-      Effect.logError('operator request failed', { cause: Cause.pretty(cause) }).pipe(
+      logError('operator request failed', { cause: Cause.pretty(cause) }).pipe(
         Effect.as(errorResponse(500, 'internal_error', 'The request could not be completed')),
       ),
     ),

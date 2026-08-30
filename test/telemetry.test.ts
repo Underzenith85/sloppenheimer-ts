@@ -42,9 +42,12 @@ const event = (payload: AgentEventPayload, overrides: Partial<AgentEvent> = {}):
   processId: 4242,
   message: null,
   usage: null,
+  rateLimits: null,
   threadId: 'thread-1',
   turnId: 'turn-1',
   sessionId: 'thread-1:turn-1',
+  turnCount: 1,
+  turnStatus: null,
   payload,
   ...overrides,
 })
@@ -77,12 +80,13 @@ describe('field-level redaction', (): void => {
     ]
 
     for (const sample of samples) {
-      const redacted = redact(sample)
-      expect(redacted).toContain('[redacted]')
+      // Every sample loses its credential; a PEM block is replaced whole, with its own marker.
+      expect(redact(sample)).toMatch(/\[REDACTED( PEM PRIVATE KEY)?\]/u)
     }
-    expect(redact(samples[1] ?? '')).toBe('export OPENAI_API_KEY=[redacted]')
+    expect(redact(samples[7] ?? '')).toBe('[REDACTED PEM PRIVATE KEY]')
+    expect(redact(samples[1] ?? '')).toBe('export OPENAI_API_KEY=[REDACTED]')
     expect(redact(samples[3] ?? '')).toBe(
-      'git remote add origin https://[redacted]@github.com/example/symphony.git',
+      'git remote add origin https://[REDACTED]@github.com/example/symphony.git',
     )
     expect(redact('nothing secret about pnpm check')).toBe('nothing secret about pnpm check')
   })
@@ -91,7 +95,7 @@ describe('field-level redaction', (): void => {
     const redactor = makeRedactor(['s3cret-token-value', 'x'])
 
     expect(redactor('used s3cret-token-value twice: s3cret-token-value')).toBe(
-      'used [redacted] twice: [redacted]',
+      'used [REDACTED] twice: [REDACTED]',
     )
     // A value too short to be distinctive is left alone rather than corrupting unrelated text.
     expect(redactor('an x marks the spot')).toBe('an x marks the spot')
@@ -152,7 +156,7 @@ describe('protocol normalization', (): void => {
     })
 
     expect(payload).toMatchObject({ kind: 'message', role: 'assistant', truncated: true })
-    expect(JSON.stringify(payload)).toContain('[redacted]')
+    expect(JSON.stringify(payload)).toContain('[REDACTED]')
     expect(JSON.stringify(payload)).not.toContain('github_pat_')
   })
 
@@ -187,16 +191,13 @@ describe('protocol normalization', (): void => {
       addedLines: 12,
       deletedLines: 3,
     })
+    // Token totals and rate limits are extracted once, by the client, and arrive on the event
+    // itself; the payload for such a method carries nothing that would compete with them.
     expect(
       normalizePayload('turn/usage', {
         usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
-        rateLimits: { primary: { usedPercent: 42, windowMinutes: 300, resetsInSeconds: 120 } },
       }),
-    ).toEqual({
-      kind: 'usage',
-      tokens: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
-      rateLimits: [{ name: 'primary', usedPercent: 42, windowMinutes: 300, resetsInSeconds: 120 }],
-    })
+    ).toEqual({ kind: 'session' })
     expect(
       normalizePayload('item/completed', { item: { type: 'error', message: 'boom' } }),
     ).toEqual({ kind: 'error', severity: 'error', code: null, message: 'boom', truncated: false })
@@ -220,7 +221,7 @@ describe('protocol normalization', (): void => {
       code: 'diagnostic',
     })
     expect(JSON.stringify(clientPayload('diagnostic', 'token=abcdefghijklmnop'))).toContain(
-      '[redacted]',
+      '[REDACTED]',
     )
     expect(qualityPhaseOf('pnpm run typecheck')).toBe('typecheck')
     expect(qualityPhaseOf('ls -la')).toBeNull()
@@ -270,7 +271,7 @@ describe('agent detail records', (): void => {
     recordAttemptStarted(record, new Date('2026-08-30T10:00:20.000Z'), 1)
     recordAgentEvent(
       record,
-      event({ kind: 'reasoning' }, { turnId: 'turn-2', sessionId: 'thread-1:turn-2' }),
+      event({ kind: 'reasoning' }, { turnId: 'turn-2', sessionId: 'thread-1', turnCount: 2 }),
     )
     const snapshot = snapshotOf(record, new Date('2026-08-30T10:00:40.000Z'))
 
@@ -286,7 +287,7 @@ describe('agent detail records', (): void => {
       'retrying',
       'running',
     ])
-    expect(snapshot.identity.sessionId).toBe('thread-1:turn-2')
+    expect(snapshot.identity.sessionId).toBe('thread-1')
     expect(snapshot.identity.threadId).toBe('thread-1')
     expect(snapshot.identity.turnNumber).toBe(2)
   })

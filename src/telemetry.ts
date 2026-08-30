@@ -100,7 +100,6 @@ export type AgentEventPayload =
       addedLines: number | null
       deletedLines: number | null
     }>
-  | Readonly<{ kind: 'usage'; tokens: TokenCounts | null; rateLimits: readonly RateLimitWindow[] }>
   | Readonly<{
       kind: 'error'
       severity: ErrorSeverity
@@ -110,16 +109,23 @@ export type AgentEventPayload =
     }>
   | Readonly<{ kind: 'cancellation'; reason: string }>
 
+/**
+ * The canonical session event. Identity, token totals, rate limits, turn count, and turn status are
+ * the normalized telemetry the Codex client already produces; `payload` is this module's bounded,
+ * pre-redacted view of the same message, for the retained timeline.
+ */
 export type AgentEvent = Readonly<{
   event: string
   timestamp: Date
   processId: number | null
   message: string | null
   usage: TokenCounts | null
+  rateLimits: JsonObject | null
   threadId: string | null
   turnId: string | null
   sessionId: string | null
-  /** Normalized, bounded, already-redacted detail for the retained timeline. */
+  turnCount: number
+  turnStatus: string | null
   payload: AgentEventPayload
 }>
 
@@ -201,19 +207,6 @@ export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLim
     })
   }
   return Object.freeze(windows.sort((left, right) => left.name.localeCompare(right.name)))
-}
-
-export const decodeTokenCounts = (value: JsonValue | undefined): TokenCounts | null => {
-  if (!isJsonObject(value)) {
-    return null
-  }
-  const inputTokens = firstNumber(value, ['inputTokens', 'input_tokens'])
-  const outputTokens = firstNumber(value, ['outputTokens', 'output_tokens'])
-  const totalTokens = firstNumber(value, ['totalTokens', 'total_tokens'])
-  if (inputTokens === null || outputTokens === null || totalTokens === null) {
-    return null
-  }
-  return { inputTokens, outputTokens, totalTokens }
 }
 
 const itemState = (method: string, item: JsonObject): ToolState => {
@@ -344,11 +337,6 @@ export const normalizePayload = (
         return payload
       }
     }
-    const usage = decodeTokenCounts(source['usage'])
-    const rateLimits = decodeRateLimits(source['rateLimits'] ?? source['rate_limits'])
-    if (usage !== null || rateLimits.length > 0) {
-      return { kind: 'usage', tokens: usage, rateLimits }
-    }
     const text = stringOf(source['text'] ?? source['message'])
     if (text !== null && /message/iu.test(method)) {
       const summary = boundRedacted(text, redactor)
@@ -369,12 +357,16 @@ export const normalizePayload = (
 /** The payload for a message the client itself emits about the session. */
 export const clientPayload = (
   event: string,
-  message: string,
+  message: string | null,
   redactor: Redactor = redact,
 ): AgentEventPayload => {
-  const summary = boundRedacted(message, redactor)
+  const summary = boundRedacted(message ?? event, redactor)
   switch (event) {
-    case 'session_started': {
+    case 'session_started':
+    case 'session_stopped':
+    case 'thread_started':
+    case 'turn_started':
+    case 'turn/terminated': {
       return { kind: 'session' }
     }
     case 'approval_auto_approved': {
@@ -677,7 +669,7 @@ export type AgentDetailRecord = {
   turnId: string | null
   sessionId: string | null
   processId: number | null
-  turnIds: Set<string>
+  turnCount: number
   tokens: TokenCounts
   rateLimits: readonly RateLimitWindow[]
   sessions: AgentSessionSummary[]
@@ -737,7 +729,7 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   turnId: null,
   sessionId: null,
   processId: null,
-  turnIds: new Set(),
+  turnCount: 0,
   tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   rateLimits: [],
   sessions: [],
@@ -867,11 +859,14 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
   record.threadId = event.threadId ?? record.threadId
   record.turnId = event.turnId ?? record.turnId
   record.sessionId = event.sessionId ?? record.sessionId
-  if (event.turnId !== null) {
-    record.turnIds.add(event.turnId)
-  }
+  // Turn count, token totals, and rate limits are already normalized by the client; this layer
+  // consumes them rather than deriving its own.
+  record.turnCount = Math.max(record.turnCount, event.turnCount)
   if (event.usage !== null) {
     record.tokens = event.usage
+  }
+  if (event.rateLimits !== null) {
+    record.rateLimits = decodeRateLimits(event.rateLimits)
   }
   const base = {
     sequence: nextSequence(record),
@@ -881,6 +876,16 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
     truncated: false,
   }
   const payload = event.payload
+  if (event.usage !== null || event.rateLimits !== null) {
+    push(record, {
+      ...base,
+      operation: record.operation,
+      category: 'usage',
+      tokens: event.usage,
+      rateLimits: record.rateLimits,
+    })
+    return
+  }
   switch (payload.kind) {
     case 'session': {
       if (record.threadId !== null && record.sessions.at(-1)?.threadId !== record.threadId) {
@@ -906,7 +911,7 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
         threadId: record.threadId,
         turnId: record.turnId,
         sessionId: record.sessionId,
-        turnNumber: record.turnIds.size,
+        turnNumber: record.turnCount,
         processId: record.processId,
       })
       return
@@ -990,22 +995,6 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
       })
       return
     }
-    case 'usage': {
-      if (payload.tokens !== null) {
-        record.tokens = payload.tokens
-      }
-      if (payload.rateLimits.length > 0) {
-        record.rateLimits = payload.rateLimits
-      }
-      push(record, {
-        ...base,
-        operation: record.operation,
-        category: 'usage',
-        tokens: payload.tokens,
-        rateLimits: payload.rateLimits,
-      })
-      return
-    }
     case 'error': {
       noteError(record, at, payload.severity, payload.code, payload.message)
       push(record, {
@@ -1038,7 +1027,7 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
         threadId: record.threadId,
         turnId: record.turnId,
         sessionId: record.sessionId,
-        turnNumber: record.turnIds.size,
+        turnNumber: record.turnCount,
         processId: record.processId,
       })
       return
@@ -1142,7 +1131,7 @@ export const recordAttemptStarted = (
     threadId: record.threadId,
     turnId: null,
     sessionId: record.sessionId,
-    turnNumber: record.turnIds.size,
+    turnNumber: record.turnCount,
     processId: record.processId,
   })
 }
@@ -1263,7 +1252,7 @@ export const buildAgentDetail = (
       turnId: record.turnId,
       sessionId: record.sessionId,
       processId: record.processId,
-      turnNumber: record.turnIds.size,
+      turnNumber: record.turnCount,
       workerHost: context.workerHost,
     }),
     attempt: Object.freeze({

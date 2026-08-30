@@ -101,11 +101,12 @@ result, and a later session-level error cannot relabel finished work. A process 
 to start settles every outstanding request and turn once, including the turn in flight, so no call
 waits out its timeout after the session is already gone.
 
-Malformed protocol data is reported as an event rather than ending the session, and
-`session_started` carries the thread id, turn id, the composed `thread:turn` session id, and the
-issue URL. Every event is attributed from the `threadId` and `turnId` the provoking message carries
-where it has them, so a message that arrives before the response introducing those ids is still
-recorded against the right turn.
+Malformed protocol data is reported as an event rather than ending the session. A session is one
+App Server thread, so `session_started` carries the thread id as both `threadId` and the stable
+`sessionId`; its `message` is null. Turn identity is reported independently through `turnId` and
+`turnCount`. Every event is attributed from the `threadId` and `turnId` the provoking message
+carries where it has them, so a message that arrives before the response introducing those ids is
+still recorded against the right turn.
 
 Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
 `codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
@@ -174,18 +175,22 @@ request was opened by this handoff or adopted from an existing one, its observed
 merge, and the dispatch-label step. The GitHub adapter does not remove dispatch labels at handoff, so
 that step reports `not_performed` with that reason instead of sitting pending forever.
 
-Telemetry is one pipeline. The Codex client normalizes each protocol message into a bounded,
-already-redacted payload — the categories are session, reasoning, message, tool, file, command,
-usage, retry, error, cancellation, and handoff — and the orchestrator folds those payloads, plus the
-scheduling facts only it knows, into actor-owned state. Snapshot requests read an immutable index
-the actor publishes; no consumer touches a scheduler map, and a published snapshot is frozen.
+Telemetry is one pipeline. The Codex client extracts session identity, token totals, rate limits,
+turn count, and turn status once, and alongside them a bounded, already-redacted payload — the
+timeline categories are session, reasoning, message, tool, file, command, usage, retry, error,
+cancellation, and handoff. The orchestrator folds those events, plus the scheduling facts only it
+knows, into actor-owned state; nothing re-derives what the client already reports. Snapshot requests
+read an immutable index the actor publishes; no consumer touches a scheduler map, and a published
+snapshot is frozen.
 
 Redaction happens at the parser, before anything is retained, not when a response is serialized: a
 credential a message carried is gone before the timeline, a log, or an HTTP response can hold it.
-Shape-based patterns cover provider tokens, bearer headers, URL credentials, credential query
-parameters, private keys, and environment-like assignments, and the resolved values of the
-environment variables the host treats as secret — the tracker's own secret, plus `GITHUB_TOKEN`,
-`GH_TOKEN`, `OPENAI_API_KEY`, and `CODEX_ACCESS_TOKEN` — are removed literally. Private reasoning is
+One redactor serves both: the structural rules in `logging.ts` — secret-named keys in any quoting
+style, `Authorization` and `Cookie` headers, bearer tokens, URL credentials, PEM blocks — composed
+with shape-based patterns for values that are credentials on sight, such as provider tokens, AWS key
+ids, and JWTs, wherever they appear. The resolved values of the environment variables the host
+treats as secret — the tracker's own secret, plus `GITHUB_TOKEN`, `GH_TOKEN`, `OPENAI_API_KEY`, and
+`CODEX_ACCESS_TOKEN` — are removed literally. Private reasoning is
 never retained, not even truncated; tool input and output are reduced to byte counts; a command is
 reduced to its program name, an argument count, and an allowlisted quality-phase label; a file
 change is reduced to a workspace-relative path and its added and deleted line counts. Retention is
