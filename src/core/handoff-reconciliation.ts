@@ -14,12 +14,13 @@ export const reconcileHandoffs = (
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     for (const [id, handoff] of context.state.handoffs) {
-      if (context.state.running.has(id)) {
+      if (context.state.running.has(id) || context.state.retries.has(id)) {
         continue
       }
       if (handoff.state === 'closed_without_merge') {
         continue
       }
+      const interventionRequired = handoff.state === 'intervention_required'
       const handoffIssueNumber = context.identifierIssueNumberValue(handoff.issue.identifier)
       if (handoffIssueNumber !== null && context.state.pausedIssueNumbers.has(handoffIssueNumber)) {
         continue
@@ -38,6 +39,50 @@ export const reconcileHandoffs = (
       if (inspected._tag === 'Failed') {
         handoff.reason = inspected.error.message
         continue
+      }
+      // Intervention was requested, so no further repair is dispatched -- but the pull request is
+      // still inspected every poll. An unchanged open head keeps the state and reason as they are;
+      // a corrected head, a manual merge, or a close falls through and is acted on normally.
+      if (
+        interventionRequired &&
+        inspected.observation.state === 'open' &&
+        inspected.observation.headSha === handoff.headSha
+      ) {
+        continue
+      }
+      // A repair agent has finished: attribute the head it produced before anything else reads it.
+      if (inspected.observation.state === 'open' && handoff.repairStartedHeadSha !== null) {
+        const repairedHeadSha = inspected.observation.headSha
+        if (repairedHeadSha !== handoff.repairStartedHeadSha) {
+          if (handoff.repairObservedHeadShas.includes(repairedHeadSha)) {
+            handoff.repairStartedHeadSha = null
+            handoff.repairBaselineRestored = false
+            handoff.state = 'intervention_required'
+            handoff.headSha = repairedHeadSha
+            handoff.reason =
+              'Repair agent returned the pull request to an already observed repair head.'
+            continue
+          }
+          handoff.repairHeadShas.push(repairedHeadSha)
+          handoff.repairObservedHeadShas.push(repairedHeadSha)
+          handoff.repairStartedHeadSha = null
+          handoff.repairBaselineRestored = false
+        } else if (handoff.repairBaselineRestored) {
+          // The baseline outlived the process that dispatched the repair, so an unchanged head is
+          // an interrupted repair, not a completed no-op. Drop the baseline and let the normal
+          // repair path retry; no head was observed, so the budget is untouched.
+          handoff.repairStartedHeadSha = null
+          handoff.repairBaselineRestored = false
+        } else {
+          const unchangedDisposition = classifyPullRequest(inspected.observation)
+          handoff.repairStartedHeadSha = null
+          if (unchangedDisposition.state === 'repair_needed') {
+            handoff.state = 'intervention_required'
+            handoff.headSha = repairedHeadSha
+            handoff.reason = `Repair agent completed without changing the pull request head. ${unchangedDisposition.reason}`
+            continue
+          }
+        }
       }
       if (inspected.observation.state === 'open') {
         const observedHeadSha = inspected.observation.headSha
@@ -108,7 +153,7 @@ export const reconcileHandoffs = (
         )
         .map((thread) => thread.id)
       const repairedHeadIsVerified =
-        handoff.repairAttempts > 0 &&
+        handoff.repairHeadShas.length > 0 &&
         inspected.observation.mergeable === true &&
         inspected.observation.mergeState !== 'dirty' &&
         inspected.observation.mergeState !== 'behind' &&
@@ -178,7 +223,7 @@ export const reconcileHandoffs = (
         continue
       }
       if (disposition.state === 'repair_needed') {
-        if (handoff.repairAttempts >= 3) {
+        if (handoff.repairHeadShas.length >= 3) {
           handoff.state = 'intervention_required'
           handoff.reason = `Repair limit reached. ${disposition.reason}`
           continue
@@ -198,9 +243,26 @@ export const reconcileHandoffs = (
           workspaces: handoff.execution.workspaces,
           loadedAt: handoff.observedAt,
         }
-        handoff.repairAttempts += 1
-        handoff.reason = `Repair agent running. ${disposition.reason}`
-        yield* dispatch(context, repairIssue, handoff.repairAttempts, effective)
+        // The budget is spent by an observed head, not by dispatching: record the baseline only
+        // once a session really started, so a refused dispatch costs nothing.
+        const started = yield* dispatch(
+          context,
+          repairIssue,
+          handoff.repairHeadShas.length + 1,
+          effective,
+        )
+        if (started) {
+          const baselineHeadSha = inspected.observation.headSha
+          handoff.repairStartedHeadSha = baselineHeadSha
+          if (
+            baselineHeadSha !== null &&
+            !handoff.repairObservedHeadShas.includes(baselineHeadSha)
+          ) {
+            handoff.repairObservedHeadShas.push(baselineHeadSha)
+          }
+          handoff.repairBaselineRestored = false
+          handoff.reason = `Repair agent running. ${disposition.reason}`
+        }
       }
     }
     // One timeline entry per observed transition, not one per poll: an unchanged disposition is
