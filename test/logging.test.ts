@@ -1,7 +1,8 @@
 import { Effect, Logger } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
 
-import { logInfo, redactSecretsInString } from '../src/logging.js'
+import { logInfo } from '../src/logging.js'
+import { redactSecretsInString } from '../src/redaction.js'
 
 describe('operator logging', (): void => {
   it('redacts credentials embedded in quoted structured strings', (): void => {
