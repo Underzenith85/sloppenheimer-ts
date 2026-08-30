@@ -19,6 +19,12 @@ export type ValidatedTrackerProvider = Readonly<{
    * different selection, which is what makes the core's reload path rebuild the tracker.
    */
   sameAs: (other: ValidatedTrackerProvider) => boolean
+  /**
+   * Re-runs the same adapter's validation over the same authored `tracker.provider`, against a
+   * fresh environment. The selection carries the adapter that produced it, so a revalidation
+   * cannot drift to a different registry than the one the workflow was loaded with.
+   */
+  revalidate: (environment: NodeJS.ProcessEnv) => ValidatedTrackerProvider
 }>
 
 /**
@@ -48,6 +54,7 @@ export type RegisteredTrackerProvider = Readonly<{
 
 const validatedSelection = <Provider>(
   adapter: TrackerProviderAdapter<Provider>,
+  authored: JsonObject,
   provider: Provider,
 ): ValidatedTrackerProvider =>
   Object.freeze({
@@ -58,6 +65,8 @@ const validatedSelection = <Provider>(
       other.kind === adapter.kind &&
       adapter.isProvider(other.provider) &&
       adapter.same(provider, other.provider),
+    revalidate: (environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
+      validatedSelection(adapter, authored, adapter.validate(authored, environment)),
   })
 
 /**
@@ -70,7 +79,7 @@ export const registerTrackerProvider = <Provider>(
   Object.freeze({
     kind: adapter.kind,
     validate: (provider: JsonObject, environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
-      validatedSelection(adapter, adapter.validate(provider, environment)),
+      validatedSelection(adapter, provider, adapter.validate(provider, environment)),
   })
 
 /** The tracker kinds a build supports, and the validation each one owns. */

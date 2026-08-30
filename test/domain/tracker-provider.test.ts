@@ -12,6 +12,7 @@ import {
   stubProviderToken,
   stubTrackerProviderAdapter,
   stubTrackerProviderEntry,
+  stubTrackerProviders,
 } from '../harness/stub-tracker-provider.js'
 
 const authored = { owner: 'example', repository: 'symphony', token: '$TRACKER_TOKEN' }
@@ -64,6 +65,23 @@ describe('tracker provider registry', (): void => {
 
     expect(validated.kind).toBe('github')
     expect(validated.secretEnvironmentNames).toEqual(['TRACKER_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'])
+  })
+
+  it('revalidates through the adapter that produced the selection', (): void => {
+    const validated = stubTrackerProviders.validate(
+      'stub',
+      { token: 'STUB_TRACKER_TOKEN' },
+      { STUB_TRACKER_TOKEN: 'secret' },
+    )
+
+    const rotated = validated.revalidate({ STUB_TRACKER_TOKEN: 'rotated' })
+
+    expect(rotated.kind).toBe('stub')
+    expect(stubProviderToken(rotated)).toBe('rotated')
+    expect(sameTrackerProvider(rotated, validated)).toBe(false)
+    expect(
+      sameTrackerProvider(rotated.revalidate({ STUB_TRACKER_TOKEN: 'rotated' }), rotated),
+    ).toBe(true)
   })
 
   it('refuses to read a selection back through another adapter', (): void => {

@@ -516,17 +516,17 @@ const splitWorkflow = (source: string): Readonly<{ config: unknown; prompt: stri
 }
 
 /**
- * Re-runs the validation that must hold before every dispatch: a supported `tracker.kind`, an
- * adapter-accepted `tracker.provider` (including its secret indirection), and a usable
- * `codex.command`.
+ * Re-runs the validation that must hold before every dispatch: an adapter-accepted
+ * `tracker.provider` (including its secret indirection) and a usable `codex.command`.
  *
- * `providers` defaults to the composition root's registry, which is where a tracker kind is
- * registered; this layer knows only that some adapter owns each kind.
+ * The selection revalidates itself rather than being looked up again by kind, so a workflow loaded
+ * with a caller's own registry keeps revalidating through that registry's adapter. Routing this
+ * through a default registry instead would report every kind the default does not carry as
+ * unsupported, and the run would silently keep its superseded credential.
  */
 export const preflightWorkflow = (
   workflow: Workflow,
   environment: NodeJS.ProcessEnv = process.env,
-  providers: TrackerProviderRegistry = trackerProviders,
 ): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
   Effect.try({
     try: () => {
@@ -536,11 +536,7 @@ export const preflightWorkflow = (
           message: 'codex.command must be a non-empty string',
         })
       }
-      return providers.validate(
-        workflow.config.tracker.kind,
-        workflow.config.tracker.provider,
-        environment,
-      )
+      return workflow.tracker.revalidate(environment)
     },
     catch: (cause: unknown) =>
       cause instanceof WorkflowError
@@ -552,6 +548,13 @@ export const preflightWorkflow = (
           }),
   })
 
+/**
+ * Reads and validates a workflow definition.
+ *
+ * `providers` defaults to the composition root's registry, which is where a tracker kind is
+ * registered; this layer knows only that some adapter owns each kind. The selection it returns
+ * carries that adapter, so every later revalidation stays with the registry used here.
+ */
 export const loadWorkflow = (
   path = resolve(process.cwd(), 'WORKFLOW.md'),
   environment: NodeJS.ProcessEnv = process.env,

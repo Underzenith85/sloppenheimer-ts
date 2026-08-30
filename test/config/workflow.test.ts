@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { githubProviderOf } from '../../src/adapters/github/index.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
+import { sameTrackerProvider } from '../../src/domain/tracker-provider.js'
+import { stubProviderToken, stubTrackerProviders } from '../harness/stub-tracker-provider.js'
 import { JsonConversionError, toJsonValue } from '../../src/support/json.js'
 import {
   loadWorkflow,
@@ -425,6 +427,29 @@ codex:
     expect(githubProviderOf(validated).token).toBe('rotated')
     expect(error.category).toBe('invalid_config')
     expect(error.message).toContain('missing environment variable')
+  })
+
+  /*
+   * The preflight revalidates through the adapter that loaded the workflow, not through whichever
+   * registry happens to be the default: a caller's own kind must keep adopting rotated credentials
+   * rather than being reported as unsupported on every poll.
+   */
+  it('preflights a workflow loaded with a caller-supplied registry through that registry', async (): Promise<void> => {
+    const path = await writeWorkflow(`tracker:
+  kind: stub
+  provider:
+    token: STUB_TRACKER_TOKEN`)
+    const workflow = await Effect.runPromise(
+      loadWorkflow(path, { STUB_TRACKER_TOKEN: 'secret' }, stubTrackerProviders),
+    )
+
+    const validated = await Effect.runPromise(
+      preflightWorkflow(workflow, { STUB_TRACKER_TOKEN: 'rotated' }),
+    )
+
+    expect(stubProviderToken(workflow.tracker)).toBe('secret')
+    expect(stubProviderToken(validated)).toBe('rotated')
+    expect(sameTrackerProvider(validated, workflow.tracker)).toBe(false)
   })
 })
 
