@@ -51,11 +51,21 @@ support/  <-  domain/  <-  ports/  <-  core/  <-  config/, operator/, adapters/,
 - `adapters/` is restricted as an import target, never as a source.
 - The `src/` root is the composition root. It binds the concrete adapters and is unrestricted.
 
-`.oxlintrc.json` enforces this with `no-restricted-imports` overrides, one per layer, so `pnpm lint`
-— and therefore `pnpm check` — fails on a violation. Each layer denies everything that leaves it and
-then re-admits the layers below it by name, so a directory added later is forbidden until the rule
-names it. `test/import-boundaries.test.ts` lints a fixture tree with that same configuration and
-asserts the rule still fires.
+`.oxlintrc.json` enforces this with `no-restricted-imports` overrides, so `pnpm lint` — and
+therefore `pnpm check` — fails on a violation. The groups match the import specifier as written
+rather than its resolved target, so each layer takes two overrides:
+
+- Every file in the layer, at any depth, is denied the sibling layers by name.
+- Files directly in the layer are denied everything that leaves the layer, with the layers below
+  re-admitted by negation. A directory added later is therefore forbidden until the rule names it.
+
+The second rule cannot be extended to nested modules, because `../json.js` is a same-layer import
+from `src/support/parsers/value.ts` and an escape to the `src/` root from `src/support/json.ts`.
+Nested modules keep the first rule only, which trades an undetected import of a root module for
+never rejecting a compliant one. Prefer flat layers.
+
+`test/import-boundaries.test.ts` lints a fixture tree with that same configuration, at both depths,
+and asserts the rule still fires.
 
 Modules that #84 left at the `src/` root are adapters and infrastructure that have not moved into a
 layer yet. `core/` reaches them through a migration allow-list in `.oxlintrc.json`, where each entry

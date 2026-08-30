@@ -50,6 +50,24 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/adapters/github/permitted.ts':
     "import '../../core/runtime.js'\nimport '../../ports/tracker.js'\n",
   'src/composition-root.ts': "import './adapters/github/tracker.js'\nimport './core/runtime.js'\n",
+
+  /*
+   * Nested modules.  The layers are flat today, but a rule that rejects a compliant directory
+   * refactor would block the restructuring issues under #76 rather than guard them, so a nested
+   * module must still be denied the layers above it and must keep its same-layer and lower-layer
+   * imports.  These specifiers carry an extra `../` that the depth-one patterns do not match.
+   */
+  'src/support/nested/violates-domain.ts': "import '../../domain/domain.js'\n",
+  'src/support/nested/permitted.ts': "import '../json.js'\n",
+  'src/domain/nested/violates-core.ts': "import '../../core/runtime.js'\n",
+  'src/domain/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
+  'src/domain/nested/permitted.ts': "import '../domain.js'\nimport '../../support/json.js'\n",
+  'src/ports/nested/violates-config.ts': "import '../../config/workflow.js'\n",
+  'src/ports/nested/permitted.ts':
+    "import '../../domain/domain.js'\nimport '../../support/json.js'\n",
+  'src/core/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
+  'src/core/nested/permitted.ts':
+    "import '../runtime.js'\nimport '../../domain/domain.js'\nimport '../../support/json.js'\n",
 }
 
 const isViolation = (path: string): boolean => path.includes('violates')
