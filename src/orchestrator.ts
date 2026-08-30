@@ -1321,12 +1321,6 @@ export const startOrchestrator = (
                   pendingRateLimits = null
                 }
               }
-              if (event.update.event === 'session_started' && event.update.message !== null) {
-                yield* Effect.logInfo('agent session started', {
-                  ...logContext(entry.issue),
-                  session_id: event.update.message,
-                })
-              }
             }
             break
           }

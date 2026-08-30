@@ -1257,6 +1257,105 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('interrupts a non-active refreshed issue without removing its workspace', async (): Promise<void> => {
+    let currentIssue = makeIssue('example/symphony#20', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [currentIssue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    let interrupted = false
+    const removed: string[] = []
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+      }),
+      runAgent: () =>
+        Effect.sync(resolveStarted).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true
+            }),
+          ),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* Effect.promise(() => started)
+          currentIssue = { ...currentIssue, state: 'review' }
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(interrupted).toBe(true)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toEqual([])
+          expect(removed).toEqual([])
+        }),
+      ),
+    )
+  })
+
+  it('requeues a due retry when another worker occupies the only slot', async (): Promise<void> => {
+    const retryingIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+    const occupyingIssue = makeIssue('example/symphony#22', 1, null, ['symphony', 'ready'])
+    let candidates: readonly Issue[] = [retryingIssue]
+    const harness = makeHarness(workflow, () => candidates)
+    let resolveOccupyingStarted = (): void => undefined
+    const occupyingStarted = new Promise<void>((resolve) => {
+      resolveOccupyingStarted = resolve
+    })
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByIds: (ids) =>
+          Effect.succeed([retryingIssue, occupyingIssue].filter((issue) => ids.includes(issue.id))),
+      }),
+      runAgent: ({ issue }) => {
+        if (issue.id === retryingIssue.id) {
+          return Effect.fail(
+            new AgentError({ category: 'process_exited', message: 'retrying worker failed' }),
+          )
+        }
+        return Effect.sync(resolveOccupyingStarted).pipe(Effect.zipRight(Effect.never))
+      },
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          while ((yield* control.snapshot).retrying.length === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          candidates = [occupyingIssue]
+          yield* control.refresh
+          yield* Effect.promise(() => occupyingStarted)
+          yield* TestClock.adjust(10_000)
+          yield* Effect.yieldNow()
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.running[0]?.issueId).toBe(occupyingIssue.id)
+          expect(snapshot.retrying).toHaveLength(1)
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: retryingIssue.id,
+            attempt: 2,
+            error: 'no available orchestrator slots',
+          })
+        }),
+      ),
+    )
+  })
+
   it('retains ended usage while a retry starts a fresh absolute counter', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [issue])
