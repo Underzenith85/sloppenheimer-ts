@@ -12,7 +12,7 @@ import {
 } from './core/orchestrator.js'
 import type { AgentEventSemantics, AgentRunnerPort } from './ports/agent-runner.js'
 import type { WorkflowError } from './errors.js'
-import { makeGitHubCodeReview, makeGitHubTracker } from './tracker.js'
+import { makeGitHubCodeReview, makeGitHubTracker } from './adapters/github/index.js'
 import { makeWorkspaceManager } from './workspace.js'
 
 export {

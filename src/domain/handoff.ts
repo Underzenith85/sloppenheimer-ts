@@ -1,3 +1,5 @@
+import type { Issue } from './domain.js'
+
 export type PullRequestCheck = Readonly<{
   name: string
   status: 'queued' | 'in_progress' | 'completed'
@@ -131,3 +133,10 @@ export type HandoffSnapshot = Readonly<{
   reviewCompletedHeadSha?: string | null
   observedAt: string
 }>
+
+/**
+ * The branch an issue's completed work is expected on. It is a Symphony naming convention rather
+ * than a provider one, so the core lifecycle and any code-review adapter derive it from the same
+ * rule.
+ */
+export const issueBranchName = (issue: Issue): string => `symphony/issue-${issue.id}`

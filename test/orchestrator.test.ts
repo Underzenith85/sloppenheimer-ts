@@ -29,7 +29,8 @@ import {
 } from '../src/orchestrator.js'
 import { makeRedactor } from '../src/support/redaction.js'
 import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
-import type { CodeReviewPort, TrackerPort } from '../src/tracker.js'
+import type { CodeReviewPort } from '../src/ports/code-review.js'
+import type { TrackerPort } from '../src/ports/tracker.js'
 import type { Workflow } from '../src/config/workflow.js'
 
 const makeIssue = (

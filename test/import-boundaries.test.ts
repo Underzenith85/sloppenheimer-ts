@@ -51,7 +51,7 @@ const fixtures: Readonly<Record<string, string>> = {
     "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps the modules #84 left at the `src/` root reachable from core/.
   'src/core/permitted-allow-list.ts':
-    "import '../codex.js'\nimport '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\nimport '../tracker.js'\nimport '../workspace.js'\n",
+    "import '../codex.js'\nimport '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\nimport '../workspace.js'\n",
 
   // adapters/ is restricted as an import target, never as a source, and the `src/` root is the
   // composition root that deliberately binds concrete adapters.
