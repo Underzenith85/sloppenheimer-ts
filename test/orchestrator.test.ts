@@ -1,4 +1,4 @@
-import { Effect, Fiber, TestClock, TestContext } from 'effect'
+import { Effect, Fiber, Logger, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { AgentEvent } from '../src/codex.js'
@@ -309,6 +309,16 @@ const makeHarness = (
     agentRuns: () => agentRuns,
     awaitAgentRun: Effect.promise(() => agentRun),
   }
+}
+
+const settled = async (predicate: () => boolean, iterations = 400): Promise<boolean> => {
+  for (let index = 0; index < iterations; index += 1) {
+    if (predicate()) {
+      return true
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5))
+  }
+  return predicate()
 }
 
 const runWithTestClock = <Value>(effect: Effect.Effect<Value, WorkflowError>): Promise<Value> =>
@@ -1176,6 +1186,68 @@ describe('session telemetry and token accounting', (): void => {
     expect(rateLimits).toEqual({
       'primary.used_percent': 41,
       'primary.resets_in_seconds': 900,
+    })
+  })
+
+  it('still hands off when the log sink throws after the run is accounted', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let handoffs = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: () =>
+          Effect.sync(() => {
+            handoffs += 1
+            return { _tag: 'NoBranch', branchName: 'symphony/test' } as const
+          }),
+      }),
+      runAgent: () => Effect.succeed({ threadId: 't', turnId: 'u', turnCount: 1 }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          yield* Effect.promise(() => settled(() => handoffs > 0))
+        }),
+      ).pipe(
+        // `WorkerExited` removes and accounts the entry before it logs. A sink that throws there
+        // must not carry away the handoff that follows.
+        Effect.provide(
+          Logger.replace(
+            Logger.defaultLogger,
+            Logger.make(() => {
+              throw new Error('log sink exploded')
+            }),
+          ),
+        ),
+      ),
+    )
+
+    expect(handoffs).toBe(1)
+  })
+
+  it('merges a sparse rate-limit update instead of replacing the window', async (): Promise<void> => {
+    const { rateLimits } = await runWithEvents([
+      agentEvent({
+        rateLimits: {
+          'primary.used_percent': 12,
+          'secondary.used_percent': 3,
+          limit_name: 'plan',
+        },
+      }),
+      // A rolling update carrying only what changed, plus a null for metadata it does not know.
+      agentEvent({ rateLimits: { 'primary.used_percent': 41, limit_name: null } }),
+    ])
+
+    // The omitted secondary window survives, and the null does not clear what was already seen.
+    expect(rateLimits).toEqual({
+      'primary.used_percent': 41,
+      'secondary.used_percent': 3,
+      limit_name: 'plan',
     })
   })
 

@@ -122,25 +122,35 @@ const readTokens = (usage: JsonObject, camel: string, snake: string): number | n
  * Reads absolute session token totals. Only payloads that declare totals are accepted; a
  * delta-shaped payload is ignored rather than being mistaken for a cumulative total.
  */
+/**
+ * Reads the cumulative token totals from a `thread/tokenUsage/updated` notification.
+ *
+ * The payload is `params.tokenUsage`, a `ThreadTokenUsage` holding two `TokenUsageBreakdown`s:
+ * `total` is cumulative for the thread and `last` covers only the most recent turn. Session
+ * accounting wants `total`, and reading it as absolute is what makes a repeated report safe to
+ * replace rather than add. `last` is deliberately ignored — treating it as a total would report
+ * one turn's usage as the session's, and adding it up would double count against `total`.
+ */
 const usageFrom = (message: JsonObject): TokenUsage | null => {
   const params = message['params']
   if (!isJsonObject(params)) {
     return null
   }
-  const usage = params['usage'] ?? params['totalTokenUsage'] ?? params['total_token_usage']
-  if (!isJsonObject(usage)) {
+  const tokenUsage = params['tokenUsage']
+  if (!isJsonObject(tokenUsage)) {
     return null
   }
-  if (usage['delta'] !== undefined || usage['isDelta'] === true) {
+  const total = tokenUsage['total']
+  if (!isJsonObject(total)) {
     return null
   }
-  const input = readTokens(usage, 'inputTokens', 'input_tokens')
-  const output = readTokens(usage, 'outputTokens', 'output_tokens')
-  const total = readTokens(usage, 'totalTokens', 'total_tokens')
+  const input = readTokens(total, 'inputTokens', 'input_tokens')
+  const output = readTokens(total, 'outputTokens', 'output_tokens')
+  const reported = readTokens(total, 'totalTokens', 'total_tokens')
   if (input === null || output === null) {
     return null
   }
-  return { inputTokens: input, outputTokens: output, totalTokens: total ?? input + output }
+  return { inputTokens: input, outputTokens: output, totalTokens: reported ?? input + output }
 }
 
 /** Flattens the primitive fields of a reported rate-limit window. */

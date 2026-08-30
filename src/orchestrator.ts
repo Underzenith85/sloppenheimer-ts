@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 import chokidar from 'chokidar'
-import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, FiberRef, HashSet, Logger, Queue, type Scope } from 'effect'
 
 import { runAgent, type AgentEvent } from './codex.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from './dependencies.js'
@@ -306,6 +306,32 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
 /** Payload summaries in logs and snapshots are bounded; nothing unbounded reaches a sink. */
 const payloadSummaryLimit = 500
 
+type RateLimitFields = Readonly<Record<string, string | number | boolean | null>>
+
+/**
+ * Folds a sparse rate-limit update into what is already known.
+ *
+ * `account/rateLimits/updated` is a rolling update, not a full snapshot: the schema directs
+ * clients to merge the values it carries into the last one seen, and states that nullable account
+ * metadata missing from a rolling update does not clear a previously observed value. So an absent
+ * key keeps its old value, and an explicit null is treated the same way — the only thing that
+ * replaces a known value is a new one.
+ */
+export const mergeRateLimits = (
+  previous: RateLimitFields | null,
+  update: RateLimitFields,
+): RateLimitFields => {
+  const merged: Record<string, string | number | boolean | null> = { ...(previous ?? {}) }
+  for (const [key, value] of Object.entries(update)) {
+    if (value !== null) {
+      merged[key] = value
+    } else if (!(key in merged)) {
+      merged[key] = null
+    }
+  }
+  return merged
+}
+
 export const summarizePayload = (value: string | null): string | null => {
   if (value === null) {
     return null
@@ -323,6 +349,29 @@ const identifierIssueNumber = (identifier: string): number | null => {
   const match = /#(\d+)$/u.exec(identifier)
   return match?.[1] === undefined ? null : Number(match[1])
 }
+
+/**
+ * Wraps a logger so a throwing sink cannot escape into the code that was logging.
+ *
+ * Guarding the logger rather than each call is deliberate. Several event cases mutate state before
+ * they log — `WorkerExited` has already removed and accounted the run — so a defect escaping a log
+ * call would carry away the handoff or retry that follows and strand the issue. Seventeen call
+ * sites each remembering to guard is a rule that holds until the next one is added; one wrapper
+ * around whatever logger the host installed holds for all of them.
+ */
+const sinkSafe = <Message, Output>(
+  logger: Logger.Logger<Message, Output>,
+): Logger.Logger<Message, Output | void> =>
+  Logger.make((options) => {
+    try {
+      return logger.log(options)
+    } catch (defect: unknown) {
+      process.stderr.write(
+        `symphony: log sink failed: ${summarizePayload(String(defect)) ?? 'unknown defect'}\n`,
+      )
+      return undefined
+    }
+  })
 
 export const startOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
@@ -1149,7 +1198,10 @@ export const startOrchestrator = (
               entry.tokens = update.usage
             }
             if (update.rateLimits !== null) {
-              state.rateLimits = update.rateLimits
+              // `account/rateLimits/updated` is a sparse rolling update: the schema says to merge
+              // available values into the last snapshot, and that a null does not clear a value
+              // already observed. Replacing wholesale would drop every field the update omitted.
+              state.rateLimits = mergeRateLimits(state.rateLimits, update.rateLimits)
             }
             if (update.event === 'session_started') {
               yield* Effect.logInfo('session started', {
@@ -1329,14 +1381,17 @@ export const startOrchestrator = (
     return {
       snapshot: Effect.sync(createSnapshot),
       refresh: requestRefresh,
-      setIssuePaused: (issueNumber, paused) =>
+      setIssuePaused: (issueNumber: number, paused: boolean) =>
         Effect.gen(function* () {
           const reply = yield* Deferred.make<void>()
           yield* Queue.offer(mailbox, { _tag: 'SetIssuePaused', issueNumber, paused, reply })
           yield* Deferred.await(reply)
         }),
     }
-  })
+  }).pipe(
+    // Applied to the whole orchestrator, including the forked event loop, which inherits it.
+    Effect.locallyWith(FiberRef.currentLoggers, (loggers) => HashSet.map(loggers, sinkSafe)),
+  )
 
 export const runOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),

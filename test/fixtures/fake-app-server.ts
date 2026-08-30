@@ -293,10 +293,31 @@ const handleTurnStart = (id: unknown): void => {
       return
     }
     case 'usage': {
+      // The real notification: cumulative thread totals under `tokenUsage.total`, with the most
+      // recent turn under `tokenUsage.last`. `last` must not be mistaken for the total.
       send({ id, result: { turn } })
       send({
-        method: 'turn/usage',
-        params: { usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 } },
+        method: 'thread/tokenUsage/updated',
+        params: {
+          threadId: thread.id,
+          turnId: turn.id,
+          tokenUsage: {
+            last: {
+              inputTokens: 4,
+              outputTokens: 2,
+              totalTokens: 6,
+              cachedInputTokens: 0,
+              reasoningOutputTokens: 0,
+            },
+            total: {
+              inputTokens: 11,
+              outputTokens: 7,
+              totalTokens: 18,
+              cachedInputTokens: 3,
+              reasoningOutputTokens: 1,
+            },
+          },
+        },
       })
       completeTurn()
       return

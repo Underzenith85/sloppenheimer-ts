@@ -393,6 +393,8 @@ describe('App Server request handling', (): void => {
   it('records absolute token usage reported during a turn', async (): Promise<void> => {
     const outcome = await runScenario('usage')
 
+    // `tokenUsage.total`, not `tokenUsage.last` — reading `last` would report one turn's usage
+    // as the session's, which is 4/2/6 in this fixture.
     expect(outcome.events.find((event) => event.usage !== null)?.usage).toEqual({
       inputTokens: 11,
       outputTokens: 7,
