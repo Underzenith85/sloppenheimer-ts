@@ -4,10 +4,45 @@ import { join } from 'node:path'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
+import {
+  issueId,
+  issueIdentifier,
+  type BlockerRef,
+  type Issue,
+  type JsonObject,
+} from '../src/domain.js'
 import { buildBacklogSnapshot, makeOperatorBackend } from '../src/operator.js'
+import { makeGitHubIssueControl } from '../src/tracker.js'
+import type { GitHubProviderConfig } from '../src/tracker-config.js'
 
 const temporaryDirectories: string[] = []
+
+const provider: GitHubProviderConfig = {
+  owner: 'example',
+  repository: 'symphony',
+  token: 'secret',
+  tokenEnvironmentName: 'TEST_OPERATOR_GITHUB_TOKEN',
+  apiBaseUrl: 'https://api.example.test',
+  baseBranch: 'main',
+}
+
+const githubIssue = (number: number): JsonObject => ({
+  number,
+  node_id: `node-${String(number)}`,
+  title: `Issue ${String(number)}`,
+  body: null,
+  state: 'open',
+  html_url: `https://example.test/issues/${String(number)}`,
+  assignee: null,
+  labels: [],
+  created_at: '2026-01-01T00:00:00.000Z',
+  updated_at: '2026-01-02T00:00:00.000Z',
+})
+
+const githubPullRequest = (number: number): JsonObject => ({
+  ...githubIssue(number),
+  pull_request: { url: `https://api.example.test/repos/example/symphony/pulls/${String(number)}` },
+})
 
 afterEach(async (): Promise<void> => {
   vi.unstubAllGlobals()
@@ -42,6 +77,20 @@ const issue = (number: number, blockers: readonly BlockerRef[] = []): Issue => (
 })
 
 describe('operator dependency graph', (): void => {
+  it('filters non-dispatchable records out of the operator backlog', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      return url.includes('/dependencies/blocked_by')
+        ? Response.json([])
+        : Response.json([githubIssue(1), githubPullRequest(2)])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(makeGitHubIssueControl(provider).listOpenIssues())
+
+    expect(issues.map((issue) => issue.id)).toEqual(['1'])
+  })
+
   it('builds deterministic nodes and blocker-to-dependent edges for mixed graph shapes', (): void => {
     const snapshot = buildBacklogSnapshot(
       [

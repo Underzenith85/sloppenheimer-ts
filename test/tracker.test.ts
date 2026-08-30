@@ -2,7 +2,7 @@ import { Effect, Logger } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, type JsonObject } from '../src/domain.js'
-import { makeGitHubIssueControl, makeGitHubTracker } from '../src/tracker.js'
+import { makeGitHubTracker } from '../src/tracker.js'
 import type { GitHubProviderConfig } from '../src/tracker-config.js'
 
 const provider: GitHubProviderConfig = {
@@ -381,19 +381,6 @@ describe('GitHub tracker state-list contract', (): void => {
     expect(value.map((issue) => issue.id)).toEqual(['1', '3'])
     expect(logs.some((entry) => entry.includes('malformed records'))).toBe(true)
     expect(logs.some((entry) => entry.includes('"skipped":2'))).toBe(true)
-  })
-
-  it('filters non-dispatchable records out of the operator backlog', async (): Promise<void> => {
-    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> =>
-      requestUrl(input).includes('/dependencies/blocked_by')
-        ? Response.json([])
-        : Response.json([githubIssue(1), githubPullRequest(2)]),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    const issues = await Effect.runPromise(makeGitHubIssueControl(provider).listOpenIssues())
-
-    expect(issues.map((issue) => issue.id)).toEqual(['1'])
   })
 
   it('fails a scoped read that never stops paginating', async (): Promise<void> => {
