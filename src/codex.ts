@@ -533,7 +533,9 @@ class CodexConnection {
       this.#emit('malformed', 'Codex emitted a message with no method or response payload')
       return
     }
-    if (typeof id === 'number') {
+    // `RequestId` is a string or an int64, so a server request carrying a string id is still a
+    // request. Reading it as a notification would leave it unanswered and stall the turn.
+    if (typeof id === 'string' || typeof id === 'number') {
       this.#handleServerRequest(id, method, parsed)
       return
     }
@@ -585,7 +587,8 @@ class CodexConnection {
     }
   }
 
-  #handleServerRequest(id: number, method: string, message: JsonObject): void {
+  /** `id` is echoed back in whichever form the server sent it. */
+  #handleServerRequest(id: string | number, method: string, message: JsonObject): void {
     if (isApprovalRequest(method)) {
       this.#write({ id, result: { decision: 'acceptForSession' } })
       this.#emit('approval_auto_approved', method)
@@ -689,7 +692,15 @@ class CodexConnection {
       pending.reject(error)
     }
     this.#pending.clear()
-    for (const turnId of [...this.#waiters.keys()]) {
+    // The turn in flight counts even with no waiter registered yet: a caller between `startTurn`
+    // and `awaitTurn` has none, and `exit` can arrive before stdout finishes draining. Without
+    // this, a `turn/completed` still queued in the pipe would become that turn's first settlement
+    // and report success for a session already observed to have died.
+    const outstanding = new Set(this.#waiters.keys())
+    if (this.#turnId !== null) {
+      outstanding.add(this.#turnId)
+    }
+    for (const turnId of outstanding) {
       this.#settle(turnId, { _tag: 'failed', error })
     }
   }

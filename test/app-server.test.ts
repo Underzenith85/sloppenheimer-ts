@@ -209,6 +209,21 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
   }, 30_000)
 
+  it('answers a server request that carries a string id', async (): Promise<void> => {
+    const outcome = await runScenario('string-request-id', { turnTimeoutMs: 2_000 })
+
+    expect(outcome.error).toBeNull()
+    expect(outcome.result?.turnCount).toBe(1)
+    expect(outcome.events.map((event) => event.event)).toContain('approval_auto_approved')
+  }, 30_000)
+
+  it('keeps a completed turn completed when the session then dies', async (): Promise<void> => {
+    const outcome = await runScenario('complete-then-exit')
+
+    expect(outcome.error).toBeNull()
+    expect(outcome.result?.turnCount).toBe(1)
+  }, 30_000)
+
   it('keeps the first settlement when a later notification contradicts it', async (): Promise<void> => {
     const outcome = await runScenario('failed-then-completed')
 

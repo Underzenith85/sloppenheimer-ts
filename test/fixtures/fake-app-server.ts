@@ -95,6 +95,27 @@ const handleTurnStart = (id: unknown): void => {
       }, 20)
       return
     }
+    case 'string-request-id': {
+      // `RequestId` permits a string. The client must answer it like any other request; if it
+      // reads it as a notification the turn never completes.
+      send({ id, result: { turn } })
+      send({
+        id: 'approval-1',
+        method: 'item/commandExecution/requestApproval',
+        params: { command: 'ls' },
+      })
+      return
+    }
+    case 'complete-then-exit': {
+      // A turn the server genuinely completed, then the session dies. Settling the in-flight turn
+      // on session death must not overwrite a completion already recorded.
+      send({ id, result: { turn } })
+      completeTurn()
+      setTimeout(() => {
+        process.exit(0)
+      }, 20)
+      return
+    }
     case 'failed-then-completed': {
       // Two lifecycle notifications for one turn. The first settlement is the turn's result; a
       // later one must not overturn it.
@@ -196,7 +217,7 @@ const handle = (message: JsonRecord): void => {
     return
   }
   // Client responses to server-initiated requests.
-  if (id === 9001) {
+  if (id === 9001 || id === 'approval-1') {
     send({ method: 'approval/observed', params: message })
     completeTurn()
     return
