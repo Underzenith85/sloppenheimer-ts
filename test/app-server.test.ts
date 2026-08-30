@@ -209,6 +209,16 @@ describe('App Server session lifecycle', (): void => {
     expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
   }, 30_000)
 
+  it('attributes an approval that arrives before the turn/start response', async (): Promise<void> => {
+    const outcome = await runScenario('approval-before-response')
+
+    expect(outcome.error).toBeNull()
+    const approved = outcome.events.find((event) => event.event === 'approval_auto_approved')
+    expect(approved?.threadId).toBe('thread-1')
+    expect(approved?.turnId).toBe('turn-1')
+    expect(approved?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
+  }, 30_000)
+
   it('answers a server request that carries a string id', async (): Promise<void> => {
     const outcome = await runScenario('string-request-id', { turnTimeoutMs: 2_000 })
 

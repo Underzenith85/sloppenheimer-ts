@@ -589,9 +589,13 @@ class CodexConnection {
 
   /** `id` is echoed back in whichever form the server sent it. */
   #handleServerRequest(id: string | number, method: string, message: JsonObject): void {
+    // A server request declares its own thread and turn, so its events are attributed from the
+    // request rather than from connection state, which is null on the first turn and names the
+    // previous one afterwards.
+    const identity = notificationIdentity(message)
     if (isApprovalRequest(method)) {
       this.#write({ id, result: { decision: 'acceptForSession' } })
-      this.#emit('approval_auto_approved', method)
+      this.#emit('approval_auto_approved', method, identity)
       return
     }
     if (isUserInputRequest(method)) {
@@ -604,12 +608,12 @@ class CodexConnection {
           category: 'input_required',
           message: 'Codex requested interactive input',
         }),
-        notificationIdentity(message).turnId,
+        identity.turnId,
       )
       return
     }
     this.#write({ id, error: { code: -32601, message: `Unsupported client request: ${method}` } })
-    this.#emit('unsupported_tool_call', method)
+    this.#emit('unsupported_tool_call', method, identity)
   }
 
   #handleNotification(method: string, message: JsonObject): void {
@@ -665,16 +669,29 @@ class CodexConnection {
     return { id, status: typeof status === 'string' ? status : null }
   }
 
-  #emit(event: string, message: string): void {
+  /**
+   * Emits a client-side event. Identity carried by the message that provoked it wins over
+   * connection state, which lags whenever a message arrives before the response that would set it.
+   */
+  #emit(
+    event: string,
+    message: string,
+    carried: Readonly<{ threadId: string | null; turnId: string | null }> = {
+      threadId: null,
+      turnId: null,
+    },
+  ): void {
+    const threadId = carried.threadId ?? this.#threadId
+    const turnId = carried.turnId ?? this.#turnId
     this.#onEvent({
       event,
       timestamp: new Date(),
       processId: this.processId,
       message,
       usage: null,
-      threadId: this.#threadId,
-      turnId: this.#turnId,
-      sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
+      threadId,
+      turnId,
+      sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
     })
   }
 

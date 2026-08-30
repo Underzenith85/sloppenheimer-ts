@@ -95,6 +95,17 @@ const handleTurnStart = (id: unknown): void => {
       }, 20)
       return
     }
+    case 'approval-before-response': {
+      // The approval request precedes the response that would teach the client the turn id, so the
+      // event can only be attributed from the identity the request itself carries.
+      send({
+        id: 9007,
+        method: 'item/commandExecution/requestApproval',
+        params: { threadId: thread.id, turnId: turn.id, command: 'ls' },
+      })
+      send({ id, result: { turn } })
+      return
+    }
     case 'string-request-id': {
       // `RequestId` permits a string. The client must answer it like any other request; if it
       // reads it as a notification the turn never completes.
@@ -217,7 +228,7 @@ const handle = (message: JsonRecord): void => {
     return
   }
   // Client responses to server-initiated requests.
-  if (id === 9001 || id === 'approval-1') {
+  if (id === 9001 || id === 9007 || id === 'approval-1') {
     send({ method: 'approval/observed', params: message })
     completeTurn()
     return
