@@ -1,4 +1,3 @@
-import { resolve } from 'node:path'
 import { Effect, type Scope } from 'effect'
 
 import type { WorkflowError } from '../errors.js'
@@ -21,16 +20,16 @@ export {
   type OrchestratorSnapshot,
   type RetrySnapshot,
   type RunningSnapshot,
+  type WorkflowWatcher,
 } from './runtime.js'
 
 export const startOrchestrator = (
-  selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
-  dependencies?: OrchestratorDependencies,
+  selectedWorkflowPath: string,
+  dependencies: OrchestratorDependencies,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
-  dependencies === undefined
-    ? startOrchestratorRuntime(selectedWorkflowPath)
-    : startOrchestratorRuntime(selectedWorkflowPath, dependencies)
+  startOrchestratorRuntime(selectedWorkflowPath, dependencies)
 
 export const runOrchestrator = (
-  selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
-): Effect.Effect<void, WorkflowError> => runOrchestratorRuntime(selectedWorkflowPath)
+  selectedWorkflowPath: string,
+  dependencies: OrchestratorDependencies,
+): Effect.Effect<void, WorkflowError> => runOrchestratorRuntime(selectedWorkflowPath, dependencies)

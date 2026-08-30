@@ -1,8 +1,7 @@
 import { resolve } from 'node:path'
-import chokidar from 'chokidar'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
-import { isCancelledTurnStatus, runAgent, type AgentEvent } from '../codex.js'
+import { isCancelledTurnStatus, type AgentEvent, type runAgent } from '../codex.js'
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
   issueId,
@@ -30,9 +29,9 @@ import {
   type AgentDetailSnapshot,
   type AgentDetailStatus,
 } from '../telemetry.js'
-import { issueBranchName, makeGitHubTracker, type TrackerAdapter } from '../tracker.js'
-import { loadWorkflow, type Workflow } from '../config/workflow.js'
-import { makeWorkspaceManager, workspaceKey, type WorkspaceManager } from '../workspace.js'
+import { issueBranchName, type TrackerAdapter } from '../tracker.js'
+import { type loadWorkflow, type Workflow } from '../config/workflow.js'
+import { workspaceKey, type WorkspaceManager } from '../workspace.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 
@@ -271,7 +270,7 @@ export type HandoffRecoveryCounts = {
   failed: number
 }
 
-type WorkflowWatcher = Readonly<{
+export type WorkflowWatcher = Readonly<{
   close: () => Promise<void>
 }>
 
@@ -357,23 +356,6 @@ export type OrchestratorContext = {
   scheduleNextTickEffect: () => Effect.Effect<void, never, Scope.Scope>
   hydrateRestoredHandoffsEffect: () => Effect.Effect<void>
   publishDetailsValue: () => void
-}
-
-const defaultDependencies: OrchestratorDependencies = {
-  loadWorkflow,
-  makeTracker: (workflow) => makeGitHubTracker(workflow.tracker.provider),
-  makeWorkspaces: (workflow) =>
-    makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
-  runAgent,
-  watchWorkflow: (path, onChange) => {
-    const watcher = chokidar.watch(path, {
-      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
-      ignoreInitial: true,
-    })
-    watcher.on('change', onChange)
-    return watcher
-  },
-  environment: process.env,
 }
 
 const initialState = (): RuntimeState => ({
@@ -501,8 +483,8 @@ const identifierIssueNumber = (identifier: string): number | null => {
 }
 
 export const startOrchestratorRuntime = (
-  selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
-  dependencies: OrchestratorDependencies = defaultDependencies,
+  selectedWorkflowPath: string,
+  dependencies: OrchestratorDependencies,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
   Effect.gen(function* () {
     const makeEffectiveWorkflow = (workflow: Workflow): EffectiveWorkflow => ({
@@ -1451,10 +1433,11 @@ export const startOrchestratorRuntime = (
   })
 
 export const runOrchestratorRuntime = (
-  selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
+  selectedWorkflowPath: string,
+  dependencies: OrchestratorDependencies,
 ): Effect.Effect<void, WorkflowError> =>
   Effect.scoped(
-    startOrchestratorRuntime(selectedWorkflowPath).pipe(
+    startOrchestratorRuntime(selectedWorkflowPath, dependencies).pipe(
       Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
     ),
   )
