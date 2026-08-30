@@ -36,4 +36,14 @@ describe('CLI options', (): void => {
     expect(() => parseCliArguments(['--port', '65536'])).toThrow('between 0 and 65535')
     expect(() => parseCliArguments(['--listen-all'])).toThrow('unknown option')
   })
+
+  it('rejects duplicate ports, extra paths, and empty paths', (): void => {
+    expect(() => parseCliArguments(['--port', '3000', '--port=3001'])).toThrow(
+      'only be provided once',
+    )
+    expect(() => parseCliArguments(['one.md', 'two.md'])).toThrow(
+      'only one workflow path may be provided',
+    )
+    expect(() => parseCliArguments([''])).toThrow('must not be empty')
+  })
 })
