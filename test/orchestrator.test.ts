@@ -50,6 +50,7 @@ import {
   type WorkspaceSettings,
 } from '../src/ports/index.js'
 import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
+import type { HostToolSession } from '../src/host-tools.js'
 import type { ValidatedTrackerProvider } from '../src/config/tracker-config.js'
 
 const makeIssue = (
@@ -2528,6 +2529,53 @@ describe('tracker credential revalidation', (): void => {
     expect(harness.idFetchTokens().at(-1)).toBe('rotated')
   })
 
+  it("routes a live session's host tool calls to the tracker a rotation installed", async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const harness = makeHarness(workflow, () => [issue])
+    const executedTokens: string[] = []
+    let session: HostToolSession | null = null
+    const ports: TestPorts = {
+      ...harness.ports,
+      environment,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
+        toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
+        executeTool: () => {
+          executedTokens.push(provider.provider.token)
+          return Promise.resolve({ success: true, data: null })
+        },
+      }),
+      runAgent: (launch) => {
+        session = launch.hostTools ?? null
+        return harness.ports.runAgent(launch)
+      },
+    }
+    const callHostTool = (): Effect.Effect<void> => {
+      const current = session
+      if (current === null) {
+        return Effect.die('worker was launched without a host tool session')
+      }
+      return Effect.promise(async () => {
+        await current.execute('symphony_issue_state', null, current.context)
+      })
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+          yield* callHostTool()
+        }),
+      ),
+    )
+
+    expect(executedTokens).toEqual(['rotated'])
+  })
+
   it('rebuilds the tracker when the referenced secret is rotated in the environment', async (): Promise<void> => {
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
     const harness = makeHarness(workflow)
@@ -2546,7 +2594,10 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
+    // Twice at startup: the layer builds the first instance from the workflow the composition root
+    // read, and the orchestrator replaces it with one built from the workflow it loaded itself.
     expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+      'secret',
       'secret',
       'first',
       'rotated',
@@ -2573,6 +2624,7 @@ describe('tracker credential revalidation', (): void => {
 
     expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
       'secret',
+      'secret',
       'first',
     ])
   })
@@ -2594,9 +2646,16 @@ describe('rebuilt port lifecycle', (): void => {
 
           expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
             'secret',
+            'secret',
             'rotated',
           ])
-          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual(['secret'])
+          // Both instances built before the rotation: the layer's, replaced at startup and freed on
+          // the first poll, and the startup one, freed once the running worker adopted the rotated
+          // tracker.
+          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
+            'secret',
+            'secret',
+          ])
         }),
       ),
     )
@@ -2641,15 +2700,18 @@ describe('rebuilt port lifecycle', (): void => {
 
           expect(harness.workspaceSettings().map((each) => each.root)).toEqual([
             '/tmp/symphony',
+            '/tmp/symphony',
             '/tmp/symphony-reloaded',
           ])
-          expect(harness.releasedWorkspaces()).toEqual([])
+          // One release, not two: the instance the layer built was replaced at startup and freed on
+          // the first poll, while the one the running worker holds outlives the reload.
+          expect(harness.releasedWorkspaces()).toHaveLength(1)
 
           finishWorker()
           yield* control.refresh
           yield* control.refresh
 
-          expect(harness.releasedWorkspaces().map((each) => each.root)).toEqual(['/tmp/symphony'])
+          expect(harness.releasedWorkspaces()).toHaveLength(2)
         }),
       ),
     )

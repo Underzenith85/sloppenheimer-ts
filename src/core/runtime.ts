@@ -50,7 +50,7 @@ import {
 } from '../ports/index.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
-import { adoptInitialPorts, rebuildEffectiveWorkflow } from './workflow-reload.js'
+import { rebuildEffectiveWorkflow } from './workflow-reload.js'
 
 export type RunningEntry = {
   runId: number
@@ -560,8 +560,16 @@ export const startOrchestratorRuntime = (
       codeReviewCell: yield* Effect.serviceOption(CurrentCodeReview),
     }
     const pendingRetirements: PendingRetirement[] = []
-    let lastKnownGood = yield* adoptInitialPorts(
+    /**
+     * Built from the workflow the orchestrator loaded rather than adopted from the composition
+     * root's own read of it. The two are separate reads of one file, and an edit between them would
+     * otherwise leave every port serving a version that nothing compares against again: the reload
+     * check measures the file against the workflow adopted here, never against the cells' input.
+     * The instances the layer built are replaced immediately and retired on the first poll.
+     */
+    let lastKnownGood = yield* rebuildEffectiveWorkflow(
       ports,
+      pendingRetirements,
       yield* ports.workflowLoader.load(selectedWorkflowPath),
     )
     const makeEffectiveWorkflow = (

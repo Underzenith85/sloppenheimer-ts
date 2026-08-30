@@ -9,13 +9,26 @@ import { logError, logInfo } from '../support/logging.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, OrchestratorContext } from './runtime.js'
 import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
 
+/** The ports a session reaches its provider through, as they stand at the moment of the call. */
+export type SessionPorts = Pick<ExecutionSnapshot, 'tracker' | 'codeReview'>
+
+/**
+ * The tool surface advertised to one session.
+ *
+ * The specs are fixed at dispatch — a rebuilt adapter of the same kind advertises the same tools —
+ * but every invocation resolves the port through `current`, so a session that outlives a credential
+ * rotation calls the instance the orchestrator adopted rather than the one it was dispatched with.
+ */
 export const makeHostToolSession = (
-  execution: Pick<ExecutionSnapshot, 'tracker' | 'codeReview'>,
+  execution: SessionPorts,
   issue: Issue,
-): HostToolSession => {
-  const codeReview = execution.codeReview
-  return Object.freeze({
-    specs: Object.freeze([...execution.tracker.toolSpecs, ...(codeReview?.toolSpecs ?? [])]),
+  current: () => SessionPorts = () => execution,
+): HostToolSession =>
+  Object.freeze({
+    specs: Object.freeze([
+      ...execution.tracker.toolSpecs,
+      ...(execution.codeReview?.toolSpecs ?? []),
+    ]),
     context: Object.freeze({
       issueId: issue.id,
       issueIdentifier: issue.identifier,
@@ -23,16 +36,17 @@ export const makeHostToolSession = (
         issue.nativeRef === null ? null : toJsonObject(issue.nativeRef, 'session.issue.nativeRef'),
     }),
     execute: (name, argumentsValue, context) => {
-      if (execution.tracker.toolSpecs.some((spec) => spec.name === name)) {
-        return execution.tracker.executeTool(name, argumentsValue, context)
+      const ports = current()
+      if (ports.tracker.toolSpecs.some((spec) => spec.name === name)) {
+        return ports.tracker.executeTool(name, argumentsValue, context)
       }
+      const codeReview = ports.codeReview
       if (codeReview?.toolSpecs.some((spec) => spec.name === name) === true) {
         return codeReview.executeTool(name, argumentsValue, context)
       }
       return unsupportedHostTool(name)
     },
   })
-}
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 export const dispatch = (
@@ -95,12 +109,20 @@ export const dispatch = (
       return false
     }
     const execution = context.captureExecutionSnapshotValue(effective, renderedPrompt.prompt)
-    const hostTools = makeHostToolSession(execution, issue)
     const runId = context.nextRunId
     context.nextRunId += 1
-    const refreshIssue = (): Effect.Effect<Issue | null, AgentError> => {
+    /**
+     * The ports this run reaches its provider through. Adoption replaces the running entry's
+     * execution when a reload or a rotation installs a replacement, so reading it back here is what
+     * keeps a live session — and the instances it holds — current with the orchestrator.
+     */
+    const sessionPorts = (): SessionPorts => {
       const running = context.state.running.get(issue.id)
-      const tracker = running?.runId === runId ? running.execution.tracker : execution.tracker
+      return running?.runId === runId ? running.execution : execution
+    }
+    const hostTools = makeHostToolSession(execution, issue, sessionPorts)
+    const refreshIssue = (): Effect.Effect<Issue | null, AgentError> => {
+      const tracker = sessionPorts().tracker
       return tracker.fetchIssuesByIds([issue.id]).pipe(
         Effect.map((issues) => issues[0] ?? null),
         Effect.mapError(

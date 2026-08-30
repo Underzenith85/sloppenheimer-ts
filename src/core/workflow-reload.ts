@@ -88,34 +88,9 @@ const rebuildCodeReview = (
   })
 
 /**
- * Adopts the instances the composition root already built.
- *
- * The layer's configuration and the workflow the orchestrator loads are read from the same file, so
- * the first effective workflow takes the cells as they stand rather than replacing three identical
- * instances before the first poll can use them.
- */
-export const adoptInitialPorts = (
-  ports: RuntimePorts,
-  workflow: Workflow,
-): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
-  Effect.gen(function* () {
-    const codeReview = yield* Option.match(ports.codeReviewCell, {
-      onNone: () => Effect.succeed<CodeReviewPort | null>(null),
-      onSome: (cell) => cell.get.pipe(Effect.flatMap((port) => requireCapability(workflow, port))),
-    })
-    return {
-      workflow,
-      tracker: yield* ports.trackerCell.get,
-      codeReview,
-      workspaces: yield* ports.workspaceCell.get,
-      loadedAt: new Date(),
-    }
-  })
-
-/**
- * Builds every rebuildable port from a workflow that has just been reloaded. All three are replaced
- * together: a reload can move the workspace root or change a hook as readily as it can change the
- * tracker provider.
+ * Builds every rebuildable port from a workflow the loader has just returned — at startup, and
+ * again whenever a reload changes the file. All three are replaced together: a reload can move the
+ * workspace root or change a hook as readily as it can change the tracker provider.
  */
 export const rebuildEffectiveWorkflow = (
   ports: RuntimePorts,
