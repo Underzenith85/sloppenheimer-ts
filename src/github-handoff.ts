@@ -198,11 +198,9 @@ const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation
       continue
     }
     const login = author['login']
-    if (
-      typeof login !== 'string' ||
-      login !== 'chatgpt-codex-connector' ||
-      !body.includes('<!-- codex-pull-request-review-summary -->')
-    ) {
+    const isCodexConnector =
+      login === 'chatgpt-codex-connector' || login === 'chatgpt-codex-connector[bot]'
+    if (!isCodexConnector || !body.includes('<!-- codex-pull-request-review-summary -->')) {
       continue
     }
     const head = /\|\s*`([0-9a-f]{7,40})`\s*\|/u.exec(body)?.[1]
