@@ -13,6 +13,24 @@ export class JsonConversionError extends Error {
 export const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
+export const isJsonArray = (value: JsonValue | undefined): value is readonly JsonValue[] =>
+  Array.isArray(value)
+
+/**
+ * Deep-merges a sparse update over a JSON object, so a report that names only the fields that
+ * changed — a rate-limit window refreshed on its own, say — updates those and leaves the rest of
+ * the last reading intact. Nested objects merge; every other value replaces.
+ */
+export const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
+  const merged: Record<string, JsonValue> = { ...(current ?? {}) }
+  for (const [key, value] of Object.entries(update)) {
+    const existing = merged[key]
+    merged[key] =
+      isJsonObject(existing) && isJsonObject(value) ? mergeSparseObject(existing, value) : value
+  }
+  return merged
+}
+
 const isPlainObject = (value: object): boolean => {
   const prototype: unknown = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null

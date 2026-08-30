@@ -64,6 +64,18 @@ const hostIsLoopback = (value: string | undefined): boolean => {
   }
 }
 
+/**
+ * The shape a tracker identifier may take. Rejecting anything else keeps a malformed path from
+ * reaching the actor at all, and keeps the reflected error free of caller-supplied text.
+ *
+ * The length bound only excludes paths no tracker could have produced: a GitHub owner and
+ * repository can together run to 140 characters, and a `detailUrl` the runtime snapshot publishes
+ * must never be rejected by the endpoint it points at.
+ */
+const issueIdentifierPattern = /^[\w.\-/]{1,512}#\d{1,12}$/u
+
+const isIssueIdentifier = (value: string): boolean => issueIdentifierPattern.test(value)
+
 const backendFailure = errorResponse(
   502,
   'backend_error',
@@ -180,6 +192,55 @@ const makeRouter = (
     HttpRouter.all('/api/v1/issues/:issueNumber/start', issueAction(true)),
     HttpRouter.all('/api/v1/issues/:issueNumber/pause', issueAction(false)),
     HttpRouter.all(
+      '/api/v1/agents/:identifier',
+      withMethod(
+        'GET',
+        Effect.flatMap(HttpRouter.params, (params) => {
+          const identifier = params['identifier'] ?? ''
+          if (!isIssueIdentifier(identifier)) {
+            return errorResponse(
+              400,
+              'invalid_identifier',
+              'The agent identifier is not a valid issue identifier',
+            )
+          }
+          return Effect.map(backend.agentDetail(identifier), (lookup) => {
+            switch (lookup._tag) {
+              case 'Found': {
+                return json(200, { version: 'v1', detail: lookup.detail })
+              }
+              case 'Completed': {
+                return errorResponse(
+                  410,
+                  'agent_session_completed',
+                  'The agent session has completed and its detail is no longer retained',
+                )
+              }
+              case 'NoSession': {
+                return errorResponse(
+                  409,
+                  'agent_not_active',
+                  'The issue has no active or retrying agent session',
+                )
+              }
+              case 'Unavailable': {
+                return errorResponse(503, 'agent_detail_unavailable', lookup.reason).pipe(
+                  HttpServerResponse.setHeader('Retry-After', '1'),
+                )
+              }
+              case 'Unknown': {
+                return errorResponse(
+                  404,
+                  'agent_not_found',
+                  'No agent has run for that identifier in this session',
+                )
+              }
+            }
+          })
+        }),
+      ),
+    ),
+    HttpRouter.all(
       '/api/v1/:identifier',
       withMethod(
         'GET',
@@ -205,8 +266,16 @@ const makeRouter = (
   )
 }
 
+/**
+ * The router's own limit on a path segment. Its default of 100 characters is shorter than a tracker
+ * identifier can legitimately be — a GitHub owner and repository together reach 140 — and a segment
+ * over the limit fails to match, so a published `detailUrl` would 404 before any handler ran.
+ */
+const maxIdentifierParamLength = 1024
+
 const makeApp = (backend: OperatorBackend, csrfToken: string): HttpApp.Default<never, never> => {
   const handled = makeRouter(backend, csrfToken).pipe(
+    HttpRouter.withRouterConfig({ maxParamLength: maxIdentifierParamLength }),
     Effect.catchTag('RouteNotFound', () => Effect.succeed(notFound)),
     Effect.catchAllCause((cause) =>
       logError('operator request failed', { cause: Cause.pretty(cause) }).pipe(

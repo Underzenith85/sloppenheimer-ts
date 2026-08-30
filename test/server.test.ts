@@ -2,11 +2,17 @@ import { Effect } from 'effect'
 import { createServer, request } from 'node:http'
 import { describe, expect, it, vi } from 'vitest'
 
-import { issueId } from '../src/domain.js'
+import { issueId, issueIdentifier } from '../src/domain.js'
 import { TrackerError } from '../src/errors.js'
 import type { OperatorBackend } from '../src/operator.js'
-import type { OrchestratorSnapshot } from '../src/orchestrator.js'
+import type { AgentDetailLookup, OrchestratorSnapshot } from '../src/orchestrator.js'
 import { startOperatorServer } from '../src/server.js'
+import {
+  buildAgentDetail,
+  createAgentDetailRecord,
+  recordAgentEvent,
+  type AgentDetailSnapshot,
+} from '../src/telemetry.js'
 
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T12:00:00.000Z',
@@ -52,6 +58,7 @@ const snapshot: OrchestratorSnapshot = {
       tokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       lastReportedTokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       workerHost: 'local',
+      detailUrl: '/api/v1/agents/example%2Fsymphony%2317',
     },
   ],
   retrying: [],
@@ -59,9 +66,83 @@ const snapshot: OrchestratorSnapshot = {
   rateLimits: null,
 }
 
+const makeDetail = (identifier: string): AgentDetailSnapshot => {
+  const record = createAgentDetailRecord({
+    issueId: issueId('17'),
+    identifier: issueIdentifier(identifier),
+    title: 'Operator console',
+    url: 'https://github.com/example/symphony/issues/17',
+    attempt: null,
+    startedAt: new Date('2026-08-29T11:59:00.000Z'),
+    workspacePathKey: 'example_symphony_17',
+    expectedBranch: 'symphony/issue-17',
+    dispatchLabels: ['symphony'],
+  })
+  recordAgentEvent(record, {
+    event: 'item/completed',
+    timestamp: new Date('2026-08-29T11:59:30.000Z'),
+    processId: 42,
+    message: null,
+    usage: null,
+    rateLimits: null,
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    sessionId: 'thread-1:turn-1',
+    turnCount: 1,
+    turnStatus: null,
+    payload: {
+      kind: 'command',
+      program: 'pnpm',
+      argumentCount: 1,
+      quality: 'check',
+      state: 'started',
+      exitCode: null,
+      durationMs: null,
+    },
+  })
+  return buildAgentDetail(record, {
+    self: `/api/v1/agents/${encodeURIComponent(identifier)}`,
+    now: new Date('2026-08-29T12:00:00.000Z'),
+    status: 'running',
+    stallTimeoutMs: 60_000,
+    workerHost: 'local',
+    branch: 'symphony/issue-17',
+    retry: null,
+  })
+}
+
+const detailLookups = new Map<string, AgentDetailLookup>([
+  ['example/symphony#17', { _tag: 'Found', detail: makeDetail('example/symphony#17') }],
+  [
+    'example/symphony#18',
+    {
+      _tag: 'Found',
+      detail: { ...makeDetail('example/symphony#18'), status: 'retrying' },
+    },
+  ],
+  ['example/symphony#19', { _tag: 'Completed', identifier: 'example/symphony#19' }],
+  [
+    // A GitHub owner and repository can together run well past a hundred characters; the endpoint
+    // must accept every identifier the runtime snapshot publishes a link for.
+    `${'o'.repeat(39)}/${'r'.repeat(100)}#7`,
+    { _tag: 'Found', detail: makeDetail(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`) },
+  ],
+  ['example/symphony#20', { _tag: 'NoSession', identifier: 'example/symphony#20' }],
+  [
+    'example/symphony#21',
+    {
+      _tag: 'Unavailable',
+      identifier: 'example/symphony#21',
+      reason: 'The agent session is still starting',
+    },
+  ],
+])
+
 const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
   snapshot: Effect.succeed(snapshot),
   refresh: Effect.void,
+  agentDetail: (identifier) =>
+    Effect.succeed(detailLookups.get(identifier) ?? { _tag: 'Unknown', identifier }),
   backlog: Effect.succeed({
     controlLabel: 'symphony',
     issues: [
@@ -141,6 +222,74 @@ describe('operator server', (): void => {
         '(state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)',
       )
       expect(source).toContain("button.disabled = !issue.enabled && issue.readiness !== 'ready'")
+    })
+  })
+
+  it('serves agent detail for a running agent without leaking the workspace or prompt', async (): Promise<void> => {
+    await withServer(makeBackend(), async (url) => {
+      const response = await fetch(
+        `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
+      )
+      const body = await response.text()
+      const payload: unknown = JSON.parse(body)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(payload).toMatchObject({
+        version: 'v1',
+        detail: {
+          version: 'v1',
+          self: '/api/v1/agents/example%2Fsymphony%2317',
+          identifier: 'example/symphony#17',
+          status: 'running',
+          identity: { threadId: 'thread-1', turnId: 'turn-1', processId: 42, workerHost: 'local' },
+          phase: { phase: 'running_command', operation: 'Running pnpm' },
+          activity: { stallTimeoutMs: 60_000, stalled: false },
+          workspace: { pathKey: 'example_symphony_17', qualityPhase: 'check' },
+          handoff: { expectedBranch: 'symphony/issue-17', outcome: 'in_progress' },
+          timeline: { retained: 1, dropped: 0, limit: 200 },
+        },
+      })
+      expect(body).not.toContain('/tmp/')
+    })
+  })
+
+  it('distinguishes retrying, completed, sessionless, unavailable, missing, and malformed detail requests', async (): Promise<void> => {
+    await withServer(makeBackend(), async (url) => {
+      const detailFor = (identifier: string): Promise<Response> =>
+        fetch(`${url}/api/v1/agents/${encodeURIComponent(identifier)}`)
+      const retrying = await detailFor('example/symphony#18')
+      const completed = await detailFor('example/symphony#19')
+      const sessionless = await detailFor('example/symphony#20')
+      const unavailable = await detailFor('example/symphony#21')
+      const missing = await detailFor('example/symphony#99')
+      const malformed = await detailFor('not an identifier')
+      const longIdentifier = await detailFor(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`)
+      const wrongMethod = await fetch(
+        `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
+        { method: 'POST' },
+      )
+
+      expect(retrying.status).toBe(200)
+      expect(await retrying.json()).toMatchObject({ detail: { status: 'retrying' } })
+      expect(completed.status).toBe(410)
+      expect(await completed.json()).toMatchObject({
+        version: 'v1',
+        error: { code: 'agent_session_completed' },
+      })
+      expect(sessionless.status).toBe(409)
+      expect(await sessionless.json()).toMatchObject({ error: { code: 'agent_not_active' } })
+      expect(unavailable.status).toBe(503)
+      expect(unavailable.headers.get('retry-after')).toBe('1')
+      expect(await unavailable.json()).toMatchObject({
+        error: { code: 'agent_detail_unavailable' },
+      })
+      expect(missing.status).toBe(404)
+      expect(await missing.json()).toMatchObject({ error: { code: 'agent_not_found' } })
+      expect(malformed.status).toBe(400)
+      expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_identifier' } })
+      expect(longIdentifier.status).toBe(200)
+      expect(wrongMethod.status).toBe(405)
     })
   })
 

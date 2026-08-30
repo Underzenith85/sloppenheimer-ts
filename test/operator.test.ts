@@ -187,6 +187,7 @@ Do the work
     const backend = makeOperatorBackend(workflowPath, {
       snapshot: Effect.die('unused'),
       refresh: Effect.void,
+      agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
       setIssuePaused,
       awaitTermination: Effect.never,
     })

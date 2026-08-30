@@ -439,6 +439,40 @@ const handleTurnStart = (id: unknown, params: unknown): void => {
       writeFileSync('grandchild.pid', String(child.pid ?? 0))
       return
     }
+    case 'secret-message': {
+      send({ id, result: { turn } })
+      send({
+        method: 'item/completed',
+        params: {
+          threadId: thread.id,
+          turnId: turn.id,
+          item: {
+            type: 'agentMessage',
+            text: 'pushed with github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz012345',
+          },
+        },
+      })
+      completeTurn()
+      return
+    }
+    case 'secret-environment': {
+      // Echoes a credential the host left in the subprocess environment, which only literal-value
+      // redaction can remove: the value has no distinguishing shape of its own.
+      send({ id, result: { turn } })
+      send({
+        method: 'item/completed',
+        params: {
+          threadId: thread.id,
+          turnId: turn.id,
+          item: {
+            type: 'agentMessage',
+            text: `remote rejected for ${process.env['GITHUB_TOKEN'] ?? 'nothing'}`,
+          },
+        },
+      })
+      completeTurn()
+      return
+    }
     case 'usage': {
       send({ id, result: { turn } })
       send({

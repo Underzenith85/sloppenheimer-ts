@@ -1,17 +1,31 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import type { AgentEvent } from '../src/codex.js'
+import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
-import { issueId, issueIdentifier, type BlockerRef, type Issue } from '../src/domain.js'
+import {
+  issueId,
+  issueIdentifier,
+  type BlockerRef,
+  type Issue,
+  type JsonObject,
+} from '../src/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import {
   issueIsRoutable,
+  retainedCompletedDetails,
   retryDelayMs,
   sortIssues,
   startOrchestrator,
+  type AgentDetailLookup,
+  type OrchestratorControl,
   type OrchestratorDependencies,
 } from '../src/orchestrator.js'
+import { makeRedactor } from '../src/redaction.js'
+import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
 import type { TrackerAdapter } from '../src/tracker.js'
 import type { Workflow } from '../src/workflow.js'
 
@@ -1094,6 +1108,666 @@ describe('scheduler dependency hydration', (): void => {
   })
 })
 
+type FakeAgent = Readonly<{
+  notify: (method: string, params: Record<string, unknown>) => void
+  settle: (outcome: 'completed' | 'failed') => void
+}>
+
+const secretRedactor = makeRedactor(['s3cret-token-value'])
+
+/**
+ * A stand-in worker that exposes the same `onEvent` contract the Codex client uses, with payloads
+ * built by the same normalizer, so what the orchestrator retains is what a real session would
+ * produce.
+ */
+const makeAgentFactory = (): Readonly<{
+  agents: Map<string, FakeAgent>
+  runAgent: OrchestratorDependencies['runAgent']
+}> => {
+  const agents = new Map<string, FakeAgent>()
+  return {
+    agents,
+    runAgent: (launch) =>
+      Effect.async<AgentResult, AgentError>((resume) => {
+        agents.set(launch.issue.identifier, {
+          notify: (method, params) => {
+            const telemetry = telemetryFrom(method, { params: params as JsonObject })
+            launch.onEvent({
+              event: method,
+              timestamp: new Date(),
+              processId: 4242,
+              message: null,
+              usage: telemetry.usage,
+              rateLimits: telemetry.rateLimits,
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              sessionId: 'thread-1',
+              turnCount: 1,
+              turnStatus: null,
+              payload: normalizePayload(
+                method,
+                params as Parameters<typeof normalizePayload>[1],
+                secretRedactor,
+              ),
+            })
+          },
+          settle: (outcome) => {
+            resume(
+              outcome === 'completed'
+                ? Effect.succeed({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
+                : Effect.fail(new AgentError({ category: 'turn_failed', message: 'turn failed' })),
+            )
+          },
+        })
+      }),
+  }
+}
+
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5))
+
+const waitUntil = async <Value>(produce: () => Value | null, what: string): Promise<Value> => {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const value = produce()
+    if (value !== null) {
+      return value
+    }
+    await settle()
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+const awaitAgent = (agents: Map<string, FakeAgent>, identifier: string): Promise<FakeAgent> =>
+  waitUntil(() => agents.get(identifier) ?? null, `agent ${identifier}`)
+
+const readDetail = (control: OrchestratorControl, identifier: string): AgentDetailLookup =>
+  Effect.runSync(control.agentDetail(identifier))
+
+const awaitDetail = (
+  control: OrchestratorControl,
+  identifier: string,
+  predicate: (detail: AgentDetailSnapshot) => boolean,
+  what: string,
+): Promise<AgentDetailSnapshot> =>
+  waitUntil(() => {
+    const lookup = readDetail(control, identifier)
+    return lookup._tag === 'Found' && predicate(lookup.detail) ? lookup.detail : null
+  }, what)
+
+describe('live agent detail', (): void => {
+  it('publishes an ordered, redacted, bounded timeline for a running agent', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#7', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#7'),
+          )
+          agent.notify('item/completed', {
+            item: { type: 'agentMessage', text: 'pushed with s3cret-token-value' },
+          })
+          agent.notify('item/started', {
+            item: { type: 'commandExecution', command: 'pnpm check', status: 'in_progress' },
+          })
+          agent.notify('item/completed', {
+            item: {
+              type: 'fileChange',
+              path: 'src/telemetry.ts',
+              kind: 'updated',
+              addedLines: 9,
+              deletedLines: 1,
+            },
+          })
+          agent.notify('turn/usage', {
+            usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+          })
+          agent.notify('account/rateLimits/updated', {
+            rateLimits: { primary: { usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 } },
+          })
+          const detail = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#7',
+              (candidate) => candidate.timeline.events.length >= 5,
+              'five retained events',
+            ),
+          )
+          const snapshot = yield* control.snapshot
+          return { detail, snapshot }
+        }),
+      ),
+    )
+
+    const detail = observed.detail
+    expect(detail.status).toBe('running')
+    expect(detail.self).toBe('/api/v1/agents/example%2Fsymphony%237')
+    expect(observed.snapshot.running[0]?.detailUrl).toBe(detail.self)
+    expect(detail.timeline.events.map((event) => event.category)).toEqual([
+      'message',
+      'command',
+      'file',
+      'usage',
+      'usage',
+    ])
+    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5])
+    expect(JSON.stringify(detail)).toContain('[REDACTED]')
+    expect(JSON.stringify(detail)).not.toContain('s3cret-token-value')
+    expect(detail.identity).toMatchObject({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      // Session identity is the thread, stable for the session's whole lifetime.
+      sessionId: 'thread-1',
+      processId: 4242,
+      turnNumber: 1,
+      workerHost: 'local',
+    })
+    expect(detail.usage.totalTokens).toBe(18)
+    expect(detail.rateLimits).toEqual([
+      { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
+    ])
+    expect(detail.workspace).toMatchObject({ dirtyFileCount: 1, addedLines: 9, deletedLines: 1 })
+    expect(detail.activity.stallTimeoutMs).toBe(30_000)
+    // The runtime snapshot keeps the client's own merged rate-limit object; the per-agent detail
+    // is the typed view of the same reading.
+    expect(observed.snapshot.rateLimits).toMatchObject({ primary: { usedPercent: 40 } })
+  })
+
+  it('separates attempts across a retry while keeping one rising sequence', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#8', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const first = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#8'),
+          )
+          first.notify('item/completed', { item: { type: 'reasoning' } })
+          yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#8',
+              (candidate) => candidate.timeline.events.length === 1,
+              'the first attempt event',
+            ),
+          )
+          factory.agents.delete('example/symphony#8')
+          first.settle('failed')
+          const retrying = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#8',
+              (candidate) => candidate.status === 'retrying',
+              'the scheduled retry',
+            ),
+          )
+          expect(retrying.retry?.attempt).toBe(1)
+          expect(retrying.phase.phase).toBe('retrying')
+          yield* TestClock.adjust('20 seconds')
+          const second = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#8'),
+          )
+          second.notify('item/completed', {
+            item: { type: 'commandExecution', command: 'pnpm test', status: 'completed' },
+          })
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#8',
+              (candidate) =>
+                candidate.attempt.current === 1 &&
+                candidate.status === 'running' &&
+                candidate.timeline.events.length === 4,
+              'the second attempt',
+            ),
+          )
+        }),
+      ).pipe(Effect.provide(TestContext.TestContext)),
+    )
+
+    expect(detail.timeline.events.map((event) => [event.attempt, event.category])).toEqual([
+      [0, 'reasoning'],
+      [0, 'retry'],
+      [1, 'session'],
+      [1, 'command'],
+    ])
+    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4])
+    expect(detail.attempt.attempts.map((attempt) => attempt.outcome)).toEqual([
+      'retrying',
+      'running',
+    ])
+    expect(detail.attempt.retries).toBe(1)
+  })
+
+  it('keeps concurrent agents in separate records', async (): Promise<void> => {
+    const issues = [
+      makeIssue('example/symphony#11', 1, null, ['symphony', 'ready']),
+      makeIssue('example/symphony#12', 1, null, ['symphony', 'ready']),
+    ]
+    const harness = makeHarness(
+      changedWorkflow({ fingerprint: 'test', maxConcurrentAgents: 2 }),
+      () => issues,
+    )
+    const factory = makeAgentFactory()
+
+    const details = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const first = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#11'),
+          )
+          const second = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#12'),
+          )
+          first.notify('item/completed', { item: { type: 'reasoning' } })
+          second.notify('item/completed', {
+            item: { type: 'commandExecution', command: 'pnpm lint', status: 'completed' },
+          })
+          second.notify('item/completed', {
+            item: { type: 'fileChange', path: 'src/server.ts', kind: 'add', addedLines: 4 },
+          })
+          const left = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#11',
+              (candidate) => candidate.timeline.events.length === 1,
+              'the first record',
+            ),
+          )
+          const right = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#12',
+              (candidate) => candidate.timeline.events.length === 2,
+              'the second record',
+            ),
+          )
+          return { left, right }
+        }),
+      ),
+    )
+
+    expect(details.left.timeline.events.map((event) => event.category)).toEqual(['reasoning'])
+    expect(details.right.timeline.events.map((event) => event.category)).toEqual([
+      'command',
+      'file',
+    ])
+    expect(details.left.workspace.dirtyFileCount).toBe(0)
+    expect(details.right.workspace.dirtyFileCount).toBe(1)
+  })
+
+  it('records handoff progress and keeps the completed record readable', async (): Promise<void> => {
+    // A handoff is persisted, so this run gets a workspace root of its own.
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-handoff-detail-'))
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#13', 1, null, ['symphony', 'ready']),
+      id: issueId('13'),
+    }
+    const harness = makeHarness(isolated, () => [issue])
+    const factory = makeAgentFactory()
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: factory.runAgent,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: () =>
+          Effect.succeed({
+            _tag: 'PullRequest',
+            branchName: 'symphony/issue-13',
+            pullRequestUrl: 'https://example.test/pull/61',
+            pullRequestNumber: 61,
+            created: true,
+          }),
+      }),
+    }
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#13'),
+          )
+          agent.settle('completed')
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#13',
+              (candidate) => candidate.status === 'completed',
+              'the completed session',
+            ),
+          )
+        }),
+      ),
+    )
+
+    expect(detail.handoff).toMatchObject({
+      expectedBranch: 'symphony/issue-13',
+      remoteBranch: { status: 'observed', name: 'symphony/issue-13' },
+      pullRequest: {
+        status: 'created',
+        number: 61,
+        url: 'https://example.test/pull/61',
+        state: 'awaiting_checks',
+      },
+      dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
+      outcome: 'pull_request_open',
+    })
+    // Four steps: the transition published before the tracker was asked, then the branch, the
+    // pull request, and the dispatch-label step it does not perform.
+    expect(detail.timeline.events.map((event) => event.category)).toEqual([
+      'handoff',
+      'handoff',
+      'handoff',
+      'handoff',
+    ])
+    expect(
+      detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
+    ).toEqual(['pending', 'observed', 'observed', 'not_performed'])
+    expect(detail.activity.stallDeadline).toBeNull()
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('publishes the handoff transition before waiting on the tracker', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-handoff-timing-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#19', 1, null, ['symphony', 'ready']),
+      id: issueId('19'),
+    }
+    const harness = makeHarness(isolated, () => [issue])
+    const factory = makeAgentFactory()
+    let releaseHandoff = (): void => undefined
+    const handoffReached = new Promise<void>((resolve) => {
+      releaseHandoff = resolve
+    })
+    let blockHandoff = true
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: factory.runAgent,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: () =>
+          blockHandoff
+            ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
+            : Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-19' }),
+      }),
+    }
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#19'),
+          )
+          agent.settle('completed')
+          yield* Effect.promise(() => handoffReached)
+          // The worker has left the running map and the tracker has not answered yet: the
+          // published detail must already say so rather than still counting down to stalled.
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#19',
+              (candidate) => candidate.phase.phase === 'handing_off',
+              'the handoff transition',
+            ),
+          )
+        }),
+      ),
+    )
+
+    expect(detail.status).toBe('completed')
+    expect(detail.activity.stallDeadline).toBeNull()
+    expect(detail.timeline.events.at(-1)).toMatchObject({ category: 'handoff', status: 'pending' })
+    blockHandoff = false
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('answers unknown, sessionless, and starting identifiers distinctly', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#14', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const lookups = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          yield* Effect.promise(() => awaitAgent(factory.agents, 'example/symphony#14'))
+          yield* Effect.promise(() =>
+            awaitDetail(control, 'example/symphony#14', () => true, 'the running agent'),
+          )
+          return {
+            unknown: readDetail(control, 'example/symphony#404'),
+            running: readDetail(control, 'example/symphony#14'),
+          }
+        }),
+      ),
+    )
+
+    expect(lookups.unknown._tag).toBe('Unknown')
+    expect(lookups.running._tag).toBe('Found')
+  })
+
+  it('keeps a retry scheduled before the session starts inspectable', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+    // Dispatch preflight fails without the referenced secret, so the retry is scheduled before any
+    // agent session exists — and its published link still has to resolve.
+    const harness = makeHarness(workflow, () => [issue], undefined, {})
+    const factory = makeAgentFactory()
+
+    const lookup = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          return yield* Effect.promise(() =>
+            waitUntil(() => {
+              const found = readDetail(control, 'example/symphony#16')
+              return found._tag === 'Found' && found.detail.status === 'retrying' ? found : null
+            }, 'the pre-launch retry to be inspectable'),
+          )
+        }),
+      ),
+    )
+
+    expect(lookup._tag).toBe('Found')
+    if (lookup._tag === 'Found') {
+      expect(lookup.detail.retry?.attempt).toBe(1)
+      expect(lookup.detail.retry?.reason).toContain('environment variable')
+      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual(['retry'])
+      expect(factory.agents.size).toBe(0)
+    }
+  })
+
+  it('closes the detail of a queued retry an operator pauses away', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+    // The same pre-launch failure as above, so the issue is waiting to retry with no session behind
+    // it when the pause drops the queued retry.
+    const harness = makeHarness(workflow, () => [issue], undefined, {})
+    const factory = makeAgentFactory()
+
+    const lookup = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          yield* Effect.promise(() =>
+            waitUntil(() => {
+              const found = readDetail(control, 'example/symphony#17')
+              return found._tag === 'Found' && found.detail.status === 'retrying' ? found : null
+            }, 'the pre-launch retry to be inspectable'),
+          )
+
+          yield* control.setIssuePaused(17, true)
+
+          return readDetail(control, 'example/symphony#17')
+        }),
+      ),
+    )
+
+    expect(lookup._tag).toBe('Found')
+    if (lookup._tag === 'Found') {
+      // The retry will never run, so nothing may still describe the agent as waiting for it.
+      expect(lookup.detail.status).toBe('completed')
+      expect(lookup.detail.retry).toBeNull()
+      expect(lookup.detail.phase.phase).toBe('cancelled')
+      expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
+        outcome: 'cancelled',
+        reason: 'the operator paused the issue',
+      })
+      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual([
+        'retry',
+        'cancellation',
+      ])
+    }
+  })
+
+  it('serves detail while a tracker poll is blocked, and hands out immutable snapshots', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
+    let blockPolling = false
+    const harness = makeHarness(
+      workflow,
+      () => [issue],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open')) {
+          return Effect.succeed([])
+        }
+        return blockPolling ? Effect.never : Effect.succeed([issue])
+      },
+    )
+    const factory = makeAgentFactory()
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#15'),
+          )
+          agent.notify('item/completed', { item: { type: 'reasoning' } })
+          const before = yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#15',
+              (candidate) => candidate.timeline.events.length === 1,
+              'the first event',
+            ),
+          )
+          // The scheduler is now parked inside a poll. A detail read must still answer, and must
+          // not be able to change anything the scheduler owns.
+          blockPolling = true
+          yield* Effect.forkScoped(control.refresh)
+          yield* Effect.promise(settle)
+          const during = readDetail(control, 'example/symphony#15')
+          expect(during._tag).toBe('Found')
+          const events = before.timeline.events as unknown as { push: (value: unknown) => number }
+          expect(() => events.push('tampered')).toThrow()
+          const after = readDetail(control, 'example/symphony#15')
+          return { during, after }
+        }),
+      ),
+    )
+
+    expect(observed.after._tag).toBe('Found')
+    if (observed.after._tag === 'Found') {
+      expect(observed.after.detail.timeline.events).toHaveLength(1)
+      expect(observed.after.detail.activity.elapsedMs).toBeGreaterThanOrEqual(0)
+    }
+  })
+})
+
+describe('aged-out agent detail', (): void => {
+  it('keeps reporting an evicted session as completed on later publications', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-aged-out-'))
+    const total = retainedCompletedDetails + 1
+    const issues = Array.from({ length: total }, (_unused, index) => ({
+      ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
+      id: issueId(String(index + 20)),
+    }))
+    const isolated: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        workspaceRoot,
+        agent: { ...workflow.config.agent, maxConcurrentAgents: total },
+      },
+    }
+    const harness = makeHarness(isolated, () => issues)
+    const factory = makeAgentFactory()
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: factory.runAgent,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: (issue) =>
+          Effect.succeed({
+            _tag: 'PullRequest',
+            branchName: `symphony/issue-${issue.id}`,
+            pullRequestUrl: `https://example.test/pull/${issue.id}`,
+            pullRequestNumber: Number(issue.id),
+            created: true,
+          }),
+      }),
+    }
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          for (const issue of issues) {
+            const agent = yield* Effect.promise(() => awaitAgent(factory.agents, issue.identifier))
+            agent.settle('completed')
+          }
+          const evicted = yield* Effect.promise(() =>
+            waitUntil(() => {
+              const aged = issues.filter(
+                (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
+              )
+              return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
+            }, 'the oldest detail to age out'),
+          )
+          // Any later publication must not downgrade the aged-out answer to "no session".
+          yield* control.setIssuePaused(9_999, true)
+          return { evicted, after: readDetail(control, evicted) }
+        }),
+      ),
+    )
+
+    expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+})
+
 const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
   event: 'thread/tokenUsage/updated',
   timestamp: new Date(),
@@ -1106,6 +1780,7 @@ const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
   turnStatus: null,
   usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
   rateLimits: null,
+  payload: { kind: 'none' },
   ...overrides,
 })
 

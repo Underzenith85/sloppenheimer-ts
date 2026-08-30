@@ -25,6 +25,7 @@ const snapshot: OrchestratorSnapshot = {
 const backend: OperatorBackend = {
   snapshot: Effect.succeed(snapshot),
   refresh: Effect.void,
+  agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
   backlog: Effect.succeed({
     controlLabel: 'symphony',
     issues: [],

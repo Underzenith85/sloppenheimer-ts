@@ -4,7 +4,14 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
-import { redactSecretsInString } from './logging.js'
+import { isJsonObject, mergeSparseObject } from './json.js'
+import { makeRedactor, redact, redactionMarker, type Redactor } from './redaction.js'
+import {
+  clientPayload,
+  normalizePayload,
+  type AgentEvent,
+  type AgentEventPayload,
+} from './telemetry.js'
 import type { CodexConfig } from './workflow.js'
 import {
   assertWorkspaceIdentity,
@@ -31,9 +38,6 @@ const shutdownGraceMs = 5_000
 const groupReapDeadlineMs = 2_000
 const groupReapPollMs = 25
 
-const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (
     value === null ||
@@ -58,23 +62,27 @@ export const composeSessionId = (threadId: string, _turnId: string | null): stri
 export const isCancelledTurnStatus = (status: string): boolean =>
   status === 'cancelled' || status === 'canceled' || status === 'interrupted'
 
-export type AgentEvent = Readonly<{
-  event: string
-  timestamp: Date
-  processId: number | null
-  message: string | null
-  usage: Readonly<{
-    inputTokens: number
-    outputTokens: number
-    totalTokens: number
-  }> | null
-  rateLimits: JsonObject | null
-  threadId: string | null
-  turnId: string | null
-  sessionId: string | null
-  turnCount: number
-  turnStatus: string | null
-}>
+export type { AgentEvent } from './telemetry.js'
+
+/**
+ * The environment values a session's telemetry must never echo. The tracker's own secret names come
+ * from the workflow; Codex's authentication sources are added because they are present in the
+ * subprocess environment by design and could be printed by any tool the agent runs.
+ */
+export const sessionSecretValues = (
+  environment: NodeJS.ProcessEnv,
+  secretEnvironmentNames: readonly string[],
+): readonly string[] => {
+  const names = new Set([
+    ...secretEnvironmentNames,
+    ...codexAuthenticationEnvironmentNames,
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+  ])
+  return [...names]
+    .map((name) => environment[name])
+    .filter((value): value is string => value !== undefined && value.length > 0)
+}
 
 export type AgentResult = Readonly<{
   threadId: string
@@ -138,16 +146,6 @@ const wrapperFrom = (params: JsonObject): JsonObject => {
   return isJsonObject(message) ? message : params
 }
 
-const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
-  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
-  for (const [key, value] of Object.entries(update)) {
-    const existing = merged[key]
-    merged[key] =
-      isJsonObject(existing) && isJsonObject(value) ? mergeSparseObject(existing, value) : value
-  }
-  return merged
-}
-
 export const telemetryFrom = (
   method: string,
   message: JsonObject,
@@ -188,8 +186,10 @@ export const boundedMessage = (
   const knownSecretsRedacted = [...knownSecretValues]
     .filter((secret) => secret.length > 0)
     .sort((left, right) => right.length - left.length)
-    .reduce((message, secret) => message.replaceAll(secret, '[REDACTED]'), value)
-  const redacted = redactSecretsInString(knownSecretsRedacted)
+    .reduce((message, secret) => message.replaceAll(secret, redactionMarker), value)
+  // `redact` composes the host's structural redactor with the shape-based patterns, so a bare
+  // provider token in an agent message is removed as surely as an `Authorization:` header is.
+  const redacted = redact(knownSecretsRedacted)
   return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
 }
 
@@ -330,6 +330,12 @@ class CodexConnection {
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
   readonly #knownSecretValues: readonly string[]
+  /**
+   * Shape-based redaction over the same known secret values, applied at the parser so a credential
+   * a message carried is gone before any consumer — the timeline, a log, an HTTP response — can
+   * retain it.
+   */
+  readonly #redact: Redactor
   readonly #flushStderr: () => void
   readonly #pending = new Map<number, PendingRequest>()
   /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
@@ -360,9 +366,11 @@ class CodexConnection {
     onEvent: (event: AgentEvent) => void,
   ) {
     const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
-    this.#knownSecretValues = [...codexAuthenticationEnvironmentNames]
-      .map((name) => environment[name])
-      .filter((value): value is string => value !== undefined && value.length > 0)
+    // Read from the host environment rather than the subprocess's: the tracker's own secret is
+    // stripped from what Codex inherits, and a value the agent never receives is exactly the one
+    // most worth removing if some tool prints it back.
+    this.#knownSecretValues = sessionSecretValues(process.env, secretEnvironmentNames)
+    this.#redact = makeRedactor(this.#knownSecretValues)
     this.#process = spawn('bash', ['-lc', command], {
       cwd,
       env: environment,
@@ -492,6 +500,7 @@ class CodexConnection {
       message: null,
       usage: null,
       rateLimits,
+      payload: { kind: 'session' },
       threadId: null,
       turnId: null,
       sessionId: null,
@@ -993,6 +1002,7 @@ class CodexConnection {
       turnCount:
         turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
       turnStatus: terminalStatus,
+      payload: normalizePayload(method, message['params'], this.#redact),
     })
     if (!isTerminal) {
       return
@@ -1048,6 +1058,7 @@ class CodexConnection {
   ): void {
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? this.#turnId
+    const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
     this.#onEvent({
       event,
       timestamp: new Date(),
@@ -1061,6 +1072,7 @@ class CodexConnection {
       turnCount:
         turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
       turnStatus,
+      payload,
     })
   }
 

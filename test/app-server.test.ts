@@ -224,6 +224,47 @@ describe('App Server session lifecycle', (): void => {
     expect(outcome.events[turnCompletedIndex]?.turnCount).toBe(1)
   })
 
+  it('redacts credentials from telemetry before any consumer receives it', async (): Promise<void> => {
+    const outcome = await runScenario('secret-message')
+    const serialized = JSON.stringify(outcome.events)
+
+    expect(outcome.error).toBeNull()
+    expect(serialized).not.toContain('github_pat_')
+    expect(serialized).toContain('[REDACTED]')
+    const message = outcome.events.find((event) => event.payload.kind === 'message')
+    expect(message?.payload).toMatchObject({ kind: 'message', role: 'assistant' })
+  }, 30_000)
+
+  it('redacts the resolved value of a host credential the agent echoes', async (): Promise<void> => {
+    const previous = process.env['GITHUB_TOKEN']
+    process.env['GITHUB_TOKEN'] = 'literal-host-credential-value'
+    try {
+      const outcome = await runScenario('secret-environment')
+      const serialized = JSON.stringify(outcome.events)
+
+      expect(outcome.error).toBeNull()
+      expect(serialized).not.toContain('literal-host-credential-value')
+      expect(serialized).toContain('[REDACTED]')
+    } finally {
+      if (previous === undefined) {
+        delete process.env['GITHUB_TOKEN']
+      } else {
+        process.env['GITHUB_TOKEN'] = previous
+      }
+    }
+  }, 30_000)
+
+  it('reports token usage on the event rather than in a competing payload', async (): Promise<void> => {
+    const outcome = await runScenario('usage')
+    const usage = outcome.events.find((event) => event.usage !== null)
+
+    expect(outcome.error).toBeNull()
+    expect(usage?.usage).toEqual({ inputTokens: 11, outputTokens: 7, totalTokens: 18 })
+    // Usage is extracted once, by the client, so the payload adds nothing beyond the lifecycle
+    // classification of the method that carried it.
+    expect(usage?.payload).toEqual({ kind: 'session' })
+  }, 30_000)
+
   it('attributes a notification from the thread and turn ids it carries', async (): Promise<void> => {
     const outcome = await runScenario('carried-identity')
 

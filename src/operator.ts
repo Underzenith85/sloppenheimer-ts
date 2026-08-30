@@ -2,7 +2,11 @@ import { Effect } from 'effect'
 
 import { findDependencyCycles, unresolvedBlockers, type DependencyCycle } from './dependencies.js'
 import { normalizeState, type Issue } from './domain.js'
-import type { OrchestratorControl, OrchestratorSnapshot } from './orchestrator.js'
+import type {
+  AgentDetailLookup,
+  OrchestratorControl,
+  OrchestratorSnapshot,
+} from './orchestrator.js'
 import { makeGitHubIssueControl } from './tracker.js'
 import { TrackerError, WorkflowError } from './errors.js'
 import { loadWorkflow, type Workflow } from './workflow.js'
@@ -51,6 +55,11 @@ export type OperatorBackendError = WorkflowError | TrackerError
 export type OperatorBackend = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
   refresh: Effect.Effect<void>
+  /**
+   * Live detail for one agent. It is served from the orchestrator's published index, so polling it
+   * cannot queue behind — or interfere with — tracker polling.
+   */
+  agentDetail: (identifier: string) => Effect.Effect<AgentDetailLookup>
   backlog: Effect.Effect<BacklogSnapshot, OperatorBackendError>
   setIssueEnabled: (
     issueNumber: number,
@@ -190,6 +199,7 @@ export const makeOperatorBackend = (
   return {
     snapshot: orchestrator.snapshot,
     refresh: orchestrator.refresh,
+    agentDetail: orchestrator.agentDetail,
     backlog: loadControl.pipe(
       Effect.flatMap(({ label, issues, terminalStates }) =>
         issues
