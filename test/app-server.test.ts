@@ -548,6 +548,13 @@ describe('App Server timeouts and shutdown', (): void => {
     expect(outcome.error?.category).toBe('turn_timeout')
   }, 30_000)
 
+  it('does not let responses matching no pending request keep a turn alive', async (): Promise<void> => {
+    const outcome = await runScenario('unmatched-response-heartbeat', { turnTimeoutMs: 600 })
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+    expect(outcome.events.map((event) => event.event)).toContain('unmatched_response')
+  }, 30_000)
+
   it('does not let traffic for an older turn keep the current one alive', async (): Promise<void> => {
     const outcome = await runScenario('stale-turn-heartbeat', { turnTimeoutMs: 600 })
 

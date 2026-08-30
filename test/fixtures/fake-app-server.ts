@@ -217,6 +217,17 @@ const handleTurnStart = (id: unknown): void => {
       }, 40)
       return
     }
+    case 'unmatched-response-heartbeat': {
+      // Response-shaped messages answering ids the client never sent, faster than the silence
+      // timeout. They settle nothing, so they are not progress and must not keep the turn alive.
+      send({ id, result: { turn } })
+      let unknown = 5000
+      setInterval(() => {
+        unknown += 1
+        send({ id: unknown, result: { ok: true } })
+      }, 40)
+      return
+    }
     case 'stale-turn-heartbeat': {
       // Steady traffic naming a turn that already ended. It belongs to no live turn and must not
       // keep the current one alive.

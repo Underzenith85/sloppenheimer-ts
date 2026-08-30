@@ -505,6 +505,10 @@ class CodexConnection {
         resolvePromise()
         return
       }
+      // Referenced on purpose. An awaited promise does not hold the event loop open, so an
+      // unreferenced timer lets the host exit before the escalation fires and leaves behind the
+      // very descendant this is here to kill. The wait is bounded by the grace, and the CLI's own
+      // shutdown deadline is far longer, so holding the loop this long cannot hang the host.
       // Skipped when the group is empty by then, so a recycled leader PID is never signalled.
       const escalation = setTimeout(() => {
         if (this.#processGroupIsAlive()) {
@@ -512,7 +516,6 @@ class CodexConnection {
         }
         resolvePromise()
       }, shutdownGraceMs)
-      escalation.unref()
       this.#process.once('exit', () => {
         if (this.#processGroupIsAlive()) {
           return
@@ -615,8 +618,6 @@ class CodexConnection {
       typeof method !== 'string' &&
       (parsed['result'] !== undefined || parsed['error'] !== undefined)
     ) {
-      // A response to a request Symphony sent is progress on the turn in flight.
-      this.#noteActivity(null)
       this.#settleResponse(id, parsed)
       return
     }
@@ -636,9 +637,13 @@ class CodexConnection {
   #settleResponse(id: number, parsed: JsonObject): void {
     const pending = this.#pending.get(id)
     if (pending === undefined) {
+      // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
+      // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
       this.#emit('unmatched_response', `no pending request for response id ${String(id)}`)
       return
     }
+    // A response to a request Symphony actually sent is progress on the turn in flight.
+    this.#noteActivity(null)
     clearTimeout(pending.timeout)
     this.#pending.delete(id)
     const error = parsed['error']
