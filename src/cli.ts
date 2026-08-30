@@ -1,20 +1,105 @@
 #!/usr/bin/env node
+import chokidar from 'chokidar'
 import { Cause, Effect, Exit, Layer } from 'effect'
 
-import { githubHttpClientLayer } from './adapters/github/index.js'
+import { codexAgentRunner } from './adapters/codex/agent-runner.js'
+import {
+  githubHttpClientLayer,
+  layerGitHubIssueControl,
+  makeGitHubCodeReview,
+  makeGitHubTracker,
+} from './adapters/github/index.js'
+import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
-import { logInfo } from './support/logging.js'
+import { loadWorkflow, preflightWorkflow } from './config/workflow.js'
+import { startOrchestrator, type OrchestratorServices } from './core/orchestrator.js'
+import type { TrackerError, WorkflowError } from './errors.js'
 import { makeOperatorBackend } from './operator/operator.js'
-import { startOrchestrator } from './orchestrator.js'
 import { startOperatorServer } from './operator/server.js'
-import { loadWorkflow } from './config/workflow.js'
-import { layerGitHubIssueControl } from './adapters/github/index.js'
-import { layerCurrentIssueControl } from './ports/index.js'
-
-/** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
-const issueControlLayer = layerCurrentIssueControl.pipe(Layer.provide(layerGitHubIssueControl))
+import {
+  CodeReviewFactory,
+  CurrentIssueControl,
+  layerAgentRunner,
+  layerCodeReviewPorts,
+  layerCurrentIssueControl,
+  layerPorts,
+  layerWorkflowLoader,
+  layerWorkflowWatcher,
+  portsConfiguration,
+  TrackerFactory,
+  WorkflowLoader,
+  WorkspaceManagerFactory,
+  type AdapterServices,
+  type CodeReviewServices,
+} from './ports/index.js'
+import { logInfo } from './support/logging.js'
 
 const shutdownTimeoutMs = 10_000
+
+/**
+ * The concrete adapters this executable binds: GitHub for the tracker and for code review, Codex
+ * for the agent runner, and the host filesystem for workflows and workspaces. Nothing below the
+ * composition root names any of them.
+ */
+const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
+  layerAgentRunner(codexAgentRunner),
+  Layer.succeed(TrackerFactory, {
+    make: (validated) => Effect.succeed(makeGitHubTracker(validated.provider)),
+  }),
+  Layer.succeed(WorkspaceManagerFactory, {
+    make: (settings) => Effect.succeed(makeWorkspaceManager(settings.root, settings.hooks)),
+  }),
+  layerWorkflowLoader({
+    load: (path) => loadWorkflow(path),
+    preflight: (workflow) => preflightWorkflow(workflow),
+  }),
+  layerWorkflowWatcher({
+    watch: (path, onChange) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const watcher = chokidar.watch(path, {
+            awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+            ignoreInitial: true,
+          })
+          watcher.on('change', onChange)
+          return watcher
+        }),
+        (watcher) => Effect.promise(() => watcher.close()),
+      ).pipe(Effect.asVoid),
+  }),
+)
+
+const codeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFactory, {
+  make: (validated) => Effect.succeed(makeGitHubCodeReview(validated.provider)),
+})
+
+/** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
+const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.pipe(
+  Layer.provide(layerGitHubIssueControl),
+)
+
+/**
+ * The production layer. The first instance of each rebuildable port is built from the workflow as
+ * it stands at startup; every later reload and credential rotation replaces it through its cell.
+ */
+const ports = (
+  workflowPath: string,
+): Layer.Layer<
+  OrchestratorServices | CodeReviewServices | CurrentIssueControl,
+  WorkflowError | TrackerError
+> =>
+  Layer.unwrapEffect(
+    loadWorkflow(workflowPath).pipe(
+      Effect.map((workflow) => {
+        const configuration = portsConfiguration(workflow)
+        return Layer.mergeAll(
+          layerPorts(configuration, adapters),
+          layerCodeReviewPorts(configuration, codeReview),
+          issueControl,
+        )
+      }),
+    ),
+  )
 
 const messageFrom = (cause: unknown): string => {
   if (cause instanceof Error) {
@@ -59,19 +144,20 @@ const main = async (): Promise<number> => {
     Effect.gen(function* () {
       const orchestrator = yield* startOrchestrator(options.workflowPath)
       yield* logInfo('symphony host started', { workflow_path: options.workflowPath })
-      const workflow = yield* loadWorkflow(options.workflowPath)
+      const loader = yield* WorkflowLoader
+      const workflow = yield* loader.load(options.workflowPath)
       const port = options.port ?? workflow.config.serverPort
       if (port !== null) {
-        const issueControl = yield* Layer.build(issueControlLayer)
-        const backend = yield* makeOperatorBackend(options.workflowPath, orchestrator).pipe(
-          Effect.provide(issueControl),
-        )
+        const backend = yield* makeOperatorBackend(options.workflowPath, orchestrator)
         const server = yield* startOperatorServer(port, backend)
         yield* logInfo('operator console listening', { url: server.url })
       }
       return yield* orchestrator.awaitTermination
     }),
-  ).pipe(Effect.provide(githubHttpClientLayer))
+    // Provided around the whole program, not around the start: the cells the orchestrator rebuilds
+    // through live as long as the host does. The GitHub adapter reads its HTTP transport from the
+    // same context, so the client bound here reaches every request its ports make.
+  ).pipe(Effect.provide(ports(options.workflowPath)), Effect.provide(githubHttpClientLayer))
 
   const exit = await Effect.runPromiseExit(program, {
     signal: controller.signal,

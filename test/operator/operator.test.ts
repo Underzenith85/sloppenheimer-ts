@@ -17,7 +17,7 @@ import {
   makeGitHubIssueControl,
 } from '../../src/adapters/github/issues.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { OrchestratorControl, OrchestratorSnapshot } from '../../src/orchestrator.js'
+import type { OrchestratorControl, OrchestratorSnapshot } from '../../src/core/orchestrator.js'
 import {
   CurrentIssueControl,
   layerCurrentIssueControl,

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
 import { TrackerError } from '../../src/errors.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { AgentDetailLookup, OrchestratorSnapshot } from '../../src/orchestrator.js'
+import type { AgentDetailLookup, OrchestratorSnapshot } from '../../src/core/orchestrator.js'
 import { startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,

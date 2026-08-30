@@ -1,64 +1,257 @@
-import { Effect } from 'effect'
+import { Effect, Option } from 'effect'
 
 import { sameTrackerProvider } from '../config/tracker-config.js'
-import { preflightWorkflow, type Workflow } from '../config/workflow.js'
+import type { Workflow } from '../config/workflow.js'
 import { WorkflowError } from '../errors.js'
-import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import { portsConfiguration, type AdapterCell, type CodeReviewPort } from '../ports/index.js'
+import type {
+  EffectiveWorkflow,
+  ExecutionSnapshot,
+  OrchestratorContext,
+  PendingRetirement,
+  RuntimePorts,
+} from './runtime.js'
 
+const portConfigurationError = (cause: unknown): WorkflowError =>
+  cause instanceof WorkflowError
+    ? cause
+    : new WorkflowError({
+        category: 'invalid_config',
+        message: 'application ports could not be configured',
+        cause,
+      })
+
+/** What an operator is owed when handoff is enabled and the provider cannot serve it. */
+const handoffCapabilityMissing = (workflow: Workflow): WorkflowError =>
+  new WorkflowError({
+    category: 'invalid_config',
+    message: `pull-request handoff is enabled, but tracker provider ${workflow.tracker.kind} does not supply CodeReviewPort`,
+  })
+
+const requireCapability = (
+  workflow: Workflow,
+  port: CodeReviewPort | null,
+): Effect.Effect<CodeReviewPort | null, WorkflowError> =>
+  port === null ? Effect.fail(handoffCapabilityMissing(workflow)) : Effect.succeed(port)
+
+/**
+ * Records an instance a rebuild replaced, so it is released once the last live holder lets go.
+ * An instance that never existed has no holder to wait for.
+ */
+const noteReplaced = (
+  pending: PendingRetirement[],
+  kind: PendingRetirement['kind'],
+  instance: unknown,
+  retire: Effect.Effect<void>,
+): Effect.Effect<void> =>
+  instance === null
+    ? retire
+    : Effect.sync(() => {
+        pending.push({ kind, instance, retire })
+      })
+
+/**
+ * Rebuilds one cell and pairs the instance it replaced with the release that retires it.
+ *
+ * The instance is read from the cell rather than taken from the caller's effective workflow: a
+ * dispatch preflighting a handoff's own workflow rebuilds against that snapshot, and what the cell
+ * releases is whatever it currently holds. Every rebuild runs on the orchestrator's event loop, so
+ * nothing installs a replacement between the read and the rebuild.
+ */
+const rebuildCell = <Value, Input, BuildError>(
+  cell: AdapterCell<Value, Input, BuildError>,
+  kind: PendingRetirement['kind'],
+  pending: PendingRetirement[],
+  input: Input,
+): Effect.Effect<Value, BuildError> =>
+  cell.get.pipe(
+    Effect.flatMap((replaced) =>
+      cell.rebuild(input).pipe(
+        Effect.tap((rebuilt) => noteReplaced(pending, kind, replaced, rebuilt.retirePrevious)),
+        Effect.map((rebuilt) => rebuilt.value),
+      ),
+    ),
+  )
+
+const rebuildCodeReview = (
+  ports: RuntimePorts,
+  pending: PendingRetirement[],
+  workflow: Workflow,
+): Effect.Effect<CodeReviewPort | null, WorkflowError> =>
+  Option.match(ports.codeReviewCell, {
+    onNone: () => Effect.succeed<CodeReviewPort | null>(null),
+    onSome: (cell) =>
+      rebuildCell(cell, 'codeReview', pending, workflow.tracker).pipe(
+        Effect.mapError(portConfigurationError),
+        Effect.flatMap((port) => requireCapability(workflow, port)),
+      ),
+  })
+
+/**
+ * Builds every rebuildable port from a workflow the loader has just returned — at startup, and
+ * again whenever a reload changes the file. All three are replaced together: a reload can move the
+ * workspace root or change a hook as readily as it can change the tracker provider.
+ */
+export const rebuildEffectiveWorkflow = (
+  ports: RuntimePorts,
+  pending: PendingRetirement[],
+  workflow: Workflow,
+): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
+  Effect.gen(function* () {
+    const tracker = yield* rebuildCell(
+      ports.trackerCell,
+      'tracker',
+      pending,
+      workflow.tracker,
+    ).pipe(Effect.mapError(portConfigurationError))
+    const codeReview = yield* rebuildCodeReview(ports, pending, workflow)
+    const workspaces = yield* rebuildCell(
+      ports.workspaceCell,
+      'workspaces',
+      pending,
+      portsConfiguration(workflow).workspaces,
+    )
+    return { workflow, tracker, codeReview, workspaces, loadedAt: new Date() }
+  })
+
+/**
+ * Re-reads the tracker credentials the workflow references and, when they have changed, rebuilds
+ * the two ports that were constructed from them. The workspace manager is untouched: nothing about
+ * it is derived from a credential.
+ */
 export const revalidateCredentials = (
   context: OrchestratorContext,
   effective: EffectiveWorkflow,
 ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
-  preflightWorkflow(effective.workflow, context.dependencies.environment).pipe(
+  context.ports.workflowLoader.preflight(effective.workflow).pipe(
     Effect.flatMap((validated) => {
       if (sameTrackerProvider(validated, effective.workflow.tracker)) {
         return Effect.succeed(effective)
       }
       const workflow: Workflow = { ...effective.workflow, tracker: validated }
-      return Effect.try({
-        try: () => {
-          const codeReview = context.dependencies.makeCodeReview?.(workflow) ?? null
-          if (context.dependencies.makeCodeReview !== undefined && codeReview === null) {
-            throw new WorkflowError({
-              category: 'invalid_config',
-              message: `pull-request handoff is enabled, but tracker provider ${workflow.tracker.kind} does not supply CodeReviewPort`,
-            })
-          }
-          return {
-            ...effective,
-            workflow,
-            tracker: context.dependencies.makeTracker(workflow),
-            codeReview,
-          }
-        },
-        catch: (cause) =>
-          cause instanceof WorkflowError
-            ? cause
-            : new WorkflowError({
-                category: 'invalid_config',
-                message: 'application ports could not be configured',
-                cause,
-              }),
+      return Effect.gen(function* () {
+        const tracker = yield* rebuildCell(
+          context.ports.trackerCell,
+          'tracker',
+          context.pendingRetirements,
+          validated,
+        ).pipe(Effect.mapError(portConfigurationError))
+        const codeReview = yield* rebuildCodeReview(
+          context.ports,
+          context.pendingRetirements,
+          workflow,
+        )
+        return { ...effective, workflow, tracker, codeReview }
       })
     }),
   )
 
+const heldInstances = (
+  context: OrchestratorContext,
+  select: (execution: ExecutionSnapshot) => unknown,
+): readonly unknown[] => [
+  ...[...context.state.running.values()].map((entry) => select(entry.execution)),
+  ...[...context.state.handoffs.values()].map((entry) => select(entry.execution)),
+]
+
+/**
+ * Whether a run that once used this instance is still going. Adoption changes what the *next* call
+ * reaches, not what a call already awaiting a response is using, so an instance a live run has used
+ * stays held until that run ends — the reference alone cannot say whether a request is in flight
+ * against it, and a host tool leaves Effect for a promise that no scope tracks.
+ *
+ * Only a run needs this. Everything a handoff calls its ports from runs on the event loop, which is
+ * the fiber that drains, so no handoff call can be in flight across a drain.
+ */
+const supersededByLiveRun = (context: OrchestratorContext, instance: unknown): boolean =>
+  [...context.supersededPorts.values()].some((ports) => ports.includes(instance))
+
+const stillHeld = (context: OrchestratorContext, retirement: PendingRetirement): boolean => {
+  if (supersededByLiveRun(context, retirement.instance)) {
+    return true
+  }
+  switch (retirement.kind) {
+    case 'tracker': {
+      return (
+        context.lastKnownGood.tracker === retirement.instance ||
+        heldInstances(context, (execution) => execution.tracker).includes(retirement.instance)
+      )
+    }
+    case 'codeReview': {
+      return (
+        context.lastKnownGood.codeReview === retirement.instance ||
+        heldInstances(context, (execution) => execution.codeReview).includes(retirement.instance)
+      )
+    }
+    case 'workspaces': {
+      return (
+        context.lastKnownGood.workspaces === retirement.instance ||
+        heldInstances(context, (execution) => execution.workspaces).includes(retirement.instance)
+      )
+    }
+  }
+}
+
+/**
+ * Releases every replaced instance that no live work still holds — neither as the instance a run is
+ * using now, nor as one it used before an adoption moved it on. The rest wait for a later pass, and
+ * anything never retired is released when the cell's scope closes.
+ */
+export const drainRetirements = (context: OrchestratorContext): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    const live = new Set([...context.state.running.values()].map((entry) => entry.runId))
+    for (const runId of [...context.supersededPorts.keys()]) {
+      if (!live.has(runId)) {
+        context.supersededPorts.delete(runId)
+      }
+    }
+    const pending = context.pendingRetirements.splice(0)
+    const held = pending.filter((retirement) => stillHeld(context, retirement))
+    context.pendingRetirements.push(...held)
+    return Effect.forEach(
+      pending.filter((retirement) => !held.includes(retirement)),
+      (retirement) => retirement.retire,
+      { discard: true },
+    )
+  })
+
+/**
+ * Moves live work onto the replacements. A running worker and an in-flight handoff each hold the
+ * instances their run started with, so a rebuilt tracker reaches them only here — without this, a
+ * rotated credential would never take effect for work already in flight.
+ */
 export const adoptPorts = (
   context: OrchestratorContext,
   previous: EffectiveWorkflow,
   next: EffectiveWorkflow,
-): void => {
-  for (const entry of [...context.state.running.values(), ...context.state.handoffs.values()]) {
-    if (entry.execution.tracker === previous.tracker) {
-      entry.execution = Object.freeze({
-        ...entry.execution,
+): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    const adopted = (execution: ExecutionSnapshot): ExecutionSnapshot =>
+      Object.freeze({
+        ...execution,
         tracker: next.tracker,
         codeReview:
-          entry.execution.codeReview === previous.codeReview
-            ? next.codeReview
-            : entry.execution.codeReview,
+          execution.codeReview === previous.codeReview ? next.codeReview : execution.codeReview,
         secretEnvironmentNames: Object.freeze([...next.tracker.secretEnvironmentNames]),
       })
+    for (const entry of context.state.running.values()) {
+      if (entry.execution.tracker !== previous.tracker) {
+        continue
+      }
+      // Recorded before the swap: this run's own fibers may still be awaiting a call that read
+      // these, and nothing else will remember they were ever in use.
+      context.supersededPorts.set(entry.runId, [
+        ...(context.supersededPorts.get(entry.runId) ?? []),
+        ...[entry.execution.tracker, entry.execution.codeReview].filter(
+          (instance) => instance !== null,
+        ),
+      ])
+      entry.execution = adopted(entry.execution)
     }
-  }
-}
+    for (const entry of context.state.handoffs.values()) {
+      if (entry.execution.tracker === previous.tracker) {
+        entry.execution = adopted(entry.execution)
+      }
+    }
+    return drainRetirements(context)
+  })

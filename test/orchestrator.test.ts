@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Fiber, TestClock, TestContext } from 'effect'
+import { Effect, Fiber, Layer, TestClock, TestContext, type Scope } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
@@ -25,13 +25,33 @@ import {
   startOrchestrator,
   type AgentDetailLookup,
   type OrchestratorControl,
-  type OrchestratorDependencies,
-} from '../src/orchestrator.js'
+  type OrchestratorServices,
+} from '../src/core/orchestrator.js'
 import { makeRedactor } from '../src/support/redaction.js'
 import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
-import type { CodeReviewPort } from '../src/ports/code-review.js'
-import type { TrackerPort } from '../src/ports/tracker.js'
-import type { Workflow } from '../src/config/workflow.js'
+import {
+  CodeReviewFactory,
+  layerAgentRunner,
+  layerCodeReviewPorts,
+  layerPorts,
+  layerWorkflowLoader,
+  layerWorkflowWatcher,
+  portsConfiguration,
+  TrackerFactory,
+  WorkspaceManagerFactory,
+  type AdapterServices,
+  type AgentEventSemantics,
+  type AgentLaunch,
+  type AgentRunnerPort,
+  type CodeReviewPort,
+  type PortsConfiguration,
+  type TrackerPort,
+  type WorkspaceManagerPort,
+  type WorkspaceSettings,
+} from '../src/ports/index.js'
+import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
+import type { HostToolSession } from '../src/host-tools.js'
+import type { ValidatedTrackerProvider } from '../src/config/tracker-config.js'
 
 const makeIssue = (
   identifier: string,
@@ -217,16 +237,98 @@ const changedWorkflow = (overrides: {
   },
 })
 
+/**
+ * The adapter set one test binds. It is the harness's own shape, not an injection seam the
+ * orchestrator knows about: `layerTestPorts` turns it into the layer the orchestrator resolves its
+ * services from, exactly as the composition root does with the real adapters.
+ */
+type TestPorts = Readonly<{
+  /** The configuration the composition root reads before the orchestrator loads it for itself. */
+  configuration: PortsConfiguration
+  loadWorkflow: (path: string) => Effect.Effect<Workflow, WorkflowError>
+  makeTracker: (provider: ValidatedTrackerProvider) => TrackerPort
+  /** Omit to compose no code-review services at all, which disables pull-request handoff. */
+  makeCodeReview?: (provider: ValidatedTrackerProvider) => CodeReviewPort | null
+  makeWorkspaces: (settings: WorkspaceSettings) => WorkspaceManagerPort
+  runAgent: AgentRunnerPort['run']
+  agentEventSemantics: AgentEventSemantics
+  watchWorkflow: (path: string, onChange: () => void) => void
+  environment: NodeJS.ProcessEnv
+  onTrackerReleased?: (provider: ValidatedTrackerProvider) => void
+  onWorkspacesReleased?: (settings: WorkspaceSettings) => void
+}>
+
+const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
+  Layer.mergeAll(
+    layerAgentRunner({ run: ports.runAgent, semantics: ports.agentEventSemantics }),
+    // Acquired rather than returned, so a test can observe when a replaced instance is released:
+    // the cell builds every instance in its own scope, and closing it is what retirement does.
+    Layer.succeed(TrackerFactory, {
+      make: (provider) =>
+        Effect.acquireRelease(
+          Effect.sync(() => ports.makeTracker(provider)),
+          () => Effect.sync(() => ports.onTrackerReleased?.(provider)),
+        ),
+    }),
+    Layer.succeed(WorkspaceManagerFactory, {
+      make: (settings) =>
+        Effect.acquireRelease(
+          Effect.sync(() => ports.makeWorkspaces(settings)),
+          () => Effect.sync(() => ports.onWorkspacesReleased?.(settings)),
+        ),
+    }),
+    layerWorkflowLoader({
+      load: ports.loadWorkflow,
+      preflight: (workflow) => preflightWorkflow(workflow, ports.environment),
+    }),
+    layerWorkflowWatcher({
+      watch: (path, onChange) => Effect.sync(() => ports.watchWorkflow(path, onChange)),
+    }),
+  )
+
+const layerTestPorts = (ports: TestPorts): Layer.Layer<OrchestratorServices, TrackerError> => {
+  const base = layerPorts(ports.configuration, layerTestAdapters(ports))
+  const makeCodeReview = ports.makeCodeReview
+  if (makeCodeReview === undefined) {
+    return base
+  }
+  return Layer.merge(
+    base,
+    layerCodeReviewPorts(
+      ports.configuration,
+      Layer.succeed(CodeReviewFactory, {
+        make: (provider) => Effect.succeed(makeCodeReview(provider)),
+      }),
+    ),
+  )
+}
+
+/**
+ * Builds the test layer into the caller's scope and hands its services to the orchestrator, so the
+ * ports outlive the call that started it exactly as the composition root's layer does.
+ */
+const startTestOrchestrator = (
+  selectedWorkflowPath: string,
+  ports: TestPorts,
+): Effect.Effect<OrchestratorControl, WorkflowError | TrackerError, Scope.Scope> =>
+  Effect.scope.pipe(
+    Effect.flatMap((scope) => Layer.buildWithScope(layerTestPorts(ports), scope)),
+    Effect.flatMap((services) => Effect.provide(startOrchestrator(selectedWorkflowPath), services)),
+  )
+
 type TestHarness = Readonly<{
-  dependencies: OrchestratorDependencies
+  ports: TestPorts
   setWorkflow: (workflow: Workflow | WorkflowError) => void
   notifyChanged: () => void
   loads: () => number
   stateFetches: () => number
+  stateFetchStates: () => readonly (readonly string[])[]
   idFetches: () => number
   idFetchTokens: () => readonly string[]
-  trackerWorkflows: () => readonly Workflow[]
-  workspaceWorkflows: () => readonly Workflow[]
+  trackerProviders: () => readonly ValidatedTrackerProvider[]
+  releasedTrackers: () => readonly ValidatedTrackerProvider[]
+  workspaceSettings: () => readonly WorkspaceSettings[]
+  releasedWorkspaces: () => readonly WorkspaceSettings[]
   agentRuns: () => readonly Readonly<{ command: string; prompt: string; maxTurns: number }>[]
   awaitAgentRun: Effect.Effect<void>
   emitAgentEvent: (event: AgentEvent) => void
@@ -245,32 +347,42 @@ const makeHarness = (
   let notifyChanged = (): void => undefined
   let loadCount = 0
   let stateFetchCount = 0
+  const stateFetchStates: (readonly string[])[] = []
   let idFetchCount = 0
   const idFetchTokens: string[] = []
-  const trackerWorkflows: Workflow[] = []
-  const workspaceWorkflows: Workflow[] = []
+  const trackerProviders: ValidatedTrackerProvider[] = []
+  const releasedTrackers: ValidatedTrackerProvider[] = []
+  const workspaceSettings: WorkspaceSettings[] = []
+  const releasedWorkspaces: WorkspaceSettings[] = []
   const agentRuns: Readonly<{ command: string; prompt: string; maxTurns: number }>[] = []
   let resolveAgentRun = (): void => undefined
   let onAgentEvent = (_event: AgentEvent): void => undefined
   const agentRun = new Promise<void>((resolve) => {
     resolveAgentRun = resolve
   })
+  /**
+   * The workflow the loader would return now. A tracker is built from a provider alone, so a fake
+   * that answers from the workflow in force reads it here rather than from its own construction.
+   */
+  const currentWorkflow = (): Workflow => (selected instanceof WorkflowError ? initial : selected)
 
-  const dependencies: OrchestratorDependencies = {
+  const ports: TestPorts = {
+    configuration: portsConfiguration(initial),
     loadWorkflow: () => {
       loadCount += 1
       return selected instanceof WorkflowError ? Effect.fail(selected) : Effect.succeed(selected)
     },
-    makeTracker: (effectiveWorkflow): TrackerPort => {
-      trackerWorkflows.push(effectiveWorkflow)
+    makeTracker: (provider): TrackerPort => {
+      trackerProviders.push(provider)
       return {
         fetchIssuesByStates: (states) => {
           stateFetchCount += 1
+          stateFetchStates.push(states)
           const normalizedStates = new Set(states.map((state) => state.trim().toLowerCase()))
           return (
-            fetchCandidates?.(effectiveWorkflow, states) ??
+            fetchCandidates?.(currentWorkflow(), states) ??
             Effect.succeed(
-              candidates(effectiveWorkflow).filter((issue) =>
+              candidates(currentWorkflow()).filter((issue) =>
                 normalizedStates.has(issue.state.trim().toLowerCase()),
               ),
             )
@@ -279,8 +391,8 @@ const makeHarness = (
         fetchIssuesByIds: () =>
           Effect.sync(() => {
             idFetchCount += 1
-            idFetchTokens.push(effectiveWorkflow.tracker.provider.token)
-            return candidates(effectiveWorkflow)
+            idFetchTokens.push(provider.provider.token)
+            return candidates(currentWorkflow())
           }),
         toolSpecs: [],
         executeTool: async (name) => ({
@@ -311,8 +423,8 @@ const makeHarness = (
       requestPullRequestReview: () => Effect.die('unused'),
       resolveReviewThreads: () => Effect.die('unused'),
     }),
-    makeWorkspaces: (effectiveWorkflow) => {
-      workspaceWorkflows.push(effectiveWorkflow)
+    makeWorkspaces: (settings) => {
+      workspaceSettings.push(settings)
       return {
         create: () =>
           Effect.succeed({ path: '/tmp/symphony-test', key: 'test', createdNow: false }),
@@ -332,12 +444,17 @@ const makeHarness = (
     environment,
     watchWorkflow: (_path, onChange) => {
       notifyChanged = onChange
-      return { close: () => Promise.resolve() }
+    },
+    onTrackerReleased: (provider) => {
+      releasedTrackers.push(provider)
+    },
+    onWorkspacesReleased: (settings) => {
+      releasedWorkspaces.push(settings)
     },
   }
 
   return {
-    dependencies,
+    ports,
     setWorkflow: (next) => {
       selected = next
     },
@@ -346,10 +463,13 @@ const makeHarness = (
     },
     loads: () => loadCount,
     stateFetches: () => stateFetchCount,
+    stateFetchStates: () => stateFetchStates,
     idFetches: () => idFetchCount,
     idFetchTokens: () => idFetchTokens,
-    trackerWorkflows: () => trackerWorkflows,
-    workspaceWorkflows: () => workspaceWorkflows,
+    trackerProviders: () => trackerProviders,
+    releasedTrackers: () => releasedTrackers,
+    workspaceSettings: () => workspaceSettings,
+    releasedWorkspaces: () => releasedWorkspaces,
     agentRuns: () => agentRuns,
     awaitAgentRun: Effect.promise(() => agentRun),
     emitAgentEvent: (event) => {
@@ -358,14 +478,15 @@ const makeHarness = (
   }
 }
 
-const runWithTestClock = <Value>(effect: Effect.Effect<Value, WorkflowError>): Promise<Value> =>
-  Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
+const runWithTestClock = <Value>(
+  effect: Effect.Effect<Value, WorkflowError | TrackerError>,
+): Promise<Value> => Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
 
 const requireCodeReview = (
-  dependencies: OrchestratorDependencies,
-  effectiveWorkflow: Workflow,
+  ports: TestPorts,
+  provider: ValidatedTrackerProvider,
 ): CodeReviewPort => {
-  const codeReview = dependencies.makeCodeReview?.(effectiveWorkflow)
+  const codeReview = ports.makeCodeReview?.(provider)
   if (codeReview === undefined || codeReview === null) {
     throw new Error('test harness CodeReviewPort is unavailable')
   }
@@ -381,10 +502,10 @@ describe('restored pull request handoffs', (): void => {
       id: issueId('20'),
     }
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         findExistingHandoff: (candidate) =>
           Effect.succeed({
             _tag: 'PullRequest' as const,
@@ -414,7 +535,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -450,10 +571,10 @@ describe('restored pull request handoffs', (): void => {
     }
     const harness = makeHarness(isolated, () => [pullRequestRecord])
     let discoveries = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         findExistingHandoff: () =>
           Effect.sync(() => {
             discoveries += 1
@@ -465,7 +586,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -508,10 +629,10 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [first, second])
     let discoveries = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         findExistingHandoff: (candidate) =>
           Effect.sync(() => {
             discoveries += 1
@@ -548,7 +669,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -573,7 +694,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -611,10 +732,10 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [issue])
     let hydrationAttempts = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => {
-        const tracker = harness.dependencies.makeTracker(effectiveWorkflow)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
         return {
           ...tracker,
           fetchIssuesByIds: (ids, options) => {
@@ -631,8 +752,8 @@ describe('restored pull request handoffs', (): void => {
           },
         }
       },
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -654,7 +775,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -696,10 +817,10 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [issue])
     let inspections = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (pullRequestNumber) =>
           Effect.sync(() => {
             inspections += 1
@@ -723,7 +844,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -765,10 +886,10 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [issue])
     let inspections = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (pullRequestNumber) =>
           Effect.sync(() => {
             inspections += 1
@@ -792,7 +913,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           yield* control.refresh
           return yield* control.snapshot
@@ -852,10 +973,10 @@ describe('restored pull request handoffs', (): void => {
     }
     const requestedHeads: string[] = []
     const mergedHeads: string[] = []
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -893,7 +1014,7 @@ describe('restored pull request handoffs', (): void => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           let snapshot = yield* control.snapshot
           expect(requestedHeads).toEqual([])
@@ -958,10 +1079,10 @@ describe('restored pull request handoffs', (): void => {
     let codexReview: CodexReviewObservation | null = null
     const requestedHeads: string[] = []
     const mergedHeads: string[] = []
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -999,7 +1120,7 @@ describe('restored pull request handoffs', (): void => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           let snapshot = yield* control.snapshot
           expect(requestedHeads).toEqual([repairedHead])
@@ -1068,10 +1189,10 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1111,7 +1232,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -1172,10 +1293,10 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1224,7 +1345,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
           while (current.handoffs[0]?.repairAttempts !== 1) {
             yield* Effect.yieldNow()
@@ -1273,10 +1394,10 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1307,7 +1428,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
           while (current.handoffs[0]?.state !== 'intervention_required') {
             yield* Effect.yieldNow()
@@ -1363,10 +1484,10 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1400,7 +1521,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -1448,10 +1569,10 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1482,7 +1603,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -1530,10 +1651,10 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1572,7 +1693,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -1619,10 +1740,10 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [issue])
     let inspections = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (number) =>
           Effect.sync(() => {
             inspections += 1
@@ -1663,7 +1784,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           // Two observations: the first finds it still open and unrepaired, the second finds the
           // operator's manual merge.
           yield* control.refresh
@@ -1690,10 +1811,10 @@ describe('restored pull request handoffs', (): void => {
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const harness = makeHarness(isolated, () => [issue])
     let handoffCalls = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         handoffCompletedWork: () =>
           Effect.sync(() => {
             handoffCalls += 1
@@ -1729,7 +1850,7 @@ describe('restored pull request handoffs', (): void => {
     const snapshot = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
           while (current.retrying.length === 0) {
             yield* Effect.yieldNow()
@@ -1776,10 +1897,10 @@ describe('startup terminal workspace cleanup', (): void => {
       hydrateDependencies: boolean | undefined
     }>[] = []
     const removed: string[] = []
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => {
-        const tracker = harness.dependencies.makeTracker(effectiveWorkflow)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
         return {
           ...tracker,
           fetchIssuesByStates: (states, labels, options) => {
@@ -1798,8 +1919,8 @@ describe('startup terminal workspace cleanup', (): void => {
           },
         }
       },
-      makeWorkspaces: (effectiveWorkflow) => {
-        const workspaces = harness.dependencies.makeWorkspaces(effectiveWorkflow)
+      makeWorkspaces: (settings) => {
+        const workspaces = harness.ports.makeWorkspaces(settings)
         return {
           ...workspaces,
           remove: (identifier) =>
@@ -1824,7 +1945,7 @@ describe('startup terminal workspace cleanup', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.snapshot
           yield* control.refresh
           yield* control.snapshot
@@ -1851,10 +1972,10 @@ describe('startup terminal workspace cleanup', (): void => {
     const activeIssue = makeIssue('GH-4', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [activeIssue])
     let startupFetch = true
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => {
-        const tracker = harness.dependencies.makeTracker(effectiveWorkflow)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
         return {
           ...tracker,
           fetchIssuesByStates: (states, labels) => {
@@ -1877,7 +1998,7 @@ describe('startup terminal workspace cleanup', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
         }),
       ),
@@ -1897,10 +2018,10 @@ describe('startup terminal workspace cleanup', (): void => {
     const closedIssue = { ...makeIssue('GH-9', null, null), state: 'closed' }
     const harness = makeHarness(startupWorkflow)
     const removed: string[] = []
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
         fetchIssuesByStates: (states) =>
           states.includes('cancelled')
             ? Effect.fail(
@@ -1913,8 +2034,8 @@ describe('startup terminal workspace cleanup', (): void => {
             : Effect.succeed([closedIssue]),
         fetchIssuesByIds: () => Effect.succeed([closedIssue]),
       }),
-      makeWorkspaces: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
         remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
       }),
     }
@@ -1922,7 +2043,7 @@ describe('startup terminal workspace cleanup', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.snapshot
         }),
       ),
@@ -1939,10 +2060,10 @@ describe('startup terminal workspace cleanup', (): void => {
     const cleanup = new Promise<void>((resolve) => {
       resolveCleanup = resolve
     })
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => {
-        const tracker = harness.dependencies.makeTracker(effectiveWorkflow)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
         return {
           ...tracker,
           fetchIssuesByStates: (states, labels) =>
@@ -1952,8 +2073,8 @@ describe('startup terminal workspace cleanup', (): void => {
           fetchIssuesByIds: () => Effect.succeed([terminalIssue]),
         }
       },
-      makeWorkspaces: (effectiveWorkflow) => {
-        const workspaces = harness.dependencies.makeWorkspaces(effectiveWorkflow)
+      makeWorkspaces: (settings) => {
+        const workspaces = harness.ports.makeWorkspaces(settings)
         return { ...workspaces, remove: () => Effect.promise(() => cleanup) }
       },
     }
@@ -1961,7 +2082,7 @@ describe('startup terminal workspace cleanup', (): void => {
     const running = runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
         }),
       ),
@@ -1981,18 +2102,18 @@ describe('startup terminal workspace cleanup', (): void => {
     const reopenedIssue = { ...terminalIssue, state: 'open' }
     const harness = makeHarness(workflow)
     const removed: string[] = []
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
         fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
         fetchIssuesByIds: (_ids, options) => {
           expect(options?.hydrateDependencies).toBe(false)
           return Effect.succeed([reopenedIssue])
         },
       }),
-      makeWorkspaces: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
         remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
       }),
     }
@@ -2000,7 +2121,7 @@ describe('startup terminal workspace cleanup', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.snapshot
         }),
       ),
@@ -2013,18 +2134,18 @@ describe('startup terminal workspace cleanup', (): void => {
     const terminalIssue = { ...makeIssue('GH-8', null, null), state: 'closed' }
     const harness = makeHarness(workflow)
     let idFetches = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
         fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
         fetchIssuesByIds: () => {
           idFetches += 1
           return Effect.succeed([terminalIssue])
         },
       }),
-      makeWorkspaces: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
         exists: () => Effect.succeed(false),
       }),
     }
@@ -2032,7 +2153,7 @@ describe('startup terminal workspace cleanup', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.snapshot
         }),
       ),
@@ -2070,7 +2191,7 @@ describe('operator snapshots', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* Effect.promise(() => pollStarted)
           return yield* control.snapshot
         }),
@@ -2110,7 +2231,7 @@ describe('operator snapshots', (): void => {
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           pollShouldBlock = true
           yield* Effect.forkScoped(control.refresh)
@@ -2134,7 +2255,7 @@ describe('operator snapshots', (): void => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           const before = harness.stateFetches()
           const consecutiveRefreshes = yield* Effect.forkScoped(
@@ -2161,7 +2282,7 @@ describe('workflow hot reload', (): void => {
     const snapshot = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           harness.setWorkflow(reloaded)
           yield* control.refresh
@@ -2208,33 +2329,26 @@ describe('workflow hot reload', (): void => {
       effective.fingerprint === reloaded.fingerprint ? [issue] : [],
     )
 
-    await runWithTestClock(
+    const snapshot = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           harness.setWorkflow(reloaded)
           yield* control.refresh
-          yield* control.snapshot
+          const snapshot = yield* control.snapshot
           yield* harness.awaitAgentRun
+          return snapshot
         }),
       ),
     )
 
-    expect(harness.trackerWorkflows().at(-1)?.config.tracker.provider['repository']).toBe(
-      'reloaded-repository',
-    )
-    expect(harness.trackerWorkflows().at(-1)?.config.tracker.activeStates).toEqual([
-      'open',
-      'queued',
-    ])
-    expect(harness.trackerWorkflows().at(-1)?.config.pollingIntervalMs).toBe(7_000)
-    expect(harness.trackerWorkflows().at(-1)?.config.agent.maxConcurrentAgents).toBe(3)
-    expect(harness.trackerWorkflows().at(-1)?.config.agent.maxRetryBackoffMs).toBe(12_000)
-    expect(harness.workspaceWorkflows().at(-1)?.config.workspaceRoot).toBe(
-      '/tmp/reloaded-workspaces',
-    )
-    expect(harness.workspaceWorkflows().at(-1)?.config.hooks.beforeRun).toBe('echo reloaded')
+    expect(harness.trackerProviders().at(-1)?.provider.repository).toBe('reloaded-repository')
+    expect(harness.stateFetchStates().at(-1)).toEqual(['open', 'queued'])
+    expect(snapshot.pollingIntervalMs).toBe(7_000)
+    expect(snapshot.maxConcurrentAgents).toBe(3)
+    expect(harness.workspaceSettings().at(-1)?.root).toBe('/tmp/reloaded-workspaces')
+    expect(harness.workspaceSettings().at(-1)?.hooks.beforeRun).toBe('echo reloaded')
     expect(harness.agentRuns()).toEqual([
       {
         command: 'reloaded-codex app-server',
@@ -2252,7 +2366,7 @@ describe('workflow hot reload', (): void => {
     const snapshot = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           harness.setWorkflow(
             new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
@@ -2276,7 +2390,7 @@ describe('workflow hot reload', (): void => {
     const snapshot = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           harness.setWorkflow(
             changedWorkflow({ fingerprint: 'missed-event', pollingIntervalMs: 2_000 }),
@@ -2299,7 +2413,7 @@ describe('workflow hot reload', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           harness.setWorkflow(changedWorkflow({ fingerprint: 'slower', pollingIntervalMs: 5_000 }))
           yield* control.refresh
@@ -2324,7 +2438,7 @@ describe('workflow hot reload', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           const before = harness.loads()
           yield* control.refresh
@@ -2353,13 +2467,13 @@ describe('workflow hot reload', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
         }),
       ),
     )
 
-    expect(harness.trackerWorkflows().at(-1)?.tracker.provider.token).toBe('rotated')
+    expect(harness.trackerProviders().at(-1)?.provider.token).toBe('rotated')
   })
 
   it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
@@ -2369,7 +2483,7 @@ describe('workflow hot reload', (): void => {
     const snapshot = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
           yield* control.setIssuePaused(1, true)
           return yield* control.snapshot
@@ -2386,14 +2500,13 @@ describe('tracker credential revalidation', (): void => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
     const harness = makeHarness(workflow, () => [issue])
-    let refreshIssue: Parameters<OrchestratorDependencies['runAgent']>[0]['refreshIssue'] | null =
-      null
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    let refreshIssue: AgentLaunch['refreshIssue'] | null = null
+    const ports: TestPorts = {
+      ...harness.ports,
       environment,
       runAgent: (launch) => {
         refreshIssue = launch.refreshIssue
-        return harness.dependencies.runAgent(launch)
+        return harness.ports.runAgent(launch)
       },
     }
     const refreshActiveIssue = (): Effect.Effect<void> =>
@@ -2404,7 +2517,7 @@ describe('tracker credential revalidation', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
           environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
@@ -2416,6 +2529,53 @@ describe('tracker credential revalidation', (): void => {
     expect(harness.idFetchTokens().at(-1)).toBe('rotated')
   })
 
+  it("routes a live session's host tool calls to the tracker a rotation installed", async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const harness = makeHarness(workflow, () => [issue])
+    const executedTokens: string[] = []
+    let session: HostToolSession | null = null
+    const ports: TestPorts = {
+      ...harness.ports,
+      environment,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
+        toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
+        executeTool: () => {
+          executedTokens.push(provider.provider.token)
+          return Promise.resolve({ success: true, data: null })
+        },
+      }),
+      runAgent: (launch) => {
+        session = launch.hostTools ?? null
+        return harness.ports.runAgent(launch)
+      },
+    }
+    const callHostTool = (): Effect.Effect<void> => {
+      const current = session
+      if (current === null) {
+        return Effect.die('worker was launched without a host tool session')
+      }
+      return Effect.promise(async () => {
+        await current.execute('symphony_issue_state', null, current.context)
+      })
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+          yield* callHostTool()
+        }),
+      ),
+    )
+
+    expect(executedTokens).toEqual(['rotated'])
+  })
+
   it('rebuilds the tracker when the referenced secret is rotated in the environment', async (): Promise<void> => {
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
     const harness = makeHarness(workflow)
@@ -2423,8 +2583,8 @@ describe('tracker credential revalidation', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             environment,
           })
           yield* control.refresh
@@ -2434,7 +2594,10 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+    // Twice at startup: the layer builds the first instance from the workflow the composition root
+    // read, and the orchestrator replaces it with one built from the workflow it loaded itself.
+    expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+      'secret',
       'secret',
       'first',
       'rotated',
@@ -2448,8 +2611,8 @@ describe('tracker credential revalidation', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             environment,
           })
           yield* control.refresh
@@ -2459,10 +2622,201 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+    expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+      'secret',
       'secret',
       'first',
     ])
+  })
+})
+
+describe('rebuilt port lifecycle', (): void => {
+  it('keeps the tracker a rotation replaced until the run that used it ends', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    let markStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let finishWorker = (): void => undefined
+    const finished = new Promise<void>((resolve) => {
+      finishWorker = resolve
+    })
+    const harness = makeHarness(workflow, () => [issue], undefined, environment)
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () =>
+        Effect.sync(markStarted).pipe(
+          Effect.zipRight(Effect.promise(() => finished)),
+          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+
+          expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+            'secret',
+            'secret',
+            'rotated',
+          ])
+          // Only the layer's instance, replaced at startup before any run could reach it. The
+          // running worker adopted the rotated tracker, but a call it made a moment earlier may
+          // still be awaiting the one it replaced.
+          expect(harness.releasedTrackers()).toHaveLength(1)
+
+          finishWorker()
+          yield* control.refresh
+          yield* control.refresh
+
+          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
+            'secret',
+            'secret',
+          ])
+        }),
+      ),
+    )
+  })
+
+  it("releases a run's superseded ports when it ends, even as its handoff lives on", async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    let markStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let finishWorker = (): void => undefined
+    const finished = new Promise<void>((resolve) => {
+      finishWorker = resolve
+    })
+    // An isolated root: this run really does hand off, so it reads and writes a handoff store.
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-superseded-handoff-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const harness = makeHarness(isolated, () => [issue], undefined, environment)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        handoffCompletedWork: () =>
+          Effect.succeed({
+            _tag: 'PullRequest' as const,
+            branchName: 'symphony/issue-1',
+            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+            pullRequestNumber: 65,
+            created: true,
+          }),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: 'handoff-head',
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: null,
+            mergeState: 'unknown',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+          }),
+        requestPullRequestReview: () => Effect.void,
+      }),
+      runAgent: () =>
+        Effect.sync(markStarted).pipe(
+          Effect.zipRight(Effect.promise(() => finished)),
+          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        ),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+          expect(harness.releasedTrackers()).toHaveLength(1)
+
+          finishWorker()
+          yield* control.refresh
+          yield* control.refresh
+          const snapshot = yield* control.snapshot
+
+          // The run has ended into a handoff under the same issue, and that handoff holds the
+          // adopted tracker — so what the run superseded is free while the pull request stays open.
+          expect(snapshot.handoffs).toHaveLength(1)
+          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
+            'secret',
+            'secret',
+          ])
+          return snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs[0]).toMatchObject({ state: 'awaiting_checks' })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('keeps the workspace manager a reload replaced until the worker holding it ends', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const initial = changedWorkflow({ fingerprint: 'initial' })
+    const reloaded: Workflow = {
+      ...changedWorkflow({ fingerprint: 'reloaded' }),
+      config: { ...initial.config, workspaceRoot: '/tmp/symphony-reloaded' },
+    }
+    let markStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let finishWorker = (): void => undefined
+    const finished = new Promise<void>((resolve) => {
+      finishWorker = resolve
+    })
+    const harness = makeHarness(initial, () => [issue])
+    // Handoff disabled: the finished worker schedules a continuation retry, which holds no
+    // execution snapshot, so the only remaining holder is the run that has just ended.
+    const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
+    void omittedCodeReview
+    const ports: TestPorts = {
+      ...trackerOnlyPorts,
+      runAgent: () =>
+        Effect.sync(markStarted).pipe(
+          Effect.zipRight(Effect.promise(() => finished)),
+          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+          harness.setWorkflow(reloaded)
+          yield* control.refresh
+
+          expect(harness.workspaceSettings().map((each) => each.root)).toEqual([
+            '/tmp/symphony',
+            '/tmp/symphony',
+            '/tmp/symphony-reloaded',
+          ])
+          // One release, not two: the instance the layer built was replaced at startup and freed on
+          // the first poll, while the one the running worker holds outlives the reload.
+          expect(harness.releasedWorkspaces()).toHaveLength(1)
+
+          finishWorker()
+          yield* control.refresh
+          yield* control.refresh
+
+          expect(harness.releasedWorkspaces()).toHaveLength(2)
+        }),
+      ),
+    )
   })
 })
 
@@ -2477,10 +2831,10 @@ describe('scheduler dependency hydration', (): void => {
     }
     const requested: (readonly string[] | null)[] = []
     const harness = makeHarness(unlabeled)
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
         fetchIssuesByStates: (_states, dependencyLabels) => {
           requested.push(dependencyLabels)
           return Effect.succeed([])
@@ -2491,7 +2845,7 @@ describe('scheduler dependency hydration', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
         }),
       ),
@@ -2504,10 +2858,10 @@ describe('scheduler dependency hydration', (): void => {
   it('passes the configured labels through when some are required', async (): Promise<void> => {
     const requested: (readonly string[] | null)[] = []
     const harness = makeHarness(workflow)
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
         fetchIssuesByStates: (_states, dependencyLabels) => {
           requested.push(dependencyLabels)
           return Effect.succeed([])
@@ -2518,7 +2872,7 @@ describe('scheduler dependency hydration', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
         }),
       ),
@@ -2542,7 +2896,7 @@ const secretRedactor = makeRedactor(['s3cret-token-value'])
  */
 const makeAgentFactory = (): Readonly<{
   agents: Map<string, FakeAgent>
-  runAgent: OrchestratorDependencies['runAgent']
+  runAgent: AgentRunnerPort['run']
 }> => {
   const agents = new Map<string, FakeAgent>()
   return {
@@ -2622,8 +2976,8 @@ describe('live agent detail', (): void => {
     const observed = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           const agent = yield* Effect.promise(() =>
@@ -2706,8 +3060,8 @@ describe('live agent detail', (): void => {
     const detail = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           const first = yield* Effect.promise(() =>
@@ -2784,8 +3138,8 @@ describe('live agent detail', (): void => {
     const details = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           const first = yield* Effect.promise(() =>
@@ -2844,11 +3198,11 @@ describe('live agent detail', (): void => {
     }
     const harness = makeHarness(isolated, () => [issue])
     const factory = makeAgentFactory()
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: factory.runAgent,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         handoffCompletedWork: () =>
           Effect.succeed({
             _tag: 'PullRequest',
@@ -2863,7 +3217,7 @@ describe('live agent detail', (): void => {
     const detail = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           const agent = yield* Effect.promise(() =>
             awaitAgent(factory.agents, 'example/symphony#13'),
           )
@@ -2926,11 +3280,11 @@ describe('live agent detail', (): void => {
       releaseHandoff = resolve
     })
     let blockHandoff = true
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: factory.runAgent,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         handoffCompletedWork: () =>
           blockHandoff
             ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
@@ -2941,7 +3295,7 @@ describe('live agent detail', (): void => {
     const detail = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           const agent = yield* Effect.promise(() =>
             awaitAgent(factory.agents, 'example/symphony#19'),
           )
@@ -2976,8 +3330,8 @@ describe('live agent detail', (): void => {
     const lookups = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           yield* Effect.promise(() => awaitAgent(factory.agents, 'example/symphony#14'))
@@ -3006,8 +3360,8 @@ describe('live agent detail', (): void => {
     const lookup = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           return yield* Effect.promise(() =>
@@ -3039,8 +3393,8 @@ describe('live agent detail', (): void => {
     const lookup = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           yield* Effect.promise(() =>
@@ -3092,8 +3446,8 @@ describe('live agent detail', (): void => {
     const observed = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.dependencies,
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
             runAgent: factory.runAgent,
           })
           const agent = yield* Effect.promise(() =>
@@ -3149,11 +3503,11 @@ describe('aged-out agent detail', (): void => {
     }
     const harness = makeHarness(isolated, () => issues)
     const factory = makeAgentFactory()
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: factory.runAgent,
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         handoffCompletedWork: (issue) =>
           Effect.succeed({
             _tag: 'PullRequest',
@@ -3168,7 +3522,7 @@ describe('aged-out agent detail', (): void => {
     const observed = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           for (const issue of issues) {
             const agent = yield* Effect.promise(() => awaitAgent(factory.agents, issue.identifier))
             agent.settle('completed')
@@ -3217,7 +3571,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', harness.dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
           harness.emitAgentEvent(makeAgentEvent({ event: 'session_started', usage: null }))
           harness.emitAgentEvent(makeAgentEvent())
@@ -3330,8 +3684,8 @@ describe('session telemetry accounting', (): void => {
       resolveStarted = resolve
     })
     let interrupted = false
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: ({ onEvent }) =>
         Effect.sync(() => {
           onEvent(makeAgentEvent({ timestamp: new Date(0), message: 'last progress' }))
@@ -3349,7 +3703,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
           yield* Effect.yieldNow()
           yield* Effect.yieldNow()
@@ -3377,10 +3731,10 @@ describe('session telemetry accounting', (): void => {
     const harness = makeHarness(workflow, () => [issue])
     let agentLaunches = 0
     let afterRunCount = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeWorkspaces: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
         beforeRun: () =>
           Effect.fail(
             new WorkspaceError({ category: 'hook_failed', message: 'before_run rejected' }),
@@ -3400,7 +3754,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
           while (snapshot.retrying.length === 0) {
             yield* Effect.yieldNow()
@@ -3425,17 +3779,17 @@ describe('session telemetry accounting', (): void => {
     const harness = makeHarness(workflow, () => [issue])
     let handoffCount = 0
     let afterRunCount = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeWorkspaces: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
         afterRun: () =>
           Effect.sync(() => {
             afterRunCount += 1
           }),
       }),
-      makeCodeReview: (effectiveWorkflow) => ({
-        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
         handoffCompletedWork: () =>
           Effect.sync(() => {
             handoffCount += 1
@@ -3449,7 +3803,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
           while (snapshot.retrying.length === 0) {
             yield* Effect.yieldNow()
@@ -3473,10 +3827,10 @@ describe('session telemetry accounting', (): void => {
   it('uses continuation turns when the tracker has no CodeReviewPort and handoff is disabled', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#139', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [issue])
-    const { makeCodeReview: omittedCodeReview, ...trackerOnlyDependencies } = harness.dependencies
+    const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
     void omittedCodeReview
-    const dependencies: OrchestratorDependencies = {
-      ...trackerOnlyDependencies,
+    const ports: TestPorts = {
+      ...trackerOnlyPorts,
       runAgent: () =>
         Effect.succeed({ threadId: 'thread-neutral', turnId: 'turn-neutral', turnCount: 1 }),
     }
@@ -3484,7 +3838,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
           while (snapshot.retrying.length === 0) {
             yield* Effect.yieldNow()
@@ -3519,13 +3873,13 @@ describe('session telemetry accounting', (): void => {
     await Effect.runPromise(saveHandoffs(storePath, [persisted]))
     const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
     const harness = makeHarness(isolated)
-    const { makeCodeReview: omittedCodeReview, ...trackerOnlyDependencies } = harness.dependencies
+    const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
     void omittedCodeReview
 
     const snapshot = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', trackerOnlyDependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', trackerOnlyPorts)
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -3539,13 +3893,13 @@ describe('session telemetry accounting', (): void => {
 
   it('rejects enabled handoff when the provider does not supply CodeReviewPort', async (): Promise<void> => {
     const harness = makeHarness(workflow)
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       makeCodeReview: () => null,
     }
 
     const result = await Effect.runPromise(
-      Effect.either(Effect.scoped(startOrchestrator('/tmp/WORKFLOW.md', dependencies))),
+      Effect.either(Effect.scoped(startTestOrchestrator('/tmp/WORKFLOW.md', ports))),
     )
 
     expect(result).toMatchObject({
@@ -3567,10 +3921,10 @@ describe('session telemetry accounting', (): void => {
     })
     let interrupted = false
     const removed: string[] = []
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeWorkspaces: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
         remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
       }),
       runAgent: () =>
@@ -3587,7 +3941,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
           currentIssue = { ...currentIssue, state: 'review' }
 
@@ -3610,15 +3964,15 @@ describe('session telemetry accounting', (): void => {
     const started = new Promise<void>((resolve) => {
       resolveStarted = resolve
     })
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
     }
 
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
           currentIssue = { ...currentIssue, title: 'Updated while active' }
 
@@ -3646,8 +4000,8 @@ describe('session telemetry accounting', (): void => {
     const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(cappedWorkflow, () => [issue])
     let failureAt = 0
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: () =>
         Effect.sync(() => {
           failureAt = Date.now()
@@ -3661,7 +4015,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
           while (snapshot.retrying.length === 0) {
             yield* Effect.yieldNow()
@@ -3686,10 +4040,10 @@ describe('session telemetry accounting', (): void => {
     const occupyingStarted = new Promise<void>((resolve) => {
       resolveOccupyingStarted = resolve
     })
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
         fetchIssuesByIds: (ids) =>
           Effect.succeed([retryingIssue, occupyingIssue].filter((issue) => ids.includes(issue.id))),
       }),
@@ -3706,7 +4060,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while ((yield* control.snapshot).retrying.length === 0) {
             yield* Effect.yieldNow()
           }
@@ -3739,8 +4093,8 @@ describe('session telemetry accounting', (): void => {
     const secondRun = new Promise<void>((resolve) => {
       resolveSecondRun = resolve
     })
-    const dependencies: OrchestratorDependencies = {
-      ...harness.dependencies,
+    const ports: TestPorts = {
+      ...harness.ports,
       runAgent: ({ onEvent }) =>
         Effect.suspend(() => {
           runCount += 1
@@ -3767,7 +4121,7 @@ describe('session telemetry accounting', (): void => {
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (runCount < 1) {
             yield* Effect.yieldNow()
           }

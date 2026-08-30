@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, type Scope } from 'effect'
 
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
@@ -29,18 +29,28 @@ import {
   type AgentDetailStatus,
   type AgentEvent,
 } from '../telemetry.js'
-import { type loadWorkflow, type Workflow } from '../config/workflow.js'
+import type { Workflow } from '../config/workflow.js'
 import { workspaceKey } from '../domain/workspace-containment.js'
-import type {
-  AgentEventSemantics,
-  AgentRunnerConfig,
-  AgentRunnerPort,
-} from '../ports/agent-runner.js'
-import type { CodeReviewPort } from '../ports/code-review.js'
-import type { TrackerPort } from '../ports/tracker.js'
-import type { WorkspaceManagerPort } from '../ports/workspace.js'
+import {
+  AgentRunner,
+  CurrentCodeReview,
+  CurrentTracker,
+  CurrentWorkspaceManager,
+  WorkflowLoader,
+  WorkflowWatcher,
+  type AgentRunnerConfig,
+  type AgentRunnerPort,
+  type CodeReviewCell,
+  type CodeReviewPort,
+  type TrackerCell,
+  type TrackerPort,
+  type WorkflowLoaderPort,
+  type WorkspaceManagerCell,
+  type WorkspaceManagerPort,
+} from '../ports/index.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
+import { rebuildEffectiveWorkflow } from './workflow-reload.js'
 
 export type RunningEntry = {
   runId: number
@@ -294,35 +304,64 @@ export type HandoffRecoveryCounts = {
   failed: number
 }
 
-export type WorkflowWatcher = Readonly<{
-  close: () => Promise<void>
+/**
+ * What the composition root must provide for the orchestrator to run. The code-review capability is
+ * not among them: it is optional, and its absence is how the application says handoff is disabled.
+ */
+export type OrchestratorServices =
+  | AgentRunner
+  | CurrentTracker
+  | CurrentWorkspaceManager
+  | WorkflowLoader
+  | WorkflowWatcher
+
+/**
+ * The ports the orchestrator resolved from {@link OrchestratorServices} at startup, and the cells
+ * through which a reload or a credential rotation installs their replacements.
+ *
+ * This is not an injection seam: it is built inside the orchestrator from the tags the composition
+ * root provided, and no caller can pass one in. A test binds a layer instead.
+ */
+export type RuntimePorts = Readonly<{
+  agentRunner: AgentRunnerPort
+  workflowLoader: WorkflowLoaderPort
+  trackerCell: TrackerCell
+  workspaceCell: WorkspaceManagerCell
+  /**
+   * `None` when pull-request handoff is disabled, so no code-review capability was composed and the
+   * application follows the core continuation lifecycle.
+   */
+  codeReviewCell: Option.Option<CodeReviewCell>
 }>
 
-export type OrchestratorDependencies = Readonly<{
-  loadWorkflow: typeof loadWorkflow
-  makeTracker: (workflow: Workflow) => TrackerPort
-  /** Omit the factory to disable pull-request handoff and use continuation turns only. */
-  makeCodeReview?: (workflow: Workflow) => CodeReviewPort | null
-  makeWorkspaces: (workflow: Workflow) => WorkspaceManagerPort
-  runAgent: AgentRunnerPort['run']
-  /**
-   * The injected runner's own reading of its turn statuses. It travels with `runAgent` so a
-   * non-Codex runner is never interpreted through another runner's status vocabulary.
-   */
-  agentEventSemantics: AgentEventSemantics
-  watchWorkflow: (path: string, onChange: () => void) => WorkflowWatcher
-  /** Environment used by dispatch preflight validation of secret indirection. */
-  environment: NodeJS.ProcessEnv
+/**
+ * An instance a rebuild replaced, held until the last live holder lets go of it. Adoption moves
+ * running workers and in-flight handoffs onto the replacement, but a worker still holds whatever
+ * its execution snapshot captured, and a handoff holds the workspace manager its run created.
+ */
+export type PendingRetirement = Readonly<{
+  kind: 'tracker' | 'codeReview' | 'workspaces'
+  instance: unknown
+  retire: Effect.Effect<void>
 }>
 
 /**
  * The explicit mutable boundary shared by the extracted runtime operations.  The operation fields
- * are installed by the composition root after their dependencies have been constructed; extracted
- * modules receive this record instead of closing over startOrchestrator's local scope.
+ * are installed once the orchestrator has resolved its ports; extracted modules receive this record
+ * instead of closing over startOrchestrator's local scope.
  */
 export type OrchestratorContext = {
   readonly state: RuntimeState
-  readonly dependencies: OrchestratorDependencies
+  readonly ports: RuntimePorts
+  /** Replaced port instances whose release is still waiting on a live holder. */
+  readonly pendingRetirements: PendingRetirement[]
+  /**
+   * Ports an adoption took away from a live run, keyed by that run. A call that read an instance a
+   * moment before adoption replaced it is still using it, so the instance is held until the run
+   * ends rather than until the reference is swapped. Keyed by run rather than by issue: the same
+   * issue goes on to a handoff, and a retry after it starts a run that never touched these.
+   */
+  readonly supersededPorts: Map<number, unknown[]>
   readonly selectedWorkflowPath: string
   readonly mailbox: Queue.Queue<OrchestratorEvent>
   readonly currentRefreshWaiters: Deferred.Deferred<void>[]
@@ -518,43 +557,33 @@ const identifierIssueNumber = (identifier: string): number | null => {
 
 export const startOrchestratorRuntime = (
   selectedWorkflowPath: string,
-  dependencies: OrchestratorDependencies,
-): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
+): Effect.Effect<OrchestratorControl, WorkflowError, OrchestratorServices | Scope.Scope> =>
   Effect.gen(function* () {
-    const configureCodeReview = (workflow: Workflow): CodeReviewPort | null => {
-      const codeReview = dependencies.makeCodeReview?.(workflow) ?? null
-      if (dependencies.makeCodeReview !== undefined && codeReview === null) {
-        throw new WorkflowError({
-          category: 'invalid_config',
-          message: `pull-request handoff is enabled, but tracker provider ${workflow.tracker.kind} does not supply CodeReviewPort`,
-        })
-      }
-      return codeReview
+    const ports: RuntimePorts = {
+      agentRunner: yield* AgentRunner,
+      workflowLoader: yield* WorkflowLoader,
+      trackerCell: yield* CurrentTracker,
+      workspaceCell: yield* CurrentWorkspaceManager,
+      codeReviewCell: yield* Effect.serviceOption(CurrentCodeReview),
     }
-    const portConfigurationError = (cause: unknown): WorkflowError =>
-      cause instanceof WorkflowError
-        ? cause
-        : new WorkflowError({
-            category: 'invalid_config',
-            message: 'application ports could not be configured',
-            cause,
-          })
+    const pendingRetirements: PendingRetirement[] = []
+    const supersededPorts = new Map<number, unknown[]>()
+    /**
+     * Built from the workflow the orchestrator loaded rather than adopted from the composition
+     * root's own read of it. The two are separate reads of one file, and an edit between them would
+     * otherwise leave every port serving a version that nothing compares against again: the reload
+     * check measures the file against the workflow adopted here, never against the cells' input.
+     * The instances the layer built are replaced immediately and retired on the first poll.
+     */
+    let lastKnownGood = yield* rebuildEffectiveWorkflow(
+      ports,
+      pendingRetirements,
+      yield* ports.workflowLoader.load(selectedWorkflowPath),
+    )
     const makeEffectiveWorkflow = (
       workflow: Workflow,
     ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
-      Effect.try({
-        try: () => ({
-          workflow,
-          tracker: dependencies.makeTracker(workflow),
-          codeReview: configureCodeReview(workflow),
-          workspaces: dependencies.makeWorkspaces(workflow),
-          loadedAt: new Date(),
-        }),
-        catch: portConfigurationError,
-      })
-    let lastKnownGood = yield* makeEffectiveWorkflow(
-      yield* dependencies.loadWorkflow(selectedWorkflowPath),
-    )
+      rebuildEffectiveWorkflow(ports, pendingRetirements, workflow)
     const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
       Effect.gen(function* () {
         const terminalGroups = yield* Effect.forEach(
@@ -963,15 +992,11 @@ export const startOrchestratorRuntime = (
       }),
     )
 
-    const watcher = yield* Effect.acquireRelease(
-      Effect.sync(() =>
-        dependencies.watchWorkflow(selectedWorkflowPath, () => {
-          Effect.runFork(requestTick('change'))
-        }),
-      ),
-      (instance) => Effect.promise(() => instance.close()),
+    yield* Effect.flatMap(WorkflowWatcher, (watcher) =>
+      watcher.watch(selectedWorkflowPath, () => {
+        Effect.runFork(requestTick('change'))
+      }),
     )
-    void watcher
 
     const scheduleNextTick = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
@@ -1278,7 +1303,7 @@ export const startOrchestratorRuntime = (
             update.event === 'turn/terminated') &&
           update.turnStatus !== null
         ) {
-          const outcome = dependencies.agentEventSemantics.turnOutcome(update.turnStatus)
+          const outcome = ports.agentRunner.semantics.turnOutcome(update.turnStatus)
           const completed = outcome === 'completed'
           const cancelled = outcome === 'cancelled'
           entry.turnActive = false
@@ -1420,7 +1445,9 @@ export const startOrchestratorRuntime = (
 
     const context: OrchestratorContext = {
       state,
-      dependencies,
+      ports,
+      pendingRetirements,
+      supersededPorts,
       selectedWorkflowPath,
       mailbox,
       currentRefreshWaiters,
@@ -1531,10 +1558,9 @@ export const startOrchestratorRuntime = (
 
 export const runOrchestratorRuntime = (
   selectedWorkflowPath: string,
-  dependencies: OrchestratorDependencies,
-): Effect.Effect<void, WorkflowError> =>
+): Effect.Effect<void, WorkflowError, OrchestratorServices> =>
   Effect.scoped(
-    startOrchestratorRuntime(selectedWorkflowPath, dependencies).pipe(
+    startOrchestratorRuntime(selectedWorkflowPath).pipe(
       Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
     ),
   )
