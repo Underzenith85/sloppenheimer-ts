@@ -114,7 +114,9 @@ export const buildBacklogSnapshot = (
       enabled:
         !pausedIssueNumbers.has(Number(issue.id)) && issue.labels.includes(label.toLowerCase()),
       state: issue.state,
-      blockedBy: issue.blockedBy,
+      // The table presents active scheduling constraints. Keep the complete dependency history in
+      // `nodes` and `edges`, but do not label an issue as "Blocked by" a terminal dependency.
+      blockedBy: blockers,
       readiness: isCyclic ? 'cyclic' : blockers.length > 0 ? 'blocked' : 'ready',
       reason: isCyclic
         ? (cycles.find((cycle) => cycle.members.includes(issue.identifier))?.message ??
@@ -138,7 +140,7 @@ export const buildBacklogSnapshot = (
     })
   }
   const edges: DependencyEdge[] = []
-  for (const issue of issues) {
+  for (const issue of openIssues) {
     for (const blocker of issue.blockedBy) {
       edges.push({ blocker: blocker.identifier, dependent: issue.identifier })
       if (!nodes.has(blocker.identifier)) {

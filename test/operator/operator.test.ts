@@ -255,9 +255,14 @@ describe('operator dependency graph', (): void => {
     expect(snapshot.issues.find(({ number }) => number === 6)?.readiness).toBe('cyclic')
     expect(snapshot.issues.find(({ number }) => number === 7)?.readiness).toBe('cyclic')
     expect(snapshot.issues.find(({ number }) => number === 8)?.readiness).toBe('ready')
+    expect(snapshot.issues.find(({ number }) => number === 8)?.blockedBy).toEqual([])
     expect(snapshot.nodes.find(({ identifier }) => identifier.endsWith('#9'))?.readiness).toBe(
       'completed',
     )
+    expect(snapshot.edges).toContainEqual({
+      blocker: 'example/symphony#9',
+      dependent: 'example/symphony#8',
+    })
   })
 
   it('reuses dependency hydration across repeated backlog snapshots', async (): Promise<void> => {

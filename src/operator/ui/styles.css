@@ -405,6 +405,10 @@ button.work-card[aria-expanded='true'] {
   stroke: rgba(244, 240, 230, 0.28);
   stroke-width: 2;
 }
+.graph-edges path.satisfied {
+  stroke: rgba(102, 217, 166, 0.42);
+  stroke-dasharray: 5 5;
+}
 .graph-node {
   position: absolute;
   width: 224px;
