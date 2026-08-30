@@ -532,7 +532,7 @@ const renderHandoffs = (entries) => {
     card.className = 'work-card'
     card.href = entry.pullRequestUrl
     const copy = document.createElement('div')
-    copy.append(text('strong', '', entry.identifier), text('span', '', entry.state.replaceAll('_', ' ')))
+    copy.append(text('strong', '', entry.identifier), text('span', '', handoffStatus(entry)))
     card.append(copy, text('small', '', entry.reason ?? ('Head ' + (entry.headSha ?? 'pending'))))
     return card
   }))
@@ -561,6 +561,7 @@ const handoffStatus = (handoff) => {
     repair_needed: 'Repair needed',
     ready_to_merge: 'Ready to merge',
     merging: 'Merging',
+    closed_without_merge: 'Closed without merge',
     intervention_required: 'Needs intervention',
     merged: 'Merged',
   }

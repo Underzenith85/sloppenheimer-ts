@@ -399,6 +399,35 @@ describe('operator console agent detail', (): void => {
     expect(textOf('#detail-timeline')).toContain('Handoff pull request')
   })
 
+  it('shows a closed-without-merge handoff as a clear terminal status', async (): Promise<void> => {
+    serveOverride = (path): Promise<Response> | null =>
+      path === '/api/v1/state'
+        ? Promise.resolve(
+            jsonResponse(200, {
+              ...snapshot,
+              handoffs: [
+                {
+                  issueId: '75',
+                  identifier: 'example/symphony#75',
+                  pullRequestUrl: 'https://example.test/pull/50',
+                  branchName: 'symphony/issue-75',
+                  state: 'closed_without_merge',
+                  headSha: 'closed-head',
+                  reason: 'The pull request was closed without being merged',
+                  repairAttempts: 0,
+                  observedAt: '2026-08-30T12:00:00.000Z',
+                },
+              ],
+            }),
+          )
+        : null
+
+    await boot()
+
+    expect(textOf('#handoff-list')).toContain('Closed without merge')
+    expect(textOf('#handoff-list')).toContain('The pull request was closed without being merged')
+  })
+
   it('restores an inspection from a deep link on load', async (): Promise<void> => {
     await boot(`#/agents/${encodeURIComponent(runningIdentifier)}`)
 

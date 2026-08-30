@@ -12,7 +12,7 @@ const isSnapshot = (value: unknown): value is HandoffSnapshot => {
   const candidate = value as Record<string, unknown>
   const states = new Set([
     'merged',
-    'closed',
+    'closed_without_merge',
     'awaiting_checks',
     'repair_needed',
     'ready_to_merge',

@@ -169,15 +169,15 @@ describe('GitHub pull request monitor', (): void => {
     const result = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(44))
 
     expect(classifyPullRequest(result)).toEqual({
-      state: 'closed',
+      state: 'closed_without_merge',
       reason: 'The pull request was closed without being merged',
     })
     expect(result).toMatchObject({
       number: 44,
+      state: 'closed',
       headSha: 'closed-head',
       merged: false,
-      closed: true,
-      mergeState: 'closed',
+      mergeState: null,
       checks: [],
       reviewThreads: [],
     })
@@ -187,6 +187,7 @@ describe('GitHub pull request monitor', (): void => {
   it('accepts a merged pull request with an omitted merge SHA', async (): Promise<void> => {
     const fetchMock = vi.fn(async (): Promise<Response> =>
       Response.json({
+        state: 'closed',
         merged: true,
         mergeable: null,
         mergeable_state: 'unknown',
@@ -199,6 +200,7 @@ describe('GitHub pull request monitor', (): void => {
     expect(classifyPullRequest(result)).toEqual({ state: 'merged', mergeCommitSha: null })
     expect(result).toMatchObject({
       number: 44,
+      state: 'closed',
       url: null,
       headSha: null,
       merged: true,
@@ -213,14 +215,21 @@ describe('GitHub pull request monitor', (): void => {
 
   it.each([
     {
+      name: 'missing state',
+      response: { merged: false },
+      message:
+        'GitHub pull request #44 field "state" is invalid: expected "open" or "closed", received missing',
+    },
+    {
       name: 'missing merged status',
-      response: { merge_commit_sha: null },
+      response: { state: 'open', merge_commit_sha: null },
       message:
         'GitHub pull request #44 field "merged" is invalid: expected boolean, received missing',
     },
     {
       name: 'invalid head SHA',
       response: {
+        state: 'open',
         html_url: 'https://github.test/example/symphony/pull/44',
         head: { sha: 42 },
         merged: false,
@@ -234,6 +243,7 @@ describe('GitHub pull request monitor', (): void => {
     {
       name: 'invalid open mergeability',
       response: {
+        state: 'open',
         html_url: 'https://github.test/example/symphony/pull/44',
         head: { sha: 'sensitive-head-value' },
         merged: false,
@@ -262,11 +272,37 @@ describe('GitHub pull request monitor', (): void => {
     expect(error.message).not.toContain('sensitive')
   })
 
+  it('decodes a closed unmerged pull request without inspecting open-PR status', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> =>
+      Response.json({ state: 'closed', merged: false }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(50))
+
+    expect(result).toEqual({
+      number: 50,
+      state: 'closed',
+      url: null,
+      headSha: null,
+      merged: false,
+      mergeCommitSha: null,
+      mergeable: null,
+      mergeState: null,
+      checks: [],
+      reviewDecision: null,
+      reviewThreads: [],
+    })
+    expect(classifyPullRequest(result).state).toBe('closed_without_merge')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('inspects checks and review threads when an open PR omits its merge SHA', async (): Promise<void> => {
     const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (url.endsWith('/pulls/41')) {
         return Response.json({
+          state: 'open',
           html_url: 'https://github.test/example/symphony/pull/41',
           head: { sha: 'head-1' },
           merged: false,

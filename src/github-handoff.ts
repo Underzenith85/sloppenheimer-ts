@@ -54,6 +54,13 @@ const requiredBoolean = (number: number, field: string, value: JsonValue | undef
   return value
 }
 
+const pullRequestState = (number: number, value: JsonValue | undefined): 'open' | 'closed' => {
+  if (value !== 'open' && value !== 'closed') {
+    throw pullRequestFieldError(number, 'state', '"open" or "closed"', value)
+  }
+  return value
+}
+
 const nullableString = (
   number: number,
   field: string,
@@ -189,8 +196,17 @@ export const makeGitHubPullRequestMonitor = (
             throw pullRequestFieldError(number, 'response', 'object', pullValue)
           }
           const pull = pullValue
+          const state = pullRequestState(number, pull['state'])
           const merged = requiredBoolean(number, 'merged', pull['merged'])
           if (merged) {
+            if (state !== 'closed') {
+              throw pullRequestFieldError(
+                number,
+                'state',
+                '"closed" for a merged pull request',
+                state,
+              )
+            }
             const head = pull['head']
             const headSha =
               isJsonRecord(head) && typeof head['sha'] === 'string' ? head['sha'] : null
@@ -198,10 +214,32 @@ export const makeGitHubPullRequestMonitor = (
               typeof pull['merge_commit_sha'] === 'string' ? pull['merge_commit_sha'] : null
             return {
               number,
+              state,
               url: typeof pull['html_url'] === 'string' ? pull['html_url'] : null,
               headSha,
               merged: true,
               mergeCommitSha,
+              mergeable:
+                pull['mergeable'] === null || typeof pull['mergeable'] === 'boolean'
+                  ? pull['mergeable']
+                  : null,
+              mergeState:
+                typeof pull['mergeable_state'] === 'string' ? pull['mergeable_state'] : null,
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }
+          }
+          if (state === 'closed') {
+            const head = pull['head']
+            return {
+              number,
+              state,
+              url: typeof pull['html_url'] === 'string' ? pull['html_url'] : null,
+              headSha: isJsonRecord(head) && typeof head['sha'] === 'string' ? head['sha'] : null,
+              merged: false,
+              mergeCommitSha:
+                typeof pull['merge_commit_sha'] === 'string' ? pull['merge_commit_sha'] : null,
               mergeable:
                 pull['mergeable'] === null || typeof pull['mergeable'] === 'boolean'
                   ? pull['mergeable']
@@ -219,22 +257,6 @@ export const makeGitHubPullRequestMonitor = (
           }
           const headSha = requiredString(number, 'head.sha', headValue['sha'])
           const url = requiredString(number, 'html_url', pull['html_url'])
-          const state = typeof pull['state'] === 'string' ? pull['state'] : 'open'
-          if (state === 'closed') {
-            return {
-              number,
-              url,
-              headSha,
-              merged: false,
-              closed: true,
-              mergeCommitSha: null,
-              mergeable: null,
-              mergeState: 'closed',
-              checks: [],
-              reviewDecision: null,
-              reviewThreads: [],
-            }
-          }
           const mergeCommitSha = nullableString(
             number,
             'merge_commit_sha',
@@ -277,10 +299,10 @@ export const makeGitHubPullRequestMonitor = (
           }
           return {
             number,
+            state,
             url,
             headSha,
             merged: false,
-            closed: false,
             mergeCommitSha,
             mergeable,
             mergeState,

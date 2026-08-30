@@ -365,7 +365,7 @@ describe('restored pull request handoffs', (): void => {
             url: 'https://github.test/example/symphony/pull/65',
             headSha: 'recovered-head',
             merged: false as const,
-            closed: false,
+            state: 'open' as const,
             mergeCommitSha: null,
             mergeable: null,
             mergeState: 'unknown',
@@ -495,7 +495,7 @@ describe('restored pull request handoffs', (): void => {
             url: `https://github.test/example/symphony/pull/${String(number)}`,
             headSha: number === 65 ? 'first-head' : 'second-head',
             merged: false as const,
-            closed: false,
+            state: 'open' as const,
             mergeCommitSha: null,
             mergeable: null,
             mergeState: 'unknown',
@@ -596,7 +596,7 @@ describe('restored pull request handoffs', (): void => {
               url: 'https://github.test/example/symphony/pull/95',
               headSha: 'persisted-head',
               merged: false as const,
-              closed: false,
+              state: 'open' as const,
               mergeCommitSha: null,
               mergeable: null,
               mergeState: 'unknown',
@@ -662,6 +662,7 @@ describe('restored pull request handoffs', (): void => {
             inspections += 1
             return {
               number: pullRequestNumber,
+              state: 'closed' as const,
               url: null,
               headSha: null,
               merged: true as const,
@@ -693,7 +694,7 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
-  it('retains the claim when a restored pull request is closed without merge', async (): Promise<void> => {
+  it('retains a closed unmerged handoff without dispatching repair work', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-closed-handoff-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
     const isolated: Workflow = {
@@ -701,16 +702,16 @@ describe('restored pull request handoffs', (): void => {
       config: { ...workflow.config, workspaceRoot },
     }
     const issue = {
-      ...makeIssue('example/symphony#112', 1, null, ['symphony', 'ready']),
-      id: issueId('112'),
+      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+      id: issueId('75'),
     }
     await Effect.runPromise(
       saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/117',
-          branchName: 'symphony/issue-112',
+          pullRequestUrl: 'https://github.test/example/symphony/pull/50',
+          branchName: 'symphony/issue-75',
           state: 'awaiting_checks',
           headSha: 'closed-head',
           reason: null,
@@ -720,23 +721,27 @@ describe('restored pull request handoffs', (): void => {
       ]),
     )
     const harness = makeHarness(isolated, () => [issue])
+    let inspections = 0
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
       makeTracker: (effectiveWorkflow) => ({
         ...harness.dependencies.makeTracker(effectiveWorkflow),
         inspectPullRequest: (pullRequestNumber) =>
-          Effect.succeed({
-            number: pullRequestNumber,
-            url: 'https://github.test/example/symphony/pull/117',
-            headSha: 'closed-head',
-            merged: false as const,
-            closed: true,
-            mergeCommitSha: null,
-            mergeable: null,
-            mergeState: 'closed',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
+          Effect.sync(() => {
+            inspections += 1
+            return {
+              number: pullRequestNumber,
+              state: 'closed' as const,
+              url: 'https://github.test/example/symphony/pull/50',
+              headSha: 'closed-head',
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: false,
+              mergeState: 'dirty',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }
           }),
       }),
     }
@@ -752,15 +757,18 @@ describe('restored pull request handoffs', (): void => {
       ),
     )
 
-    expect(harness.agentRuns()).toEqual([])
-    expect(snapshot.handoffs).toHaveLength(1)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      issueId: issue.id,
-      state: 'intervention_required',
-      reason: 'The pull request was closed without being merged',
-    })
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toMatchObject([
-      { issueId: issue.id, state: 'intervention_required' },
+    expect(inspections).toBe(1)
+    expect(snapshot.running).toEqual([])
+    expect(snapshot.handoffs).toEqual([
+      expect.objectContaining({
+        issueId: '75',
+        state: 'closed_without_merge',
+        reason: 'The pull request was closed without being merged',
+        repairAttempts: 0,
+      }),
+    ])
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ state: 'closed_without_merge' }),
     ])
     await rm(workspaceRoot, { force: true, recursive: true })
   })

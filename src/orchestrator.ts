@@ -1242,6 +1242,9 @@ export const startOrchestrator = (
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         for (const [id, handoff] of state.handoffs) {
+          if (handoff.state === 'closed_without_merge') {
+            continue
+          }
           const handoffIssueNumber = identifierIssueNumber(handoff.issue.identifier)
           if (handoffIssueNumber !== null && state.pausedIssueNumbers.has(handoffIssueNumber)) {
             continue
@@ -1289,7 +1292,6 @@ export const startOrchestrator = (
                 : 'Verified repair head; waiting for resolved review state'
             continue
           }
-          const previousState = handoff.state
           const disposition = classifyPullRequest(inspected.observation)
           handoff.state = disposition.state
           handoff.headSha = inspected.observation.headSha
@@ -1301,11 +1303,8 @@ export const startOrchestrator = (
             state.claimed.delete(id)
             continue
           }
-          if (disposition.state === 'closed') {
-            handoff.state = 'intervention_required'
-            if (previousState !== 'intervention_required') {
-              noteHandoffOutcome(id, handoff, 'intervention_required')
-            }
+          if (disposition.state === 'closed_without_merge') {
+            noteHandoffOutcome(id, handoff, 'intervention_required')
             continue
           }
           if (disposition.state === 'ready_to_merge') {

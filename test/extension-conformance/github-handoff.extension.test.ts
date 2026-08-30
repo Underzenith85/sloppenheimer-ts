@@ -4,6 +4,7 @@ import { classifyPullRequest, type PullRequestObservation } from '../../src/hand
 
 const observation: PullRequestObservation = {
   number: 19,
+  state: 'open',
   url: 'https://github.com/Underzenith85/symphony-ts/pull/19',
   headSha: 'isolated-head',
   merged: false,
