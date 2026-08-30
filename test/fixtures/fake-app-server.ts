@@ -217,6 +217,30 @@ const handleTurnStart = (id: unknown): void => {
       }, 40)
       return
     }
+    case 'unattributed-heartbeat': {
+      // Well-formed session-level notifications that name no turn, faster than the silence
+      // timeout. They say nothing about the live turn and must not keep it alive.
+      send({ id, result: { turn } })
+      setInterval(() => {
+        send({ method: 'session/keepAlive', params: { note: 'still here' } })
+      }, 40)
+      return
+    }
+    case 'slow-exiting-grandchild': {
+      // Ignores SIGTERM but leaves on its own shortly after. Shutdown should notice the group
+      // emptying rather than sitting out the whole escalation grace.
+      send({ id, result: { turn } })
+      // A single process that really ignores SIGTERM — a shell trap does not help, because the
+      // `sleep` it waits on is signalled independently and returns early.
+      const child = spawn(
+        'node',
+        ['-e', 'process.on("SIGTERM", () => {}); setTimeout(() => process.exit(0), 500)'],
+        { stdio: 'ignore' },
+      )
+      child.unref()
+      writeFileSync('grandchild.pid', String(child.pid ?? 0))
+      return
+    }
     case 'unmatched-response-heartbeat': {
       // Response-shaped messages answering ids the client never sent, faster than the silence
       // timeout. They settle nothing, so they are not progress and must not keep the turn alive.

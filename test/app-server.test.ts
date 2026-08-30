@@ -549,6 +549,24 @@ describe('App Server timeouts and shutdown', (): void => {
     expect(outcome.error?.category).toBe('turn_timeout')
   }, 30_000)
 
+  it('does not let notifications naming no turn keep a turn alive', async (): Promise<void> => {
+    const outcome = await runScenario('unattributed-heartbeat', { turnTimeoutMs: 600 })
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+  }, 30_000)
+
+  it('finishes shutdown as soon as the group empties, not after the whole grace', async (): Promise<void> => {
+    const started = Date.now()
+    const outcome = await runScenario('slow-exiting-grandchild', { turnTimeoutMs: 400 })
+    const elapsed = Date.now() - started
+    const grandchild = Number((await readFile(join(outcome.path, 'grandchild.pid'), 'utf8')).trim())
+
+    expect(processIsAlive(grandchild)).toBe(false)
+    // The descendant leaves ~400ms after SIGTERM. Waiting on the leader's exit alone would have
+    // meant sitting out the full 5s escalation grace before anyone looked again.
+    expect(elapsed).toBeLessThan(3_000)
+  }, 30_000)
+
   it('does not let responses matching no pending request keep a turn alive', async (): Promise<void> => {
     const outcome = await runScenario('unmatched-response-heartbeat', { turnTimeoutMs: 600 })
 

@@ -456,21 +456,18 @@ class CodexConnection {
    * `codex.turn_timeout_ms` is a silence timeout, not a total turn budget: protocol output that
    * belongs to a turn re-arms that turn's timer, so a long but active turn never expires.
    *
-   * Only validated, attributed output counts. Re-arming on anything parseable would let a stuck
-   * server hold a turn open forever by emitting `{}` faster than the timeout, and would let
-   * late traffic for an older turn keep the current one alive.
+   * Only output that names its own turn counts. There is no fallback to the turn in flight:
+   * anything parseable would otherwise hold a turn open forever — `{}` emitted faster than the
+   * timeout, responses matching nothing, unsupported requests, or session-level notifications that
+   * have no bearing on the turn at all.
    */
-  #noteActivity(turnId: string | null): void {
-    const active = turnId ?? this.#turnId
-    if (active === null) {
-      return
-    }
-    const waiter = this.#waiters.get(active)
+  #noteActivity(turnId: string): void {
+    const waiter = this.#waiters.get(turnId)
     if (waiter === undefined) {
       return
     }
     clearTimeout(waiter.timeout)
-    this.#waiters.set(active, { ...waiter, timeout: this.#armTurnTimer(active) })
+    this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
   }
 
   emitSessionStarted(issue: Issue): void {
@@ -499,55 +496,41 @@ class CodexConnection {
     this.#process.stderr.removeAllListeners('data')
     this.#process.stdin.end()
     this.#terminate('SIGTERM')
-    await new Promise<void>((resolvePromise) => {
-      // Shutdown is finished when the process *group* is empty, not when its leader exits. A tool
-      // the App Server started can outlive it in the same group — and does, if the server crashes
-      // while the tool ignores SIGTERM — so the leader's exit is not the completion signal and
-      // escalation is scheduled even when the leader has already gone.
-      if (!this.#processGroupIsAlive()) {
-        resolvePromise()
-        return
-      }
-      // Referenced on purpose. An awaited promise does not hold the event loop open, so an
-      // unreferenced timer lets the host exit before the escalation fires and leaves behind the
-      // very descendant this is here to kill. The wait is bounded by the grace, and the CLI's own
-      // shutdown deadline is far longer, so holding the loop this long cannot hang the host.
-      // Skipped when the group is empty by then, so a recycled leader PID is never signalled.
-      const escalation = setTimeout(() => {
-        if (!this.#processGroupIsAlive()) {
-          resolvePromise()
-          return
-        }
-        this.#terminate('SIGKILL')
-        // Signal delivery is asynchronous. Resolving here would let the finalizer complete — and
-        // terminal reconciliation start removing the workspace — while a descendant is still
-        // running in it, so shutdown stays pending until the group is actually gone.
-        void this.#awaitGroupExit().then(resolvePromise)
-      }, shutdownGraceMs)
-      this.#process.once('exit', () => {
-        if (this.#processGroupIsAlive()) {
-          return
-        }
-        clearTimeout(escalation)
-        resolvePromise()
-      })
-    })
+    await this.#reapGroup()
   }
 
   /**
-   * Waits for the process group to actually disappear after `SIGKILL`. Bounded by a second
-   * deadline so a process that somehow survives an uncatchable signal still cannot hang shutdown.
+   * Waits for the App Server's process group to empty, escalating to `SIGKILL` once the grace has
+   * passed. Polling rather than waiting on the leader's `exit`: the group emptying is not an event
+   * Node reports, so a tree whose last member leaves a moment after the leader would otherwise sit
+   * out the whole grace before anyone noticed, delaying workspace cleanup for ordinary sessions.
+   *
+   * Both phases are bounded, and the poll timers are referenced on purpose — an awaited promise
+   * does not hold the event loop open, so an unreferenced wait would let the host exit before the
+   * escalation ever fired and leave behind the descendant this exists to kill.
    */
-  async #awaitGroupExit(): Promise<void> {
-    const deadline = Date.now() + groupReapDeadlineMs
-    while (Date.now() < deadline) {
-      if (!this.#processGroupIsAlive()) {
-        return
+  async #reapGroup(): Promise<void> {
+    const escalateAt = Date.now() + shutdownGraceMs
+    while (this.#processGroupIsAlive()) {
+      if (Date.now() >= escalateAt) {
+        this.#terminate('SIGKILL')
+        break
       }
-      await new Promise<void>((resolvePromise) => {
-        setTimeout(resolvePromise, groupReapPollMs)
-      })
+      await CodexConnection.#pause(groupReapPollMs)
     }
+    // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
+    // finalizer complete — and terminal reconciliation start removing the workspace — while a
+    // descendant is still running in it.
+    const deadline = Date.now() + groupReapDeadlineMs
+    while (this.#processGroupIsAlive() && Date.now() < deadline) {
+      await CodexConnection.#pause(groupReapPollMs)
+    }
+  }
+
+  static #pause(milliseconds: number): Promise<void> {
+    return new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, milliseconds)
+    })
   }
 
   /** Whether the App Server's process group still has a member. */
@@ -666,8 +649,6 @@ class CodexConnection {
       this.#emit('unmatched_response', `no pending request for response id ${String(id)}`)
       return
     }
-    // A response to a request Symphony actually sent is progress on the turn in flight.
-    this.#noteActivity(null)
     clearTimeout(pending.timeout)
     this.#pending.delete(id)
     const error = parsed['error']
@@ -713,8 +694,10 @@ class CodexConnection {
     // request rather than from connection state, which is null on the first turn and names the
     // previous one afterwards.
     const identity = notificationIdentity(message)
-    // A server request belongs to a turn and is progress on it.
-    this.#noteActivity(identity.turnId)
+    // Only when the request names its turn; an unattributed one is not evidence that turn is alive.
+    if (identity.turnId !== null) {
+      this.#noteActivity(identity.turnId)
+    }
     if (isPermissionsApproval(method)) {
       this.#write({ id, result: withheldPermissionsGrant })
       this.#emit('permissions_grant_withheld', method, identity)
@@ -750,8 +733,11 @@ class CodexConnection {
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? turn?.id ?? this.#turnId
-    // Re-arm the turn this notification belongs to, not whichever turn happens to be waiting.
-    this.#noteActivity(carried.turnId ?? turn?.id ?? null)
+    // Re-arm the turn this notification names, not whichever turn happens to be waiting.
+    const attributed = carried.turnId ?? turn?.id
+    if (attributed !== undefined) {
+      this.#noteActivity(attributed)
+    }
     this.#onEvent({
       event: method,
       timestamp: new Date(),
