@@ -54,7 +54,7 @@ export const reconcileHandoffs = (
       if (inspected.observation.state === 'open' && handoff.repairStartedHeadSha !== null) {
         const repairedHeadSha = inspected.observation.headSha
         if (repairedHeadSha !== handoff.repairStartedHeadSha) {
-          if (handoff.repairHeadShas.includes(repairedHeadSha)) {
+          if (handoff.repairObservedHeadShas.includes(repairedHeadSha)) {
             handoff.repairStartedHeadSha = null
             handoff.repairBaselineRestored = false
             handoff.state = 'intervention_required'
@@ -64,6 +64,7 @@ export const reconcileHandoffs = (
             continue
           }
           handoff.repairHeadShas.push(repairedHeadSha)
+          handoff.repairObservedHeadShas.push(repairedHeadSha)
           handoff.repairStartedHeadSha = null
           handoff.repairBaselineRestored = false
         } else if (handoff.repairBaselineRestored) {
@@ -251,7 +252,14 @@ export const reconcileHandoffs = (
           effective,
         )
         if (started) {
-          handoff.repairStartedHeadSha = inspected.observation.headSha
+          const baselineHeadSha = inspected.observation.headSha
+          handoff.repairStartedHeadSha = baselineHeadSha
+          if (
+            baselineHeadSha !== null &&
+            !handoff.repairObservedHeadShas.includes(baselineHeadSha)
+          ) {
+            handoff.repairObservedHeadShas.push(baselineHeadSha)
+          }
           handoff.repairBaselineRestored = false
           handoff.reason = `Repair agent running. ${disposition.reason}`
         }

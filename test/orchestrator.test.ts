@@ -1405,6 +1405,90 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('detects a repair cycle back to the pre-repair head', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-cycle-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const initialHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    // The first repair moved the branch off initialHead; the second put it back. initialHead was
+    // only ever a baseline, so it is the head the budget counter alone cannot remember.
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'repair_needed',
+          headSha: repairedHead,
+          reason: 'Repair agent running. Unresolved review feedback',
+          repairAttempts: 1,
+          repairHeadShas: [repairedHead],
+          repairObservedHeadShas: [initialHead, repairedHead],
+          repairStartedHeadSha: repairedHead,
+          reviewRequestedHeadSha: repairedHead,
+          reviewCompletedHeadSha: repairedHead,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: initialHead,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+            codexReview: { headShaPrefix: initialHead.slice(0, 7), status: 'completed' as const },
+          }),
+        handoffCompletedWork: () =>
+          Effect.succeed({
+            _tag: 'PullRequest' as const,
+            branchName: 'symphony/issue-20',
+            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+            pullRequestNumber: 65,
+            created: false,
+          }),
+      }),
+      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    // Returning to an already observed head is a cycle, not progress: it must not buy another
+    // repair or another slot in the budget.
+    expect(snapshot.handoffs[0]).toMatchObject({
+      state: 'intervention_required',
+      repairAttempts: 1,
+    })
+    expect(snapshot.handoffs[0]?.reason).toContain('already observed repair head')
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('treats a repair interrupted by a restart as retryable, not a no-op', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-interrupted-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')

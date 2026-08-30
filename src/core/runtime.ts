@@ -79,6 +79,12 @@ export type HandoffEntry = {
   reason: string | null
   /** Distinct heads observed after a repair agent finished; its length is the verified repair count. */
   repairHeadShas: string[]
+  /**
+   * Every head this handoff has been observed at, baselines included. Cycle detection reads this
+   * rather than repairHeadShas, which counts only post-repair heads and so never holds the head a
+   * repair started from.
+   */
+  repairObservedHeadShas: string[]
   /** Head observed when the in-flight repair was dispatched, or null when no repair is running. */
   repairStartedHeadSha: string | null
   /**
@@ -815,6 +821,7 @@ export const startOrchestratorRuntime = (
         reason: handoff.reason,
         repairAttempts: handoff.repairHeadShas.length,
         repairHeadShas: [...handoff.repairHeadShas],
+        repairObservedHeadShas: [...handoff.repairObservedHeadShas],
         repairStartedHeadSha: handoff.repairStartedHeadSha,
         reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
         reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
@@ -891,6 +898,17 @@ export const startOrchestratorRuntime = (
             // Legacy snapshots conflated worker retries with repairs. An absent head list migrates
             // to zero verified repairs rather than preserving a contaminated counter.
             repairHeadShas: [...(restored.repairHeadShas ?? [])],
+            // A legacy snapshot has no observed set; its post-repair heads plus any in-flight
+            // baseline are the most it can honestly contribute.
+            repairObservedHeadShas: [
+              ...new Set([
+                ...(restored.repairObservedHeadShas ?? restored.repairHeadShas ?? []),
+                ...(restored.repairStartedHeadSha === undefined ||
+                restored.repairStartedHeadSha === null
+                  ? []
+                  : [restored.repairStartedHeadSha]),
+              ]),
+            ],
             // Preserved rather than cleared: a repair may have pushed a new head just before the
             // restart, and the first observation after recovery needs this baseline to attribute it.
             repairStartedHeadSha: restored.repairStartedHeadSha ?? null,
@@ -1150,6 +1168,7 @@ export const startOrchestratorRuntime = (
             headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
             reason: 'reason' in disposition ? disposition.reason : null,
             repairHeadShas: [],
+            repairObservedHeadShas: [],
             repairStartedHeadSha: null,
             repairBaselineRestored: false,
             reviewRequestedHeadSha: null,

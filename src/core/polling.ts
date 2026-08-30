@@ -294,6 +294,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               headSha: existingHandoff?.headSha ?? null,
               reason: 'Awaiting the first protected-branch observation',
               repairHeadShas: existingHandoff?.repairHeadShas ?? [],
+              repairObservedHeadShas: existingHandoff?.repairObservedHeadShas ?? [],
               repairStartedHeadSha: existingHandoff?.repairStartedHeadSha ?? null,
               repairBaselineRestored: existingHandoff?.repairBaselineRestored ?? false,
               reviewRequestedHeadSha: existingHandoff?.reviewRequestedHeadSha ?? null,
@@ -378,10 +379,31 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             )
             break
           }
+          // Reconciliation skips a handoff while its retry is pending, so the cached head can be
+          // stale by the time the retry runs. Observe the pull request first, or a head that moved
+          // during the retry delay is credited to the repair this dispatch is about to start.
+          const pendingHandoff = context.state.handoffs.get(issue.id)
+          const pendingCodeReview = pendingHandoff?.execution.codeReview ?? null
+          if (pendingHandoff !== undefined && pendingCodeReview !== null) {
+            const observed = yield* pendingCodeReview
+              .inspectPullRequest(pendingHandoff.pullRequestNumber)
+              .pipe(
+                Effect.match({
+                  onFailure: () => null,
+                  onSuccess: (observation) => observation.headSha,
+                }),
+              )
+            if (observed !== null) {
+              pendingHandoff.headSha = observed
+            }
+          }
           const started = yield* dispatch(context, issue, event.attempt)
           const retriedHandoff = context.state.handoffs.get(issue.id)
           if (started && retriedHandoff !== undefined && retriedHandoff.headSha !== null) {
             retriedHandoff.repairStartedHeadSha ??= retriedHandoff.headSha
+            if (!retriedHandoff.repairObservedHeadShas.includes(retriedHandoff.headSha)) {
+              retriedHandoff.repairObservedHeadShas.push(retriedHandoff.headSha)
+            }
             retriedHandoff.repairBaselineRestored = false
             yield* context.persistHandoffsEffect()
           }

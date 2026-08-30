@@ -34,6 +34,9 @@ const isSnapshot = (value: unknown): value is HandoffSnapshot => {
     (candidate['repairHeadShas'] === undefined ||
       (Array.isArray(candidate['repairHeadShas']) &&
         candidate['repairHeadShas'].every((headSha) => typeof headSha === 'string'))) &&
+    (candidate['repairObservedHeadShas'] === undefined ||
+      (Array.isArray(candidate['repairObservedHeadShas']) &&
+        candidate['repairObservedHeadShas'].every((headSha) => typeof headSha === 'string'))) &&
     (candidate['repairStartedHeadSha'] === undefined ||
       candidate['repairStartedHeadSha'] === null ||
       typeof candidate['repairStartedHeadSha'] === 'string') &&
