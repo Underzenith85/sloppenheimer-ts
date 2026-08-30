@@ -1272,6 +1272,54 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('does not launch the agent when beforeRun fails', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#24', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let agentLaunches = 0
+    let afterRunCount = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        beforeRun: () =>
+          Effect.fail(
+            new WorkspaceError({ category: 'hook_failed', message: 'before_run rejected' }),
+          ),
+        afterRun: () =>
+          Effect.sync(() => {
+            afterRunCount += 1
+          }),
+      }),
+      runAgent: () =>
+        Effect.sync(() => {
+          agentLaunches += 1
+          return { threadId: 'unexpected', turnId: 'unexpected', turnCount: 1 }
+        }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(agentLaunches).toBe(0)
+          expect(afterRunCount).toBe(1)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            attempt: 1,
+            error: 'before_run rejected',
+          })
+        }),
+      ),
+    )
+  })
+
   it('schedules continuation attempt one after a normal exit without a branch', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#23', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [issue])

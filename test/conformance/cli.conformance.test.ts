@@ -40,12 +40,12 @@ const runCli = async (
     while (
       child.exitCode === null &&
       child.signalCode === null &&
-      !Buffer.concat(stdout).toString('utf8').includes('operator console listening') &&
+      !Buffer.concat(stdout).toString('utf8').includes('symphony host started') &&
       Date.now() < deadline
     ) {
       await delay(25)
     }
-    if (!Buffer.concat(stdout).toString('utf8').includes('operator console listening')) {
+    if (!Buffer.concat(stdout).toString('utf8').includes('symphony host started')) {
       child.kill('SIGKILL')
       throw new Error('CLI did not become ready within ten seconds')
     }
@@ -77,8 +77,6 @@ tracker:
   terminal_states: []
 workspace:
   root: ${JSON.stringify(join(directory, 'workspaces'))}
-server:
-  port: 0
 ---
 Do nothing.
 `,
