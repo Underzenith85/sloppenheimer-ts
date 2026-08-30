@@ -44,13 +44,22 @@ export const parseProcessStatus = (stat: string): Option.Option<ProcessStatus> =
   return Option.some({ state, processGroup })
 }
 
+/** What one pass over `/proc` saw of a process group. */
+type GroupMembership =
+  /** At least one member is not a zombie. */
+  | { readonly kind: 'live' }
+  /** Every member seen is a zombie; `members` holds their pids, in order. */
+  | { readonly kind: 'zombies'; readonly members: readonly number[] }
+
 /**
- * One pass over `/proc`: whether the process group led by `pid` holds a member that is not a zombie,
- * or `none` when the host does not let the question be answered. `/proc` is Linux-only, and a scan
- * that reads no process at all — an unreadable `/proc` — is reported as unknown rather than as an
- * empty group, so it never turns into a claim that the group is dead.
+ * One pass over `/proc`: what it saw of the process group led by `pid`, or `none` when this host
+ * cannot answer at all — `/proc` is Linux-only, and a pass that reads no process whatsoever is an
+ * unreadable `/proc` rather than an empty host.
+ *
+ * A listed process that cannot be read has exited since the listing, so it is no member; whether it
+ * left a member behind is what the agreement in `procGroupHasLiveMember` decides.
  */
-const scanProcessGroup = (pid: number): Option.Option<boolean> => {
+const scanProcessGroup = (pid: number): Option.Option<GroupMembership> => {
   if (process.platform !== 'linux') {
     return Option.none()
   }
@@ -60,17 +69,16 @@ const scanProcessGroup = (pid: number): Option.Option<boolean> => {
   } catch {
     return Option.none()
   }
+  const members: number[] = []
   let read = false
   for (const entry of entries) {
+    let stat: string
     if (!procEntryPattern.test(entry)) {
       continue
     }
-    let stat: string
     try {
       stat = readFileSync(`${procRoot}/${entry}/stat`, 'utf8')
     } catch {
-      // The process left between the listing and the read; the confirmation pass below covers the
-      // case where it had forked a replacement that this listing therefore never saw.
       continue
     }
     const status = parseProcessStatus(stat)
@@ -78,29 +86,61 @@ const scanProcessGroup = (pid: number): Option.Option<boolean> => {
       continue
     }
     read = true
-    if (status.value.processGroup === pid && status.value.state !== zombieState) {
-      return Option.some(true)
+    if (status.value.processGroup !== pid) {
+      continue
     }
+    if (status.value.state !== zombieState) {
+      return Option.some({ kind: 'live' })
+    }
+    members.push(Number.parseInt(entry, 10))
   }
-  return read ? Option.some(false) : Option.none()
+  return read
+    ? Option.some({ kind: 'zombies', members: members.sort((left, right) => left - right) })
+    : Option.none()
 }
+
+const sameMembers = (left: readonly number[], right: readonly number[]): boolean =>
+  left.length === right.length && left.every((member, index) => member === right[index])
+
+/** How many passes a "dead" verdict may take before it is given up as unknown. */
+const deadVerdictPasses = 4
 
 /**
  * Whether the process group led by `pid` still holds a member that is not a zombie, or `none` when
  * `/proc` cannot answer.
  *
- * A single pass can miss a member: one that is forked after the listing is not in it, and if its
- * parent then dies before its own entry is read, the pass sees only zombies and would call a group
- * dead while a descendant runs in it. Only a "dead" verdict is therefore re-checked, and only that
- * verdict costs a second pass. A member that outlives one pass has a `/proc` entry before the next
- * one lists, so the confirming pass sees it.
+ * A single pass cannot settle this: a member forked after the listing is not in it, so one pass can
+ * see nothing but zombies while a descendant runs. "Dead" therefore requires two consecutive passes
+ * that saw the *same* members — every member that appears, disappears or is replaced between the
+ * two moves the set and denies the verdict, and a member present before a pass lists has an entry
+ * for that pass to find. Zombies cannot fork, so an agreed set of them names a group that is not
+ * producing anything new.
+ *
+ * What that leaves is narrow and cannot be closed from `/proc`, which offers no atomic view of a
+ * group: a member that forks and then dies inside the window between one pass's listing and its
+ * reads hides its replacement from that pass, and to survive the verdict it must do so in both
+ * passes running. A group still handing off work that way keeps moving the set — that is what the
+ * comparison is for — and any pass that finds a running member says alive outright. When the passes
+ * cannot agree within their bound the answer is unknown, which every caller reads as alive and
+ * probes again, so an inconclusive read costs a poll rather than a live descendant.
  */
 const procGroupHasLiveMember = (pid: number): Option.Option<boolean> => {
-  const scan = scanProcessGroup(pid)
-  if (Option.isSome(scan) && !scan.value) {
-    return scanProcessGroup(pid)
+  let previous: readonly number[] | undefined
+  for (let pass = 0; pass < deadVerdictPasses; pass += 1) {
+    const scan = scanProcessGroup(pid)
+    if (Option.isNone(scan)) {
+      return Option.none()
+    }
+    const membership = scan.value
+    if (membership.kind === 'live') {
+      return Option.some(true)
+    }
+    if (previous !== undefined && sameMembers(previous, membership.members)) {
+      return Option.some(false)
+    }
+    previous = membership.members
   }
-  return scan
+  return Option.none()
 }
 
 /**

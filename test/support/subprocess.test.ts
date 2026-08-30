@@ -56,6 +56,13 @@ const exitOf = (child: ChildProcess): Promise<void> =>
     child.once('exit', () => resolve())
   })
 
+const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline && !predicate()) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25))
+  }
+}
+
 describe('process group liveness', (): void => {
   it('reports a group whose descendant still runs as alive', async (): Promise<void> => {
     const { child, pid } = await spawnIgnoringTree()
@@ -80,6 +87,30 @@ describe('process group liveness', (): void => {
     // The killed descendants may linger as unreaped `Z` entries on a host whose PID 1 does not reap
     // orphans, so the group keeps answering `process.kill(-pid, 0)`; none of them can run again.
     expect(processGroupIsAlive(pid)).toBe(false)
+  })
+
+  it('still reports a zombie-only group as dead while the host churns processes', async (): Promise<void> => {
+    // Unrelated short-lived processes come and go throughout every `/proc` pass. The verdict must
+    // rest on what the group itself shows: a probe that gave up whenever the host was busy would
+    // flap back to alive here, and every escalation built on it would run to its bound again.
+    for (const _ of [0, 1]) {
+      const churn = spawn('bash', ['-lc', 'while true; do /bin/true; done'], {
+        detached: true,
+        stdio: 'ignore',
+      })
+      children.push(churn)
+    }
+    const { child, pid } = await spawnIgnoringTree()
+    const exited = exitOf(child)
+
+    process.kill(-pid, 'SIGKILL')
+    await exited
+    await waitFor(() => !processGroupIsAlive(pid))
+
+    // Once dead the group cannot come back, so every further read must agree.
+    const reads = Array.from({ length: 20 }, () => processGroupIsAlive(pid))
+
+    expect(reads).toEqual(Array.from({ length: 20 }, () => false))
   })
 
   it('reads the state and process group out of a stat line whose comm has spaces and parens', (): void => {
