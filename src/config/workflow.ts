@@ -10,9 +10,13 @@ import type { Issue, JsonObject, JsonValue } from '../domain/domain.js'
 import { expandHomePath, resolvePathReference } from './env-reference.js'
 import { WorkflowError } from '../errors.js'
 import { emptyJsonObject, JsonConversionError, toJsonObject, toJsonValue } from '../support/json.js'
-import { validateTrackerProvider, type ValidatedTrackerProvider } from './tracker-config.js'
+import type {
+  TrackerProviderRegistry,
+  ValidatedTrackerProvider,
+} from '../domain/tracker-provider.js'
+import { trackerProviders } from '../tracker-adapters.js'
 
-export type { GitHubProviderConfig, ValidatedTrackerProvider } from './tracker-config.js'
+export type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
 export type TrackerConfig = Readonly<{
   kind: string
@@ -515,10 +519,14 @@ const splitWorkflow = (source: string): Readonly<{ config: unknown; prompt: stri
  * Re-runs the validation that must hold before every dispatch: a supported `tracker.kind`, an
  * adapter-accepted `tracker.provider` (including its secret indirection), and a usable
  * `codex.command`.
+ *
+ * `providers` defaults to the composition root's registry, which is where a tracker kind is
+ * registered; this layer knows only that some adapter owns each kind.
  */
 export const preflightWorkflow = (
   workflow: Workflow,
   environment: NodeJS.ProcessEnv = process.env,
+  providers: TrackerProviderRegistry = trackerProviders,
 ): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
   Effect.try({
     try: () => {
@@ -528,7 +536,7 @@ export const preflightWorkflow = (
           message: 'codex.command must be a non-empty string',
         })
       }
-      return validateTrackerProvider(
+      return providers.validate(
         workflow.config.tracker.kind,
         workflow.config.tracker.provider,
         environment,
@@ -547,6 +555,7 @@ export const preflightWorkflow = (
 export const loadWorkflow = (
   path = resolve(process.cwd(), 'WORKFLOW.md'),
   environment: NodeJS.ProcessEnv = process.env,
+  providers: TrackerProviderRegistry = trackerProviders,
 ): Effect.Effect<Workflow, WorkflowError> =>
   Effect.tryPromise({
     try: async () => {
@@ -576,7 +585,7 @@ export const loadWorkflow = (
         path,
         fingerprint: createHash('sha256').update(source).digest('hex'),
         config,
-        tracker: validateTrackerProvider(config.tracker.kind, config.tracker.provider, environment),
+        tracker: providers.validate(config.tracker.kind, config.tracker.provider, environment),
         promptTemplate: definition.prompt,
       }
     },

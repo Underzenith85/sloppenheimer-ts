@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { githubProviderOf } from '../../src/adapters/github/index.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { JsonConversionError, toJsonValue } from '../../src/support/json.js'
 import {
@@ -74,10 +75,10 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
       repository: 'symphony',
       token: '$TEST_TRACKER_TOKEN',
     })
-    expect(workflow.tracker.provider.token).toBe('secret')
-    expect(workflow.tracker.provider.tokenEnvironmentName).toBe('TEST_TRACKER_TOKEN')
+    expect(githubProviderOf(workflow.tracker).token).toBe('secret')
+    expect(githubProviderOf(workflow.tracker).tokenEnvironmentName).toBe('TEST_TRACKER_TOKEN')
     expect(workflow.config.tracker.requiredLabels).toEqual(['symphony'])
-    expect(workflow.tracker.provider.baseBranch).toBe('main')
+    expect(githubProviderOf(workflow.tracker).baseBranch).toBe('main')
     expect(workflow.config.workspaceRoot).toBe(join(directory, '.workspaces'))
     expect(workflow.config.agent.maxConcurrentAgents).toBe(2)
     expect(workflow.config.codex.threadSandbox).toBe('workspace-write')
@@ -235,7 +236,7 @@ describe('workflow defaults and extension keys', (): void => {
     expect(workflow.config.tracker.terminalStates).toEqual(['closed'])
     expect(workflow.config.tracker.requiredLabels).toEqual([])
     expect(workflow.config.serverPort).toBeNull()
-    expect(workflow.tracker.provider.apiBaseUrl).toBe('https://api.github.com')
+    expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://api.github.com')
   })
 
   it('preserves unknown front-matter keys while still enforcing required fields', async (): Promise<void> => {
@@ -374,7 +375,7 @@ describe('adapter-owned validation', (): void => {
 
     const workflow = await Effect.runPromise(loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }))
 
-    expect(workflow.tracker.provider.apiBaseUrl).toBe('https://github.example.test/api/v3')
+    expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://github.example.test/api/v3')
   })
 
   it.each([
@@ -421,7 +422,7 @@ codex:
     )
     const error = await Effect.runPromise(Effect.flip(preflightWorkflow(workflow, {})))
 
-    expect(validated.provider.token).toBe('rotated')
+    expect(githubProviderOf(validated).token).toBe('rotated')
     expect(error.category).toBe('invalid_config')
     expect(error.message).toContain('missing environment variable')
   })

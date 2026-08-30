@@ -1,8 +1,9 @@
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import type { GitHubProviderConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
+import type { ValidatedTrackerProvider } from '../../src/config/workflow.js'
 import { TrackerError } from '../../src/errors.js'
+import { stubProvider, stubProviderToken } from '../harness/stub-tracker-provider.js'
 import {
   CurrentTracker,
   layerCurrentTracker,
@@ -12,24 +13,14 @@ import {
   type TrackerPort,
 } from '../../src/ports/index.js'
 
-const provider = (token: string): ValidatedTrackerProvider => ({
-  kind: 'github',
-  provider: {
-    owner: 'example',
-    repository: 'symphony',
-    token,
-    tokenEnvironmentName: 'GITHUB_TOKEN',
-    apiBaseUrl: 'https://api.github.com',
-    baseBranch: 'main',
-  } satisfies GitHubProviderConfig,
-})
+const provider = (token: string): ValidatedTrackerProvider => stubProvider(token)
 
 const stubTracker = (validated: ValidatedTrackerProvider): TrackerPort => ({
   fetchIssuesByStates: () => Effect.succeed([]),
   fetchIssuesByIds: () => Effect.succeed([]),
   toolSpecs: [],
   executeTool: () => Promise.resolve({ success: true, data: null }),
-  secretEnvironmentNames: [validated.provider.token],
+  secretEnvironmentNames: [stubProviderToken(validated)],
 })
 
 /** Records construction and release so a rebuild's lifecycle is observable. */
@@ -38,10 +29,10 @@ const recordingFactory = (built: string[], released: string[]): Layer.Layer<Trac
     make: (validated) =>
       Effect.acquireRelease(
         Effect.sync(() => {
-          built.push(validated.provider.token)
+          built.push(stubProviderToken(validated))
           return stubTracker(validated)
         }),
-        () => Effect.sync(() => released.push(validated.provider.token)),
+        () => Effect.sync(() => released.push(stubProviderToken(validated))),
       ),
   })
 

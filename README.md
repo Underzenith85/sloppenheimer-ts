@@ -283,6 +283,12 @@ is expanded by the hook shell rather than by the loader.
 
 `tracker.provider` is kept as the exact JSON object that was authored and is handed to the adapter
 selected by `tracker.kind`; the core configuration layer never decodes provider-specific fields.
+That holds for the types as well as the JSON: a validated selection carries its provider opaquely,
+alongside the adapter's own equality and the environment names it resolved secrets from, so no
+provider-specific type reaches the core. Each adapter owns the validation for its kind and
+registers it in the composition root, which is also where the supported kinds are enumerated;
+adding a kind changes no file under `src/config/` or `src/core/`.
+
 Values that cannot round-trip through JSON are rejected. The GitHub adapter validates:
 
 | Key            | Required | Default                  |

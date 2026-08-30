@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, type Scope } from 'effect'
 
-import type { ValidatedTrackerProvider } from '../config/tracker-config.js'
+import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { Issue, IssueId, JsonValue } from '../domain/domain.js'
 import type { TrackerError } from '../errors.js'
 import type { HostToolContext, HostToolResult, HostToolSpec } from '../host-tools.js'

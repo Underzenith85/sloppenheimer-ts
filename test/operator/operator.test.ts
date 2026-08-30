@@ -13,7 +13,7 @@ import {
 } from '../../src/domain/domain.js'
 import { buildBacklogSnapshot, makeOperatorBackend } from '../../src/operator/operator.js'
 import { makeGitHubIssueControl } from '../../src/adapters/github/issues.js'
-import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
+import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
 
 const temporaryDirectories: string[] = []
 

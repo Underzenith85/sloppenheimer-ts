@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { HooksConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import { stubProvider } from '../harness/stub-tracker-provider.js'
 import { WorkflowError } from '../../src/errors.js'
 import {
   AgentRunner,
@@ -29,17 +30,7 @@ const hooks: HooksConfig = {
   timeoutMs: 1_000,
 }
 
-const validated: ValidatedTrackerProvider = {
-  kind: 'github',
-  provider: {
-    owner: 'example',
-    repository: 'symphony',
-    token: 'token',
-    tokenEnvironmentName: 'GITHUB_TOKEN',
-    apiBaseUrl: 'https://api.github.com',
-    baseBranch: 'main',
-  },
-}
+const validated: ValidatedTrackerProvider = stubProvider('token')
 
 /** Stand-ins for the adapter layers the adapter issues supply. */
 const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(

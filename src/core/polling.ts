@@ -31,7 +31,8 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
       adoptPorts(context, previous, revalidated.value)
       yield* logInfo('tracker credential refreshed from the environment', {
         tracker_kind: revalidated.value.workflow.tracker.kind,
-        secret_environment_name: revalidated.value.workflow.tracker.provider.tokenEnvironmentName,
+        secret_environment_names:
+          revalidated.value.workflow.tracker.secretEnvironmentNames.join(', '),
       })
     }
     yield* hydrateRestoredHandoffs(context)

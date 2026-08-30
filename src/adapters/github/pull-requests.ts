@@ -14,7 +14,7 @@ import {
 } from './client.js'
 import type { CodexReviewObservation, PullRequestObservation } from '../../domain/handoff.js'
 import { isJsonArray } from '../../support/json.js'
-import type { GitHubProviderConfig } from '../../config/tracker-config.js'
+import type { GitHubProviderConfig } from './provider.js'
 
 const isArray = isJsonArray
 

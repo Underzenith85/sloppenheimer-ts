@@ -5,6 +5,7 @@ import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
+import { githubProviderOf, githubTrackerProvider } from '../src/adapters/github/index.js'
 import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/adapters/codex/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
 import {
@@ -63,17 +64,10 @@ const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
   promptTemplate: 'test',
-  tracker: {
-    kind: 'github',
-    provider: {
-      owner: 'example',
-      repository: 'symphony',
-      token: 'secret',
-      tokenEnvironmentName: 'SYMPHONY_TEST_TOKEN',
-      apiBaseUrl: 'https://api.github.com',
-      baseBranch: 'main',
-    },
-  },
+  tracker: githubTrackerProvider.validate(
+    { owner: 'example', repository: 'symphony', token: '$SYMPHONY_TEST_TOKEN' },
+    testEnvironment,
+  ),
   config: {
     tracker: {
       kind: 'github',
@@ -279,7 +273,7 @@ const makeHarness = (
         fetchIssuesByIds: () =>
           Effect.sync(() => {
             idFetchCount += 1
-            idFetchTokens.push(effectiveWorkflow.tracker.provider.token)
+            idFetchTokens.push(githubProviderOf(effectiveWorkflow.tracker).token)
             return candidates(effectiveWorkflow)
           }),
         toolSpecs: [],
@@ -2359,7 +2353,8 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().at(-1)?.tracker.provider.token).toBe('rotated')
+    const latest = harness.trackerWorkflows().at(-1)
+    expect(latest === undefined ? null : githubProviderOf(latest.tracker).token).toBe('rotated')
   })
 
   it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
@@ -2434,7 +2429,7 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+    expect(harness.trackerWorkflows().map((each) => githubProviderOf(each.tracker).token)).toEqual([
       'secret',
       'first',
       'rotated',
@@ -2459,7 +2454,7 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
-    expect(harness.trackerWorkflows().map((each) => each.tracker.provider.token)).toEqual([
+    expect(harness.trackerWorkflows().map((each) => githubProviderOf(each.tracker).token)).toEqual([
       'secret',
       'first',
     ])

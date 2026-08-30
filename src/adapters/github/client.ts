@@ -3,7 +3,7 @@ import { Effect } from 'effect'
 import type { JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
 import { isJsonValue } from '../../support/json.js'
-import type { GitHubProviderConfig } from '../../config/tracker-config.js'
+import type { GitHubProviderConfig } from './provider.js'
 
 export const githubApiVersion = '2026-03-10'
 export const githubRequestTimeoutMs = 30_000

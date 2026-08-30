@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 
-import { sameTrackerProvider } from '../config/tracker-config.js'
+import { sameTrackerProvider } from '../domain/tracker-provider.js'
 import { preflightWorkflow, type Workflow } from '../config/workflow.js'
 import { WorkflowError } from '../errors.js'
 import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'

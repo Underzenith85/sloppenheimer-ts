@@ -11,7 +11,7 @@ import type {
   OrchestratorControl,
   OrchestratorSnapshot,
 } from '../orchestrator.js'
-import { makeGitHubIssueControl } from '../adapters/github/index.js'
+import { githubProviderOf, makeGitHubIssueControl } from '../adapters/github/index.js'
 import { TrackerError, WorkflowError } from '../errors.js'
 import { loadWorkflow, type Workflow } from '../config/workflow.js'
 
@@ -190,7 +190,7 @@ export const makeOperatorBackend = (
           }
           const control: LoadedControl = {
             label,
-            issues: makeGitHubIssueControl(workflow.tracker.provider),
+            issues: makeGitHubIssueControl(githubProviderOf(workflow.tracker)),
             terminalStates: workflow.config.tracker.terminalStates,
           }
           cachedControl = { fingerprint: workflow.fingerprint, control }

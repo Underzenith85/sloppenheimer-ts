@@ -4,15 +4,12 @@ import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.
 import { TrackerError } from '../../errors.js'
 import { isJsonArray } from '../../support/json.js'
 import { logWarning } from '../../support/logging.js'
-import {
-  githubAuthenticationEnvironmentNames,
-  type GitHubProviderConfig,
-} from '../../config/tracker-config.js'
 import type { HostToolResult, HostToolSpec } from '../../host-tools.js'
 import { unsupportedHostTool } from '../../host-tools.js'
 import type { IssueControlPort } from '../../ports/issue-control.js'
 import type { TrackerPort } from '../../ports/tracker.js'
 import { githubJson, githubPageSize, trackerResponseError } from './client.js'
+import { githubSecretEnvironmentNames, type GitHubProviderConfig } from './provider.js'
 import {
   decodeGitHubDependency,
   decodeGitHubIssue,
@@ -273,9 +270,7 @@ export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): Tra
   return {
     toolSpecs: githubTrackerToolSpecs,
     executeTool: makeGitHubTrackerToolExecutor(provider, prefix),
-    secretEnvironmentNames: [
-      ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
-    ],
+    secretEnvironmentNames: githubSecretEnvironmentNames(provider),
     fetchIssuesByStates: (
       states,
       dependencyLabels,
