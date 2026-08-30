@@ -64,14 +64,19 @@ const requirePhase = (expected: StartupPhase, id: unknown): boolean => {
 }
 
 const hasInitializePayload = (params: unknown): boolean => {
-  if (!isJsonRecord(params) || !isJsonRecord(params['clientInfo'])) {
+  if (
+    !isJsonRecord(params) ||
+    !isJsonRecord(params['clientInfo']) ||
+    !isJsonRecord(params['capabilities'])
+  ) {
     return false
   }
   const clientInfo = params['clientInfo']
   return (
     clientInfo['name'] === 'symphony_ts' &&
     clientInfo['title'] === 'Symphony TypeScript' &&
-    clientInfo['version'] === '0.1.0'
+    clientInfo['version'] === '0.1.0' &&
+    params['capabilities']['experimentalApi'] === true
   )
 }
 
@@ -83,7 +88,9 @@ const hasThreadPayload = (params: unknown): params is JsonRecord & Readonly<{ cw
   params['approvalPolicy'] === expectedApprovalPolicy &&
   params['sandbox'] === expectedThreadSandbox &&
   params['serviceName'] === 'symphony_ts' &&
-  (expectedDynamicTools === null || isDeepStrictEqual(params['dynamicTools'], expectedDynamicTools))
+  (expectedDynamicTools === null
+    ? !Object.hasOwn(params, 'dynamicTools')
+    : isDeepStrictEqual(params['dynamicTools'], expectedDynamicTools))
 
 const hasTurnPayload = (params: unknown): boolean => {
   if (!isJsonRecord(params) || !isUnknownArray(params['input'])) {

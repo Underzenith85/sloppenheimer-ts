@@ -76,5 +76,6 @@ describe('installed Codex App Server schema', (): void => {
     for (const mode of codexSandboxModes) {
       expect(schema).toContain(`"${mode}"`)
     }
+    expect(schema).toContain('experimentalApi')
   }, 60_000)
 })
