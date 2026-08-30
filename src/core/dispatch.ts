@@ -7,7 +7,7 @@ import type { HostToolSession } from '../host-tools.js'
 import { mergeSparseObject, toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
 import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
-import { adoptTracker, revalidateCredentials } from './workflow-reload.js'
+import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
 
 export const dispatch = (
   context: OrchestratorContext,
@@ -49,9 +49,9 @@ export const dispatch = (
     }
     const effective = preflight.value
     if (effectiveOverride === undefined && effective !== context.lastKnownGood) {
-      const previousTracker = context.lastKnownGood.tracker
+      const previous = context.lastKnownGood
       context.lastKnownGood = effective
-      adoptTracker(context, previousTracker, effective.tracker)
+      adoptPorts(context, previous, effective)
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
       Effect.match({

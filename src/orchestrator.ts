@@ -11,7 +11,7 @@ import {
   type OrchestratorDependencies,
 } from './core/orchestrator.js'
 import type { WorkflowError } from './errors.js'
-import { makeGitHubTracker } from './tracker.js'
+import { makeGitHubCodeReview, makeGitHubTracker } from './tracker.js'
 import { makeWorkspaceManager } from './workspace.js'
 
 export {
@@ -35,6 +35,7 @@ export {
 const defaultDependencies: OrchestratorDependencies = {
   loadWorkflow,
   makeTracker: (workflow) => makeGitHubTracker(workflow.tracker.provider),
+  makeCodeReview: (workflow) => makeGitHubCodeReview(workflow.tracker.provider),
   makeWorkspaces: (workflow) =>
     makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
   runAgent,
