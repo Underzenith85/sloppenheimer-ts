@@ -10,6 +10,8 @@ export default defineConfig({
       'test/handoff.test.ts',
       'test/handoff-store.test.ts',
       'test/installed-codex.integration.test.ts',
+      'test/operator.test.ts',
+      'test/server.test.ts',
     ],
   },
 })
