@@ -129,15 +129,8 @@
           {
             "patterns": [
               {
-                "group": [
-                  "**/adapters/**",
-                  "**/core/**",
-                  "**/operator/**",
-                  "**/config/**",
-                  "!**/config/tracker-config.js",
-                  "!**/config/workflow.js"
-                ],
-                "message": "ports/ may import only from domain/ and support/."
+                "group": ["**/adapters/**", "**/config/**", "**/core/**", "**/operator/**"],
+                "message": "ports/ may import only from domain/ and support/. The migration allow-list covers the flat port modules that exist today; a nested port has no exemption."
               }
             ]
           }
@@ -150,21 +143,50 @@
         "no-restricted-imports": [
           "error",
           {
+            // Migration allow-list.  #88 declared the ports against configuration and error
+            // vocabulary that has not been placed in a layer yet.  `patterns` exempts these
+            // modules from the escape rule below; `paths` then holds them to `import type`, so a
+            // port cannot quietly acquire a runtime dependency on configuration or on root
+            // infrastructure.  The two compose: a second `patterns` group would not, because a
+            // negation there suppresses any later group for the same specifier.
+            "paths": [
+              {
+                "name": "../config/tracker-config.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #94 removes the GitHub-shaped provider type from the core surface."
+              },
+              {
+                "name": "../config/workflow.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #94 and #105 settle the workflow configuration type surface."
+              },
+              {
+                "name": "../errors.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #109 moves the remaining root modules into their layers."
+              },
+              {
+                "name": "../host-tools.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #109 moves the remaining root modules into their layers."
+              },
+              {
+                "name": "../telemetry.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #98 converts the telemetry record to pure reducers."
+              }
+            ],
             "patterns": [
               {
                 "group": [
                   "../**",
                   "!../domain/**",
                   "!../support/**",
-
-                  // Migration allow-list.  #88 declared the ports against configuration and
-                  // error vocabulary that has not been placed in a layer yet.  These are types
-                  // only, never an adapter implementation; `../adapters/**` stays denied above.
-                  "!../config/tracker-config.js", // #94 removes the GitHub-shaped provider type from the core surface
-                  "!../config/workflow.js", // #94 and #105 own the workflow configuration type surface
-                  "!../errors.js", // #109 moves the remaining root modules into their layers
-                  "!../host-tools.js", // #109 moves the remaining root modules into their layers
-                  "!../telemetry.js" // #98 converts the telemetry record to pure reducers
+                  "!../config/tracker-config.js",
+                  "!../config/workflow.js",
+                  "!../errors.js",
+                  "!../host-tools.js",
+                  "!../telemetry.js"
                 ],
                 "message": "ports/ may import only from domain/ and support/."
               }

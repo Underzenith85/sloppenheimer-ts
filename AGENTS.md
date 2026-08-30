@@ -71,6 +71,13 @@ Some vocabulary has not been placed in a layer yet: the modules #84 left at the 
 workflow configuration types that #88 declared the ports against. `core/` and `ports/` reach them
 through migration allow-lists in `.oxlintrc.json`, where each entry names the issue under
 [#76](https://github.com/Underzenith85/symphony-ts/issues/76) that removes it. The entries name
-files rather than directories, so the rest of each directory stays denied. Add to an allow-list only
-for a type that has not moved yet; never to admit an import of `adapters/`, which stays denied at
-both tiers.
+files rather than directories, so the rest of each directory stays denied.
+
+The `ports/` allow-list is `import type` only, enforced through the rule's `paths` option. #88
+declared the ports as types, and an exemption that also admitted runtime values would let a port
+acquire a real dependency on configuration or on root infrastructure under cover of the migration.
+The `core/` allow-list is not so restricted: `core/` legitimately calls into those modules today.
+The exemption covers the flat modules that exist now — a nested port has none.
+
+Add to an allow-list only for a type that has not moved yet; never to admit an import of
+`adapters/`, which stays denied at both tiers.

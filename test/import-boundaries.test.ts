@@ -30,9 +30,14 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/ports/violates-config.ts': "import '../config/cli-options.js'\n",
   'src/ports/violates-root.ts': "import '../tracker.js'\n",
   'src/ports/permitted.ts': "import '../domain/domain.js'\nimport '../support/json.js'\n",
-  // The migration allow-list keeps the vocabulary #88 declared the ports against reachable.
+  // The migration allow-list keeps the vocabulary #88 declared the ports against reachable, but
+  // only as types: a port must not acquire a runtime dependency on configuration or on root
+  // infrastructure under cover of the exemption.
   'src/ports/permitted-allow-list.ts':
-    "import '../config/tracker-config.js'\nimport '../config/workflow.js'\nimport '../errors.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\n",
+    "import type { ValidatedTrackerProvider } from '../config/tracker-config.js'\nimport type { Workflow } from '../config/workflow.js'\nimport type { TrackerError } from '../errors.js'\nimport type { HostToolSpec } from '../host-tools.js'\nimport type { AgentEvent } from '../telemetry.js'\n\nexport type Vocabulary = [ValidatedTrackerProvider, Workflow, TrackerError, HostToolSpec, AgentEvent]\n",
+  'src/ports/violates-allow-list-value.ts':
+    "import { loadWorkflow } from '../config/workflow.js'\n\nexport const load = loadWorkflow\n",
+  'src/ports/violates-allow-list-side-effect.ts': "import '../telemetry.js'\n",
 
   // core/ holds policy and may not name a concrete adapter.  This is the drift the rule exists to
   // stop: the composition root importing `makeGitHubTracker` by name from inside core.
@@ -66,6 +71,8 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/domain/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
   'src/domain/nested/permitted.ts': "import '../domain.js'\nimport '../../support/json.js'\n",
   'src/ports/nested/violates-config.ts': "import '../../config/cli-options.js'\n",
+  'src/ports/nested/violates-config-allow-listed.ts':
+    "import type { Workflow } from '../../config/workflow.js'\n\nexport type W = Workflow\n",
   'src/ports/nested/permitted.ts':
     "import '../../domain/domain.js'\nimport '../../support/json.js'\n",
   'src/core/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
