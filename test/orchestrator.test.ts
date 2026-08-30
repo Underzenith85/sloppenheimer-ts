@@ -2631,16 +2631,32 @@ describe('tracker credential revalidation', (): void => {
 })
 
 describe('rebuilt port lifecycle', (): void => {
-  it('releases the tracker a rotation replaced once live work has adopted the new one', async (): Promise<void> => {
+  it('keeps the tracker a rotation replaced until the run that used it ends', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    let markStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let finishWorker = (): void => undefined
+    const finished = new Promise<void>((resolve) => {
+      finishWorker = resolve
+    })
     const harness = makeHarness(workflow, () => [issue], undefined, environment)
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () =>
+        Effect.sync(markStarted).pipe(
+          Effect.zipRight(Effect.promise(() => finished)),
+          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        ),
+    }
 
     await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
-          yield* harness.awaitAgentRun
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
           environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
 
@@ -2649,9 +2665,15 @@ describe('rebuilt port lifecycle', (): void => {
             'secret',
             'rotated',
           ])
-          // Both instances built before the rotation: the layer's, replaced at startup and freed on
-          // the first poll, and the startup one, freed once the running worker adopted the rotated
-          // tracker.
+          // Only the layer's instance, replaced at startup before any run could reach it. The
+          // running worker adopted the rotated tracker, but a call it made a moment earlier may
+          // still be awaiting the one it replaced.
+          expect(harness.releasedTrackers()).toHaveLength(1)
+
+          finishWorker()
+          yield* control.refresh
+          yield* control.refresh
+
           expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
             'secret',
             'secret',

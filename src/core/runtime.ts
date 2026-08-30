@@ -355,6 +355,12 @@ export type OrchestratorContext = {
   readonly ports: RuntimePorts
   /** Replaced port instances whose release is still waiting on a live holder. */
   readonly pendingRetirements: PendingRetirement[]
+  /**
+   * Ports an adoption took away from a live run, keyed by the issue that run belongs to. A call
+   * that read an instance a moment before adoption replaced it is still using it, so the instance
+   * is held until the run ends rather than until the reference is swapped.
+   */
+  readonly supersededPorts: Map<IssueId, unknown[]>
   readonly selectedWorkflowPath: string
   readonly mailbox: Queue.Queue<OrchestratorEvent>
   readonly currentRefreshWaiters: Deferred.Deferred<void>[]
@@ -560,6 +566,7 @@ export const startOrchestratorRuntime = (
       codeReviewCell: yield* Effect.serviceOption(CurrentCodeReview),
     }
     const pendingRetirements: PendingRetirement[] = []
+    const supersededPorts = new Map<IssueId, unknown[]>()
     /**
      * Built from the workflow the orchestrator loaded rather than adopted from the composition
      * root's own read of it. The two are separate reads of one file, and an edit between them would
@@ -1439,6 +1446,7 @@ export const startOrchestratorRuntime = (
       state,
       ports,
       pendingRetirements,
+      supersededPorts,
       selectedWorkflowPath,
       mailbox,
       currentRefreshWaiters,

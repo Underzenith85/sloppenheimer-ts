@@ -154,7 +154,19 @@ const heldInstances = (
   ...[...context.state.handoffs.values()].map((entry) => select(entry.execution)),
 ]
 
+/**
+ * Whether a run that once used this instance is still going. Adoption changes what the *next* call
+ * reaches, not what a call already awaiting a response is using, so an instance a live run has used
+ * stays held until that run ends — the reference alone cannot say whether a request is in flight
+ * against it, and a host tool leaves Effect for a promise that no scope tracks.
+ */
+const supersededByLiveRun = (context: OrchestratorContext, instance: unknown): boolean =>
+  [...context.supersededPorts.values()].some((ports) => ports.includes(instance))
+
 const stillHeld = (context: OrchestratorContext, retirement: PendingRetirement): boolean => {
+  if (supersededByLiveRun(context, retirement.instance)) {
+    return true
+  }
   switch (retirement.kind) {
     case 'tracker': {
       return (
@@ -178,12 +190,17 @@ const stillHeld = (context: OrchestratorContext, retirement: PendingRetirement):
 }
 
 /**
- * Releases every replaced instance that no live work still holds. A worker that captured the
- * previous instance in its execution snapshot keeps it until that run ends, so the rest wait for a
- * later pass; anything never retired is released when the cell's scope closes.
+ * Releases every replaced instance that no live work still holds — neither as the instance a run is
+ * using now, nor as one it used before an adoption moved it on. The rest wait for a later pass, and
+ * anything never retired is released when the cell's scope closes.
  */
 export const drainRetirements = (context: OrchestratorContext): Effect.Effect<void> =>
   Effect.suspend(() => {
+    for (const id of [...context.supersededPorts.keys()]) {
+      if (!context.state.running.has(id) && !context.state.handoffs.has(id)) {
+        context.supersededPorts.delete(id)
+      }
+    }
     const pending = context.pendingRetirements.splice(0)
     const held = pending.filter((retirement) => stillHeld(context, retirement))
     context.pendingRetirements.push(...held)
@@ -205,18 +222,26 @@ export const adoptPorts = (
   next: EffectiveWorkflow,
 ): Effect.Effect<void> =>
   Effect.suspend(() => {
-    for (const entry of [...context.state.running.values(), ...context.state.handoffs.values()]) {
-      if (entry.execution.tracker === previous.tracker) {
-        entry.execution = Object.freeze({
-          ...entry.execution,
-          tracker: next.tracker,
-          codeReview:
-            entry.execution.codeReview === previous.codeReview
-              ? next.codeReview
-              : entry.execution.codeReview,
-          secretEnvironmentNames: Object.freeze([...next.tracker.secretEnvironmentNames]),
-        })
+    for (const [id, entry] of [...context.state.running, ...context.state.handoffs]) {
+      if (entry.execution.tracker !== previous.tracker) {
+        continue
       }
+      const superseded = context.supersededPorts.get(id) ?? []
+      superseded.push(
+        ...[entry.execution.tracker, entry.execution.codeReview].filter(
+          (instance) => instance !== null,
+        ),
+      )
+      context.supersededPorts.set(id, superseded)
+      entry.execution = Object.freeze({
+        ...entry.execution,
+        tracker: next.tracker,
+        codeReview:
+          entry.execution.codeReview === previous.codeReview
+            ? next.codeReview
+            : entry.execution.codeReview,
+        secretEnvironmentNames: Object.freeze([...next.tracker.secretEnvironmentNames]),
+      })
     }
     return drainRetirements(context)
   })
