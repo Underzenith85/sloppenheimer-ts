@@ -59,23 +59,23 @@ This matrix targets the upstream Symphony SPEC Sections 17 and 18 as retrieved o
 
 ## 17.4 Orchestrator dispatch, reconciliation, and retry
 
-| SPEC bullet                                | Deterministic test or disposition                                                                                                             | Implementation                           |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Priority/age dispatch order                | `orchestrator policies > orders valid priority first, then creation time, then identifier`                                                    | `src/orchestrator.ts`                    |
-| `dispatchable=false` is ineligible         | `orchestrator policies > rejects a provider record marked non-dispatchable at the scheduler boundary`                                         | `src/orchestrator.ts`                    |
-| Case-insensitive required labels           | `orchestrator policies > matches required labels case-insensitively`                                                                          | `src/orchestrator.ts`                    |
-| Active refresh updates running state       | `tracker credential revalidation > updates the tracker used by an active worker issue refresh`                                                | `src/orchestrator.ts`                    |
-| Non-active stops without cleanup           | `session telemetry accounting > interrupts a non-active refreshed issue without removing its workspace`                                       | `src/orchestrator.ts`                    |
-| Terminal stops and cleans                  | `startup terminal workspace cleanup` suite, including reopen race and cleanup failures                                                        | `src/orchestrator.ts`                    |
-| No-running reconciliation no-op            | `operator snapshots > start and remain responsive while the initial tracker poll is pending`                                                  | `src/orchestrator.ts`                    |
-| Normal exit continuation retry attempt 1   | `session telemetry accounting > schedules continuation attempt one after a normal exit without a branch`                                      | `src/orchestrator.ts`                    |
-| Abnormal exit uses 10s exponential retry   | `orchestrator policies > caps exponential retry backoff`                                                                                      | `src/orchestrator.ts`                    |
-| Configured retry cap                       | `orchestrator policies > caps exponential retry backoff`; workflow default assertion                                                          | `src/orchestrator.ts`, `src/workflow.ts` |
-| Retry row has attempt/due/identifier/error | `operator server > serves the console and versioned runtime state on loopback`                                                                | `src/orchestrator.ts`, `src/server.ts`   |
-| Stall detection kills/retries              | `session telemetry accounting > cancels a stalled worker and schedules its first retry`                                                       | `src/orchestrator.ts`                    |
-| Slot exhaustion requeues with reason       | `session telemetry accounting > requeues a due retry when another worker occupies the only slot`                                              | `src/orchestrator.ts`                    |
-| Snapshot rows/totals/rate limits           | `operator server > serves the console and versioned runtime state on loopback`                                                                | `src/orchestrator.ts`, `src/operator.ts` |
-| Snapshot unavailable/timeout surfaced      | `operator server > sanitizes typed backend failures as versioned 502 responses` and `sanitizes unexpected defects as versioned 500 responses` | `src/server.ts`, `src/operator.ts`       |
+| SPEC bullet                                | Deterministic test or disposition                                                                                              | Implementation                           |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| Priority/age dispatch order                | `orchestrator policies > orders valid priority first, then creation time, then identifier`                                     | `src/orchestrator.ts`                    |
+| `dispatchable=false` is ineligible         | `orchestrator policies > rejects a provider record marked non-dispatchable at the scheduler boundary`                          | `src/orchestrator.ts`                    |
+| Case-insensitive required labels           | `orchestrator policies > matches required labels case-insensitively`                                                           | `src/orchestrator.ts`                    |
+| Active refresh updates running state       | `tracker credential revalidation > updates the tracker used by an active worker issue refresh`                                 | `src/orchestrator.ts`                    |
+| Non-active stops without cleanup           | `session telemetry accounting > interrupts a non-active refreshed issue without removing its workspace`                        | `src/orchestrator.ts`                    |
+| Terminal stops and cleans                  | `startup terminal workspace cleanup` suite, including reopen race and cleanup failures                                         | `src/orchestrator.ts`                    |
+| No-running reconciliation no-op            | `operator snapshots > start and remain responsive while the initial tracker poll is pending`                                   | `src/orchestrator.ts`                    |
+| Normal exit continuation retry attempt 1   | `session telemetry accounting > schedules continuation attempt one after a normal exit without a branch`                       | `src/orchestrator.ts`                    |
+| Abnormal exit uses 10s exponential retry   | `orchestrator policies > caps exponential retry backoff`                                                                       | `src/orchestrator.ts`                    |
+| Configured retry cap                       | `orchestrator policies > caps exponential retry backoff`; workflow default assertion                                           | `src/orchestrator.ts`, `src/workflow.ts` |
+| Retry row has attempt/due/identifier/error | `session telemetry accounting > cancels a stalled worker and schedules its first retry` directly asserts every retry-row field | `src/orchestrator.ts`                    |
+| Stall detection kills/retries              | `session telemetry accounting > cancels a stalled worker and schedules its first retry`                                        | `src/orchestrator.ts`                    |
+| Slot exhaustion requeues with reason       | `session telemetry accounting > requeues a due retry when another worker occupies the only slot`                               | `src/orchestrator.ts`                    |
+| Snapshot rows/totals/rate limits           | `session telemetry accounting > tracks metadata and rate limits without double-counting repeated absolute totals`              | `src/orchestrator.ts`                    |
+| Snapshot unavailable/timeout surfaced      | HTTP status extension; covered by the excluded `operator server` typed-failure and unexpected-defect response tests            | `src/server.ts`, `src/operator.ts`       |
 
 ## 17.5 Coding-agent App Server client
 
@@ -98,14 +98,14 @@ This matrix targets the upstream Symphony SPEC Sections 17 and 18 as retrieved o
 
 ## 17.6 Observability
 
-| SPEC bullet                      | Deterministic test or disposition                                                                          | Implementation                        |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| Validation errors visible        | Invalid reload and CLI startup tests above                                                                 | `src/orchestrator.ts`, `src/cli.ts`   |
-| Structured issue/session context | Codex identity test and orchestrator dispatch/log assertions                                               | `src/orchestrator.ts`, `src/codex.ts` |
-| Sink failures do not crash       | Effect logger isolation exercised throughout orchestrator tests                                            | `src/orchestrator.ts`                 |
-| Token/rate-limit aggregation     | `operator server > serves the console and versioned runtime state on loopback`; Codex usage telemetry test | `src/orchestrator.ts`                 |
-| Human-readable status surface    | `Extension Conformance: HTTP status surface > binds loopback and serves state owned by the orchestrator`   | `src/server.ts`, `src/ui-assets.ts`   |
-| Humanized summaries              | Not shipped as a separate event transformation; UI displays immutable orchestrator snapshot fields.        | `src/ui-assets.ts`                    |
+| SPEC bullet                      | Deterministic test or disposition                                                                        | Implementation                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| Validation errors visible        | Invalid reload and CLI startup tests above                                                               | `src/orchestrator.ts`, `src/cli.ts`   |
+| Structured issue/session context | Codex identity test and orchestrator dispatch/log assertions                                             | `src/orchestrator.ts`, `src/codex.ts` |
+| Sink failures do not crash       | Effect logger isolation exercised throughout orchestrator tests                                          | `src/orchestrator.ts`                 |
+| Token/rate-limit aggregation     | Session telemetry accounting tests plus the Core Codex usage telemetry test                              | `src/orchestrator.ts`, `src/codex.ts` |
+| Human-readable status surface    | `Extension Conformance: HTTP status surface > binds loopback and serves state owned by the orchestrator` | `src/server.ts`, `src/ui-assets.ts`   |
+| Humanized summaries              | Not shipped as a separate event transformation; UI displays immutable orchestrator snapshot fields.      | `src/ui-assets.ts`                    |
 
 ## 17.7 CLI and host lifecycle
 

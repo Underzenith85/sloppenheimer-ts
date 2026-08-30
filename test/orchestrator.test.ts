@@ -1260,7 +1260,13 @@ describe('session telemetry accounting', (): void => {
           expect(interrupted).toBe(true)
           expect(snapshot.running).toEqual([])
           expect(snapshot.retrying).toHaveLength(1)
-          expect(snapshot.retrying[0]).toMatchObject({ attempt: 1, error: 'agent stalled' })
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            identifier: issue.identifier,
+            attempt: 1,
+            error: 'agent stalled',
+          })
+          expect(Date.parse(snapshot.retrying[0]?.dueAt ?? '')).not.toBeNaN()
         }),
       ),
     )
