@@ -77,6 +77,7 @@ type HandoffEntry = {
   reason: string | null
   repairAttempts: number
   reviewRequestedHeadSha: string | null
+  reviewCompletedHeadSha: string | null
   observedAt: Date
 }
 
@@ -694,6 +695,7 @@ export const startOrchestrator = (
         reason: handoff.reason,
         repairAttempts: handoff.repairAttempts,
         reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
+        reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
         observedAt: handoff.observedAt.toISOString(),
       })),
     ]
@@ -761,6 +763,7 @@ export const startOrchestrator = (
             reason: restored.reason,
             repairAttempts: restored.repairAttempts,
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
+            reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
           })
           state.claimed.add(issue.id)
@@ -1228,6 +1231,7 @@ export const startOrchestrator = (
             reason: 'reason' in disposition ? disposition.reason : null,
             repairAttempts: 0,
             reviewRequestedHeadSha: null,
+            reviewCompletedHeadSha: null,
             observedAt,
           })
           state.claimed.add(issue.id)
@@ -1283,9 +1287,27 @@ export const startOrchestrator = (
             handoff.reason = inspected.error.message
             continue
           }
-          if (handoff.repairAttempts > 0 && inspected.observation.state === 'open') {
+          if (inspected.observation.state === 'open') {
             const observedHeadSha = inspected.observation.headSha
+            const codexReview = inspected.observation.codexReview
             if (handoff.reviewRequestedHeadSha !== observedHeadSha) {
+              handoff.reviewCompletedHeadSha = null
+              if (
+                codexReview !== null &&
+                codexReview !== undefined &&
+                observedHeadSha.startsWith(codexReview.headShaPrefix)
+              ) {
+                handoff.reviewRequestedHeadSha = observedHeadSha
+                handoff.state = 'awaiting_checks'
+                if (codexReview.status === 'completed') {
+                  handoff.reviewCompletedHeadSha = observedHeadSha
+                  handoff.reason =
+                    'Codex review completed for the current head; waiting for review state to settle'
+                } else {
+                  handoff.reason = 'Waiting for Codex review of the current head to complete'
+                }
+                continue
+              }
               const requested = yield* handoff.execution.tracker
                 .requestPullRequestReview(handoff.pullRequestNumber, observedHeadSha)
                 .pipe(
@@ -1296,12 +1318,12 @@ export const startOrchestrator = (
                 )
               handoff.state = 'awaiting_checks'
               if (requested._tag === 'Failed') {
-                handoff.reason = `Could not request Codex review for repaired head: ${requested.error.message}`
+                handoff.reason = `Could not request Codex review for the current head: ${requested.error.message}`
                 continue
               }
               handoff.reviewRequestedHeadSha = observedHeadSha
-              handoff.reason = 'Codex review requested for repaired head'
-              yield* logInfo('Codex review requested for repaired pull request head', {
+              handoff.reason = 'Codex review requested for the current head'
+              yield* logInfo('Codex review requested for pull request head', {
                 ...logContext(handoff.issue),
                 action: 'pull_request_review_request',
                 outcome: 'completed',
@@ -1311,13 +1333,20 @@ export const startOrchestrator = (
               })
               continue
             }
-            const codexReview = inspected.observation.codexReview
             if (
               codexReview?.status !== 'completed' ||
               !observedHeadSha.startsWith(codexReview.headShaPrefix)
             ) {
+              handoff.reviewCompletedHeadSha = null
               handoff.state = 'awaiting_checks'
-              handoff.reason = 'Waiting for Codex review of the repaired head to complete'
+              handoff.reason = 'Waiting for Codex review of the current head to complete'
+              continue
+            }
+            if (handoff.reviewCompletedHeadSha !== observedHeadSha) {
+              handoff.reviewCompletedHeadSha = observedHeadSha
+              handoff.state = 'awaiting_checks'
+              handoff.reason =
+                'Codex review completed for the current head; waiting for review state to settle'
               continue
             }
           }
@@ -2034,6 +2063,7 @@ export const startOrchestrator = (
                 reason: 'Awaiting the first protected-branch observation',
                 repairAttempts: event.attempt ?? 0,
                 reviewRequestedHeadSha: null,
+                reviewCompletedHeadSha: null,
                 observedAt: new Date(),
               })
               yield* persistHandoffs()
