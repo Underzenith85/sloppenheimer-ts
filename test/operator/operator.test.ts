@@ -10,10 +10,10 @@ import {
   type BlockerRef,
   type Issue,
   type JsonObject,
-} from '../src/domain.js'
-import { buildBacklogSnapshot, makeOperatorBackend } from '../src/operator.js'
-import { makeGitHubIssueControl } from '../src/tracker.js'
-import type { GitHubProviderConfig } from '../src/tracker-config.js'
+} from '../../src/domain/domain.js'
+import { buildBacklogSnapshot, makeOperatorBackend } from '../../src/operator/operator.js'
+import { makeGitHubIssueControl } from '../../src/tracker.js'
+import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
 
 const temporaryDirectories: string[] = []
 

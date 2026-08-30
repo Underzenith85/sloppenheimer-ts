@@ -2,10 +2,10 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { makeGitHubPullRequestMonitor } from '../src/github-handoff.js'
-import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
-import { classifyPullRequest } from '../src/handoff.js'
+import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
+import { classifyPullRequest } from '../src/domain/handoff.js'
 import { issueBranchName, makeGitHubTracker } from '../src/tracker.js'
-import type { GitHubProviderConfig } from '../src/workflow.js'
+import type { GitHubProviderConfig } from '../src/config/workflow.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

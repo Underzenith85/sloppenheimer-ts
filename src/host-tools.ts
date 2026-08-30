@@ -1,4 +1,4 @@
-import type { IssueIdentifier, JsonObject, JsonValue } from './domain.js'
+import type { IssueIdentifier, JsonObject, JsonValue } from './domain/domain.js'
 
 /** A provider-native function exposed to Codex through the App Server dynamic-tool protocol. */
 export type HostToolSpec = Readonly<{

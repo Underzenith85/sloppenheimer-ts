@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { codexApprovalPolicies, codexSandboxModes } from '../src/workflow.js'
+import { codexApprovalPolicies, codexSandboxModes } from '../src/config/workflow.js'
 
 const execFileAsync = promisify(execFile)
 const schemaArguments = ['app-server', 'generate-json-schema'] as const

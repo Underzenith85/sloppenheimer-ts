@@ -5,17 +5,17 @@ import { Effect, Fiber, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/codex.js'
-import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/dependencies.js'
+import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
 import {
   issueId,
   issueIdentifier,
   type BlockerRef,
   type Issue,
   type JsonObject,
-} from '../src/domain.js'
+} from '../src/domain/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
-import type { CodexReviewObservation } from '../src/handoff.js'
+import type { CodexReviewObservation } from '../src/domain/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -26,10 +26,10 @@ import {
   type OrchestratorControl,
   type OrchestratorDependencies,
 } from '../src/orchestrator.js'
-import { makeRedactor } from '../src/redaction.js'
+import { makeRedactor } from '../src/support/redaction.js'
 import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
 import type { TrackerAdapter } from '../src/tracker.js'
-import type { Workflow } from '../src/workflow.js'
+import type { Workflow } from '../src/config/workflow.js'
 
 const makeIssue = (
   identifier: string,

@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { Effect, Fiber } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { issueIdentifier, type Workspace } from '../src/domain.js'
-import type { HooksConfig } from '../src/workflow.js'
+import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
+import type { HooksConfig } from '../src/config/workflow.js'
 import { containedWorkspacePath, makeWorkspaceManager, workspaceKey } from '../src/workspace.js'
 
 const roots: string[] = []

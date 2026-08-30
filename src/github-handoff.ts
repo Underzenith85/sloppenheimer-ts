@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 
-import type { JsonValue } from './domain.js'
+import type { JsonValue } from './domain/domain.js'
 import { TrackerError } from './errors.js'
 import {
   githubJson,
@@ -12,9 +12,9 @@ import {
   trackerResponseError,
   type JsonRecord,
 } from './github-http.js'
-import type { CodexReviewObservation, PullRequestObservation } from './handoff.js'
-import { isJsonArray } from './json.js'
-import type { GitHubProviderConfig } from './tracker-config.js'
+import type { CodexReviewObservation, PullRequestObservation } from './domain/handoff.js'
+import { isJsonArray } from './support/json.js'
+import type { GitHubProviderConfig } from './config/tracker-config.js'
 
 const isArray = isJsonArray
 

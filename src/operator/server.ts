@@ -7,8 +7,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import { Cause, Effect, type Scope } from 'effect'
 
-import { ServerError } from './errors.js'
-import { logError } from './logging.js'
+import { ServerError } from '../errors.js'
+import { logError } from '../support/logging.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
 

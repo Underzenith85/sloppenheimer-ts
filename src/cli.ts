@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { Cause, Effect, Exit } from 'effect'
 
-import { parseCliArguments, type CliOptions } from './cli-options.js'
-import { logInfo } from './logging.js'
-import { makeOperatorBackend } from './operator.js'
+import { parseCliArguments, type CliOptions } from './config/cli-options.js'
+import { logInfo } from './support/logging.js'
+import { makeOperatorBackend } from './operator/operator.js'
 import { startOrchestrator } from './orchestrator.js'
-import { startOperatorServer } from './server.js'
-import { loadWorkflow } from './workflow.js'
+import { startOperatorServer } from './operator/server.js'
+import { loadWorkflow } from './config/workflow.js'
 
 const shutdownTimeoutMs = 10_000
 

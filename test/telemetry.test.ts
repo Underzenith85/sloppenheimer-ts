@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier } from '../src/domain.js'
-import { bound, commandSummary, makeRedactor, redact } from '../src/redaction.js'
+import { issueId, issueIdentifier } from '../src/domain/domain.js'
+import { bound, commandSummary, makeRedactor, redact } from '../src/support/redaction.js'
 import {
   buildAgentDetail,
   clientPayload,
