@@ -1415,6 +1415,80 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('updates running snapshot metadata when an active issue refreshes', async (): Promise<void> => {
+    let currentIssue = makeIssue('example/symphony#25', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [currentIssue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* Effect.promise(() => started)
+          currentIssue = { ...currentIssue, title: 'Updated while active' }
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.running[0]).toMatchObject({
+            issueId: currentIssue.id,
+            title: 'Updated while active',
+          })
+        }),
+      ),
+    )
+  })
+
+  it('applies a configured retry cap to an actual failed worker', async (): Promise<void> => {
+    const cappedWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        agent: { ...workflow.config.agent, maxRetryBackoffMs: 250 },
+      },
+    }
+    const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(cappedWorkflow, () => [issue])
+    let failureAt = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: () =>
+        Effect.sync(() => {
+          failureAt = Date.now()
+        }).pipe(
+          Effect.zipRight(
+            Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
+          ),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(snapshot.retrying[0]).toMatchObject({ issueId: issue.id, attempt: 1 })
+          const scheduledDelay = Date.parse(snapshot.retrying[0]?.dueAt ?? '') - failureAt
+          expect(scheduledDelay).toBeGreaterThanOrEqual(250)
+          expect(scheduledDelay).toBeLessThan(1_000)
+        }),
+      ),
+    )
+  })
+
   it('requeues a due retry when another worker occupies the only slot', async (): Promise<void> => {
     const retryingIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
     const occupyingIssue = makeIssue('example/symphony#22', 1, null, ['symphony', 'ready'])
