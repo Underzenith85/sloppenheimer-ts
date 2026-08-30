@@ -321,9 +321,6 @@ const mergeSparseObject = (current: JsonObject | null, update: JsonObject): Json
   const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
   for (const [key, value] of Object.entries(update)) {
     const existing = merged[key]
-    if (value === null && existing !== undefined) {
-      continue
-    }
     merged[key] =
       isJsonObjectValue(existing) && isJsonObjectValue(value)
         ? mergeSparseObject(existing, value)

@@ -142,9 +142,6 @@ const mergeSparseObject = (current: JsonObject | null, update: JsonObject): Json
   const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
   for (const [key, value] of Object.entries(update)) {
     const existing = merged[key]
-    if (value === null && existing !== undefined) {
-      continue
-    }
     merged[key] =
       isJsonObject(existing) && isJsonObject(value) ? mergeSparseObject(existing, value) : value
   }
@@ -410,7 +407,7 @@ class CodexConnection {
         }
         return
       }
-      const pemStart = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/u.exec(line)
+      const pemStart = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----/u.exec(line)
       const label = pemStart?.[1]
       if (pemStart !== null && label !== undefined) {
         const endMarker = `-----END ${label}-----`

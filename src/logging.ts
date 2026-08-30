@@ -80,7 +80,7 @@ const redactUnquotedAssignments = (value: string): string => {
 
 const redactPemPrivateKeys = (value: string): string =>
   value.replace(
-    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----/gu,
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?-----END \1-----/gu,
     '[REDACTED PEM PRIVATE KEY]',
   )
 

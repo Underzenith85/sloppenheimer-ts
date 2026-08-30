@@ -1118,6 +1118,7 @@ describe('session telemetry accounting', (): void => {
               usage: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
               rateLimits: {
                 limitId: 'codex',
+                credits: { hasCredits: true, balance: '20' },
                 primary: { usedPercent: 25, windowDurationMins: 300 },
               },
             }),
@@ -1131,10 +1132,16 @@ describe('session telemetry accounting', (): void => {
               message: null,
               usage: null,
               rateLimits: {
-                limitId: null,
-                primary: null,
                 secondary: { usedPercent: 5, windowDurationMins: 1_440 },
               },
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
+              event: 'account/rateLimits/updated',
+              message: null,
+              usage: null,
+              rateLimits: { credits: { balance: null } },
             }),
           )
           harness.emitAgentEvent(
@@ -1181,6 +1188,7 @@ describe('session telemetry accounting', (): void => {
           expect(live.totals).toMatchObject({ inputTokens: 14, outputTokens: 7, totalTokens: 21 })
           expect(live.rateLimits).toMatchObject({
             limitId: 'codex',
+            credits: { hasCredits: true, balance: null },
             primary: { usedPercent: 25, windowDurationMins: 300 },
             secondary: { usedPercent: 5, windowDurationMins: 1_440 },
           })

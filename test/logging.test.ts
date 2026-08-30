@@ -28,6 +28,11 @@ Authorization=[REDACTED]`,
         'PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nc2VjcmV0LWtleS1ib2R5\n-----END PRIVATE KEY-----',
       ),
     ).toBe('PRIVATE_KEY=[REDACTED]')
+    expect(
+      redactSecretsInString(
+        '-----BEGIN PGP PRIVATE KEY BLOCK-----\nc2VjcmV0LXBncC1rZXk=\n-----END PGP PRIVATE KEY BLOCK-----',
+      ),
+    ).toBe('[REDACTED PEM PRIVATE KEY]')
   })
 
   it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {

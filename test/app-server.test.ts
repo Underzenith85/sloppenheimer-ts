@@ -430,6 +430,17 @@ describe('App Server request handling', (): void => {
     expect(JSON.stringify(diagnostics)).not.toContain('END PRIVATE KEY')
   })
 
+  it('suppresses every line of an ASCII-armored PGP private key', async (): Promise<void> => {
+    const outcome = await runScenario('pgp-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('[REDACTED PEM PRIVATE KEY]')
+    expect(JSON.stringify(diagnostics)).not.toContain('c2VjcmV0LXBncC1wcml2YXRlLWtleQ')
+    expect(JSON.stringify(diagnostics)).not.toContain('PGP PRIVATE KEY BLOCK')
+  })
+
   it('flushes an unterminated final stderr record before shutdown', async (): Promise<void> => {
     const outcome = await runScenario('unterminated-stderr-secret')
     const diagnostics = outcome.events

@@ -47,6 +47,11 @@ const handleInitialize = (id: unknown): void => {
     process.stderr.write('c2VjcmV0LXByaXZhdGUta2V5LWJvZHk=\n')
     process.stderr.write('-----END PRIVATE KEY-----\n')
   }
+  if (scenario === 'pgp-stderr-secret') {
+    process.stderr.write('-----BEGIN PGP PRIVATE KEY BLOCK-----\n')
+    process.stderr.write('c2VjcmV0LXBncC1wcml2YXRlLWtleQ==\n')
+    process.stderr.write('-----END PGP PRIVATE KEY BLOCK-----\n')
+  }
   if (scenario === 'unterminated-stderr-secret') {
     process.stderr.write('Authorization: Bearer final-secret')
   }
