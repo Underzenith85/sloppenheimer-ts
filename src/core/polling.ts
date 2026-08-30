@@ -10,7 +10,7 @@ import { dispatch } from './dispatch.js'
 import { hydrateRestoredHandoffs, reconcileHandoffs } from './handoff-reconciliation.js'
 import type { OrchestratorContext } from './runtime.js'
 import { publishDetails } from './snapshot.js'
-import { adoptTracker, revalidateCredentials } from './workflow-reload.js'
+import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
 
 export const poll = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
@@ -26,9 +26,9 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         effective_fingerprint: context.lastKnownGood.workflow.fingerprint,
       })
     } else if (revalidated.value !== context.lastKnownGood) {
-      const previousTracker = context.lastKnownGood.tracker
+      const previous = context.lastKnownGood
       context.lastKnownGood = revalidated.value
-      adoptTracker(context, previousTracker, revalidated.value.tracker)
+      adoptPorts(context, previous, revalidated.value)
       yield* logInfo('tracker credential refreshed from the environment', {
         tracker_kind: revalidated.value.workflow.tracker.kind,
         secret_environment_name: revalidated.value.workflow.tracker.provider.tokenEnvironmentName,
@@ -53,11 +53,30 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
     if (reloaded !== null) {
       context.workflowReloadError = null
       if (reloaded.fingerprint !== context.lastKnownGood.workflow.fingerprint) {
-        context.lastKnownGood = context.makeEffectiveWorkflowValue(reloaded)
-        yield* logInfo('workflow reloaded', {
-          path: reloaded.path,
-          fingerprint: reloaded.fingerprint,
-        })
+        const configured = yield* context.makeEffectiveWorkflowEffect(reloaded).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (value) => ({ _tag: 'Succeeded' as const, value }),
+          }),
+        )
+        if (configured._tag === 'Failed') {
+          context.workflowReloadError = {
+            message: configured.error.message,
+            observedAt: new Date(),
+          }
+          yield* logError('workflow port configuration failed; retaining last known good', {
+            error: configured.error.message,
+            effective_fingerprint: context.lastKnownGood.workflow.fingerprint,
+          })
+        } else {
+          const previous = context.lastKnownGood
+          context.lastKnownGood = configured.value
+          adoptPorts(context, previous, configured.value)
+          yield* logInfo('workflow reloaded', {
+            path: reloaded.path,
+            fingerprint: reloaded.fingerprint,
+          })
+        }
       }
     }
     const effective = context.lastKnownGood
@@ -181,6 +200,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             )
           }
           if (event.outcome === 'normal') {
+            const codeReview = entry.execution.codeReview
+            if (codeReview === null) {
+              yield* context.scheduleRetryEffect(entry.issue, 1, null, true)
+              break
+            }
             // Published before the tracker call, not after it: the worker is already out of the
             // running map, so an open detail panel would otherwise keep reading the previous
             // snapshot as running — and count it down to stalled — for as long as the handoff
@@ -193,14 +217,12 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               })
             }
             publishDetails(context)
-            const handoff = yield* entry.execution.tracker
-              .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
-              .pipe(
-                Effect.match({
-                  onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-                  onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
-                }),
-              )
+            const handoff = yield* codeReview.handoffCompletedWork(entry.issue).pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
+              }),
+            )
             if (handoff._tag === 'Failed') {
               if (record !== undefined) {
                 recordHandoff(record, new Date(), {

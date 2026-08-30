@@ -28,7 +28,7 @@ import {
 } from '../src/orchestrator.js'
 import { makeRedactor } from '../src/support/redaction.js'
 import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
-import type { TrackerAdapter } from '../src/tracker.js'
+import type { CodeReviewPort, TrackerPort } from '../src/tracker.js'
 import type { Workflow } from '../src/config/workflow.js'
 
 const makeIssue = (
@@ -259,7 +259,7 @@ const makeHarness = (
       loadCount += 1
       return selected instanceof WorkflowError ? Effect.fail(selected) : Effect.succeed(selected)
     },
-    makeTracker: (effectiveWorkflow): TrackerAdapter => {
+    makeTracker: (effectiveWorkflow): TrackerPort => {
       trackerWorkflows.push(effectiveWorkflow)
       return {
         fetchIssuesByStates: (states) => {
@@ -280,14 +280,6 @@ const makeHarness = (
             idFetchTokens.push(effectiveWorkflow.tracker.provider.token)
             return candidates(effectiveWorkflow)
           }),
-        handoffCompletedWork: () =>
-          Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
-        findExistingHandoff: () =>
-          Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
-        inspectPullRequest: () => Effect.die('unused'),
-        mergePullRequest: () => Effect.die('unused'),
-        requestPullRequestReview: () => Effect.die('unused'),
-        resolveReviewThreads: () => Effect.die('unused'),
         toolSpecs: [],
         executeTool: async (name) => ({
           success: false,
@@ -300,6 +292,14 @@ const makeHarness = (
         secretEnvironmentNames: [],
       }
     },
+    makeCodeReview: (): CodeReviewPort => ({
+      handoffCompletedWork: () => Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
+      findExistingHandoff: () => Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
+      inspectPullRequest: () => Effect.die('unused'),
+      mergePullRequest: () => Effect.die('unused'),
+      requestPullRequestReview: () => Effect.die('unused'),
+      resolveReviewThreads: () => Effect.die('unused'),
+    }),
     makeWorkspaces: (effectiveWorkflow) => {
       workspaceWorkflows.push(effectiveWorkflow)
       return {
@@ -349,6 +349,17 @@ const makeHarness = (
 const runWithTestClock = <Value>(effect: Effect.Effect<Value, WorkflowError>): Promise<Value> =>
   Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
 
+const requireCodeReview = (
+  dependencies: OrchestratorDependencies,
+  effectiveWorkflow: Workflow,
+): CodeReviewPort => {
+  const codeReview = dependencies.makeCodeReview?.(effectiveWorkflow)
+  if (codeReview === undefined || codeReview === null) {
+    throw new Error('test harness CodeReviewPort is unavailable')
+  }
+  return codeReview
+}
+
 describe('restored pull request handoffs', (): void => {
   it('rediscovers open pull requests for active issue branches when the store is missing', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-recovered-handoff-'))
@@ -360,8 +371,8 @@ describe('restored pull request handoffs', (): void => {
     const harness = makeHarness(isolated, () => [issue])
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         findExistingHandoff: (candidate) =>
           Effect.succeed({
             _tag: 'PullRequest' as const,
@@ -429,8 +440,8 @@ describe('restored pull request handoffs', (): void => {
     let discoveries = 0
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         findExistingHandoff: () =>
           Effect.sync(() => {
             discoveries += 1
@@ -487,8 +498,8 @@ describe('restored pull request handoffs', (): void => {
     let discoveries = 0
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         findExistingHandoff: (candidate) =>
           Effect.sync(() => {
             discoveries += 1
@@ -606,23 +617,26 @@ describe('restored pull request handoffs', (): void => {
                 )
               : tracker.fetchIssuesByIds(ids, options)
           },
-          inspectPullRequest: (number) =>
-            Effect.succeed({
-              number,
-              url: 'https://github.test/example/symphony/pull/95',
-              headSha: 'persisted-head',
-              merged: false as const,
-              state: 'open' as const,
-              mergeCommitSha: null,
-              mergeable: null,
-              mergeState: 'unknown',
-              checks: [],
-              reviewDecision: null,
-              reviewThreads: [],
-              codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
-            }),
         }
       },
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            url: 'https://github.test/example/symphony/pull/95',
+            headSha: 'persisted-head',
+            merged: false as const,
+            state: 'open' as const,
+            mergeCommitSha: null,
+            mergeable: null,
+            mergeState: 'unknown',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+            codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+          }),
+      }),
     }
 
     const snapshot = await Effect.runPromise(
@@ -672,8 +686,8 @@ describe('restored pull request handoffs', (): void => {
     let inspections = 0
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         inspectPullRequest: (pullRequestNumber) =>
           Effect.sync(() => {
             inspections += 1
@@ -741,8 +755,8 @@ describe('restored pull request handoffs', (): void => {
     let inspections = 0
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         inspectPullRequest: (pullRequestNumber) =>
           Effect.sync(() => {
             inspections += 1
@@ -828,8 +842,8 @@ describe('restored pull request handoffs', (): void => {
     const mergedHeads: string[] = []
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -934,8 +948,8 @@ describe('restored pull request handoffs', (): void => {
     const mergedHeads: string[] = []
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -1044,8 +1058,8 @@ describe('restored pull request handoffs', (): void => {
     const harness = makeHarness(isolated, () => [issue])
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         inspectPullRequest: (number) =>
           Effect.succeed({
             number,
@@ -2201,8 +2215,8 @@ describe('live agent detail', (): void => {
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
       runAgent: factory.runAgent,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         handoffCompletedWork: () =>
           Effect.succeed({
             _tag: 'PullRequest',
@@ -2283,8 +2297,8 @@ describe('live agent detail', (): void => {
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
       runAgent: factory.runAgent,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         handoffCompletedWork: () =>
           blockHandoff
             ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
@@ -2506,8 +2520,8 @@ describe('aged-out agent detail', (): void => {
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
       runAgent: factory.runAgent,
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         handoffCompletedWork: (issue) =>
           Effect.succeed({
             _tag: 'PullRequest',
@@ -2788,8 +2802,8 @@ describe('session telemetry accounting', (): void => {
             afterRunCount += 1
           }),
       }),
-      makeTracker: (effectiveWorkflow) => ({
-        ...harness.dependencies.makeTracker(effectiveWorkflow),
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
         handoffCompletedWork: () =>
           Effect.sync(() => {
             handoffCount += 1
@@ -2822,6 +2836,94 @@ describe('session telemetry accounting', (): void => {
         }),
       ),
     )
+  })
+
+  it('uses continuation turns when the tracker has no CodeReviewPort and handoff is disabled', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#139', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const { makeCodeReview: omittedCodeReview, ...trackerOnlyDependencies } = harness.dependencies
+    void omittedCodeReview
+    const dependencies: OrchestratorDependencies = {
+      ...trackerOnlyDependencies,
+      runAgent: () =>
+        Effect.succeed({ threadId: 'thread-neutral', turnId: 'turn-neutral', turnCount: 1 }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(snapshot.handoffs).toEqual([])
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            attempt: 1,
+            error: null,
+          })
+        }),
+      ),
+    )
+  })
+
+  it('preserves the persisted handoff store while handoff is disabled', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-disabled-handoff-'))
+    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const persisted = {
+      issueId: issueId('75'),
+      identifier: issueIdentifier('example/symphony#75'),
+      pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+      branchName: 'symphony/issue-75',
+      state: 'awaiting_checks' as const,
+      headSha: 'persisted-head',
+      reason: null,
+      repairAttempts: 0,
+      observedAt: new Date(0).toISOString(),
+    }
+    await Effect.runPromise(saveHandoffs(storePath, [persisted]))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const harness = makeHarness(isolated)
+    const { makeCodeReview: omittedCodeReview, ...trackerOnlyDependencies } = harness.dependencies
+    void omittedCodeReview
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', trackerOnlyDependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs).toEqual([])
+    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toEqual([persisted])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('rejects enabled handoff when the provider does not supply CodeReviewPort', async (): Promise<void> => {
+    const harness = makeHarness(workflow)
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeCodeReview: () => null,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.either(Effect.scoped(startOrchestrator('/tmp/WORKFLOW.md', dependencies))),
+    )
+
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: {
+        category: 'invalid_config',
+        message:
+          'pull-request handoff is enabled, but tracker provider github does not supply CodeReviewPort',
+      },
+    })
   })
 
   it('interrupts a non-active refreshed issue without removing its workspace', async (): Promise<void> => {

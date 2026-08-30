@@ -47,7 +47,20 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
   readonly cause?: unknown
 }> {}
 
-export { AgentError } from './core/agent-runner.js'
+export class AgentError extends Data.TaggedError('AgentError')<{
+  readonly category:
+    | 'spawn_failed'
+    | 'workspace_rejected'
+    | 'protocol_error'
+    | 'read_timeout'
+    | 'turn_timeout'
+    | 'turn_failed'
+    | 'turn_cancelled'
+    | 'input_required'
+    | 'process_exited'
+  readonly message: string
+  readonly cause?: unknown
+}> {}
 
 export class ServerError extends Data.TaggedError('ServerError')<{
   readonly category: 'listen_failed' | 'close_failed'

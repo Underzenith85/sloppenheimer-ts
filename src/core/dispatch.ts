@@ -2,12 +2,12 @@ import { Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue } from '../domain/domain.js'
+import { AgentError } from '../errors.js'
 import type { HostToolSession } from '../host-tools.js'
 import { mergeSparseObject, toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
 import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
-import { AgentError } from './agent-runner.js'
-import { adoptTracker, revalidateCredentials } from './workflow-reload.js'
+import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
 
 export const dispatch = (
   context: OrchestratorContext,
@@ -49,9 +49,9 @@ export const dispatch = (
     }
     const effective = preflight.value
     if (effectiveOverride === undefined && effective !== context.lastKnownGood) {
-      const previousTracker = context.lastKnownGood.tracker
+      const previous = context.lastKnownGood
       context.lastKnownGood = effective
-      adoptTracker(context, previousTracker, effective.tracker)
+      adoptPorts(context, previous, effective)
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
       Effect.match({
@@ -107,7 +107,7 @@ export const dispatch = (
               issue,
               workspace,
               workspaceRoot: execution.workspaceRoot,
-              config: execution.codex,
+              config: execution.agentRunner,
               prompt: execution.prompt,
               maxTurns: execution.maxTurns,
               secretEnvironmentNames: execution.secretEnvironmentNames,

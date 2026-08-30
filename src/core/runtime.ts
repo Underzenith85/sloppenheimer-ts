@@ -11,7 +11,7 @@ import {
   type JsonObject,
   type TokenTotals,
 } from '../domain/domain.js'
-import type { WorkflowError } from '../errors.js'
+import { WorkflowError } from '../errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from '../domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
 import { mergeSparseObject } from '../support/json.js'
@@ -27,11 +27,16 @@ import {
   type AgentDetailRecord,
   type AgentDetailSnapshot,
   type AgentDetailStatus,
+  type AgentEvent,
 } from '../telemetry.js'
-import { issueBranchName, type TrackerAdapter } from '../tracker.js'
+import { issueBranchName, type CodeReviewPort, type TrackerPort } from '../tracker.js'
 import { type loadWorkflow, type Workflow } from '../config/workflow.js'
 import { workspaceKey, type WorkspaceManager } from '../workspace.js'
-import type { AgentEvent, AgentEventSemantics, AgentRunner } from './agent-runner.js'
+import type {
+  AgentEventSemantics,
+  AgentRunnerConfig,
+  AgentRunnerPort,
+} from '../ports/agent-runner.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 
@@ -232,14 +237,16 @@ export type RuntimeState = {
 
 export type EffectiveWorkflow = Readonly<{
   workflow: Workflow
-  tracker: TrackerAdapter
+  tracker: TrackerPort
+  codeReview: CodeReviewPort | null
   workspaces: WorkspaceManager
   loadedAt: Date
 }>
 
 export type ExecutionSnapshot = Readonly<{
   workflow: Workflow
-  tracker: TrackerAdapter
+  tracker: TrackerPort
+  codeReview: CodeReviewPort | null
   requiredLabels: readonly string[]
   activeStates: readonly string[]
   terminalStates: readonly string[]
@@ -247,7 +254,7 @@ export type ExecutionSnapshot = Readonly<{
   workspaces: WorkspaceManager
   workspaceRoot: string
   prompt: string
-  codex: Workflow['config']['codex']
+  agentRunner: AgentRunnerConfig
   maxTurns: number
   stallTimeoutMs: number
 }>
@@ -276,9 +283,11 @@ export type WorkflowWatcher = Readonly<{
 
 export type OrchestratorDependencies = Readonly<{
   loadWorkflow: typeof loadWorkflow
-  makeTracker: (workflow: Workflow) => TrackerAdapter
+  makeTracker: (workflow: Workflow) => TrackerPort
+  /** Omit the factory to disable pull-request handoff and use continuation turns only. */
+  makeCodeReview?: (workflow: Workflow) => CodeReviewPort | null
   makeWorkspaces: (workflow: Workflow) => WorkspaceManager
-  runAgent: AgentRunner
+  runAgent: AgentRunnerPort['run']
   watchWorkflow: (path: string, onChange: () => void) => WorkflowWatcher
   /** Environment used by dispatch preflight validation of secret indirection. */
   environment: NodeJS.ProcessEnv
@@ -337,7 +346,9 @@ export type OrchestratorContext = {
   handoffSnapshotsValue: () => readonly HandoffSnapshot[]
   recoverMissingHandoffsEffect: () => Effect.Effect<void>
   reconcileEffect: () => Effect.Effect<void, never, Scope.Scope>
-  makeEffectiveWorkflowValue: (workflow: Workflow) => EffectiveWorkflow
+  makeEffectiveWorkflowEffect: (
+    workflow: Workflow,
+  ) => Effect.Effect<EffectiveWorkflow, WorkflowError>
   sortIssuesValue: typeof sortIssues
   issueIsActiveValue: (issue: Issue, workflow: Workflow) => boolean
   issueIsRoutableValue: typeof issueIsRoutable
@@ -432,6 +443,7 @@ const captureExecutionSnapshot = (
   Object.freeze({
     workflow: effective.workflow,
     tracker: effective.tracker,
+    codeReview: effective.codeReview,
     requiredLabels: Object.freeze([...effective.workflow.config.tracker.requiredLabels]),
     activeStates: Object.freeze([...effective.workflow.config.tracker.activeStates]),
     terminalStates: Object.freeze([...effective.workflow.config.tracker.terminalStates]),
@@ -439,7 +451,7 @@ const captureExecutionSnapshot = (
     workspaces: effective.workspaces,
     workspaceRoot: effective.workflow.config.workspaceRoot,
     prompt,
-    codex: Object.freeze({ ...effective.workflow.config.codex }),
+    agentRunner: Object.freeze({ ...effective.workflow.config.codex }),
     maxTurns: effective.workflow.config.agent.maxTurns,
     stallTimeoutMs: effective.workflow.config.codex.stallTimeoutMs,
   })
@@ -488,13 +500,38 @@ export const startOrchestratorRuntime = (
   agentEventSemantics: AgentEventSemantics,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
   Effect.gen(function* () {
-    const makeEffectiveWorkflow = (workflow: Workflow): EffectiveWorkflow => ({
-      workflow,
-      tracker: dependencies.makeTracker(workflow),
-      workspaces: dependencies.makeWorkspaces(workflow),
-      loadedAt: new Date(),
-    })
-    let lastKnownGood = makeEffectiveWorkflow(
+    const configureCodeReview = (workflow: Workflow): CodeReviewPort | null => {
+      const codeReview = dependencies.makeCodeReview?.(workflow) ?? null
+      if (dependencies.makeCodeReview !== undefined && codeReview === null) {
+        throw new WorkflowError({
+          category: 'invalid_config',
+          message: `pull-request handoff is enabled, but tracker provider ${workflow.tracker.kind} does not supply CodeReviewPort`,
+        })
+      }
+      return codeReview
+    }
+    const portConfigurationError = (cause: unknown): WorkflowError =>
+      cause instanceof WorkflowError
+        ? cause
+        : new WorkflowError({
+            category: 'invalid_config',
+            message: 'application ports could not be configured',
+            cause,
+          })
+    const makeEffectiveWorkflow = (
+      workflow: Workflow,
+    ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
+      Effect.try({
+        try: () => ({
+          workflow,
+          tracker: dependencies.makeTracker(workflow),
+          codeReview: configureCodeReview(workflow),
+          workspaces: dependencies.makeWorkspaces(workflow),
+          loadedAt: new Date(),
+        }),
+        catch: portConfigurationError,
+      })
+    let lastKnownGood = yield* makeEffectiveWorkflow(
       yield* dependencies.loadWorkflow(selectedWorkflowPath),
     )
     const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
@@ -716,25 +753,31 @@ export const startOrchestratorRuntime = (
     )
     let handoffStoreError: HandoffStoreError | null = null
     let storeReadFailed = false
-    const loadedHandoffs = yield* loadHandoffs(handoffStorePath).pipe(
-      Effect.matchEffect({
-        onFailure: (error) => {
-          storeReadFailed = true
-          handoffStoreError = {
-            operation: error.operation,
-            message: error.message,
-            observedAt: new Date(),
-          }
-          return logError('handoff store read failed; preserving store during recovery', {
-            action: 'handoff_store_read',
-            outcome: 'failed',
-            path: handoffStorePath,
-            error: error.message,
-          }).pipe(Effect.as<readonly HandoffSnapshot[]>([]))
-        },
-        onSuccess: (handoffs) => Effect.succeed(handoffs),
-      }),
-    )
+    // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
+    // never be written back over it. A later handoff-enabled run still has to restore those
+    // pull requests.
+    const handoffStoreDisabled = lastKnownGood.codeReview === null
+    const loadedHandoffs = yield* handoffStoreDisabled
+      ? Effect.succeed<readonly HandoffSnapshot[]>([])
+      : loadHandoffs(handoffStorePath).pipe(
+          Effect.matchEffect({
+            onFailure: (error) => {
+              storeReadFailed = true
+              handoffStoreError = {
+                operation: error.operation,
+                message: error.message,
+                observedAt: new Date(),
+              }
+              return logError('handoff store read failed; preserving store during recovery', {
+                action: 'handoff_store_read',
+                outcome: 'failed',
+                path: handoffStorePath,
+                error: error.message,
+              }).pipe(Effect.as<readonly HandoffSnapshot[]>([]))
+            },
+            onSuccess: (handoffs) => Effect.succeed(handoffs),
+          }),
+        )
     let pendingRestoredHandoffs = loadedHandoffs
     const recoveryCounts = {
       loaded: loadedHandoffs.length,
@@ -764,7 +807,7 @@ export const startOrchestratorRuntime = (
       })),
     ]
     const persistHandoffs = (): Effect.Effect<void> => {
-      if (!startupRecoveryFinished || storeReadFailed) {
+      if (handoffStoreDisabled || !startupRecoveryFinished || storeReadFailed) {
         return Effect.void
       }
       return saveHandoffs(handoffStorePath, handoffSnapshots()).pipe(
@@ -967,6 +1010,10 @@ export const startOrchestratorRuntime = (
           return
         }
         const effective = lastKnownGood
+        if (effective.codeReview === null) {
+          startupRecoveryFinished = true
+          return
+        }
         const requiredLabels = effective.workflow.config.tracker.requiredLabels
         const fetched = yield* effective.tracker
           .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
@@ -1010,7 +1057,7 @@ export const startOrchestratorRuntime = (
           ) {
             continue
           }
-          const found = yield* effective.tracker.findExistingHandoff(issue).pipe(
+          const found = yield* effective.codeReview.findExistingHandoff(issue).pipe(
             Effect.match({
               onFailure: (error) => ({ _tag: 'Failed' as const, error }),
               onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
@@ -1033,7 +1080,7 @@ export const startOrchestratorRuntime = (
             continue
           }
           const observedAt = new Date()
-          const inspected = yield* effective.tracker
+          const inspected = yield* effective.codeReview
             .inspectPullRequest(found.result.pullRequestNumber)
             .pipe(
               Effect.match({
@@ -1397,7 +1444,7 @@ export const startOrchestratorRuntime = (
       handoffSnapshotsValue: handoffSnapshots,
       recoverMissingHandoffsEffect: recoverMissingHandoffs,
       reconcileEffect: reconcile,
-      makeEffectiveWorkflowValue: makeEffectiveWorkflow,
+      makeEffectiveWorkflowEffect: makeEffectiveWorkflow,
       sortIssuesValue: sortIssues,
       issueIsActiveValue: issueIsActive,
       issueIsRoutableValue: issueIsRoutable,

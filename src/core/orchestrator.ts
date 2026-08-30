@@ -1,7 +1,7 @@
 import { Effect, type Scope } from 'effect'
 
 import type { WorkflowError } from '../errors.js'
-import type { AgentEventSemantics } from './agent-runner.js'
+import type { AgentEventSemantics } from '../ports/agent-runner.js'
 import {
   runOrchestratorRuntime,
   startOrchestratorRuntime,

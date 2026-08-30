@@ -3,13 +3,8 @@ import { Effect } from 'effect'
 
 import type { JsonObject, JsonValue } from './domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from './config/env-reference.js'
-import {
-  AgentError,
-  type AgentLaunch,
-  type AgentResult,
-  type AgentRunnerConfig,
-} from './core/agent-runner.js'
-import type { WorkspaceError } from './errors.js'
+import { AgentError, type WorkspaceError } from './errors.js'
+import type { AgentLaunch, AgentResult, AgentRunnerConfig } from './ports/agent-runner.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from './support/json.js'
 import type { HostToolResult, HostToolSession } from './host-tools.js'
 import { unsupportedHostTool } from './host-tools.js'
@@ -52,7 +47,7 @@ export const isCancelledTurnStatus = (status: string): boolean =>
   status === 'cancelled' || status === 'canceled' || status === 'interrupted'
 
 export type { AgentEvent } from './telemetry.js'
-export type { AgentLaunch, AgentResult } from './core/agent-runner.js'
+export type { AgentLaunch, AgentResult } from './ports/agent-runner.js'
 
 /**
  * The environment values a session's telemetry must never echo. The tracker's own secret names come

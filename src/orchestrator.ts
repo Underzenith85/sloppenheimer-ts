@@ -10,9 +10,9 @@ import {
   type OrchestratorControl,
   type OrchestratorDependencies,
 } from './core/orchestrator.js'
-import type { AgentEventSemantics, AgentRunner } from './core/agent-runner.js'
+import type { AgentEventSemantics, AgentRunnerPort } from './ports/agent-runner.js'
 import type { WorkflowError } from './errors.js'
-import { makeGitHubTracker } from './tracker.js'
+import { makeGitHubCodeReview, makeGitHubTracker } from './tracker.js'
 import { makeWorkspaceManager } from './workspace.js'
 
 export {
@@ -33,8 +33,12 @@ export {
  * The composition root binds the concrete adapters.  `src/core` depends on these only through
  * `OrchestratorDependencies`, so the core runtime never imports an adapter implementation.
  */
-const codexAgentRunner: AgentRunner = runAgent
+const codexAgentRunner: AgentRunnerPort['run'] = runAgent
 
+/**
+ * Codex's own turn-status vocabulary, kept with the adapter so the core runtime reacts to an
+ * outcome rather than matching one runner's status strings.
+ */
 const codexAgentEventSemantics: AgentEventSemantics = {
   turnOutcome: (status) =>
     status === 'completed' ? 'completed' : isCancelledTurnStatus(status) ? 'cancelled' : 'failed',
@@ -43,6 +47,7 @@ const codexAgentEventSemantics: AgentEventSemantics = {
 const defaultDependencies: OrchestratorDependencies = {
   loadWorkflow,
   makeTracker: (workflow) => makeGitHubTracker(workflow.tracker.provider),
+  makeCodeReview: (workflow) => makeGitHubCodeReview(workflow.tracker.provider),
   makeWorkspaces: (workflow) =>
     makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
   runAgent: codexAgentRunner,
