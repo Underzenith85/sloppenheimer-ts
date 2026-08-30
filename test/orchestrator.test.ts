@@ -885,6 +885,96 @@ describe('restored pull request handoffs', (): void => {
     )
     await rm(workspaceRoot, { force: true, recursive: true })
   })
+
+  it('persists the repair marker while its agent is running', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-running-repair-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const reviewedHead = 'abcdef1234567890abcdef1234567890abcdef12'
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'repair_needed',
+          headSha: reviewedHead,
+          reason: 'Unresolved review feedback',
+          repairAttempts: 0,
+          reviewRequestedHeadSha: null,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: reviewedHead,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [
+              {
+                name: 'quality',
+                status: 'completed' as const,
+                conclusion: 'success',
+                url: null,
+              },
+            ],
+            reviewDecision: null,
+            reviewThreads: [
+              {
+                id: 'thread-1',
+                resolved: false,
+                body: 'Fix this',
+                url: null,
+                commentHeadSha: reviewedHead,
+              },
+            ],
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.running).toHaveLength(1)
+    expect(snapshot.handoffs).toEqual([
+      expect.objectContaining({
+        issueId: '20',
+        state: 'repair_needed',
+        repairAttempts: 1,
+        reviewRequestedHeadSha: null,
+      }),
+    ])
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ issueId: '20', repairAttempts: 1 }),
+    ])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
 })
 
 describe('startup terminal workspace cleanup', (): void => {

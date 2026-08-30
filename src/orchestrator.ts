@@ -1260,6 +1260,9 @@ export const startOrchestrator = (
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         for (const [id, handoff] of state.handoffs) {
+          if (state.running.has(id)) {
+            continue
+          }
           if (handoff.state === 'closed_without_merge') {
             continue
           }
@@ -1402,7 +1405,6 @@ export const startOrchestrator = (
               handoff.reason = `Repair limit reached. ${disposition.reason}`
               continue
             }
-            state.handoffs.delete(id)
             const repairIssue: Issue = {
               ...handoff.issue,
               description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${inspected.observation.headSha}\n\n${disposition.reason}`,
@@ -1417,7 +1419,9 @@ export const startOrchestrator = (
               workspaces: handoff.execution.workspaces,
               loadedAt: handoff.observedAt,
             }
-            yield* dispatch(repairIssue, handoff.repairAttempts + 1, effective)
+            handoff.repairAttempts += 1
+            handoff.reason = `Repair agent running. ${disposition.reason}`
+            yield* dispatch(repairIssue, handoff.repairAttempts, effective)
           }
         }
         // One timeline entry per observed transition, not one per poll: an unchanged disposition is
