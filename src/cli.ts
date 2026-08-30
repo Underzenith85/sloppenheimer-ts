@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Cause, Effect, Exit, Layer } from 'effect'
 
+import { githubHttpClientLayer } from './adapters/github/index.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { logInfo } from './support/logging.js'
 import { makeOperatorBackend } from './operator/operator.js'
@@ -50,6 +51,10 @@ const main = async (): Promise<number> => {
   process.once('SIGINT', requestShutdown)
   process.once('SIGTERM', requestShutdown)
 
+  /**
+   * The composition root binds the HTTP transport the GitHub adapter talks through. The adapter
+   * falls back to this same layer when it is run without one, so a test can substitute a client.
+   */
   const program = Effect.scoped(
     Effect.gen(function* () {
       const orchestrator = yield* startOrchestrator(options.workflowPath)
@@ -66,7 +71,7 @@ const main = async (): Promise<number> => {
       }
       return yield* orchestrator.awaitTermination
     }),
-  )
+  ).pipe(Effect.provide(githubHttpClientLayer))
 
   const exit = await Effect.runPromiseExit(program, {
     signal: controller.signal,

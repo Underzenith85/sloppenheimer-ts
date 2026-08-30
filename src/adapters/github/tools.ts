@@ -1,10 +1,11 @@
+import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect } from 'effect'
 
 import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
 import type { GitHubProviderConfig } from '../../config/tracker-config.js'
 import type { HostToolContext, HostToolFailureCode, HostToolResult } from '../../host-tools.js'
-import { isJsonRecord, trackerResponseError } from './client.js'
+import { isJsonRecord, trackerResponseError, withBoundHttpClient } from './client.js'
 
 /*
  * Host-tool plumbing shared by the tracker's issue tools and the code-review capability's
@@ -67,11 +68,18 @@ const hostToolFailureFrom = (error: TrackerError): HostToolResult => {
   return toolFailure('provider_error', error.message, error.retryable, error.retryAfterMs)
 }
 
+/**
+ * Runs one host-tool request to the JSON-safe result the host boundary promises.
+ *
+ * The port hands tool results back as a promise, so this leaves Effect and with it any client the
+ * caller had in context; `httpClient` is the adapter's own binding, carried from construction.
+ */
 export const githubToolValue = (
   effect: Effect.Effect<JsonValue, TrackerError>,
+  httpClient?: HttpClient.HttpClient,
 ): Promise<HostToolResult> =>
   Effect.runPromise(
-    effect.pipe(
+    withBoundHttpClient(httpClient)(effect).pipe(
       Effect.match({
         onFailure: hostToolFailureFrom,
         onSuccess: (data): HostToolResult => ({ success: true, data }),
