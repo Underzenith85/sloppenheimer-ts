@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { Option } from 'effect'
 
 import { parseProcessStatus } from '../../src/support/subprocess.js'
 
@@ -41,5 +42,5 @@ export const processIsAlive = (pid: number): boolean => {
     return false
   }
   const status = parseProcessStatus(stat)
-  return status === null || status.state !== 'Z'
+  return Option.isNone(status) || status.value.state !== 'Z'
 }

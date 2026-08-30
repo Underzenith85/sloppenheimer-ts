@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
+import { Option } from 'effect'
 
 /** The `/proc/<pid>/stat` state character of a process that has exited but has not been reaped. */
 const zombieState = 'Z'
@@ -15,16 +16,16 @@ type ProcessStatus = {
 }
 
 /**
- * Parses one `/proc/<pid>/stat` line, or returns null when it does not have the expected shape.
+ * Parses one `/proc/<pid>/stat` line, or `none` when it does not have the expected shape.
  *
  * The second field, `comm`, is the executable name in parentheses and may itself contain spaces and
  * parentheses, so the remaining fields are read from after its final `)` rather than by splitting
  * the whole line.
  */
-export const parseProcessStatus = (stat: string): ProcessStatus | null => {
+export const parseProcessStatus = (stat: string): Option.Option<ProcessStatus> => {
   const commEnd = stat.lastIndexOf(')')
   if (commEnd === -1) {
-    return null
+    return Option.none()
   }
   // After `comm`: state, ppid, pgrp, ...
   const fields = stat
@@ -34,30 +35,30 @@ export const parseProcessStatus = (stat: string): ProcessStatus | null => {
   const state = fields[0]
   const group = fields[2]
   if (state === undefined || state.length === 0 || group === undefined) {
-    return null
+    return Option.none()
   }
   const processGroup = Number.parseInt(group, 10)
   if (!Number.isSafeInteger(processGroup)) {
-    return null
+    return Option.none()
   }
-  return { state, processGroup }
+  return Option.some({ state, processGroup })
 }
 
 /**
- * Whether the process group led by `pid` still holds a member that is not a zombie, or null when
- * the host does not let the question be answered — `/proc` is Linux-only, and an entry may vanish
- * mid-scan. A scan that reads no process at all is reported as unknown rather than as an empty
- * group, so an unreadable `/proc` never turns into a claim that the group is dead.
+ * One pass over `/proc`: whether the process group led by `pid` holds a member that is not a zombie,
+ * or `none` when the host does not let the question be answered. `/proc` is Linux-only, and a scan
+ * that reads no process at all — an unreadable `/proc` — is reported as unknown rather than as an
+ * empty group, so it never turns into a claim that the group is dead.
  */
-const procGroupHasLiveMember = (pid: number): boolean | null => {
+const scanProcessGroup = (pid: number): Option.Option<boolean> => {
   if (process.platform !== 'linux') {
-    return null
+    return Option.none()
   }
   let entries: readonly string[]
   try {
     entries = readdirSync(procRoot)
   } catch {
-    return null
+    return Option.none()
   }
   let read = false
   for (const entry of entries) {
@@ -68,19 +69,38 @@ const procGroupHasLiveMember = (pid: number): boolean | null => {
     try {
       stat = readFileSync(`${procRoot}/${entry}/stat`, 'utf8')
     } catch {
-      // The process exited between the listing and the read; it is not a live member either way.
+      // The process left between the listing and the read; the confirmation pass below covers the
+      // case where it had forked a replacement that this listing therefore never saw.
       continue
     }
     const status = parseProcessStatus(stat)
-    if (status === null) {
+    if (Option.isNone(status)) {
       continue
     }
     read = true
-    if (status.processGroup === pid && status.state !== zombieState) {
-      return true
+    if (status.value.processGroup === pid && status.value.state !== zombieState) {
+      return Option.some(true)
     }
   }
-  return read ? false : null
+  return read ? Option.some(false) : Option.none()
+}
+
+/**
+ * Whether the process group led by `pid` still holds a member that is not a zombie, or `none` when
+ * `/proc` cannot answer.
+ *
+ * A single pass can miss a member: one that is forked after the listing is not in it, and if its
+ * parent then dies before its own entry is read, the pass sees only zombies and would call a group
+ * dead while a descendant runs in it. Only a "dead" verdict is therefore re-checked, and only that
+ * verdict costs a second pass. A member that outlives one pass has a `/proc` entry before the next
+ * one lists, so the confirming pass sees it.
+ */
+const procGroupHasLiveMember = (pid: number): Option.Option<boolean> => {
+  const scan = scanProcessGroup(pid)
+  if (Option.isSome(scan) && !scan.value) {
+    return scanProcessGroup(pid)
+  }
+  return scan
 }
 
 /**
@@ -105,7 +125,7 @@ export const processGroupIsAlive = (pid: number): boolean => {
   } catch {
     return false
   }
-  return procGroupHasLiveMember(pid) ?? true
+  return Option.getOrElse(procGroupHasLiveMember(pid), () => true)
 }
 
 const signalChildGroup = (child: ChildProcess, signal: NodeJS.Signals): void => {

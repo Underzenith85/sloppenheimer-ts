@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { Option } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
@@ -82,14 +83,19 @@ describe('process group liveness', (): void => {
   })
 
   it('reads the state and process group out of a stat line whose comm has spaces and parens', (): void => {
-    expect(parseProcessStatus('7 (my (odd) name) Z 1 4242 0 0 -1 4194560 0')).toEqual({
+    expect(
+      Option.getOrNull(parseProcessStatus('7 (my (odd) name) Z 1 4242 0 0 -1 4194560 0')),
+    ).toEqual({
       state: 'Z',
       processGroup: 4242,
     })
-    expect(parseProcessStatus('7 (bash) S 1 7 0 0')).toEqual({ state: 'S', processGroup: 7 })
-    expect(parseProcessStatus('malformed')).toBeNull()
-    expect(parseProcessStatus('7 (bash) S 1')).toBeNull()
-    expect(parseProcessStatus('7 (bash) S 1 not-a-number')).toBeNull()
+    expect(Option.getOrNull(parseProcessStatus('7 (bash) S 1 7 0 0'))).toEqual({
+      state: 'S',
+      processGroup: 7,
+    })
+    expect(Option.isNone(parseProcessStatus('malformed'))).toBe(true)
+    expect(Option.isNone(parseProcessStatus('7 (bash) S 1'))).toBe(true)
+    expect(Option.isNone(parseProcessStatus('7 (bash) S 1 not-a-number'))).toBe(true)
   })
 })
 
