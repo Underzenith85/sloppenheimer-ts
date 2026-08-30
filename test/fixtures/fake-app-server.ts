@@ -4,6 +4,7 @@
 
 import { spawn } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 
 type JsonRecord = Record<string, unknown>
 
@@ -29,6 +30,20 @@ const isJsonRecord = (value: unknown): value is JsonRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const isUnknownArray = (value: unknown): value is readonly unknown[] => Array.isArray(value)
+
+const expectedArgument: unknown = process.argv[3] === undefined ? null : JSON.parse(process.argv[3])
+const expectedApprovalPolicy =
+  isJsonRecord(expectedArgument) && typeof expectedArgument['approvalPolicy'] === 'string'
+    ? expectedArgument['approvalPolicy']
+    : 'never'
+const expectedThreadSandbox =
+  isJsonRecord(expectedArgument) && typeof expectedArgument['threadSandbox'] === 'string'
+    ? expectedArgument['threadSandbox']
+    : 'workspace-write'
+const expectedTurnSandboxPolicy =
+  isJsonRecord(expectedArgument) && isJsonRecord(expectedArgument['turnSandboxPolicy'])
+    ? expectedArgument['turnSandboxPolicy']
+    : null
 
 const rejectRequest = (id: unknown, message: string): void => {
   send({ id, error: { code: -32602, message } })
@@ -60,8 +75,9 @@ const hasThreadPayload = (params: unknown): params is JsonRecord & Readonly<{ cw
   isJsonRecord(params) &&
   typeof params['cwd'] === 'string' &&
   params['cwd'].length > 0 &&
-  params['approvalPolicy'] === 'never' &&
-  params['sandbox'] === 'workspace-write' &&
+  params['cwd'] === process.cwd() &&
+  params['approvalPolicy'] === expectedApprovalPolicy &&
+  params['sandbox'] === expectedThreadSandbox &&
   params['serviceName'] === 'symphony_ts'
 
 const hasTurnPayload = (params: unknown): boolean => {
@@ -70,6 +86,11 @@ const hasTurnPayload = (params: unknown): boolean => {
   }
   const [input, ...additionalInputs] = params['input']
   const sandboxPolicy = params['sandboxPolicy']
+  const requiredSandboxPolicy = expectedTurnSandboxPolicy ?? {
+    type: 'workspaceWrite',
+    writableRoots: [workspaceCwd],
+    networkAccess: true,
+  }
   return (
     isJsonRecord(input) &&
     additionalInputs.length === 0 &&
@@ -78,13 +99,8 @@ const hasTurnPayload = (params: unknown): boolean => {
     input['text'].length > 0 &&
     params['threadId'] === thread.id &&
     params['cwd'] === workspaceCwd &&
-    params['approvalPolicy'] === 'never' &&
-    isJsonRecord(sandboxPolicy) &&
-    sandboxPolicy['type'] === 'workspaceWrite' &&
-    isUnknownArray(sandboxPolicy['writableRoots']) &&
-    sandboxPolicy['writableRoots'].length === 1 &&
-    sandboxPolicy['writableRoots'][0] === workspaceCwd &&
-    sandboxPolicy['networkAccess'] === true
+    params['approvalPolicy'] === expectedApprovalPolicy &&
+    isDeepStrictEqual(sandboxPolicy, requiredSandboxPolicy)
   )
 }
 
@@ -201,6 +217,15 @@ const handleTurnStart = (id: unknown, params: unknown): void => {
     case 'approval': {
       send({ id, result: { turn } })
       send({ id: 9001, method: 'item/commandExecution/requestApproval', params: { command: 'ls' } })
+      return
+    }
+    case 'file-approval': {
+      send({ id, result: { turn } })
+      send({
+        id: 9008,
+        method: 'item/fileChange/requestApproval',
+        params: { path: 'README.md' },
+      })
       return
     }
     case 'unsupported-request': {
@@ -497,7 +522,7 @@ const handle = (message: JsonRecord): void => {
     return
   }
   // Client responses to server-initiated requests.
-  if (id === 9001 || id === 9007 || id === 'approval-1') {
+  if (id === 9001 || id === 9007 || id === 9008 || id === 'approval-1') {
     send({ method: 'approval/observed', params: message })
     completeTurn()
     return

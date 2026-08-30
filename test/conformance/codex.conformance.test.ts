@@ -35,11 +35,19 @@ const runScenario = async (
   const workspacePath = join(workspaceRoot, 'fake')
   await mkdir(workspacePath)
   const events: AgentEvent[] = []
+  const configuredPolicies = scenario === 'configured-policies'
+  const expectation = configuredPolicies
+    ? {
+        approvalPolicy: 'on-request',
+        threadSandbox: 'read-only',
+        turnSandboxPolicy: { type: 'readOnly', networkAccess: false },
+      }
+    : undefined
   const config: CodexConfig = {
-    command: fakeAppServerCommand(scenario),
-    approvalPolicy: 'never',
-    threadSandbox: 'workspace-write',
-    turnSandboxPolicy: null,
+    command: fakeAppServerCommand(scenario, expectation),
+    approvalPolicy: expectation?.approvalPolicy ?? 'never',
+    threadSandbox: expectation?.threadSandbox ?? 'workspace-write',
+    turnSandboxPolicy: expectation?.turnSandboxPolicy ?? null,
     readTimeoutMs: scenario === 'read-timeout' ? timeoutMs : 1_000,
     turnTimeoutMs: scenario === 'turn-timeout' ? timeoutMs : 1_000,
     stallTimeoutMs: 0,
@@ -98,6 +106,18 @@ describe('Core Conformance Codex App Server client', (): void => {
     expect(events).toEqual(
       expect.arrayContaining([expect.objectContaining({ event: 'approval_auto_approved' })]),
     )
+  })
+
+  it('answers file-change approval requests according to the documented session policy', async (): Promise<void> => {
+    const { events } = await runScenario('file-approval')
+    expect(events).toEqual(
+      expect.arrayContaining([expect.objectContaining({ event: 'approval_auto_approved' })]),
+    )
+  })
+
+  it('preserves configured approval and sandbox policies', async (): Promise<void> => {
+    const { result } = await runScenario('configured-policies')
+    expect(result.turnCount).toBe(1)
   })
 
   it('rejects unsupported client requests without stalling the turn', async (): Promise<void> => {
