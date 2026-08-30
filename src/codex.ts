@@ -632,7 +632,9 @@ class CodexConnection {
     if (turn === null) {
       return
     }
-    const status = method === 'turn/failed' ? 'failed' : turn.status
+    // The reported status is the specific one — `cancelled`, say — so it always wins. `turn/failed`
+    // supplies `failed` only when the notification omitted it, since there the method says enough.
+    const status = turn.status ?? (method === 'turn/failed' ? 'failed' : null)
     if (status === null) {
       // The Turn schema requires `status`. Reading a missing one as success would hand off work
       // the server never reported as complete, so the turn fails with a legible reason instead.

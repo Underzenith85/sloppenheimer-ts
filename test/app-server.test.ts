@@ -265,6 +265,8 @@ describe('App Server session lifecycle', (): void => {
     const outcome = await runScenario('turn-cancelled')
 
     expect(outcome.error?.category).toBe('turn_failed')
+    // The specific status the server reported must survive; `turn/failed` does not flatten it.
+    expect(outcome.error?.message).toContain('cancelled')
   })
 
   it('surfaces a protocol error returned by thread/start', async (): Promise<void> => {
