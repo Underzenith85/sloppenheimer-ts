@@ -15,12 +15,12 @@ import {
   githubJson,
   githubMaxPages,
   githubPageSize,
-  isJsonArray,
   isJsonRecord,
   parseNextUrl,
   trackerPaginationError,
   trackerResponseError,
 } from './github-http.js'
+import { isJsonArray } from './json.js'
 import {
   githubAuthenticationEnvironmentNames,
   type GitHubProviderConfig,

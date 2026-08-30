@@ -4,6 +4,7 @@ import { Effect } from 'effect'
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
+import { isJsonObject, mergeSparseObject } from './json.js'
 import { makeRedactor, redact, redactionMarker, type Redactor } from './redaction.js'
 import {
   clientPayload,
@@ -36,9 +37,6 @@ const shutdownGraceMs = 5_000
 /** After `SIGKILL`, how long to wait for the group to vanish, and how often to look. */
 const groupReapDeadlineMs = 2_000
 const groupReapPollMs = 25
-
-const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (
@@ -146,16 +144,6 @@ const tokenTotalsFrom = (value: JsonValue | undefined): AgentEvent['usage'] => {
 const wrapperFrom = (params: JsonObject): JsonObject => {
   const message = params['msg']
   return isJsonObject(message) ? message : params
-}
-
-const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
-  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
-  for (const [key, value] of Object.entries(update)) {
-    const existing = merged[key]
-    merged[key] =
-      isJsonObject(existing) && isJsonObject(value) ? mergeSparseObject(existing, value) : value
-  }
-  return merged
 }
 
 export const telemetryFrom = (

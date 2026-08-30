@@ -5,12 +5,12 @@ import { TrackerError } from './errors.js'
 import {
   githubJson,
   githubPageSize,
-  isJsonArray,
   isJsonRecord,
   trackerResponseError,
   type JsonRecord,
 } from './github-http.js'
 import type { PullRequestObservation } from './handoff.js'
+import { isJsonArray } from './json.js'
 import type { GitHubProviderConfig } from './tracker-config.js'
 
 const isArray = isJsonArray

@@ -16,6 +16,7 @@ import {
 import { AgentError, type WorkflowError } from './errors.js'
 import { classifyPullRequest, type HandoffSnapshot } from './handoff.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
+import { mergeSparseObject } from './json.js'
 import { logError, logInfo, logWarning } from './logging.js'
 import {
   agentDetailPath,
@@ -383,21 +384,6 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_id: issue.id,
   issue_identifier: issue.identifier,
 })
-
-const isJsonObjectValue = (value: unknown): value is JsonObject =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
-  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
-  for (const [key, value] of Object.entries(update)) {
-    const existing = merged[key]
-    merged[key] =
-      isJsonObjectValue(existing) && isJsonObjectValue(value)
-        ? mergeSparseObject(existing, value)
-        : value
-  }
-  return merged
-}
 
 const sessionLogContext = (
   entry: RunningEntry,

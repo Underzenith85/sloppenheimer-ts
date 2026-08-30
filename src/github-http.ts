@@ -32,9 +32,6 @@ export const isJsonValue = (value: unknown): value is JsonValue => {
   return isJsonRecord(value) && Object.values(value).every(isJsonValue)
 }
 
-export const isJsonArray = (value: JsonValue | undefined): value is readonly JsonValue[] =>
-  Array.isArray(value)
-
 export const trackerResponseError = (message: string, cause?: unknown): TrackerError =>
   new TrackerError({
     category: 'tracker_response',
