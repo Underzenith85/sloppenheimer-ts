@@ -161,6 +161,15 @@ describe('port layer composition', (): void => {
               Layer.succeed(CodeReviewFactory, {
                 make: () =>
                   Effect.succeed({
+                    toolSpecs: [],
+                    executeTool: async (name) => ({
+                      success: false,
+                      error: {
+                        code: 'unsupported_tool' as const,
+                        message: `Unsupported host tool: ${name}`,
+                        retryable: false,
+                      },
+                    }),
                     handoffCompletedWork: () =>
                       Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
                     findExistingHandoff: () =>

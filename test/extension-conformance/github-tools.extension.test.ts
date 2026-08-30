@@ -6,9 +6,10 @@ import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent, type AgentEvent } from '../../src/codex.js'
+import { makeHostToolSession } from '../../src/core/dispatch.js'
 import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
-import { makeGitHubTracker } from '../../src/tracker.js'
+import { makeGitHubCodeReview, makeGitHubTracker } from '../../src/tracker.js'
 import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
 
@@ -74,16 +75,40 @@ const configFor = (scenario: string, dynamicTools: readonly JsonValue[]): CodexC
 })
 
 describe('GitHub provider-native tool extension', (): void => {
-  it('publishes a compact mutation-only profile and validates arguments exactly', async (): Promise<void> => {
+  it('publishes capability-scoped profiles and rejects disabled code-review tools', async (): Promise<void> => {
     const tracker = makeGitHubTracker(provider)
+    const codeReview = makeGitHubCodeReview(provider)
 
     expect(tracker.toolSpecs.map((tool) => tool.name)).toEqual([
+      'github_add_comment',
+      'github_handoff_issue',
+    ])
+    expect(codeReview.toolSpecs.map((tool) => tool.name)).toEqual(['github_link_pull_request'])
+
+    const disabledSession = makeHostToolSession({ tracker, codeReview: null }, issue)
+    expect(disabledSession.specs.map((tool) => tool.name)).toEqual([
+      'github_add_comment',
+      'github_handoff_issue',
+    ])
+    expect(
+      await disabledSession.execute(
+        'github_link_pull_request',
+        { pull_request_number: 7 },
+        toolContext,
+      ),
+    ).toMatchObject({
+      success: false,
+      error: { code: 'unsupported_tool', retryable: false },
+    })
+
+    const enabledSession = makeHostToolSession({ tracker, codeReview }, issue)
+    expect(enabledSession.specs.map((tool) => tool.name)).toEqual([
       'github_add_comment',
       'github_handoff_issue',
       'github_link_pull_request',
     ])
     await expect(
-      tracker.executeTool(
+      enabledSession.execute(
         'github_add_comment',
         { body: 'hello', token: 'model-value' },
         toolContext,
@@ -92,7 +117,7 @@ describe('GitHub provider-native tool extension', (): void => {
       success: false,
       error: { code: 'invalid_arguments', retryable: false },
     })
-    await expect(tracker.executeTool('github_unknown', {}, toolContext)).resolves.toMatchObject({
+    expect(await enabledSession.execute('github_unknown', {}, toolContext)).toMatchObject({
       success: false,
       error: { code: 'unsupported_tool', retryable: false },
     })
@@ -199,18 +224,20 @@ describe('GitHub provider-native tool extension', (): void => {
     }
     try {
       const tracker = makeGitHubTracker(provider)
+      const codeReview = makeGitHubCodeReview(provider)
+      const hostTools = makeHostToolSession({ tracker, codeReview }, issue)
       await expect(
-        tracker.executeTool('github_add_comment', { body: 'status update' }, toolContext),
+        hostTools.execute('github_add_comment', { body: 'status update' }, toolContext),
       ).resolves.toMatchObject({ success: true })
       await expect(
-        tracker.executeTool(
+        hostTools.execute(
           'github_handoff_issue',
           { state: 'closed', add_labels: ['done'], remove_labels: ['symphony'] },
           toolContext,
         ),
       ).resolves.toMatchObject({ success: true })
       await expect(
-        tracker.executeTool('github_link_pull_request', { pull_request_number: 7 }, toolContext),
+        hostTools.execute('github_link_pull_request', { pull_request_number: 7 }, toolContext),
       ).resolves.toMatchObject({
         success: true,
         data: { issue_number: 20, pull_request_number: 7 },
