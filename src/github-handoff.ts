@@ -15,6 +15,67 @@ import type { GitHubProviderConfig } from './tracker-config.js'
 
 const isArray = isJsonArray
 
+const safeValueType = (value: JsonValue | undefined): string => {
+  if (value === undefined) {
+    return 'missing'
+  }
+  if (value === null) {
+    return 'null'
+  }
+  if (Array.isArray(value)) {
+    return 'array'
+  }
+  return typeof value
+}
+
+const pullRequestFieldError = (
+  number: number,
+  field: string,
+  expected: string,
+  value: JsonValue | undefined,
+): TrackerError =>
+  new TrackerError({
+    category: 'tracker_response',
+    message: `GitHub pull request #${String(number)} field ${JSON.stringify(field)} is invalid: expected ${expected}, received ${safeValueType(value)}`,
+    retryable: false,
+  })
+
+const requiredString = (number: number, field: string, value: JsonValue | undefined): string => {
+  if (typeof value !== 'string') {
+    throw pullRequestFieldError(number, field, 'string', value)
+  }
+  return value
+}
+
+const requiredBoolean = (number: number, field: string, value: JsonValue | undefined): boolean => {
+  if (typeof value !== 'boolean') {
+    throw pullRequestFieldError(number, field, 'boolean', value)
+  }
+  return value
+}
+
+const nullableString = (
+  number: number,
+  field: string,
+  value: JsonValue | undefined,
+): string | null => {
+  if (value !== null && typeof value !== 'string') {
+    throw pullRequestFieldError(number, field, 'string or null', value)
+  }
+  return value
+}
+
+const nullableBoolean = (
+  number: number,
+  field: string,
+  value: JsonValue | undefined,
+): boolean | null => {
+  if (value !== null && typeof value !== 'boolean') {
+    throw pullRequestFieldError(number, field, 'boolean or null', value)
+  }
+  return value
+}
+
 const record = (value: JsonValue | undefined | null, message: string): JsonRecord => {
   if (value === undefined || value === null || !isJsonRecord(value)) {
     throw trackerResponseError(message)
@@ -123,31 +184,48 @@ export const makeGitHubPullRequestMonitor = (
     inspect: (number) =>
       guarded(
         Effect.gen(function* () {
-          const pull = record(
-            yield* json(provider, `${prefix}/pulls/${String(number)}`),
-            'GitHub pull request is invalid',
-          )
-          const head = record(pull['head'], 'GitHub pull request head is missing')
-          const headSha = head['sha']
-          const url = pull['html_url']
-          const merged = pull['merged']
-          const mergeable = pull['mergeable']
-          const mergeState = pull['mergeable_state']
-          const mergeCommitSha = pull['merge_commit_sha']
-          if (
-            typeof headSha !== 'string' ||
-            typeof url !== 'string' ||
-            typeof merged !== 'boolean' ||
-            (mergeable !== null && typeof mergeable !== 'boolean') ||
-            typeof mergeState !== 'string' ||
-            (mergeCommitSha !== null && typeof mergeCommitSha !== 'string')
-          ) {
-            throw new TrackerError({
-              category: 'tracker_response',
-              message: 'GitHub pull request status is incomplete',
-              retryable: false,
-            })
+          const pullValue = yield* json(provider, `${prefix}/pulls/${String(number)}`)
+          if (!isJsonRecord(pullValue)) {
+            throw pullRequestFieldError(number, 'response', 'object', pullValue)
           }
+          const pull = pullValue
+          const merged = requiredBoolean(number, 'merged', pull['merged'])
+          if (merged) {
+            const head = pull['head']
+            const headSha =
+              isJsonRecord(head) && typeof head['sha'] === 'string' ? head['sha'] : null
+            const mergeCommitSha =
+              typeof pull['merge_commit_sha'] === 'string' ? pull['merge_commit_sha'] : null
+            return {
+              number,
+              url: typeof pull['html_url'] === 'string' ? pull['html_url'] : null,
+              headSha,
+              merged: true,
+              mergeCommitSha,
+              mergeable:
+                pull['mergeable'] === null || typeof pull['mergeable'] === 'boolean'
+                  ? pull['mergeable']
+                  : null,
+              mergeState:
+                typeof pull['mergeable_state'] === 'string' ? pull['mergeable_state'] : null,
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }
+          }
+          const headValue = pull['head']
+          if (!isJsonRecord(headValue)) {
+            throw pullRequestFieldError(number, 'head', 'object', headValue)
+          }
+          const headSha = requiredString(number, 'head.sha', headValue['sha'])
+          const url = requiredString(number, 'html_url', pull['html_url'])
+          const mergeCommitSha = nullableString(
+            number,
+            'merge_commit_sha',
+            pull['merge_commit_sha'],
+          )
+          const mergeable = nullableBoolean(number, 'mergeable', pull['mergeable'])
+          const mergeState = requiredString(number, 'mergeable_state', pull['mergeable_state'])
           const checksResponse = record(
             yield* json(
               provider,
@@ -185,7 +263,7 @@ export const makeGitHubPullRequestMonitor = (
             number,
             url,
             headSha,
-            merged,
+            merged: false,
             mergeCommitSha,
             mergeable,
             mergeState,

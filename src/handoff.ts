@@ -12,18 +12,32 @@ export type PullRequestReviewThread = Readonly<{
   url: string | null
 }>
 
-export type PullRequestObservation = Readonly<{
+type PullRequestObservationDetails = Readonly<{
   number: number
-  url: string
-  headSha: string
-  merged: boolean
-  mergeCommitSha: string | null
-  mergeable: boolean | null
-  mergeState: string
   checks: readonly PullRequestCheck[]
   reviewDecision: string | null
   reviewThreads: readonly PullRequestReviewThread[]
 }>
+
+export type PullRequestObservation = PullRequestObservationDetails &
+  (
+    | Readonly<{
+        url: string | null
+        headSha: string | null
+        merged: true
+        mergeCommitSha: string | null
+        mergeable: boolean | null
+        mergeState: string | null
+      }>
+    | Readonly<{
+        url: string
+        headSha: string
+        merged: false
+        mergeCommitSha: string | null
+        mergeable: boolean | null
+        mergeState: string
+      }>
+  )
 
 export type HandoffDisposition =
   | Readonly<{ state: 'merged'; mergeCommitSha: string | null }>

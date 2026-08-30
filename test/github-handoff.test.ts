@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { makeGitHubPullRequestMonitor } from '../src/github-handoff.js'
 import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
+import { classifyPullRequest } from '../src/handoff.js'
 import { issueBranchName, makeGitHubTracker } from '../src/tracker.js'
 import type { GitHubProviderConfig } from '../src/workflow.js'
 
@@ -130,6 +131,84 @@ describe('GitHub pull request handoff', (): void => {
 })
 
 describe('GitHub pull request monitor', (): void => {
+  it('accepts a merged pull request with an omitted merge SHA', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> =>
+      Response.json({
+        merged: true,
+        mergeable: null,
+        mergeable_state: 'unknown',
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(44))
+
+    expect(classifyPullRequest(result)).toEqual({ state: 'merged', mergeCommitSha: null })
+    expect(result).toMatchObject({
+      number: 44,
+      url: null,
+      headSha: null,
+      merged: true,
+      mergeCommitSha: null,
+      mergeable: null,
+      mergeState: 'unknown',
+      checks: [],
+      reviewThreads: [],
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    {
+      name: 'missing merged status',
+      response: { merge_commit_sha: null },
+      message:
+        'GitHub pull request #44 field "merged" is invalid: expected boolean, received missing',
+    },
+    {
+      name: 'invalid head SHA',
+      response: {
+        html_url: 'https://github.test/example/symphony/pull/44',
+        head: { sha: 42 },
+        merged: false,
+        merge_commit_sha: null,
+        mergeable: true,
+        mergeable_state: 'clean',
+      },
+      message:
+        'GitHub pull request #44 field "head.sha" is invalid: expected string, received number',
+    },
+    {
+      name: 'invalid open mergeability',
+      response: {
+        html_url: 'https://github.test/example/symphony/pull/44',
+        head: { sha: 'sensitive-head-value' },
+        merged: false,
+        merge_commit_sha: null,
+        mergeable: 'sensitive-payload-value',
+        mergeable_state: 'clean',
+      },
+      message:
+        'GitHub pull request #44 field "mergeable" is invalid: expected boolean or null, received string',
+    },
+  ])('reports a typed field error for $name', async ({ response, message }): Promise<void> => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (): Promise<Response> => Response.json(response)),
+    )
+
+    const error = await Effect.runPromise(
+      Effect.flip(makeGitHubPullRequestMonitor(provider).inspect(44)),
+    )
+
+    expect(error).toMatchObject({
+      category: 'tracker_response',
+      message,
+      retryable: false,
+    })
+    expect(error.message).not.toContain('sensitive')
+  })
+
   it('reads the exact head, checks, and unresolved review threads', async (): Promise<void> => {
     vi.stubGlobal(
       'fetch',

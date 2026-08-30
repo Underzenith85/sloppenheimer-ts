@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import { classifyPullRequest, type PullRequestObservation } from '../src/handoff.js'
 
-const observation = (overrides: Partial<PullRequestObservation> = {}): PullRequestObservation => ({
+type OpenPullRequestObservation = Extract<PullRequestObservation, { merged: false }>
+
+const observation = (
+  overrides: Partial<OpenPullRequestObservation> = {},
+): OpenPullRequestObservation => ({
   number: 41,
   url: 'https://github.com/example/symphony/pull/41',
   headSha: 'abc123',
@@ -49,8 +53,8 @@ describe('pull request handoff state machine', (): void => {
       state: 'ready_to_merge',
       headSha: 'abc123',
     })
-    expect(classifyPullRequest(observation({ merged: true, mergeCommitSha: 'merged123' }))).toEqual(
-      { state: 'merged', mergeCommitSha: 'merged123' },
-    )
+    expect(
+      classifyPullRequest({ ...observation(), merged: true, mergeCommitSha: 'merged123' }),
+    ).toEqual({ state: 'merged', mergeCommitSha: 'merged123' })
   })
 })
