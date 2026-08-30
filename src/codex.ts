@@ -172,10 +172,6 @@ const messageFrom = (message: JsonObject, knownSecretValues: readonly string[]):
   if (isJsonObject(item) && item['type'] === 'agentMessage' && typeof item['text'] === 'string') {
     return boundedMessage(item['text'], knownSecretValues)
   }
-  const turn = params['turn']
-  if (isJsonObject(turn) && typeof turn['status'] === 'string') {
-    return `turn status=${turn['status']}`
-  }
   return null
 }
 

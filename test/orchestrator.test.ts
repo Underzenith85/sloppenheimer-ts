@@ -1126,7 +1126,12 @@ describe('session telemetry accounting', (): void => {
             makeAgentEvent({ event: 'item/completed', message: 'meaningful update', usage: null }),
           )
           harness.emitAgentEvent(
-            makeAgentEvent({ event: 'thread/tokenUsage/updated', message: null, usage: null }),
+            makeAgentEvent({
+              event: 'turn/completed',
+              message: null,
+              turnStatus: 'completed',
+              usage: null,
+            }),
           )
           yield* Effect.yieldNow()
           yield* Effect.yieldNow()
