@@ -465,6 +465,7 @@ class CodexConnection {
   async initialize(config: CodexConfig, cwd: string): Promise<string> {
     await this.#request('initialize', {
       clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
+      capabilities: { experimentalApi: true },
     })
     this.#notify('initialized', {})
     const rateLimitsResult = await this.#request('account/rateLimits/read', {})
@@ -494,16 +495,16 @@ class CodexConnection {
       turnCount: 0,
       turnStatus: null,
     })
-    const result = await this.#request('thread/start', {
+    const baseThreadParams: JsonObject = {
       cwd,
       approvalPolicy: config.approvalPolicy,
       sandbox: config.threadSandbox,
       serviceName: 'symphony_ts',
-      dynamicTools:
-        this.#hostTools === null
-          ? []
-          : this.#hostTools.specs.map((spec) => ({ type: 'function', ...spec })),
-    })
+    }
+    const dynamicTools = this.#hostTools?.specs.map((spec) => ({ type: 'function', ...spec })) ?? []
+    const threadParams: JsonObject =
+      dynamicTools.length === 0 ? baseThreadParams : { ...baseThreadParams, dynamicTools }
+    const result = await this.#request('thread/start', threadParams)
     if (
       !isJsonObject(result) ||
       !isJsonObject(result['thread']) ||
