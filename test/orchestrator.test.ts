@@ -119,6 +119,15 @@ describe('orchestrator policies', (): void => {
     expect(issueIsRoutable(makeIssue('GH-2', 1, null, ['symphony']), workflow)).toBe(false)
   })
 
+  it('rejects a provider record marked non-dispatchable at the scheduler boundary', (): void => {
+    const issue = {
+      ...makeIssue('GH-3', 1, null, ['symphony', 'ready']),
+      dispatchable: false,
+    }
+
+    expect(issueIsRoutable(issue, workflow)).toBe(false)
+  })
+
   it('does not route an issue until its final native blocker is terminal', (): void => {
     const openBlocker: BlockerRef = {
       id: '101',
@@ -1261,8 +1270,16 @@ describe('session telemetry accounting', (): void => {
     const issue = makeIssue('example/symphony#23', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [issue])
     let handoffCount = 0
+    let afterRunCount = 0
     const dependencies: OrchestratorDependencies = {
       ...harness.dependencies,
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        afterRun: () =>
+          Effect.sync(() => {
+            afterRunCount += 1
+          }),
+      }),
       makeTracker: (effectiveWorkflow) => ({
         ...harness.dependencies.makeTracker(effectiveWorkflow),
         handoffCompletedWork: () =>
@@ -1286,6 +1303,7 @@ describe('session telemetry accounting', (): void => {
           }
 
           expect(handoffCount).toBe(1)
+          expect(afterRunCount).toBe(1)
           expect(snapshot.running).toEqual([])
           expect(snapshot.retrying).toHaveLength(1)
           expect(snapshot.retrying[0]).toMatchObject({
