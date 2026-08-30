@@ -24,7 +24,13 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/domain/violates-adapters.ts': "import '../adapters/github/tracker.js'\n",
   'src/domain/violates-config.ts': "import '../config/workflow.js'\n",
   'src/domain/violates-operator.ts': "import '../operator/operator.js'\n",
+  'src/domain/violates-root.ts': "import '../telemetry.js'\n",
   'src/domain/permitted.ts': "import '../support/json.js'\n",
+  // The migration allow-list keeps the error vocabulary reachable from domain/.  #91 put the
+  // workspace containment rules here and they reject by constructing a `WorkspaceError`, so this
+  // entry admits a runtime import; the rest of the `src/` root stays denied above.
+  'src/domain/permitted-allow-list.ts':
+    "import { WorkspaceError } from '../errors.js'\n\nexport const reject = WorkspaceError\n",
 
   // ports/ may use domain/ and support/ and nothing else.
   'src/ports/violates-config.ts': "import '../config/cli-options.js'\n",
@@ -51,7 +57,16 @@ const fixtures: Readonly<Record<string, string>> = {
     "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps the modules #84 left at the `src/` root reachable from core/.
   'src/core/permitted-allow-list.ts':
-    "import '../codex.js'\nimport '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\nimport '../tracker.js'\nimport '../workspace.js'\n",
+    "import '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\n",
+  // #89 retired Codex's entry: the backend now lives under adapters/ behind the agent-runner port,
+  // so a root module of that name is no longer a module core may reach for.
+  'src/core/violates-retired-codex-allow-list.ts': "import '../codex.js'\n",
+  // #90 retired the tracker's entry for the same reason: the GitHub tracker and code-review
+  // implementations now live under adapters/ behind their ports.
+  'src/core/violates-retired-tracker-allow-list.ts': "import '../tracker.js'\n",
+  // #91 retired the workspace entry the same way: the manager and the hooks live under adapters/,
+  // and the containment rules core still calls moved down into domain/.
+  'src/core/violates-retired-workspace-allow-list.ts': "import '../workspace.js'\n",
 
   // adapters/ is restricted as an import target, never as a source, and the `src/` root is the
   // composition root that deliberately binds concrete adapters.

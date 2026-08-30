@@ -12,7 +12,7 @@ import {
   type TokenTotals,
 } from '../domain/domain.js'
 import { WorkflowError } from '../errors.js'
-import { classifyPullRequest, type HandoffSnapshot } from '../domain/handoff.js'
+import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
 import { mergeSparseObject } from '../support/json.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -29,14 +29,16 @@ import {
   type AgentDetailStatus,
   type AgentEvent,
 } from '../telemetry.js'
-import { issueBranchName, type CodeReviewPort, type TrackerPort } from '../tracker.js'
 import { type loadWorkflow, type Workflow } from '../config/workflow.js'
-import { workspaceKey, type WorkspaceManager } from '../workspace.js'
+import { workspaceKey } from '../domain/workspace-containment.js'
 import type {
   AgentEventSemantics,
   AgentRunnerConfig,
   AgentRunnerPort,
 } from '../ports/agent-runner.js'
+import type { CodeReviewPort } from '../ports/code-review.js'
+import type { TrackerPort } from '../ports/tracker.js'
+import type { WorkspaceManagerPort } from '../ports/workspace.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 
@@ -77,7 +79,22 @@ export type HandoffEntry = {
   state: HandoffSnapshot['state']
   headSha: string | null
   reason: string | null
-  repairAttempts: number
+  /** Distinct heads observed after a repair agent finished; its length is the verified repair count. */
+  repairHeadShas: string[]
+  /**
+   * Every head this handoff has been observed at, baselines included. Cycle detection reads this
+   * rather than repairHeadShas, which counts only post-repair heads and so never holds the head a
+   * repair started from.
+   */
+  repairObservedHeadShas: string[]
+  /** Head observed when the in-flight repair was dispatched, or null when no repair is running. */
+  repairStartedHeadSha: string | null
+  /**
+   * Whether repairStartedHeadSha came back from the store rather than from a dispatch in this
+   * process. Not persisted: a restored baseline proves a repair started, never that it finished,
+   * so an unchanged head means the repair was interrupted rather than a no-op.
+   */
+  repairBaselineRestored: boolean
   reviewRequestedHeadSha: string | null
   reviewCompletedHeadSha: string | null
   observedAt: Date
@@ -239,7 +256,7 @@ export type EffectiveWorkflow = Readonly<{
   workflow: Workflow
   tracker: TrackerPort
   codeReview: CodeReviewPort | null
-  workspaces: WorkspaceManager
+  workspaces: WorkspaceManagerPort
   loadedAt: Date
 }>
 
@@ -251,7 +268,7 @@ export type ExecutionSnapshot = Readonly<{
   activeStates: readonly string[]
   terminalStates: readonly string[]
   secretEnvironmentNames: readonly string[]
-  workspaces: WorkspaceManager
+  workspaces: WorkspaceManagerPort
   workspaceRoot: string
   prompt: string
   agentRunner: AgentRunnerConfig
@@ -286,7 +303,7 @@ export type OrchestratorDependencies = Readonly<{
   makeTracker: (workflow: Workflow) => TrackerPort
   /** Omit the factory to disable pull-request handoff and use continuation turns only. */
   makeCodeReview?: (workflow: Workflow) => CodeReviewPort | null
-  makeWorkspaces: (workflow: Workflow) => WorkspaceManager
+  makeWorkspaces: (workflow: Workflow) => WorkspaceManagerPort
   runAgent: AgentRunnerPort['run']
   /**
    * The injected runner's own reading of its turn statuses. It travels with `runAgent` so a
@@ -804,7 +821,10 @@ export const startOrchestratorRuntime = (
         state: handoff.state,
         headSha: handoff.headSha,
         reason: handoff.reason,
-        repairAttempts: handoff.repairAttempts,
+        repairAttempts: handoff.repairHeadShas.length,
+        repairHeadShas: [...handoff.repairHeadShas],
+        repairObservedHeadShas: [...handoff.repairObservedHeadShas],
+        repairStartedHeadSha: handoff.repairStartedHeadSha,
         reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
         reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
         observedAt: handoff.observedAt.toISOString(),
@@ -869,10 +889,32 @@ export const startOrchestratorRuntime = (
             pullRequestNumber,
             pullRequestUrl: restored.pullRequestUrl,
             branchName: restored.branchName,
-            state: restored.state,
+            state:
+              restored.repairHeadShas === undefined &&
+              restored.state === 'intervention_required' &&
+              restored.reason?.startsWith('Repair limit reached.') === true
+                ? 'repair_needed'
+                : restored.state,
             headSha: restored.headSha,
             reason: restored.reason,
-            repairAttempts: restored.repairAttempts,
+            // Legacy snapshots conflated worker retries with repairs. An absent head list migrates
+            // to zero verified repairs rather than preserving a contaminated counter.
+            repairHeadShas: [...(restored.repairHeadShas ?? [])],
+            // A legacy snapshot has no observed set; its post-repair heads plus any in-flight
+            // baseline are the most it can honestly contribute.
+            repairObservedHeadShas: [
+              ...new Set([
+                ...(restored.repairObservedHeadShas ?? restored.repairHeadShas ?? []),
+                ...(restored.repairStartedHeadSha === undefined ||
+                restored.repairStartedHeadSha === null
+                  ? []
+                  : [restored.repairStartedHeadSha]),
+              ]),
+            ],
+            // Preserved rather than cleared: a repair may have pushed a new head just before the
+            // restart, and the first observation after recovery needs this baseline to attribute it.
+            repairStartedHeadSha: restored.repairStartedHeadSha ?? null,
+            repairBaselineRestored: (restored.repairStartedHeadSha ?? null) !== null,
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
@@ -1127,7 +1169,10 @@ export const startOrchestratorRuntime = (
             state: disposition.state,
             headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
             reason: 'reason' in disposition ? disposition.reason : null,
-            repairAttempts: 0,
+            repairHeadShas: [],
+            repairObservedHeadShas: [],
+            repairStartedHeadSha: null,
+            repairBaselineRestored: false,
             reviewRequestedHeadSha: null,
             reviewCompletedHeadSha: null,
             observedAt,

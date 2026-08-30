@@ -41,6 +41,16 @@ export {
   type HandoffResult,
 } from './code-review.js'
 export {
+  CurrentIssueControl,
+  issueControlFor,
+  IssueControlFactory,
+  layerCurrentIssueControl,
+  layerIssueControlFactory,
+  type IssueControlCell,
+  type IssueControlFactoryPort,
+  type IssueControlPort,
+} from './issue-control.js'
+export {
   CurrentTracker,
   layerCurrentTracker,
   tracker,

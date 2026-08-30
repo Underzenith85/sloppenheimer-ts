@@ -10,14 +10,14 @@ import {
   runAgent,
   telemetryFrom,
   type AgentLaunch,
-} from '../src/codex.js'
-import { issueId, issueIdentifier, type Issue, type Workspace } from '../src/domain/domain.js'
-import type { CodexConfig } from '../src/config/workflow.js'
+} from '../../../src/adapters/codex/codex.js'
+import { issueId, issueIdentifier, type Issue, type Workspace } from '../../../src/domain/domain.js'
+import type { CodexConfig } from '../../../src/config/workflow.js'
 import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
   verifyWorkspaceForLaunch,
-} from '../src/workspace.js'
+} from '../../../src/adapters/node/workspace-identity.js'
 
 describe('Codex child environment', (): void => {
   it('removes custom tracker secrets and every GitHub authentication alias', (): void => {

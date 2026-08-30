@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { issueIdentifier } from '../../src/domain/domain.js'
 import type { HooksConfig } from '../../src/config/workflow.js'
-import { makeWorkspaceManager } from '../../src/workspace.js'
+import { makeWorkspaceManager } from '../../src/adapters/node/workspace-manager.js'
 
 const directories: string[] = []
 const makeRoot = async (): Promise<string> => {

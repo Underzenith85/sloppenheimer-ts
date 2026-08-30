@@ -34,15 +34,16 @@ export const makeHostToolSession = (
   })
 }
 
+/** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 export const dispatch = (
   context: OrchestratorContext,
   issue: Issue,
   attempt: number | null,
   effectiveOverride?: EffectiveWorkflow,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<boolean, never, Scope.Scope> =>
   Effect.gen(function* () {
     if (context.state.running.has(issue.id)) {
-      return
+      return false
     }
     context.state.claimed.add(issue.id)
     const retry = context.state.retries.get(issue.id)
@@ -70,7 +71,7 @@ export const dispatch = (
         error: preflight.error.message,
       })
       yield* context.scheduleRetryEffect(issue, (attempt ?? 0) + 1, preflight.error.message, false)
-      return
+      return false
     }
     const effective = preflight.value
     if (effectiveOverride === undefined && effective !== context.lastKnownGood) {
@@ -91,7 +92,7 @@ export const dispatch = (
         renderedPrompt.error.message,
         false,
       )
-      return
+      return false
     }
     const execution = context.captureExecutionSnapshotValue(effective, renderedPrompt.prompt)
     const hostTools = makeHostToolSession(execution, issue)
@@ -209,4 +210,5 @@ export const dispatch = (
       action: 'dispatch',
       outcome: 'started',
     })
+    return true
   })

@@ -2,7 +2,7 @@ import { Effect, Logger } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, type JsonObject } from '../src/domain/domain.js'
-import { makeGitHubTracker } from '../src/tracker.js'
+import { makeGitHubTracker } from '../src/adapters/github/issues.js'
 import type { GitHubProviderConfig } from '../src/config/tracker-config.js'
 
 const provider: GitHubProviderConfig = {
