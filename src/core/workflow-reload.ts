@@ -159,6 +159,9 @@ const heldInstances = (
  * reaches, not what a call already awaiting a response is using, so an instance a live run has used
  * stays held until that run ends — the reference alone cannot say whether a request is in flight
  * against it, and a host tool leaves Effect for a promise that no scope tracks.
+ *
+ * Only a run needs this. Everything a handoff calls its ports from runs on the event loop, which is
+ * the fiber that drains, so no handoff call can be in flight across a drain.
  */
 const supersededByLiveRun = (context: OrchestratorContext, instance: unknown): boolean =>
   [...context.supersededPorts.values()].some((ports) => ports.includes(instance))
@@ -196,9 +199,10 @@ const stillHeld = (context: OrchestratorContext, retirement: PendingRetirement):
  */
 export const drainRetirements = (context: OrchestratorContext): Effect.Effect<void> =>
   Effect.suspend(() => {
-    for (const id of [...context.supersededPorts.keys()]) {
-      if (!context.state.running.has(id) && !context.state.handoffs.has(id)) {
-        context.supersededPorts.delete(id)
+    const live = new Set([...context.state.running.values()].map((entry) => entry.runId))
+    for (const runId of [...context.supersededPorts.keys()]) {
+      if (!live.has(runId)) {
+        context.supersededPorts.delete(runId)
       }
     }
     const pending = context.pendingRetirements.splice(0)
@@ -222,26 +226,32 @@ export const adoptPorts = (
   next: EffectiveWorkflow,
 ): Effect.Effect<void> =>
   Effect.suspend(() => {
-    for (const [id, entry] of [...context.state.running, ...context.state.handoffs]) {
+    const adopted = (execution: ExecutionSnapshot): ExecutionSnapshot =>
+      Object.freeze({
+        ...execution,
+        tracker: next.tracker,
+        codeReview:
+          execution.codeReview === previous.codeReview ? next.codeReview : execution.codeReview,
+        secretEnvironmentNames: Object.freeze([...next.tracker.secretEnvironmentNames]),
+      })
+    for (const entry of context.state.running.values()) {
       if (entry.execution.tracker !== previous.tracker) {
         continue
       }
-      const superseded = context.supersededPorts.get(id) ?? []
-      superseded.push(
+      // Recorded before the swap: this run's own fibers may still be awaiting a call that read
+      // these, and nothing else will remember they were ever in use.
+      context.supersededPorts.set(entry.runId, [
+        ...(context.supersededPorts.get(entry.runId) ?? []),
         ...[entry.execution.tracker, entry.execution.codeReview].filter(
           (instance) => instance !== null,
         ),
-      )
-      context.supersededPorts.set(id, superseded)
-      entry.execution = Object.freeze({
-        ...entry.execution,
-        tracker: next.tracker,
-        codeReview:
-          entry.execution.codeReview === previous.codeReview
-            ? next.codeReview
-            : entry.execution.codeReview,
-        secretEnvironmentNames: Object.freeze([...next.tracker.secretEnvironmentNames]),
-      })
+      ])
+      entry.execution = adopted(entry.execution)
+    }
+    for (const entry of context.state.handoffs.values()) {
+      if (entry.execution.tracker === previous.tracker) {
+        entry.execution = adopted(entry.execution)
+      }
     }
     return drainRetirements(context)
   })

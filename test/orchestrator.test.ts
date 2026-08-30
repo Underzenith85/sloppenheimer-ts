@@ -2683,6 +2683,86 @@ describe('rebuilt port lifecycle', (): void => {
     )
   })
 
+  it("releases a run's superseded ports when it ends, even as its handoff lives on", async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    let markStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let finishWorker = (): void => undefined
+    const finished = new Promise<void>((resolve) => {
+      finishWorker = resolve
+    })
+    // An isolated root: this run really does hand off, so it reads and writes a handoff store.
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-superseded-handoff-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const harness = makeHarness(isolated, () => [issue], undefined, environment)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        handoffCompletedWork: () =>
+          Effect.succeed({
+            _tag: 'PullRequest' as const,
+            branchName: 'symphony/issue-1',
+            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+            pullRequestNumber: 65,
+            created: true,
+          }),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: 'handoff-head',
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: null,
+            mergeState: 'unknown',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+          }),
+        requestPullRequestReview: () => Effect.void,
+      }),
+      runAgent: () =>
+        Effect.sync(markStarted).pipe(
+          Effect.zipRight(Effect.promise(() => finished)),
+          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        ),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+          expect(harness.releasedTrackers()).toHaveLength(1)
+
+          finishWorker()
+          yield* control.refresh
+          yield* control.refresh
+          const snapshot = yield* control.snapshot
+
+          // The run has ended into a handoff under the same issue, and that handoff holds the
+          // adopted tracker — so what the run superseded is free while the pull request stays open.
+          expect(snapshot.handoffs).toHaveLength(1)
+          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
+            'secret',
+            'secret',
+          ])
+          return snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs[0]).toMatchObject({ state: 'awaiting_checks' })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('keeps the workspace manager a reload replaced until the worker holding it ends', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const initial = changedWorkflow({ fingerprint: 'initial' })
