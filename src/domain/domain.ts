@@ -1,3 +1,5 @@
+import type { JsonObject } from '../support/json.js'
+
 export type Brand<Value, Name extends string> = Value & {
   readonly __brand: Name
 }
@@ -5,9 +7,12 @@ export type Brand<Value, Name extends string> = Value & {
 export type IssueId = Brand<string, 'IssueId'>
 export type IssueIdentifier = Brand<string, 'IssueIdentifier'>
 
-export type JsonPrimitive = string | number | boolean | null
-export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[]
-export type JsonObject = Readonly<{ [key: string]: JsonValue }>
+/**
+ * The JSON structural vocabulary lives in `support/`, the bottom layer, so that the JSON
+ * predicates in `support/json.ts` do not have to reach up into `domain/`.  It is re-exported here
+ * because domain types describe tracker payloads in terms of it.
+ */
+export type { JsonObject, JsonPrimitive, JsonValue } from '../support/json.js'
 
 export type BlockerRef = Readonly<{
   id: string
