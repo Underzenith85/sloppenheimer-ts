@@ -42,6 +42,14 @@ const handleInitialize = (id: unknown): void => {
     }, 20)
     return
   }
+  if (scenario === 'pem-stderr-secret') {
+    process.stderr.write('PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n')
+    process.stderr.write('c2VjcmV0LXByaXZhdGUta2V5LWJvZHk=\n')
+    process.stderr.write('-----END PRIVATE KEY-----\n')
+  }
+  if (scenario === 'unterminated-stderr-secret') {
+    process.stderr.write('Authorization: Bearer final-secret')
+  }
   if (scenario === 'malformed') {
     sendRaw('this is not json\n')
     sendRaw('[1,2,3]\n')

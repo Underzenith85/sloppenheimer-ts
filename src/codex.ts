@@ -333,6 +333,7 @@ class CodexConnection {
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
   readonly #knownSecretValues: readonly string[]
+  readonly #flushStderr: () => void
   readonly #pending = new Map<number, PendingRequest>()
   /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
   readonly #settled = new Map<string, TurnSettlement>()
@@ -398,24 +399,51 @@ class CodexConnection {
     // stderr is diagnostic only and never parsed as protocol. Buffer complete records before
     // redaction: a chunk boundary between `Authorization:` and its value must not turn the value
     // into an unkeyed fragment that can escape the header redactor.
-    const readStderr = makeLineReader(
-      codexMaxLineBytes,
-      (line) => {
-        const message = line.trim()
-        if (message.length > 0) {
-          this.#emit('diagnostic', message)
+    let pemEndMarker: string | null = null
+    let pemPrefix = ''
+    const emitDiagnosticLine = (line: string): void => {
+      if (pemEndMarker !== null) {
+        if (line.includes(pemEndMarker)) {
+          this.#emit('diagnostic', `${pemPrefix}[REDACTED PEM PRIVATE KEY]`)
+          pemEndMarker = null
+          pemPrefix = ''
         }
-      },
-      () => {
-        this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
-      },
-    )
+        return
+      }
+      const pemStart = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/u.exec(line)
+      const label = pemStart?.[1]
+      if (pemStart !== null && label !== undefined) {
+        const endMarker = `-----END ${label}-----`
+        if (line.slice(pemStart.index + pemStart[0].length).includes(endMarker)) {
+          this.#emit('diagnostic', line.trim())
+          return
+        }
+        pemPrefix = line.slice(0, pemStart.index)
+        pemEndMarker = endMarker
+        return
+      }
+      const message = line.trim()
+      if (message.length > 0) {
+        this.#emit('diagnostic', message)
+      }
+    }
+    const readStderr = makeLineReader(codexMaxLineBytes, emitDiagnosticLine, () => {
+      this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
+    })
+    this.#flushStderr = (): void => {
+      readStderr(Buffer.from('\n'))
+      if (pemEndMarker !== null) {
+        this.#emit('diagnostic', `${pemPrefix}[REDACTED PEM PRIVATE KEY]`)
+        pemEndMarker = null
+        pemPrefix = ''
+      }
+    }
     this.#process.stderr.on('data', (chunk: Buffer) => {
       readStderr(chunk)
     })
     this.#process.stderr.once('end', () => {
       // Treat an unterminated final diagnostic as a complete record once the stream closes.
-      readStderr(Buffer.from('\n'))
+      this.#flushStderr()
     })
 
     this.#process.once('error', (cause) => {
@@ -631,6 +659,7 @@ class CodexConnection {
     if (this.#closed) {
       return
     }
+    this.#flushStderr()
     this.#emit('session_stopped', null)
     this.#closed = true
     this.#fail(

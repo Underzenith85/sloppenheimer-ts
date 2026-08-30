@@ -419,6 +419,27 @@ describe('App Server request handling', (): void => {
     expect(JSON.stringify(diagnostics)).not.toContain('split-secret')
   })
 
+  it('suppresses every line of a multiline PEM diagnostic', async (): Promise<void> => {
+    const outcome = await runScenario('pem-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('PRIVATE_KEY=[REDACTED]')
+    expect(JSON.stringify(diagnostics)).not.toContain('c2VjcmV0LXByaXZhdGUta2V5LWJvZHk')
+    expect(JSON.stringify(diagnostics)).not.toContain('END PRIVATE KEY')
+  })
+
+  it('flushes an unterminated final stderr record before shutdown', async (): Promise<void> => {
+    const outcome = await runScenario('unterminated-stderr-secret')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    expect(diagnostics).toContain('Authorization=[REDACTED]')
+    expect(JSON.stringify(diagnostics)).not.toContain('final-secret')
+  })
+
   it('records absolute token usage reported during a turn', async (): Promise<void> => {
     const outcome = await runScenario('usage')
 
