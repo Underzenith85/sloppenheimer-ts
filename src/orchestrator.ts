@@ -418,7 +418,7 @@ export const startOrchestrator = (
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
     const pendingUsage = new Map<IssueId, NonNullable<AgentEvent['usage']>>()
-    const pendingRateLimits = new Map<IssueId, JsonObject>()
+    let pendingRateLimits: JsonObject | null = null
     const handoffStorePath = resolve(
       lastKnownGood.workflow.config.workspaceRoot,
       '.symphony',
@@ -701,7 +701,7 @@ export const startOrchestrator = (
                       pendingUsage.set(issue.id, update.usage)
                     }
                     if (update.rateLimits !== null) {
-                      pendingRateLimits.set(issue.id, update.rateLimits)
+                      pendingRateLimits = update.rateLimits
                     }
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
@@ -902,12 +902,11 @@ export const startOrchestrator = (
           totalTokens: Math.max(entry.tokens.totalTokens, usage.totalTokens),
         }
       }
-      const rateLimits = pendingRateLimits.get(id)
-      if (rateLimits !== undefined) {
-        state.rateLimits = rateLimits
+      if (pendingRateLimits !== null) {
+        state.rateLimits = pendingRateLimits
+        pendingRateLimits = null
       }
       pendingUsage.delete(id)
-      pendingRateLimits.delete(id)
     }
 
     const cancelRunning = (
@@ -1213,6 +1212,9 @@ export const startOrchestrator = (
               }
               if (event.update.rateLimits !== null) {
                 state.rateLimits = event.update.rateLimits
+                if (pendingRateLimits === event.update.rateLimits) {
+                  pendingRateLimits = null
+                }
               }
               if (entry.sessionId !== null && event.update.event === 'session_started') {
                 yield* logInfo('action=session outcome=started', {

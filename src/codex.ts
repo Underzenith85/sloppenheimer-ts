@@ -841,6 +841,11 @@ class CodexConnection {
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? turn?.id ?? this.#turnId
+    const isTerminal = method === 'turn/completed' || method === 'turn/failed'
+    const terminalStatus =
+      isTerminal && turn !== null
+        ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
+        : null
     let usage = telemetry.usage
     if (method === 'turn/usage' && usage !== null && turnId !== null) {
       const previous = this.#turnUsage.get(turnId)
@@ -874,9 +879,9 @@ class CodexConnection {
       turnId,
       sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
       turnCount: this.#turnCount,
-      turnStatus: turn?.status ?? null,
+      turnStatus: terminalStatus,
     })
-    if (method !== 'turn/completed' && method !== 'turn/failed') {
+    if (!isTerminal) {
       return
     }
     if (turn === null) {
@@ -884,17 +889,19 @@ class CodexConnection {
     }
     // The reported status is the specific one — `cancelled`, say — so it always wins. `turn/failed`
     // supplies `failed` only when the notification omitted it, since there the method says enough.
-    const status = turn.status ?? (method === 'turn/failed' ? 'failed' : null)
-    if (status === null) {
+    if (turn.status === null && method === 'turn/completed') {
       // The Turn schema requires `status`. Reading a missing one as success would hand off work
       // the server never reported as complete, so the turn fails with a legible reason instead.
       this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
     }
     this.#settle(
       turn.id,
-      status === 'completed'
+      terminalStatus === 'completed'
         ? { _tag: 'completed' }
-        : { _tag: 'failed', error: CodexConnection.#turnFailure(turn.id, status ?? 'unreported') },
+        : {
+            _tag: 'failed',
+            error: CodexConnection.#turnFailure(turn.id, terminalStatus ?? 'unreported'),
+          },
       true,
     )
   }
