@@ -728,7 +728,7 @@ export const startOrchestrator = (
                       })
                     }
                     if (update.rateLimits !== null) {
-                      pendingRateLimits = update.rateLimits
+                      pendingRateLimits = mergeSparseObject(pendingRateLimits, update.rateLimits)
                     }
                     if (
                       update.event === 'session_started' ||
