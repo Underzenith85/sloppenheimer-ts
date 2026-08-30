@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import { Effect } from 'effect'
 
 import type { HandoffSnapshot } from './handoff.js'
+import { logWarning } from './logging.js'
 
 const isSnapshot = (value: unknown): value is HandoffSnapshot => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -49,8 +50,17 @@ export const loadHandoffs = (path: string): Effect.Effect<readonly HandoffSnapsh
         throw cause
       }
     },
-    catch: () => [],
-  }).pipe(Effect.catchAll(() => Effect.succeed([])))
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll((cause) =>
+      logWarning('handoff persistence load failed; continuing with empty state', {
+        action: 'handoff_load',
+        outcome: 'failed',
+        path,
+        error: cause instanceof Error ? cause.message : String(cause),
+      }).pipe(Effect.as<readonly HandoffSnapshot[]>([])),
+    ),
+  )
 
 export const saveHandoffs = (
   path: string,
@@ -65,5 +75,14 @@ export const saveHandoffs = (
       })
       await rename(temporaryPath, path)
     },
-    catch: () => undefined,
-  }).pipe(Effect.catchAll(() => Effect.void))
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll((cause) =>
+      logWarning('handoff persistence save failed; state was not persisted', {
+        action: 'handoff_save',
+        outcome: 'failed',
+        path,
+        error: cause instanceof Error ? cause.message : String(cause),
+      }),
+    ),
+  )

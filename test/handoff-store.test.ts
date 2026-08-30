@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect } from 'effect'
+import { Effect, Logger } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
@@ -42,5 +42,27 @@ describe('handoff persistence', (): void => {
     await expect(Effect.runPromise(loadHandoffs(join(directory, 'missing.json')))).resolves.toEqual(
       [],
     )
+  })
+
+  it('logs a failing write instead of silently discarding it', async (): Promise<void> => {
+    const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
+    directories.push(directory)
+    const path = join(directory, 'handoffs.json')
+    await mkdir(`${path}.tmp`)
+    const logs: string[] = []
+    const logger = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message }: Readonly<{ message: unknown }>) => {
+        logs.push(JSON.stringify(message))
+      }),
+    )
+
+    await expect(
+      Effect.runPromise(saveHandoffs(path, []).pipe(Effect.provide(logger))),
+    ).resolves.toBeUndefined()
+    expect(logs).toContainEqual(expect.stringContaining('handoff persistence save failed'))
+    expect(logs).toContainEqual(expect.stringContaining('handoff_save'))
+    expect(logs).toContainEqual(expect.stringContaining(path))
+    expect(logs).toContainEqual(expect.stringContaining('EISDIR'))
   })
 })
