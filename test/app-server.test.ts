@@ -531,6 +531,29 @@ describe('App Server timeouts and shutdown', (): void => {
     expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
   }, 40_000)
 
+  it('reaps a descendant left behind when the App Server itself dies', async (): Promise<void> => {
+    const outcome = await runScenario('orphan-after-crash', { turnTimeoutMs: 30_000 })
+    const grandchild = Number((await readFile(join(outcome.path, 'grandchild.pid'), 'utf8')).trim())
+
+    // The leader exiting is not shutdown completing: the descendant is still in its process group,
+    // and it ignores SIGTERM, so only a group-level escalation clears it.
+    expect(outcome.error?.category).toBe('process_exited')
+    expect(grandchild).toBeGreaterThan(0)
+    expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
+  }, 40_000)
+
+  it('does not let parseable garbage keep a silent turn alive', async (): Promise<void> => {
+    const outcome = await runScenario('garbage-heartbeat', { turnTimeoutMs: 600 })
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+  }, 30_000)
+
+  it('does not let traffic for an older turn keep the current one alive', async (): Promise<void> => {
+    const outcome = await runScenario('stale-turn-heartbeat', { turnTimeoutMs: 600 })
+
+    expect(outcome.error?.category).toBe('turn_timeout')
+  }, 30_000)
+
   it('settles a cancelled session once and leaves no process tree behind', async (): Promise<void> => {
     const { root, path } = await makeWorkspace()
     const config: CodexConfig = {

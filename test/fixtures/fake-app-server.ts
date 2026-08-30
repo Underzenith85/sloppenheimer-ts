@@ -208,6 +208,39 @@ const handleTurnStart = (id: unknown): void => {
       send({ id, result: { turn } })
       return
     }
+    case 'garbage-heartbeat': {
+      // Parseable but meaningless output, faster than the silence timeout. It must not keep the
+      // turn alive: a stuck server emitting `{}` is silence as far as the turn is concerned.
+      send({ id, result: { turn } })
+      setInterval(() => {
+        sendRaw('{}\n')
+      }, 40)
+      return
+    }
+    case 'stale-turn-heartbeat': {
+      // Steady traffic naming a turn that already ended. It belongs to no live turn and must not
+      // keep the current one alive.
+      send({ id, result: { turn } })
+      setInterval(() => {
+        send({
+          method: 'item/started',
+          params: { threadId: thread.id, turnId: 'turn-0', item: { id: 'stale' } },
+        })
+      }, 40)
+      return
+    }
+    case 'orphan-after-crash': {
+      // A descendant that ignores SIGTERM, then the App Server itself dies. Shutdown must still
+      // reap the group rather than treating the leader's exit as completion.
+      send({ id, result: { turn } })
+      const child = spawn('sh', ['-c', 'trap "" TERM; sleep 300'], { stdio: 'ignore' })
+      child.unref()
+      writeFileSync('grandchild.pid', String(child.pid ?? 0))
+      setTimeout(() => {
+        process.exit(7)
+      }, 60)
+      return
+    }
     case 'spawn-grandchild': {
       send({ id, result: { turn } })
       const child = spawn('sleep', ['300'], { stdio: 'ignore' })

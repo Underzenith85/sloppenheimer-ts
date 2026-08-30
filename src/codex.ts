@@ -450,14 +450,24 @@ class CodexConnection {
   }
 
   /**
-   * `codex.turn_timeout_ms` is a silence timeout, not a total turn budget: every valid protocol
-   * output belonging to the live session re-arms it, so a long but active turn never expires.
+   * `codex.turn_timeout_ms` is a silence timeout, not a total turn budget: protocol output that
+   * belongs to a turn re-arms that turn's timer, so a long but active turn never expires.
+   *
+   * Only validated, attributed output counts. Re-arming on anything parseable would let a stuck
+   * server hold a turn open forever by emitting `{}` faster than the timeout, and would let
+   * late traffic for an older turn keep the current one alive.
    */
-  #noteActivity(): void {
-    for (const [turnId, waiter] of this.#waiters) {
-      clearTimeout(waiter.timeout)
-      this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
+  #noteActivity(turnId: string | null): void {
+    const active = turnId ?? this.#turnId
+    if (active === null) {
+      return
     }
+    const waiter = this.#waiters.get(active)
+    if (waiter === undefined) {
+      return
+    }
+    clearTimeout(waiter.timeout)
+    this.#waiters.set(active, { ...waiter, timeout: this.#armTurnTimer(active) })
   }
 
   emitSessionStarted(issue: Issue): void {
@@ -487,20 +497,27 @@ class CodexConnection {
     this.#process.stdin.end()
     this.#terminate('SIGTERM')
     await new Promise<void>((resolvePromise) => {
-      if (this.#process.exitCode !== null || this.#process.signalCode !== null) {
+      // Shutdown is finished when the process *group* is empty, not when its leader exits. A tool
+      // the App Server started can outlive it in the same group — and does, if the server crashes
+      // while the tool ignores SIGTERM — so the leader's exit is not the completion signal and
+      // escalation is scheduled even when the leader has already gone.
+      if (!this.#processGroupIsAlive()) {
         resolvePromise()
         return
       }
-      // The escalation is not cancelled when the shell exits: a tool the App Server started can
-      // outlive it in the same process group. It is skipped when the group is already empty, so a
-      // recycled leader PID is never signalled.
-      setTimeout(() => {
+      // Skipped when the group is empty by then, so a recycled leader PID is never signalled.
+      const escalation = setTimeout(() => {
         if (this.#processGroupIsAlive()) {
           this.#terminate('SIGKILL')
         }
         resolvePromise()
-      }, shutdownGraceMs).unref()
+      }, shutdownGraceMs)
+      escalation.unref()
       this.#process.once('exit', () => {
+        if (this.#processGroupIsAlive()) {
+          return
+        }
+        clearTimeout(escalation)
         resolvePromise()
       })
     })
@@ -590,7 +607,6 @@ class CodexConnection {
       this.#emit('malformed', 'Codex emitted a non-object protocol message')
       return
     }
-    this.#noteActivity()
     const parsed = decoded
     const id = parsed['id']
     const method = parsed['method']
@@ -599,6 +615,8 @@ class CodexConnection {
       typeof method !== 'string' &&
       (parsed['result'] !== undefined || parsed['error'] !== undefined)
     ) {
+      // A response to a request Symphony sent is progress on the turn in flight.
+      this.#noteActivity(null)
       this.#settleResponse(id, parsed)
       return
     }
@@ -666,6 +684,8 @@ class CodexConnection {
     // request rather than from connection state, which is null on the first turn and names the
     // previous one afterwards.
     const identity = notificationIdentity(message)
+    // A server request belongs to a turn and is progress on it.
+    this.#noteActivity(identity.turnId)
     if (isPermissionsApproval(method)) {
       this.#write({ id, result: withheldPermissionsGrant })
       this.#emit('permissions_grant_withheld', method, identity)
@@ -701,6 +721,8 @@ class CodexConnection {
     // the response that would have taught the connection those ids.
     const threadId = carried.threadId ?? this.#threadId
     const turnId = carried.turnId ?? turn?.id ?? this.#turnId
+    // Re-arm the turn this notification belongs to, not whichever turn happens to be waiting.
+    this.#noteActivity(carried.turnId ?? turn?.id ?? null)
     this.#onEvent({
       event: method,
       timestamp: new Date(),
