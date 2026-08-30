@@ -30,7 +30,7 @@ import {
   type AgentEvent,
 } from '../telemetry.js'
 import { type loadWorkflow, type Workflow } from '../config/workflow.js'
-import { workspaceKey, type WorkspaceManager } from '../workspace.js'
+import { workspaceKey } from '../domain/workspace-containment.js'
 import type {
   AgentEventSemantics,
   AgentRunnerConfig,
@@ -38,6 +38,7 @@ import type {
 } from '../ports/agent-runner.js'
 import type { CodeReviewPort } from '../ports/code-review.js'
 import type { TrackerPort } from '../ports/tracker.js'
+import type { WorkspaceManagerPort } from '../ports/workspace.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 
@@ -255,7 +256,7 @@ export type EffectiveWorkflow = Readonly<{
   workflow: Workflow
   tracker: TrackerPort
   codeReview: CodeReviewPort | null
-  workspaces: WorkspaceManager
+  workspaces: WorkspaceManagerPort
   loadedAt: Date
 }>
 
@@ -267,7 +268,7 @@ export type ExecutionSnapshot = Readonly<{
   activeStates: readonly string[]
   terminalStates: readonly string[]
   secretEnvironmentNames: readonly string[]
-  workspaces: WorkspaceManager
+  workspaces: WorkspaceManagerPort
   workspaceRoot: string
   prompt: string
   agentRunner: AgentRunnerConfig
@@ -302,7 +303,7 @@ export type OrchestratorDependencies = Readonly<{
   makeTracker: (workflow: Workflow) => TrackerPort
   /** Omit the factory to disable pull-request handoff and use continuation turns only. */
   makeCodeReview?: (workflow: Workflow) => CodeReviewPort | null
-  makeWorkspaces: (workflow: Workflow) => WorkspaceManager
+  makeWorkspaces: (workflow: Workflow) => WorkspaceManagerPort
   runAgent: AgentRunnerPort['run']
   /**
    * The injected runner's own reading of its turn statuses. It travels with `runAgent` so a

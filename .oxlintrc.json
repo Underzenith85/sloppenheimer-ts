@@ -113,7 +113,17 @@
           {
             "patterns": [
               {
-                "group": ["../**", "!../support/**"],
+                "group": [
+                  "../**",
+                  "!../support/**",
+
+                  // Migration allow-list.  The error vocabulary is domain vocabulary that still
+                  // sits at the `src/` root; #91 moved the workspace containment rules into
+                  // domain/ and they reject by constructing a `WorkspaceError`, so unlike the
+                  // ports/ exemption this one cannot be held to `import type`.  It names one file,
+                  // so the rest of the root stays denied.
+                  "!../errors.js" // #109 moves the remaining root modules into their layers
+                ],
                 "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, operator/, adapters/, or the composition root."
               }
             ]
@@ -230,7 +240,6 @@
                   // sit at the `src/` root because #84 moved only the leaf modules.  Each entry is
                   // removed by the issue under #76 named beside it; none of them may be replaced by
                   // an import of `../adapters/**`, which stays denied above.
-                  "!../workspace.js", // #91 splits workspace.ts into containment policy, hooks, and manager
                   "!../telemetry.js", // #98 converts the telemetry record to pure reducers
                   "!../errors.js", // #109 moves the remaining root modules into their layers
                   "!../handoff-store.js", // #109 moves the remaining root modules into their layers
