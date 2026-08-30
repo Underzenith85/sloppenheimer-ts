@@ -1,4 +1,11 @@
-import { Effect } from 'effect'
+import * as FetchHttpClient from '@effect/platform/FetchHttpClient'
+import * as PlatformHeaders from '@effect/platform/Headers'
+import * as HttpBody from '@effect/platform/HttpBody'
+import * as HttpClient from '@effect/platform/HttpClient'
+import type * as HttpClientError from '@effect/platform/HttpClientError'
+import * as HttpClientRequest from '@effect/platform/HttpClientRequest'
+import type * as HttpMethod from '@effect/platform/HttpMethod'
+import { Effect, Layer, Option } from 'effect'
 
 import type { JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
@@ -33,6 +40,18 @@ export const trackerPaginationError = (message: string, cause?: unknown): Tracke
     ...(cause === undefined ? {} : { cause }),
   })
 
+/** Transport failures — connection, DNS, TLS, an aborted read, or the request deadline. */
+const trackerRequestError = (cause: unknown): TrackerError =>
+  new TrackerError({
+    category: 'tracker_request',
+    message: 'GitHub request failed',
+    retryable: true,
+    cause,
+  })
+
+const header = (headers: PlatformHeaders.Headers, name: string): string | null =>
+  Option.getOrNull(PlatformHeaders.get(headers, name))
+
 const parseRetryAfterMs = (value: string | null, now: number): number | null => {
   if (value === null) {
     return null
@@ -61,18 +80,18 @@ const parseRateLimitResetMs = (value: string | null, now: number): number | null
  * advertised delay as retry metadata when GitHub supplies one.
  */
 export const rateLimitError = (
-  headers: Headers,
+  headers: PlatformHeaders.Headers,
   status: number,
   now = Date.now(),
 ): TrackerError | null => {
-  const retryAfterMs = parseRetryAfterMs(headers.get('retry-after'), now)
-  const remaining = headers.get('x-ratelimit-remaining')
+  const retryAfterMs = parseRetryAfterMs(header(headers, 'retry-after'), now)
+  const remaining = header(headers, 'x-ratelimit-remaining')
   const exhausted = remaining !== null && /^0+$/u.test(remaining.trim())
   const limited = status === 429 || (status === 403 && (retryAfterMs !== null || exhausted))
   if (!limited) {
     return null
   }
-  const resetMs = parseRateLimitResetMs(headers.get('x-ratelimit-reset'), now)
+  const resetMs = parseRateLimitResetMs(header(headers, 'x-ratelimit-reset'), now)
   const delayMs = retryAfterMs ?? resetMs
   return new TrackerError({
     category: 'tracker_rate_limited',
@@ -96,16 +115,55 @@ export type GitHubHttpResult = Readonly<{
   linkHeader: string | null
 }>
 
-const githubHeaders = (provider: GitHubProviderConfig, init: RequestInit | undefined): Headers => {
-  const headers = new Headers(init?.headers)
-  headers.set('Accept', 'application/vnd.github+json')
-  headers.set('Authorization', `Bearer ${provider.token}`)
-  headers.set('User-Agent', githubUserAgent)
-  headers.set('X-GitHub-Api-Version', githubApiVersion)
-  if (init?.body !== undefined && init.body !== null) {
-    headers.set('Content-Type', 'application/json')
+export type GitHubRequestInit = Readonly<{
+  method?: HttpMethod.HttpMethod
+  /** An already-serialized JSON payload; the transport supplies its `Content-Type`. */
+  body?: string
+}>
+
+/**
+ * The client the transport uses when the caller has not provided one. The composition root and the
+ * adapter tests bind `HttpClient` through a layer; this is the standalone default.
+ */
+export const githubHttpClientLayer: Layer.Layer<HttpClient.HttpClient> = FetchHttpClient.layer
+
+/**
+ * Runs a request against the `HttpClient` in context, falling back to `githubHttpClientLayer`.
+ *
+ * The client is read as an optional service rather than left in the requirement channel because
+ * the adapter satisfies ports whose operations are `R = never`, and `executeTool` leaves Effect
+ * entirely for a promise. Reading it here keeps the client injectable through a layer at every
+ * call site without asking the ports to carry the requirement.
+ */
+const withGitHubHttpClient = <Value, Failure>(
+  effect: Effect.Effect<Value, Failure, HttpClient.HttpClient>,
+): Effect.Effect<Value, Failure> =>
+  Effect.flatMap(Effect.serviceOption(HttpClient.HttpClient), (provided) =>
+    Option.isSome(provided)
+      ? Effect.provideService(effect, HttpClient.HttpClient, provided.value)
+      : Effect.provide(effect, githubHttpClientLayer),
+  )
+
+const githubRequest = (
+  provider: GitHubProviderConfig,
+  url: string,
+  init: GitHubRequestInit | undefined,
+): HttpClientRequest.HttpClientRequest => {
+  const request = HttpClientRequest.make(init?.method ?? 'GET')(url).pipe(
+    HttpClientRequest.setHeaders({
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${provider.token}`,
+      'User-Agent': githubUserAgent,
+      'X-GitHub-Api-Version': githubApiVersion,
+    }),
+  )
+  if (init?.body === undefined) {
+    return request
   }
-  return headers
+  return HttpClientRequest.setBody(
+    request,
+    HttpBody.raw(init.body, { contentType: 'application/json' }),
+  )
 }
 
 /**
@@ -118,50 +176,47 @@ const githubHeaders = (provider: GitHubProviderConfig, init: RequestInit | undef
 export const githubJson = (
   provider: GitHubProviderConfig,
   url: string,
-  init?: RequestInit,
+  init?: GitHubRequestInit,
   acceptedStatuses: readonly number[] = [],
 ): Effect.Effect<GitHubHttpResult, TrackerError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const response = await fetch(url, {
-        ...init,
-        headers: githubHeaders(provider, init),
-        signal: AbortSignal.timeout(githubRequestTimeoutMs),
-      })
-      const limited = rateLimitError(response.headers, response.status)
-      if (limited !== null) {
-        throw limited
-      }
-      if (acceptedStatuses.includes(response.status)) {
-        return { status: response.status, body: null, linkHeader: response.headers.get('link') }
-      }
-      if (!response.ok) {
-        throw statusError(response.status)
-      }
-      if (response.status === 204) {
-        return { status: response.status, body: null, linkHeader: response.headers.get('link') }
-      }
-      let body: unknown
-      try {
-        body = await response.json()
-      } catch (cause: unknown) {
-        throw trackerResponseError('GitHub returned a malformed JSON payload', cause)
-      }
-      if (!isJsonValue(body)) {
-        throw trackerResponseError('GitHub returned non-JSON data')
-      }
-      return { status: response.status, body, linkHeader: response.headers.get('link') }
-    },
-    catch: (cause: unknown) =>
-      cause instanceof TrackerError
-        ? cause
-        : new TrackerError({
-            category: 'tracker_request',
-            message: 'GitHub request failed',
-            retryable: true,
-            cause,
-          }),
-  })
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient
+    const response = yield* client
+      .execute(githubRequest(provider, url, init))
+      .pipe(Effect.mapError((cause: HttpClientError.HttpClientError) => trackerRequestError(cause)))
+    const linkHeader = header(response.headers, 'link')
+    const limited = rateLimitError(response.headers, response.status)
+    if (limited !== null) {
+      return yield* Effect.fail(limited)
+    }
+    if (acceptedStatuses.includes(response.status)) {
+      return { status: response.status, body: null, linkHeader }
+    }
+    if (response.status < 200 || response.status >= 300) {
+      return yield* Effect.fail(statusError(response.status))
+    }
+    if (response.status === 204) {
+      return { status: response.status, body: null, linkHeader }
+    }
+    const body = yield* response.json.pipe(
+      Effect.mapError((cause: HttpClientError.ResponseError) =>
+        trackerResponseError('GitHub returned a malformed JSON payload', cause),
+      ),
+    )
+    if (!isJsonValue(body)) {
+      return yield* Effect.fail(trackerResponseError('GitHub returned non-JSON data'))
+    }
+    return { status: response.status, body, linkHeader }
+  }).pipe(
+    Effect.timeoutFail({
+      duration: githubRequestTimeoutMs,
+      onTimeout: () =>
+        trackerRequestError(
+          new Error(`GitHub request exceeded ${String(githubRequestTimeoutMs)}ms`),
+        ),
+    }),
+    withGitHubHttpClient,
+  )
 
 /** Reads the `rel="next"` target from a `Link` header, rejecting cross-origin or malformed links. */
 export const parseNextUrl = (

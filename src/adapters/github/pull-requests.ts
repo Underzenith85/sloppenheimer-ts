@@ -10,6 +10,7 @@ import {
   parseNextUrl,
   trackerPaginationError,
   trackerResponseError,
+  type GitHubRequestInit,
   type JsonRecord,
 } from './client.js'
 import type { CodexReviewObservation, PullRequestObservation } from '../../domain/handoff.js'
@@ -96,7 +97,7 @@ const record = (value: JsonValue | undefined | null, message: string): JsonRecor
 const json = (
   provider: GitHubProviderConfig,
   url: string,
-  init?: RequestInit,
+  init?: GitHubRequestInit,
 ): Effect.Effect<JsonValue | null, TrackerError> =>
   githubJson(provider, url, init).pipe(Effect.map(({ body }) => body))
 
