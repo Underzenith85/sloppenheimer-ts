@@ -16,6 +16,8 @@
     "lint": "oxlint --type-aware --deny-warnings",
     "start": "node dist/cli.js",
     "test": "vitest run",
+    "test:conformance": "vitest run --config vitest.conformance.config.ts",
+    "test:real-integration": "vitest run --config vitest.real-integration.config.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

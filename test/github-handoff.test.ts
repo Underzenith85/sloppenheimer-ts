@@ -2,6 +2,8 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { makeGitHubPullRequestMonitor } from '../src/github-handoff.js'
+import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
+import { issueBranchName, makeGitHubTracker } from '../src/tracker.js'
 import type { GitHubProviderConfig } from '../src/workflow.js'
 
 const provider: GitHubProviderConfig = {
@@ -13,8 +15,116 @@ const provider: GitHubProviderConfig = {
   baseBranch: 'main',
 }
 
+const handoffIssue: Issue = {
+  id: issueId('28'),
+  nativeRef: null,
+  identifier: issueIdentifier('example/symphony#28'),
+  title: 'Migrate to pnpm',
+  description: null,
+  priority: null,
+  state: 'open',
+  branchName: null,
+  url: 'https://example.test/issues/28',
+  assigneeId: null,
+  labels: ['symphony'],
+  blockedBy: [],
+  dispatchable: true,
+  createdAt: null,
+  updatedAt: null,
+}
+
+const requestUrl = (input: string | URL | Request): string => {
+  if (typeof input === 'string') {
+    return input
+  }
+  return input instanceof URL ? input.href : input.url
+}
+
 afterEach((): void => {
   vi.unstubAllGlobals()
+})
+
+describe('GitHub pull request handoff', (): void => {
+  it('continues when the expected issue branch has not been pushed', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> => new Response(null, { status: 404 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(
+      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+    )
+
+    expect(result).toEqual({ _tag: 'NoBranch', branchName: 'symphony/issue-28' })
+    expect(issueBranchName(handoffIssue)).toBe('symphony/issue-28')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('creates a pull request without changing dispatch labels after a branch is pushed', async (): Promise<void> => {
+    const requests: Array<Readonly<{ url: string; method: string }>> = []
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url = requestUrl(input)
+        const method = init?.method ?? 'GET'
+        requests.push({ url, method })
+        if (url.endsWith('/git/ref/heads/symphony%2Fissue-28')) {
+          return Response.json({ ref: 'refs/heads/symphony/issue-28' })
+        }
+        if (url.includes('/pulls?')) {
+          return Response.json([])
+        }
+        if (url.endsWith('/pulls') && method === 'POST') {
+          expect(init?.body).toBe(
+            JSON.stringify({
+              base: 'main',
+              head: 'symphony/issue-28',
+              title: 'Migrate to pnpm',
+              body: 'Closes #28',
+            }),
+          )
+          return Response.json({ html_url: 'https://example.test/pulls/31' }, { status: 201 })
+        }
+        return new Response(null, { status: 500 })
+      },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(
+      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+    )
+
+    expect(result).toEqual({
+      _tag: 'PullRequest',
+      branchName: 'symphony/issue-28',
+      pullRequestUrl: 'https://example.test/pulls/31',
+      pullRequestNumber: 31,
+    })
+    expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET', 'POST'])
+  })
+
+  it('reuses an existing pull request without changing dispatch labels', async (): Promise<void> => {
+    const methods: string[] = []
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url = requestUrl(input)
+        const method = init?.method ?? 'GET'
+        methods.push(method)
+        if (url.includes('/git/ref/heads/')) {
+          return Response.json({ ref: 'refs/heads/symphony/issue-28' })
+        }
+        if (url.includes('/pulls?')) {
+          return Response.json([{ html_url: 'https://example.test/pulls/31' }])
+        }
+        return new Response(null, { status: 204 })
+      },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(
+      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+    )
+
+    expect(result._tag).toBe('PullRequest')
+    expect(methods).toEqual(['GET', 'GET'])
+  })
 })
 
 describe('GitHub pull request monitor', (): void => {

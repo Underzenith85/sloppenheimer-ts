@@ -48,6 +48,7 @@ const main = async (): Promise<number> => {
   const program = Effect.scoped(
     Effect.gen(function* () {
       const orchestrator = yield* startOrchestrator(options.workflowPath)
+      yield* logInfo('symphony host started', { workflow_path: options.workflowPath })
       const workflow = yield* loadWorkflow(options.workflowPath)
       const port = options.port ?? workflow.config.serverPort
       if (port !== null) {

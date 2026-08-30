@@ -119,6 +119,15 @@ describe('orchestrator policies', (): void => {
     expect(issueIsRoutable(makeIssue('GH-2', 1, null, ['symphony']), workflow)).toBe(false)
   })
 
+  it('rejects a provider record marked non-dispatchable at the scheduler boundary', (): void => {
+    const issue = {
+      ...makeIssue('GH-3', 1, null, ['symphony', 'ready']),
+      dispatchable: false,
+    }
+
+    expect(issueIsRoutable(issue, workflow)).toBe(false)
+  })
+
   it('does not route an issue until its final native blocker is terminal', (): void => {
     const openBlocker: BlockerRef = {
       id: '101',
@@ -1200,6 +1209,334 @@ describe('session telemetry accounting', (): void => {
             inputTokens: 14,
             outputTokens: 7,
             totalTokens: 21,
+          })
+        }),
+      ),
+    )
+  })
+
+  it('cancels a stalled worker and schedules its first retry', async (): Promise<void> => {
+    const stalledWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+      },
+    }
+    const issue = makeIssue('example/symphony#19', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(stalledWorkflow, () => [issue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    let interrupted = false
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: ({ onEvent }) =>
+        Effect.sync(() => {
+          onEvent(makeAgentEvent({ timestamp: new Date(0), message: 'last progress' }))
+          resolveStarted()
+        }).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true
+            }),
+          ),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* Effect.promise(() => started)
+          yield* Effect.yieldNow()
+          yield* Effect.yieldNow()
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(interrupted).toBe(true)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toHaveLength(1)
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            identifier: issue.identifier,
+            attempt: 1,
+            error: 'agent stalled',
+          })
+          expect(Date.parse(snapshot.retrying[0]?.dueAt ?? '')).not.toBeNaN()
+        }),
+      ),
+    )
+  })
+
+  it('does not launch the agent when beforeRun fails', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#24', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let agentLaunches = 0
+    let afterRunCount = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        beforeRun: () =>
+          Effect.fail(
+            new WorkspaceError({ category: 'hook_failed', message: 'before_run rejected' }),
+          ),
+        afterRun: () =>
+          Effect.sync(() => {
+            afterRunCount += 1
+          }),
+      }),
+      runAgent: () =>
+        Effect.sync(() => {
+          agentLaunches += 1
+          return { threadId: 'unexpected', turnId: 'unexpected', turnCount: 1 }
+        }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(agentLaunches).toBe(0)
+          expect(afterRunCount).toBe(1)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            attempt: 1,
+            error: 'before_run rejected',
+          })
+        }),
+      ),
+    )
+  })
+
+  it('schedules continuation attempt one after a normal exit without a branch', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#23', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let handoffCount = 0
+    let afterRunCount = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        afterRun: () =>
+          Effect.sync(() => {
+            afterRunCount += 1
+          }),
+      }),
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: () =>
+          Effect.sync(() => {
+            handoffCount += 1
+            return { _tag: 'NoBranch' as const, branchName: 'symphony/test' }
+          }),
+      }),
+      runAgent: () =>
+        Effect.succeed({ threadId: 'thread-normal', turnId: 'turn-normal', turnCount: 1 }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(handoffCount).toBe(1)
+          expect(afterRunCount).toBe(1)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toHaveLength(1)
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            attempt: 1,
+            error: null,
+          })
+        }),
+      ),
+    )
+  })
+
+  it('interrupts a non-active refreshed issue without removing its workspace', async (): Promise<void> => {
+    let currentIssue = makeIssue('example/symphony#20', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [currentIssue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    let interrupted = false
+    const removed: string[] = []
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeWorkspaces: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeWorkspaces(effectiveWorkflow),
+        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+      }),
+      runAgent: () =>
+        Effect.sync(resolveStarted).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true
+            }),
+          ),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* Effect.promise(() => started)
+          currentIssue = { ...currentIssue, state: 'review' }
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(interrupted).toBe(true)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toEqual([])
+          expect(removed).toEqual([])
+        }),
+      ),
+    )
+  })
+
+  it('updates running snapshot metadata when an active issue refreshes', async (): Promise<void> => {
+    let currentIssue = makeIssue('example/symphony#25', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [currentIssue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* Effect.promise(() => started)
+          currentIssue = { ...currentIssue, title: 'Updated while active' }
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.running[0]).toMatchObject({
+            issueId: currentIssue.id,
+            title: 'Updated while active',
+          })
+        }),
+      ),
+    )
+  })
+
+  it('applies a configured retry cap to an actual failed worker', async (): Promise<void> => {
+    const cappedWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        agent: { ...workflow.config.agent, maxRetryBackoffMs: 250 },
+      },
+    }
+    const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(cappedWorkflow, () => [issue])
+    let failureAt = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: () =>
+        Effect.sync(() => {
+          failureAt = Date.now()
+        }).pipe(
+          Effect.zipRight(
+            Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
+          ),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(snapshot.retrying[0]).toMatchObject({ issueId: issue.id, attempt: 1 })
+          const scheduledDelay = Date.parse(snapshot.retrying[0]?.dueAt ?? '') - failureAt
+          expect(scheduledDelay).toBeGreaterThanOrEqual(250)
+          expect(scheduledDelay).toBeLessThan(1_000)
+        }),
+      ),
+    )
+  })
+
+  it('requeues a due retry when another worker occupies the only slot', async (): Promise<void> => {
+    const retryingIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+    const occupyingIssue = makeIssue('example/symphony#22', 1, null, ['symphony', 'ready'])
+    let candidates: readonly Issue[] = [retryingIssue]
+    const harness = makeHarness(workflow, () => candidates)
+    let resolveOccupyingStarted = (): void => undefined
+    const occupyingStarted = new Promise<void>((resolve) => {
+      resolveOccupyingStarted = resolve
+    })
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        fetchIssuesByIds: (ids) =>
+          Effect.succeed([retryingIssue, occupyingIssue].filter((issue) => ids.includes(issue.id))),
+      }),
+      runAgent: ({ issue }) => {
+        if (issue.id === retryingIssue.id) {
+          return Effect.fail(
+            new AgentError({ category: 'process_exited', message: 'retrying worker failed' }),
+          )
+        }
+        return Effect.sync(resolveOccupyingStarted).pipe(Effect.zipRight(Effect.never))
+      },
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          while ((yield* control.snapshot).retrying.length === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          candidates = [occupyingIssue]
+          yield* control.refresh
+          yield* Effect.promise(() => occupyingStarted)
+          yield* TestClock.adjust(10_000)
+          yield* Effect.yieldNow()
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.running[0]?.issueId).toBe(occupyingIssue.id)
+          expect(snapshot.retrying).toHaveLength(1)
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: retryingIssue.id,
+            attempt: 2,
+            error: 'no available orchestrator slots',
           })
         }),
       ),
