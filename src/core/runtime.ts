@@ -81,6 +81,12 @@ export type HandoffEntry = {
   repairHeadShas: string[]
   /** Head observed when the in-flight repair was dispatched, or null when no repair is running. */
   repairStartedHeadSha: string | null
+  /**
+   * Whether repairStartedHeadSha came back from the store rather than from a dispatch in this
+   * process. Not persisted: a restored baseline proves a repair started, never that it finished,
+   * so an unchanged head means the repair was interrupted rather than a no-op.
+   */
+  repairBaselineRestored: boolean
   reviewRequestedHeadSha: string | null
   reviewCompletedHeadSha: string | null
   observedAt: Date
@@ -888,6 +894,7 @@ export const startOrchestratorRuntime = (
             // Preserved rather than cleared: a repair may have pushed a new head just before the
             // restart, and the first observation after recovery needs this baseline to attribute it.
             repairStartedHeadSha: restored.repairStartedHeadSha ?? null,
+            repairBaselineRestored: (restored.repairStartedHeadSha ?? null) !== null,
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
@@ -1144,6 +1151,7 @@ export const startOrchestratorRuntime = (
             reason: 'reason' in disposition ? disposition.reason : null,
             repairHeadShas: [],
             repairStartedHeadSha: null,
+            repairBaselineRestored: false,
             reviewRequestedHeadSha: null,
             reviewCompletedHeadSha: null,
             observedAt,

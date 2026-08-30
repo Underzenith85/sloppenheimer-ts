@@ -1405,6 +1405,96 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('treats a repair interrupted by a restart as retryable, not a no-op', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-interrupted-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    // The repair was dispatched and its baseline persisted, then the process died before the
+    // agent pushed anything. The head is therefore unchanged, but nothing was a no-op.
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'repair_needed',
+          headSha: head,
+          reason: 'Repair agent running. Unresolved review feedback',
+          repairAttempts: 0,
+          repairHeadShas: [],
+          repairStartedHeadSha: head,
+          reviewRequestedHeadSha: head,
+          reviewCompletedHeadSha: head,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeCodeReview: (effectiveWorkflow) => ({
+        ...requireCodeReview(harness.dependencies, effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: head,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [
+              {
+                id: 'thread-1',
+                resolved: false,
+                body: 'Fix this',
+                url: null,
+                commentHeadSha: head,
+              },
+            ],
+            codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+          }),
+        handoffCompletedWork: () =>
+          Effect.succeed({
+            _tag: 'PullRequest' as const,
+            branchName: 'symphony/issue-20',
+            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+            pullRequestNumber: 65,
+            created: false,
+          }),
+      }),
+      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    // The interrupted repair neither consumed the changed-head budget nor locked the handoff out
+    // of further automatic repairs.
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 0,
+      repairHeadShas: [],
+    })
+    expect(snapshot.handoffs[0]?.state).not.toBe('intervention_required')
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('keeps observing a handoff that needs intervention', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-intervention-observed-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')

@@ -56,6 +56,7 @@ export const reconcileHandoffs = (
         if (repairedHeadSha !== handoff.repairStartedHeadSha) {
           if (handoff.repairHeadShas.includes(repairedHeadSha)) {
             handoff.repairStartedHeadSha = null
+            handoff.repairBaselineRestored = false
             handoff.state = 'intervention_required'
             handoff.headSha = repairedHeadSha
             handoff.reason =
@@ -64,6 +65,13 @@ export const reconcileHandoffs = (
           }
           handoff.repairHeadShas.push(repairedHeadSha)
           handoff.repairStartedHeadSha = null
+          handoff.repairBaselineRestored = false
+        } else if (handoff.repairBaselineRestored) {
+          // The baseline outlived the process that dispatched the repair, so an unchanged head is
+          // an interrupted repair, not a completed no-op. Drop the baseline and let the normal
+          // repair path retry; no head was observed, so the budget is untouched.
+          handoff.repairStartedHeadSha = null
+          handoff.repairBaselineRestored = false
         } else {
           const unchangedDisposition = classifyPullRequest(inspected.observation)
           handoff.repairStartedHeadSha = null
@@ -244,6 +252,7 @@ export const reconcileHandoffs = (
         )
         if (started) {
           handoff.repairStartedHeadSha = inspected.observation.headSha
+          handoff.repairBaselineRestored = false
           handoff.reason = `Repair agent running. ${disposition.reason}`
         }
       }

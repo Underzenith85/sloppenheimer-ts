@@ -295,6 +295,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               reason: 'Awaiting the first protected-branch observation',
               repairHeadShas: existingHandoff?.repairHeadShas ?? [],
               repairStartedHeadSha: existingHandoff?.repairStartedHeadSha ?? null,
+              repairBaselineRestored: existingHandoff?.repairBaselineRestored ?? false,
               reviewRequestedHeadSha: existingHandoff?.reviewRequestedHeadSha ?? null,
               reviewCompletedHeadSha: existingHandoff?.reviewCompletedHeadSha ?? null,
               observedAt: new Date(),
@@ -381,6 +382,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           const retriedHandoff = context.state.handoffs.get(issue.id)
           if (started && retriedHandoff !== undefined && retriedHandoff.headSha !== null) {
             retriedHandoff.repairStartedHeadSha ??= retriedHandoff.headSha
+            retriedHandoff.repairBaselineRestored = false
             yield* context.persistHandoffsEffect()
           }
           break
