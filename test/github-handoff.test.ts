@@ -327,7 +327,7 @@ describe('GitHub pull request monitor', (): void => {
         if (url.includes('page=2')) {
           return Response.json([
             {
-              user: { login: 'chatgpt-codex-connector' },
+              user: { login: 'chatgpt-codex-connector[bot]' },
               body: '<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | `abcdef1` |',
             },
           ])
