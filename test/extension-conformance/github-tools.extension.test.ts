@@ -6,11 +6,11 @@ import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent, type AgentEvent } from '../../src/codex.js'
-import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain.js'
+import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
 import { makeGitHubTracker } from '../../src/tracker.js'
-import type { GitHubProviderConfig } from '../../src/tracker-config.js'
-import type { CodexConfig } from '../../src/workflow.js'
+import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
+import type { CodexConfig } from '../../src/config/workflow.js'
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),

@@ -9,8 +9,8 @@
  * {@link AgentDetailSnapshot} values built from it.
  */
 
-import type { IssueId, IssueIdentifier, JsonObject, JsonValue } from './domain.js'
-import { isJsonArray, isJsonObject } from './json.js'
+import type { IssueId, IssueIdentifier, JsonObject, JsonValue } from './domain/domain.js'
+import { isJsonArray, isJsonObject } from './support/json.js'
 import {
   bound,
   boundRedacted,
@@ -18,7 +18,7 @@ import {
   pathKey,
   redact,
   type Redactor,
-} from './redaction.js'
+} from './support/redaction.js'
 
 /** How many timeline events are retained per issue. Older events are dropped and counted. */
 export const timelineEventLimit = 200

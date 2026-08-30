@@ -5,9 +5,9 @@ import { lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { Effect, type Scope } from 'effect'
 
-import type { IssueIdentifier, Workspace } from './domain.js'
+import type { IssueIdentifier, Workspace } from './domain/domain.js'
 import { WorkspaceError } from './errors.js'
-import type { HooksConfig } from './workflow.js'
+import type { HooksConfig } from './config/workflow.js'
 
 export type HookPhase = 'after_create' | 'before_run' | 'after_run' | 'before_remove'
 

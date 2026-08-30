@@ -1,20 +1,20 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Effect } from 'effect'
 
-import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
-import { codexAuthenticationEnvironmentNames } from './env-reference.js'
+import type { Issue, JsonObject, JsonValue, Workspace } from './domain/domain.js'
+import { codexAuthenticationEnvironmentNames } from './config/env-reference.js'
 import { AgentError, type WorkspaceError } from './errors.js'
-import { isJsonObject, isJsonValue, mergeSparseObject } from './json.js'
+import { isJsonObject, isJsonValue, mergeSparseObject } from './support/json.js'
 import type { HostToolResult, HostToolSession } from './host-tools.js'
 import { unsupportedHostTool } from './host-tools.js'
-import { makeRedactor, redact, redactionMarker, type Redactor } from './redaction.js'
+import { makeRedactor, redact, redactionMarker, type Redactor } from './support/redaction.js'
 import {
   clientPayload,
   normalizePayload,
   type AgentEvent,
   type AgentEventPayload,
 } from './telemetry.js'
-import type { CodexConfig } from './workflow.js'
+import type { CodexConfig } from './config/workflow.js'
 import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,

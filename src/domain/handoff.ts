@@ -128,5 +128,6 @@ export type HandoffSnapshot = Readonly<{
   reason: string | null
   repairAttempts: number
   reviewRequestedHeadSha?: string | null
+  reviewCompletedHeadSha?: string | null
   observedAt: string
 }>

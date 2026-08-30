@@ -6,10 +6,10 @@ import { Effect } from 'effect'
 import { Liquid } from 'liquidjs'
 import { parse } from 'yaml'
 
-import type { Issue, JsonObject, JsonValue } from './domain.js'
+import type { Issue, JsonObject, JsonValue } from '../domain/domain.js'
 import { expandHomePath, resolvePathReference } from './env-reference.js'
-import { WorkflowError } from './errors.js'
-import { emptyJsonObject, JsonConversionError, toJsonObject, toJsonValue } from './json.js'
+import { WorkflowError } from '../errors.js'
+import { emptyJsonObject, JsonConversionError, toJsonObject, toJsonValue } from '../support/json.js'
 import { validateTrackerProvider, type ValidatedTrackerProvider } from './tracker-config.js'
 
 export type { GitHubProviderConfig, ValidatedTrackerProvider } from './tracker-config.js'

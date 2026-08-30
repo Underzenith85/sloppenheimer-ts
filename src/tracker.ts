@@ -8,9 +8,9 @@ import {
   type IssueId,
   type JsonObject,
   type JsonValue,
-} from './domain.js'
+} from './domain/domain.js'
 import { TrackerError } from './errors.js'
-import { logWarning } from './logging.js'
+import { logWarning } from './support/logging.js'
 import { makeGitHubPullRequestMonitor } from './github-handoff.js'
 import {
   githubJson,
@@ -21,12 +21,12 @@ import {
   trackerPaginationError,
   trackerResponseError,
 } from './github-http.js'
-import { isJsonArray } from './json.js'
+import { isJsonArray } from './support/json.js'
 import {
   githubAuthenticationEnvironmentNames,
   type GitHubProviderConfig,
-} from './tracker-config.js'
-import type { PullRequestObservation } from './handoff.js'
+} from './config/tracker-config.js'
+import type { PullRequestObservation } from './domain/handoff.js'
 import type {
   HostToolContext,
   HostToolFailureCode,

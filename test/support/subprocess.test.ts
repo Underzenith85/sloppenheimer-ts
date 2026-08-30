@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { terminateChildProcess } from '../src/subprocess.js'
+import { terminateChildProcess } from '../../src/support/subprocess.js'
 
 const processGroupIsAlive = (child: ChildProcess): boolean => {
   if (child.pid === undefined) {

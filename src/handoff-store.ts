@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { Effect } from 'effect'
 
 import { HandoffStoreError } from './errors.js'
-import type { HandoffSnapshot } from './handoff.js'
+import type { HandoffSnapshot } from './domain/handoff.js'
 
 const isSnapshot = (value: unknown): value is HandoffSnapshot => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -34,6 +34,9 @@ const isSnapshot = (value: unknown): value is HandoffSnapshot => {
     (candidate['reviewRequestedHeadSha'] === undefined ||
       candidate['reviewRequestedHeadSha'] === null ||
       typeof candidate['reviewRequestedHeadSha'] === 'string') &&
+    (candidate['reviewCompletedHeadSha'] === undefined ||
+      candidate['reviewCompletedHeadSha'] === null ||
+      typeof candidate['reviewCompletedHeadSha'] === 'string') &&
     typeof candidate['observedAt'] === 'string' &&
     !Number.isNaN(Date.parse(candidate['observedAt']))
   )

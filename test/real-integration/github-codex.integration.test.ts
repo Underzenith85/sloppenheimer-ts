@@ -5,10 +5,10 @@ import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent } from '../../src/codex.js'
-import { issueId, issueIdentifier, type Issue } from '../../src/domain.js'
+import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { makeGitHubTracker } from '../../src/tracker.js'
-import { githubProviderDefaults } from '../../src/tracker-config.js'
-import type { CodexConfig } from '../../src/workflow.js'
+import { githubProviderDefaults } from '../../src/config/tracker-config.js'
+import type { CodexConfig } from '../../src/config/workflow.js'
 
 const environment = process.env
 const nonEmptyEnvironmentValue = (name: string): string | undefined => {

@@ -15,9 +15,9 @@ import {
   type AgentLaunch,
   type AgentResult,
 } from '../src/codex.js'
-import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
+import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
 import type { AgentError } from '../src/errors.js'
-import type { CodexConfig } from '../src/workflow.js'
+import type { CodexConfig } from '../src/config/workflow.js'
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),

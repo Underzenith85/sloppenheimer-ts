@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifyPullRequest, type PullRequestObservation } from '../../src/handoff.js'
+import { classifyPullRequest, type PullRequestObservation } from '../../src/domain/handoff.js'
 
 const observation: PullRequestObservation = {
   number: 19,
