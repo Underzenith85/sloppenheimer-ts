@@ -14,6 +14,9 @@ Authorization: AWS4-HMAC-SHA256 Credential=key, SignedHeaders=host, Signature=si
       String.raw`failure: {"token":"[REDACTED]","password":"[REDACTED]","client_secret":"[REDACTED]","access_token":"[REDACTED]","clientSecret":"[REDACTED]"} payload: {\"token\":\"[REDACTED]\",\"refreshToken\":\"[REDACTED]\"} OPENAI_API_KEY=[REDACTED] CODEX_ACCESS_TOKEN=[REDACTED] AWS_SECRET_ACCESS_KEY=[REDACTED] PASSWORD=[REDACTED]
 Authorization=[REDACTED]`,
     )
+    expect(redactSecretsInString('Cookie: sessionid=secret\nSet-Cookie: auth=secret')).toBe(
+      'Cookie=[REDACTED]\nSet-Cookie=[REDACTED]',
+    )
   })
 
   it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {

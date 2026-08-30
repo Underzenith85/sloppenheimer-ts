@@ -6,7 +6,11 @@ const exactSecretKeys = new Set([
   'authorization',
   'credential',
   'credentials',
+  'cookie',
   'password',
+  'sessionid',
+  'set-cookie',
+  'setcookie',
   'secret',
   'token',
   'apikey',
@@ -46,7 +50,7 @@ const redactAssignment = (match: string, key: string): string =>
 
 export const redactSecretsInString = (value: string): string =>
   value
-    .replace(/\b((?:Proxy-)?Authorization)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
+    .replace(/\b((?:Proxy-)?Authorization|Set-Cookie|Cookie)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
     .replace(
       /\\"([A-Za-z_][A-Za-z0-9_-]*)\\"\s*:\s*\\"(?:[^"\\]|\\{2,}"|\\(?!"))*\\"/gu,
