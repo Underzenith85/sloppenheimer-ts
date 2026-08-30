@@ -3,11 +3,36 @@ import { Effect, Fiber, Queue, type Scope } from 'effect'
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue } from '../domain/domain.js'
 import { AgentError } from '../errors.js'
-import type { HostToolSession } from '../host-tools.js'
+import { unsupportedHostTool, type HostToolSession } from '../host-tools.js'
 import { mergeSparseObject, toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
-import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, ExecutionSnapshot, OrchestratorContext } from './runtime.js'
 import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
+
+export const makeHostToolSession = (
+  execution: Pick<ExecutionSnapshot, 'tracker' | 'codeReview'>,
+  issue: Issue,
+): HostToolSession => {
+  const codeReview = execution.codeReview
+  return Object.freeze({
+    specs: Object.freeze([...execution.tracker.toolSpecs, ...(codeReview?.toolSpecs ?? [])]),
+    context: Object.freeze({
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      nativeRef:
+        issue.nativeRef === null ? null : toJsonObject(issue.nativeRef, 'session.issue.nativeRef'),
+    }),
+    execute: (name, argumentsValue, context) => {
+      if (execution.tracker.toolSpecs.some((spec) => spec.name === name)) {
+        return execution.tracker.executeTool(name, argumentsValue, context)
+      }
+      if (codeReview?.toolSpecs.some((spec) => spec.name === name) === true) {
+        return codeReview.executeTool(name, argumentsValue, context)
+      }
+      return unsupportedHostTool(name)
+    },
+  })
+}
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 export const dispatch = (
@@ -70,18 +95,7 @@ export const dispatch = (
       return false
     }
     const execution = context.captureExecutionSnapshotValue(effective, renderedPrompt.prompt)
-    const hostTools: HostToolSession = Object.freeze({
-      specs: Object.freeze([...execution.tracker.toolSpecs]),
-      context: Object.freeze({
-        issueId: issue.id,
-        issueIdentifier: issue.identifier,
-        nativeRef:
-          issue.nativeRef === null
-            ? null
-            : toJsonObject(issue.nativeRef, 'session.issue.nativeRef'),
-      }),
-      execute: execution.tracker.executeTool,
-    })
+    const hostTools = makeHostToolSession(execution, issue)
     const runId = context.nextRunId
     context.nextRunId += 1
     const refreshIssue = (): Effect.Effect<Issue | null, AgentError> => {

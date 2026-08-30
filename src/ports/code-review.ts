@@ -1,9 +1,10 @@
 import { Context, Effect, Layer, type Scope } from 'effect'
 
 import type { ValidatedTrackerProvider } from '../config/tracker-config.js'
-import type { Issue } from '../domain/domain.js'
+import type { Issue, JsonValue } from '../domain/domain.js'
 import type { PullRequestObservation } from '../domain/handoff.js'
 import type { TrackerError } from '../errors.js'
+import type { HostToolContext, HostToolResult, HostToolSpec } from '../host-tools.js'
 import { makeAdapterCell, type AdapterCell } from './cell.js'
 
 /**
@@ -29,6 +30,14 @@ export type HandoffResult =
  * code-review adapter has no use for that vocabulary.
  */
 export type CodeReviewPort = Readonly<{
+  /** Provider-native code-review operations advertised only when this capability is present. */
+  toolSpecs: readonly HostToolSpec[]
+  /** Total host-side boundary: every invocation resolves to a JSON-safe success or failure. */
+  executeTool: (
+    name: string,
+    argumentsValue: JsonValue,
+    context: HostToolContext,
+  ) => Promise<HostToolResult>
   handoffCompletedWork: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
   findExistingHandoff: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
   inspectPullRequest: (

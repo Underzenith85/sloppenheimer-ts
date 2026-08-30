@@ -294,6 +294,15 @@ const makeHarness = (
       }
     },
     makeCodeReview: (): CodeReviewPort => ({
+      toolSpecs: [],
+      executeTool: async (name) => ({
+        success: false,
+        error: {
+          code: 'unsupported_tool',
+          message: `Unsupported host tool: ${name}`,
+          retryable: false,
+        },
+      }),
       handoffCompletedWork: () => Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
       findExistingHandoff: () => Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
       inspectPullRequest: () => Effect.die('unused'),

@@ -77,6 +77,14 @@ export type HandoffResult =
     }>
 
 export type CodeReviewPort = Readonly<{
+  /** Provider-native code-review operations advertised only when this capability is present. */
+  toolSpecs: readonly HostToolSpec[]
+  /** Total host-side boundary: every invocation resolves to a JSON-safe success or failure. */
+  executeTool: (
+    name: string,
+    argumentsValue: JsonValue,
+    context: HostToolContext,
+  ) => Promise<HostToolResult>
   handoffCompletedWork: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
   findExistingHandoff: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
   inspectPullRequest: (
@@ -132,7 +140,7 @@ type DependencyCacheEntry = Readonly<{
   expiresAt: number
 }>
 
-const githubToolSpecs: readonly HostToolSpec[] = Object.freeze([
+const githubTrackerToolSpecs: readonly HostToolSpec[] = Object.freeze([
   Object.freeze({
     name: 'github_add_comment',
     description:
@@ -173,6 +181,9 @@ const githubToolSpecs: readonly HostToolSpec[] = Object.freeze([
       }),
     }),
   }),
+])
+
+const githubCodeReviewToolSpecs: readonly HostToolSpec[] = Object.freeze([
   Object.freeze({
     name: 'github_link_pull_request',
     description:
@@ -274,10 +285,10 @@ const requiredResponseUrl = (body: JsonValue | null, field: string): string => {
   return body[field]
 }
 
-const makeGitHubToolExecutor =
+const makeGitHubTrackerToolExecutor =
   (provider: GitHubProviderConfig, prefix: string): TrackerPort['executeTool'] =>
   async (name, argumentsValue, context): Promise<HostToolResult> => {
-    if (!githubToolSpecs.some((spec) => spec.name === name)) {
+    if (!githubTrackerToolSpecs.some((spec) => spec.name === name)) {
       return unsupportedHostTool(name)
     }
     if (provider.token.length === 0) {
@@ -376,6 +387,22 @@ const makeGitHubToolExecutor =
         ),
       )
     }
+    return unsupportedHostTool(name)
+  }
+
+const makeGitHubCodeReviewToolExecutor =
+  (provider: GitHubProviderConfig, prefix: string): CodeReviewPort['executeTool'] =>
+  async (name, argumentsValue, context): Promise<HostToolResult> => {
+    if (!githubCodeReviewToolSpecs.some((spec) => spec.name === name)) {
+      return unsupportedHostTool(name)
+    }
+    if (provider.token.length === 0) {
+      return toolFailure('missing_auth', 'GitHub credential is not configured')
+    }
+    const issueNumber = githubIssueNumber(provider, context)
+    if (issueNumber === null) {
+      return invalidToolArguments('Session issue context is invalid for this GitHub adapter')
+    }
     const argumentsObject = exactObject(argumentsValue, new Set(['pull_request_number']))
     const pullRequestNumber = argumentsObject?.['pull_request_number']
     if (
@@ -403,10 +430,16 @@ const makeGitHubToolExecutor =
           }),
         ),
         Effect.flatMap((pullRequestUrl) =>
-          githubJson(provider, `${issuePath}/comments`, {
-            method: 'POST',
-            body: JSON.stringify({ body: `Linked pull request for handoff: ${pullRequestUrl}` }),
-          }).pipe(
+          githubJson(
+            provider,
+            `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}/comments`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                body: `Linked pull request for handoff: ${pullRequestUrl}`,
+              }),
+            },
+          ).pipe(
             Effect.as({
               issue_number: issueNumber,
               pull_request_number: pullRequestNumber,
@@ -817,8 +850,8 @@ export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): Tra
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   return {
-    toolSpecs: githubToolSpecs,
-    executeTool: makeGitHubToolExecutor(provider, prefix),
+    toolSpecs: githubTrackerToolSpecs,
+    executeTool: makeGitHubTrackerToolExecutor(provider, prefix),
     secretEnvironmentNames: [
       ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
     ],
@@ -907,6 +940,8 @@ export const makeGitHubCodeReview = (configuredProvider: GitHubProviderConfig): 
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const pullRequests = makeGitHubPullRequestMonitor(provider)
   return {
+    toolSpecs: githubCodeReviewToolSpecs,
+    executeTool: makeGitHubCodeReviewToolExecutor(provider, prefix),
     handoffCompletedWork: (issue) => {
       const branchName = issueBranchName(issue)
       return githubBranchExists(provider, prefix, branchName).pipe(
