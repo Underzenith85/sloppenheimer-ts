@@ -566,6 +566,79 @@ describe('agent detail records', (): void => {
     }
   })
 
+  it('freezes token totals wherever they are shared', (): void => {
+    const record = makeRecord()
+    recordAgentEvent(
+      record,
+      event(
+        { kind: 'none' },
+        {
+          event: 'turn/completed',
+          usage: { inputTokens: 11, outputTokens: 5, totalTokens: 16 },
+        },
+      ),
+    )
+    const snapshot = snapshotOf(record)
+    const [entry] = snapshot.timeline.events
+
+    expect(entry?.category).toBe('usage')
+    if (entry?.category === 'usage') {
+      // A timeline event is frozen shallowly, so the counts nested inside it need freezing of their
+      // own: the record holds that same object, and an edit here would be carried forward by it.
+      expect(Object.isFrozen(entry.tokens)).toBe(true)
+      const tokens = entry.tokens as unknown as { totalTokens: number }
+      expect(() => {
+        tokens.totalTokens = 9_999
+      }).toThrow()
+    }
+    expect(snapshotOf(record).usage).toEqual({ inputTokens: 11, outputTokens: 5, totalTokens: 16 })
+  })
+
+  it('starts a retried attempt with no identity carried over from the last session', (): void => {
+    const record = makeRecord()
+    recordAgentEvent(record, event({ kind: 'session' }))
+    recordAgentEvent(record, event({ kind: 'none' }, { event: 'turn/completed', turnCount: 7 }))
+    recordRetryScheduled(
+      record,
+      new Date('2026-08-30T10:00:10.000Z'),
+      1,
+      new Date('2026-08-30T10:00:15.000Z'),
+      'the worker exited',
+    )
+    recordAttemptStarted(record, new Date('2026-08-30T10:00:20.000Z'), 1)
+
+    const started = snapshotOf(record)
+    // The retry opens a new agent connection, so nothing may still describe the previous one.
+    expect(started.identity).toMatchObject({
+      threadId: null,
+      turnId: null,
+      sessionId: null,
+      processId: null,
+      turnNumber: 0,
+    })
+    // The session that was replaced is still there in full.
+    expect(started.attempt.sessions.at(-1)).toMatchObject({
+      threadId: 'thread-1',
+      sessionId: 'thread-1:turn-1',
+      processId: 4242,
+    })
+
+    recordAgentEvent(
+      record,
+      event(
+        { kind: 'session' },
+        { threadId: 'thread-2', turnId: 'turn-2', sessionId: 'thread-2:turn-2', turnCount: 1 },
+      ),
+    )
+
+    // The new session counts from its own first turn rather than being held above it by the last.
+    expect(snapshotOf(record).identity).toMatchObject({
+      threadId: 'thread-2',
+      sessionId: 'thread-2:turn-2',
+      turnNumber: 1,
+    })
+  })
+
   it('publishes frozen snapshots that cannot be edited by a consumer', (): void => {
     const record = makeRecord()
     recordAgentEvent(record, event({ kind: 'reasoning' }))

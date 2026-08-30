@@ -869,7 +869,10 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
   // consumes them rather than deriving its own.
   record.turnCount = Math.max(record.turnCount, event.turnCount)
   if (event.usage !== null) {
-    record.tokens = event.usage
+    // The same counts reach the record and the usage timeline event, and a timeline event is only
+    // frozen shallowly, so the object they share is frozen here rather than left reachable through
+    // `events[i].tokens` — a mutation there would otherwise be carried forward by the record.
+    record.tokens = Object.freeze({ ...event.usage })
   }
   if (event.rateLimits !== null) {
     record.rateLimits = decodeRateLimits(event.rateLimits)
@@ -887,7 +890,7 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
       ...base,
       operation: record.operation,
       category: 'usage',
-      tokens: event.usage,
+      tokens: event.usage === null ? null : record.tokens,
       rateLimits: record.rateLimits,
     })
     return
@@ -1112,7 +1115,16 @@ export const recordAttemptStarted = (
   record.retries += 1
   record.startedAt = at
   record.lastActivityAt = null
+  // A new attempt is a new agent connection, so every session-scoped field is cleared rather than
+  // left to describe the previous one: identity is only refilled by events the new session emits,
+  // and the turn count starts over — it is folded forward with `Math.max`, so a session beginning
+  // again at turn one could never displace a larger count carried over from the last. The session
+  // this replaces is preserved in full by the retained session summaries.
+  record.threadId = null
   record.turnId = null
+  record.sessionId = null
+  record.processId = null
+  record.turnCount = 0
   record.attempts.push({
     attempt: attemptNumber,
     startedAt: at.toISOString(),
