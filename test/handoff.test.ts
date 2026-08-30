@@ -21,6 +21,13 @@ const observation = (
 })
 
 describe('pull request handoff state machine', (): void => {
+  it('recognizes a pull request closed without merge as terminal', (): void => {
+    expect(classifyPullRequest(observation({ closed: true, mergeState: 'closed' }))).toEqual({
+      state: 'closed',
+      reason: 'The pull request was closed without being merged',
+    })
+  })
+
   it('waits for checks and rejects stale or failed heads', (): void => {
     expect(classifyPullRequest(observation({ checks: [], mergeState: 'clean' }))).toEqual({
       state: 'ready_to_merge',

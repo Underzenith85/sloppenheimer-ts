@@ -17,6 +17,7 @@ export type TrackerCall =
       options: IssueFetchOptions | undefined
     }>
   | Readonly<{ operation: 'handoffCompletedWork'; issue: Issue }>
+  | Readonly<{ operation: 'findExistingHandoff'; issue: Issue }>
   | Readonly<{ operation: 'inspectPullRequest'; pullRequestNumber: number }>
   | Readonly<{ operation: 'mergePullRequest'; pullRequestNumber: number; expectedHeadSha: string }>
   | Readonly<{ operation: 'resolveReviewThreads'; threadIds: readonly string[] }>
@@ -55,6 +56,11 @@ export class FakeTracker implements TrackerAdapter {
 
   handoffCompletedWork(issue: Issue): Effect.Effect<HandoffResult> {
     this.calls.push({ operation: 'handoffCompletedWork', issue })
+    return Effect.succeed({ _tag: 'NoBranch', branchName: issue.branchName ?? issue.identifier })
+  }
+
+  findExistingHandoff(issue: Issue): Effect.Effect<HandoffResult> {
+    this.calls.push({ operation: 'findExistingHandoff', issue })
     return Effect.succeed({ _tag: 'NoBranch', branchName: issue.branchName ?? issue.identifier })
   }
 

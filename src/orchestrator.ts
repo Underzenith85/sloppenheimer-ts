@@ -134,6 +134,18 @@ export type OrchestratorSnapshot = Readonly<{
     message: string
     observedAt: string
   }> | null
+  handoffRecovery: Readonly<{
+    status: 'recovering' | 'completed' | 'degraded'
+    loaded: number
+    recovered: number
+    skipped: number
+    failed: number
+    storeError: Readonly<{
+      operation: 'read' | 'write'
+      message: string
+      observedAt: string
+    }> | null
+  }>
   pollingIntervalMs: number
   maxConcurrentAgents: number
   counts: Readonly<{ running: number; retrying: number; completed: number }>
@@ -631,7 +643,40 @@ export const startOrchestrator = (
       '.symphony',
       'handoffs.json',
     )
-    let pendingRestoredHandoffs = yield* loadHandoffs(handoffStorePath)
+    let handoffStoreError: Readonly<{
+      operation: 'read' | 'write'
+      message: string
+      observedAt: Date
+    }> | null = null
+    let storeReadFailed = false
+    const loadedHandoffs = yield* loadHandoffs(handoffStorePath).pipe(
+      Effect.matchEffect({
+        onFailure: (error) => {
+          storeReadFailed = true
+          handoffStoreError = {
+            operation: error.operation,
+            message: error.message,
+            observedAt: new Date(),
+          }
+          return logError('handoff store read failed; preserving store during recovery', {
+            action: 'handoff_store_read',
+            outcome: 'failed',
+            path: handoffStorePath,
+            error: error.message,
+          }).pipe(Effect.as<readonly HandoffSnapshot[]>([]))
+        },
+        onSuccess: (handoffs) => Effect.succeed(handoffs),
+      }),
+    )
+    let pendingRestoredHandoffs = loadedHandoffs
+    const recoveryCounts = {
+      loaded: loadedHandoffs.length,
+      recovered: 0,
+      skipped: 0,
+      failed: storeReadFailed ? 1 : 0,
+    }
+    let startupRecoveryFinished = false
+    const recoveryResolved = new Set<IssueId>()
     for (const pending of pendingRestoredHandoffs) {
       state.claimed.add(issueId(pending.issueId))
     }
@@ -649,8 +694,27 @@ export const startOrchestrator = (
         observedAt: handoff.observedAt.toISOString(),
       })),
     ]
-    const persistHandoffs = (): Effect.Effect<void> =>
-      saveHandoffs(handoffStorePath, handoffSnapshots())
+    const persistHandoffs = (): Effect.Effect<void> => {
+      if (!startupRecoveryFinished || storeReadFailed) {
+        return Effect.void
+      }
+      return saveHandoffs(handoffStorePath, handoffSnapshots()).pipe(
+        Effect.catchAll((error) => {
+          recoveryCounts.failed += 1
+          handoffStoreError = {
+            operation: error.operation,
+            message: error.message,
+            observedAt: new Date(),
+          }
+          return logError('handoff store write failed', {
+            action: 'handoff_store_write',
+            outcome: 'failed',
+            path: handoffStorePath,
+            error: error.message,
+          })
+        }),
+      )
+    }
     const hydrateRestoredHandoffs = (): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (pendingRestoredHandoffs.length === 0) {
@@ -659,9 +723,17 @@ export const startOrchestrator = (
         const fetched = yield* lastKnownGood.tracker
           .fetchIssuesByIds(pendingRestoredHandoffs.map((handoff) => issueId(handoff.issueId)))
           .pipe(
-            Effect.match({
-              onFailure: () => null,
-              onSuccess: (issues) => issues,
+            Effect.matchEffect({
+              onFailure: (error) => {
+                recoveryCounts.failed += 1
+                return logWarning('persisted handoff hydration failed; retrying later', {
+                  action: 'handoff_hydration',
+                  outcome: 'failed',
+                  pending: pendingRestoredHandoffs.length,
+                  error: error.message,
+                }).pipe(Effect.as<readonly Issue[] | null>(null))
+              },
+              onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
             }),
           )
         if (fetched === null) {
@@ -1022,6 +1094,146 @@ export const startOrchestrator = (
       })
     }
 
+    const recoverMissingHandoffs = (): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        if (startupRecoveryFinished) {
+          return
+        }
+        const effective = lastKnownGood
+        const requiredLabels = effective.workflow.config.tracker.requiredLabels
+        const fetched = yield* effective.tracker
+          .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
+            hydrateDependencies: false,
+          })
+          .pipe(
+            Effect.match({
+              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
+            }),
+          )
+        if (fetched._tag === 'Failed') {
+          recoveryCounts.failed += 1
+          yield* logError('startup handoff recovery issue fetch failed; retrying later', {
+            action: 'handoff_recovery',
+            outcome: 'failed',
+            loaded: recoveryCounts.loaded,
+            recovered: recoveryCounts.recovered,
+            skipped: recoveryCounts.skipped,
+            failed: recoveryCounts.failed,
+            error: fetched.error.message,
+          })
+          return
+        }
+        let attemptFailed = false
+        for (const issue of fetched.issues) {
+          const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
+          const isLabeled = requiredLabels.every(
+            (label) => label.length > 0 && labels.has(label.trim().toLowerCase()),
+          )
+          if (
+            !isLabeled ||
+            state.handoffs.has(issue.id) ||
+            pendingRestoredHandoffs.some((handoff) => handoff.issueId === issue.id) ||
+            recoveryResolved.has(issue.id)
+          ) {
+            continue
+          }
+          const found = yield* effective.tracker.findExistingHandoff(issue).pipe(
+            Effect.match({
+              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+              onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
+            }),
+          )
+          if (found._tag === 'Failed') {
+            attemptFailed = true
+            recoveryCounts.failed += 1
+            yield* logWarning('startup handoff recovery lookup failed; retrying later', {
+              ...logContext(issue),
+              action: 'handoff_recovery',
+              outcome: 'failed',
+              error: found.error.message,
+            })
+            continue
+          }
+          if (found.result._tag === 'NoBranch') {
+            recoveryResolved.add(issue.id)
+            recoveryCounts.skipped += 1
+            continue
+          }
+          const observedAt = new Date()
+          const inspected = yield* effective.tracker
+            .inspectPullRequest(found.result.pullRequestNumber)
+            .pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+              }),
+            )
+          const disposition =
+            inspected._tag === 'Succeeded'
+              ? classifyPullRequest(inspected.observation)
+              : {
+                  state: 'awaiting_checks' as const,
+                  reason: inspected.error.message,
+                }
+          const record = detailRecord(issue, null, requiredLabels)
+          state.details.set(issue.id, record)
+          recordHandoff(record, observedAt, {
+            step: 'remote_branch',
+            status: 'observed',
+            message: `Remote branch ${found.result.branchName} is present`,
+            remoteBranch: found.result.branchName,
+          })
+          recordHandoff(record, observedAt, {
+            step: 'pull_request',
+            status: 'observed',
+            message: 'Recovered an existing pull request during startup',
+            pullRequest: {
+              status: 'reused',
+              number: found.result.pullRequestNumber,
+              url: found.result.pullRequestUrl,
+              state: disposition.state,
+            },
+          })
+          state.handoffs.set(issue.id, {
+            issue,
+            execution: captureExecutionSnapshot(effective, ''),
+            pullRequestNumber: found.result.pullRequestNumber,
+            pullRequestUrl: found.result.pullRequestUrl,
+            branchName: found.result.branchName,
+            state: disposition.state,
+            headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
+            reason: 'reason' in disposition ? disposition.reason : null,
+            repairAttempts: 0,
+            observedAt,
+          })
+          state.claimed.add(issue.id)
+          noteIssue(issue)
+          recoveryResolved.add(issue.id)
+          recoveryCounts.recovered += 1
+          yield* logInfo('open pull request handoff recovered', {
+            ...logContext(issue),
+            action: 'handoff_recovery',
+            outcome: 'recovered',
+            branch: found.result.branchName,
+            pull_request_url: found.result.pullRequestUrl,
+          })
+        }
+        if (attemptFailed) {
+          return
+        }
+        startupRecoveryFinished = true
+        yield* logInfo('startup handoff recovery completed', {
+          action: 'handoff_recovery',
+          outcome: storeReadFailed ? 'degraded' : 'completed',
+          loaded: recoveryCounts.loaded,
+          recovered: recoveryCounts.recovered,
+          skipped: recoveryCounts.skipped,
+          failed: recoveryCounts.failed,
+        })
+        yield* persistHandoffs()
+      })
+
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         for (const [id, handoff] of state.handoffs) {
@@ -1080,6 +1292,12 @@ export const startOrchestrator = (
             noteHandoffOutcome(id, handoff, 'merged')
             state.handoffs.delete(id)
             state.completed.add(id)
+            state.claimed.delete(id)
+            continue
+          }
+          if (disposition.state === 'closed') {
+            noteHandoffOutcome(id, handoff, 'intervention_required')
+            state.handoffs.delete(id)
             state.claimed.delete(id)
             continue
           }
@@ -1391,6 +1609,7 @@ export const startOrchestrator = (
           })
         }
         yield* hydrateRestoredHandoffs()
+        yield* recoverMissingHandoffs()
         yield* reconcileHandoffs()
         yield* reconcile()
         const reloaded = yield* dependencies.loadWorkflow(selectedWorkflowPath).pipe(
@@ -1434,6 +1653,7 @@ export const startOrchestrator = (
         const cyclicIdentifiers = cyclicIssueIdentifiers(candidates)
         for (const issue of sortIssues(candidates)) {
           if (
+            !startupRecoveryFinished ||
             state.claimed.has(issue.id) ||
             (identifierIssueNumber(issue.identifier) !== null &&
               state.pausedIssueNumbers.has(identifierIssueNumber(issue.identifier) ?? -1)) ||
@@ -1477,6 +1697,25 @@ export const startOrchestrator = (
                 message: workflowReloadError.message,
                 observedAt: workflowReloadError.observedAt.toISOString(),
               },
+        handoffRecovery: {
+          status: startupRecoveryFinished
+            ? storeReadFailed || handoffStoreError !== null
+              ? 'degraded'
+              : 'completed'
+            : 'recovering',
+          loaded: recoveryCounts.loaded,
+          recovered: recoveryCounts.recovered,
+          skipped: recoveryCounts.skipped,
+          failed: recoveryCounts.failed,
+          storeError:
+            handoffStoreError === null
+              ? null
+              : {
+                  operation: handoffStoreError.operation,
+                  message: handoffStoreError.message,
+                  observedAt: handoffStoreError.observedAt.toISOString(),
+                },
+        },
         pollingIntervalMs: effective.workflow.config.pollingIntervalMs,
         maxConcurrentAgents: effective.workflow.config.agent.maxConcurrentAgents,
         counts: {
