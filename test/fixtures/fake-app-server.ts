@@ -523,17 +523,36 @@ const handle = (message: JsonRecord): void => {
   }
   // Client responses to server-initiated requests.
   if (id === 9001 || id === 9007 || id === 9008 || id === 'approval-1') {
+    const result = message['result']
+    if (!isJsonRecord(result) || result['decision'] !== 'acceptForSession') {
+      send({ method: 'approval/rejected', params: { reason: 'invalid approval response' } })
+      return
+    }
     send({ method: 'approval/observed', params: message })
     completeTurn()
     return
   }
   if (id === 9004) {
+    if (
+      !isDeepStrictEqual(message['result'], {
+        permissions: {},
+        scope: 'turn',
+      })
+    ) {
+      send({ method: 'permissions/rejected', params: { reason: 'invalid permissions response' } })
+      return
+    }
     // The permissions grant is a result, not an error: the turn proceeds once it is answered.
     send({ method: 'permissions/observed', params: message })
     completeTurn()
     return
   }
   if (id === 9002) {
+    const error = message['error']
+    if (!isJsonRecord(error) || error['code'] !== -32_601) {
+      send({ method: 'request/invalid-rejection', params: message })
+      return
+    }
     send({ method: 'request/rejected', params: message })
     completeTurn()
     return
