@@ -83,17 +83,18 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       }
       try {
         const result = await Effect.runPromise(
-          runAgent(
+          runAgent({
             issue,
-            { path: workspaceRoot, key: identifier, createdNow: true },
+            workspace: { path: workspaceRoot, key: identifier, createdNow: true },
+            workspaceRoot,
             config,
-            'This is an integration smoke test. Reply briefly without changing files.',
-            1,
-            ['GITHUB_TOKEN'],
-            () => Effect.succeed(null),
-            () => false,
-            () => {},
-          ),
+            prompt: 'This is an integration smoke test. Reply briefly without changing files.',
+            maxTurns: 1,
+            secretEnvironmentNames: ['GITHUB_TOKEN'],
+            refreshIssue: () => Effect.succeed(null),
+            isRoutable: () => false,
+            onEvent: () => {},
+          }),
         )
         expect(result.threadId.length).toBeGreaterThan(0)
         expect(result.turnId.length).toBeGreaterThan(0)

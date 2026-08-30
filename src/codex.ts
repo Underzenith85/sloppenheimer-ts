@@ -1,11 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createInterface, type Interface } from 'node:readline'
 import { Effect } from 'effect'
 
 import type { Issue, JsonObject, JsonValue, Workspace } from './domain.js'
 import { codexAuthenticationEnvironmentNames } from './env-reference.js'
-import { AgentError } from './errors.js'
+import { AgentError, type WorkspaceError } from './errors.js'
 import type { CodexConfig } from './workflow.js'
+import {
+  assertWorkspaceIdentity,
+  openVerifiedWorkspace,
+  type VerifiedWorkspace,
+} from './workspace.js'
 
 export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,
@@ -18,6 +22,13 @@ export const makeCodexEnvironment = (
     Object.entries(environment).filter(([name]) => !blockedEnvironmentNames.has(name)),
   )
 }
+
+/** The App Server framing limit for one protocol line. */
+export const codexMaxLineBytes = 10 * 1024 * 1024
+const shutdownGraceMs = 5_000
+/** After `SIGKILL`, how long to wait for the group to vanish, and how often to look. */
+const groupReapDeadlineMs = 2_000
+const groupReapPollMs = 25
 
 const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -40,6 +51,10 @@ const isJsonValue = (value: unknown): value is JsonValue => {
   return Object.values(value).every(isJsonValue)
 }
 
+/** Composes the session identity the SPEC reports for a thread and its current turn. */
+export const composeSessionId = (threadId: string, turnId: string | null): string =>
+  turnId === null ? threadId : `${threadId}:${turnId}`
+
 export type AgentEvent = Readonly<{
   event: string
   timestamp: Date
@@ -50,6 +65,9 @@ export type AgentEvent = Readonly<{
     outputTokens: number
     totalTokens: number
   }> | null
+  threadId: string | null
+  turnId: string | null
+  sessionId: string | null
 }>
 
 export type AgentResult = Readonly<{
@@ -69,6 +87,17 @@ type TurnWaiter = Readonly<{
   reject: (error: AgentError) => void
   timeout: NodeJS.Timeout
 }>
+
+/**
+ * How a turn ended. Whatever observes the end — a lifecycle notification, a request Symphony
+ * cannot serve, the turn timeout, or the session dying — records one of these against the turn id,
+ * and the first record wins. That single rule replaces the precedence questions that arise once
+ * "completed", "failed", and "the session died" live in separate places: a turn the server already
+ * reported keeps its own result, and a later session-level error cannot overwrite or mask it.
+ */
+type TurnSettlement =
+  | Readonly<{ _tag: 'completed' }>
+  | Readonly<{ _tag: 'failed'; error: AgentError }>
 
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
@@ -95,18 +124,136 @@ const usageFrom = (message: JsonObject): AgentEvent['usage'] => {
     : null
 }
 
+/**
+ * Splits a byte stream into protocol lines while enforcing the framing limit on the *pending*
+ * buffer, so an unterminated line can never grow without bound before it is rejected.
+ */
+export const makeLineReader = (
+  limitBytes: number,
+  onLine: (line: string) => void,
+  onOverflow: () => void,
+): ((chunk: Buffer) => void) => {
+  let pending: Buffer[] = []
+  let pendingBytes = 0
+  let overflowed = false
+  // A pending buffer may hold a full-length payload plus the CR of a CRLF whose LF has not arrived
+  // yet. Stripping happens once the line is complete, so the pending limit allows that one byte;
+  // otherwise a valid maximum-length line would be rejected purely for where a chunk boundary fell.
+  const pendingLimitBytes = limitBytes + 1
+  const overflow = (): void => {
+    overflowed = true
+    pending = []
+    pendingBytes = 0
+    onOverflow()
+  }
+  return (chunk: Buffer): void => {
+    if (overflowed) {
+      return
+    }
+    pending.push(chunk)
+    pendingBytes += chunk.byteLength
+    if (chunk.indexOf(0x0a) < 0) {
+      // No frame boundary here, so hold the chunk whole. Concatenating on every chunk would make
+      // framing quadratic in line size: a permitted 10 MB frame arriving in pipe-sized chunks
+      // would copy hundreds of megabytes before its terminator ever showed up.
+      if (pendingBytes > pendingLimitBytes) {
+        overflow()
+      }
+      return
+    }
+    let buffer = pending.length === 1 ? chunk : Buffer.concat(pending, pendingBytes)
+    pending = []
+    pendingBytes = 0
+    for (;;) {
+      const index = buffer.indexOf(0x0a)
+      if (index < 0) {
+        break
+      }
+      const raw = buffer.subarray(0, index)
+      buffer = buffer.subarray(index + 1)
+      const line = raw.at(-1) === 0x0d ? raw.subarray(0, raw.byteLength - 1) : raw
+      if (line.byteLength > limitBytes) {
+        overflow()
+        return
+      }
+      onLine(line.toString('utf8'))
+    }
+    if (buffer.byteLength > pendingLimitBytes) {
+      overflow()
+      return
+    }
+    if (buffer.byteLength > 0) {
+      pending.push(buffer)
+      pendingBytes = buffer.byteLength
+    }
+  }
+}
+
+/**
+ * Identity a notification carries itself. Item and delta notifications declare `threadId` and
+ * `turnId` directly under `params`, so they attribute correctly even out of order; the turn
+ * lifecycle notifications carry the turn nested under `params.turn` instead.
+ */
+const notificationIdentity = (
+  message: JsonObject,
+): Readonly<{ threadId: string | null; turnId: string | null }> => {
+  const params = message['params']
+  if (!isJsonObject(params)) {
+    return { threadId: null, turnId: null }
+  }
+  const threadId = params['threadId']
+  const turnId = params['turnId']
+  return {
+    threadId: typeof threadId === 'string' ? threadId : null,
+    turnId: typeof turnId === 'string' ? turnId : null,
+  }
+}
+
+/**
+ * A permissions approval answers with a `GrantedPermissionProfile`, not the `decision` value the
+ * command execution and file change approvals take, so it needs its own response.
+ */
+const isPermissionsApproval = (method: string): boolean =>
+  method.endsWith('/permissions/requestApproval')
+
+/**
+ * What Symphony grants when Codex asks to widen its sandbox mid-turn: nothing, answered in the
+ * shape the server can decode.
+ *
+ * The request asks for additional filesystem paths or network access beyond the sandbox the thread
+ * was started with. Echoing it back would let the agent negotiate its own containment, which is
+ * exactly what verifying the workspace before launch exists to prevent. An operator widens the
+ * sandbox by declaring `codex.turn_sandbox_policy`, where the decision is reviewable, so the turn
+ * proceeds here under the sandbox it already has rather than one it asked for.
+ *
+ * `scope` is the schema's own default; an empty profile makes it immaterial, but stating the
+ * narrower of the two values keeps the grant unambiguous.
+ */
+const withheldPermissionsGrant: JsonObject = { permissions: {}, scope: 'turn' }
+
+const isApprovalRequest = (method: string): boolean =>
+  /requestApproval$/u.test(method) && !isPermissionsApproval(method)
+const isUserInputRequest = (method: string): boolean => /requestUserInput$/u.test(method)
+
 class CodexConnection {
   readonly #process: ChildProcessWithoutNullStreams
-  readonly #lines: Interface
   readonly #readTimeoutMs: number
   readonly #turnTimeoutMs: number
   readonly #onEvent: (event: AgentEvent) => void
   readonly #pending = new Map<number, PendingRequest>()
-  readonly #turns = new Map<string, TurnWaiter>()
-  readonly #earlyTurnStatuses = new Map<string, string>()
+  /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
+  readonly #settled = new Map<string, TurnSettlement>()
+  /** Callers waiting on turns that have not settled yet. */
+  readonly #waiters = new Map<string, TurnWaiter>()
   #nextId = 1
   #closed = false
-  #turnFailure: AgentError | null = null
+  /**
+   * Why the session as a whole is unusable. It answers only turns that never settled — a turn with
+   * a settlement of its own is already decided.
+   */
+  #terminalError: AgentError | null = null
+  #threadId: string | null = null
+  #turnId: string | null = null
 
   constructor(
     command: string,
@@ -119,31 +266,54 @@ class CodexConnection {
       cwd,
       env: makeCodexEnvironment(process.env, secretEnvironmentNames),
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Its own process group, so shutdown reaches tools the App Server itself started.
+      detached: true,
     })
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
     this.#onEvent = onEvent
-    this.#lines = createInterface({ input: this.#process.stdout, crlfDelay: Infinity })
-    this.#lines.on('line', (line) => {
-      this.#receiveLine(line)
+
+    // stdout carries protocol framing only.
+    const readStdout = makeLineReader(
+      codexMaxLineBytes,
+      (line) => {
+        this.#receiveLine(line)
+      },
+      () => {
+        this.#fail(
+          new AgentError({
+            category: 'protocol_error',
+            message: `Codex protocol line exceeds ${String(codexMaxLineBytes)} bytes`,
+          }),
+        )
+      },
+    )
+    this.#process.stdout.on('data', (chunk: Buffer) => {
+      readStdout(chunk)
     })
+
+    // stderr is diagnostic only and never parsed as protocol.
     this.#process.stderr.on('data', (chunk: Buffer) => {
       const message = chunk.toString('utf8').trim()
       if (message.length > 0) {
         this.#emit('diagnostic', message)
       }
     })
+
     this.#process.once('error', (cause) => {
-      this.#failAll(
+      this.#fail(
         new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
       )
     })
-    this.#process.once('exit', (code) => {
+    this.#process.once('exit', (code, signal) => {
       if (!this.#closed) {
-        this.#failAll(
+        this.#fail(
           new AgentError({
             category: 'process_exited',
-            message: `Codex process exited with ${String(code)}`,
+            message:
+              signal === null
+                ? `Codex process exited with ${String(code)}`
+                : `Codex process terminated by ${signal}`,
           }),
         )
       }
@@ -154,13 +324,13 @@ class CodexConnection {
     return this.#process.pid ?? null
   }
 
-  async initialize(config: CodexConfig, workspace: Workspace): Promise<string> {
+  async initialize(config: CodexConfig, cwd: string): Promise<string> {
     await this.#request('initialize', {
       clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
     })
     this.#notify('initialized', {})
     const result = await this.#request('thread/start', {
-      cwd: workspace.path,
+      cwd,
       approvalPolicy: config.approvalPolicy,
       sandbox: config.threadSandbox,
       serviceName: 'symphony_ts',
@@ -175,23 +345,24 @@ class CodexConnection {
         message: 'thread/start returned no thread id',
       })
     }
-    return result['thread']['id']
+    this.#threadId = result['thread']['id']
+    return this.#threadId
   }
 
-  async runTurn(
+  async startTurn(
     threadId: string,
-    workspace: Workspace,
+    cwd: string,
     config: CodexConfig,
     prompt: string,
   ): Promise<string> {
     const result = await this.#request('turn/start', {
       threadId,
       input: [{ type: 'text', text: prompt }],
-      cwd: workspace.path,
+      cwd,
       approvalPolicy: config.approvalPolicy,
       sandboxPolicy: config.turnSandboxPolicy ?? {
         type: 'workspaceWrite',
-        writableRoots: [workspace.path],
+        writableRoots: [cwd],
         networkAccess: true,
       },
     })
@@ -205,32 +376,111 @@ class CodexConnection {
         message: 'turn/start returned no turn id',
       })
     }
-    const turnId = result['turn']['id']
-    this.#emit('session_started', `${threadId}-${turnId}`)
-    if (this.#turnFailure !== null) {
-      throw this.#turnFailure
+    this.#turnId = result['turn']['id']
+    return this.#turnId
+  }
+
+  /**
+   * Waits for a turn to finish. Everything that could have decided it already — a completion the
+   * App Server emitted in the same batch as the `turn/start` response, a request Symphony could not
+   * serve, a process that died — is one settlement lookup, so this never has to rank one against
+   * another.
+   */
+  awaitTurn(turnId: string): Promise<void> {
+    const settlement = this.#settled.get(turnId)
+    if (settlement !== undefined) {
+      return settlement._tag === 'completed' ? Promise.resolve() : Promise.reject(settlement.error)
     }
-    const earlyStatus = this.#earlyTurnStatuses.get(turnId)
-    if (earlyStatus !== undefined) {
-      this.#earlyTurnStatuses.delete(turnId)
-      if (earlyStatus !== 'completed') {
-        throw new AgentError({
-          category: 'turn_failed',
-          message: `turn ${turnId} finished with status ${earlyStatus}`,
-        })
-      }
-      return turnId
+    // Only a turn that never settled falls back to the session-level reason.
+    if (this.#terminalError !== null) {
+      return Promise.reject(this.#terminalError)
     }
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.#turns.delete(turnId)
-        rejectPromise(
-          new AgentError({ category: 'turn_timeout', message: `turn ${turnId} timed out` }),
-        )
-      }, this.#turnTimeoutMs)
-      this.#turns.set(turnId, { resolve: resolvePromise, reject: rejectPromise, timeout })
+    return new Promise<void>((resolvePromise, rejectPromise) => {
+      this.#waiters.set(turnId, {
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        timeout: this.#armTurnTimer(turnId),
+      })
     })
-    return turnId
+  }
+
+  /**
+   * Records how a turn ended and answers anyone waiting on it. The first settlement wins, so a
+   * later report — including the session dying — cannot overwrite a decided turn.
+   */
+  #settle(turnId: string, settlement: TurnSettlement): void {
+    if (this.#settled.has(turnId)) {
+      return
+    }
+    this.#settled.set(turnId, settlement)
+    const waiter = this.#waiters.get(turnId)
+    if (waiter === undefined) {
+      return
+    }
+    this.#waiters.delete(turnId)
+    clearTimeout(waiter.timeout)
+    if (settlement._tag === 'completed') {
+      waiter.resolve()
+      return
+    }
+    waiter.reject(settlement.error)
+  }
+
+  /**
+   * Fails the turn the App Server is working on. A request Symphony cannot serve ends that turn,
+   * and the turn it names — or failing that, the turn in flight — is where the reason belongs. With
+   * no turn to attribute it to the whole session is unusable, so it becomes the terminal reason.
+   */
+  #failCurrentTurn(error: AgentError, turnId: string | null): void {
+    const target = turnId ?? this.#turnId
+    if (target === null) {
+      this.#fail(error)
+      return
+    }
+    this.#settle(target, { _tag: 'failed', error })
+  }
+
+  #armTurnTimer(turnId: string): NodeJS.Timeout {
+    return setTimeout(() => {
+      this.#settle(turnId, {
+        _tag: 'failed',
+        error: new AgentError({
+          category: 'turn_timeout',
+          message: `turn ${turnId} produced no output for ${String(this.#turnTimeoutMs)}ms`,
+        }),
+      })
+    }, this.#turnTimeoutMs)
+  }
+
+  /**
+   * `codex.turn_timeout_ms` is a silence timeout, not a total turn budget: protocol output that
+   * belongs to a turn re-arms that turn's timer, so a long but active turn never expires.
+   *
+   * Only output that names its own turn counts. There is no fallback to the turn in flight:
+   * anything parseable would otherwise hold a turn open forever — `{}` emitted faster than the
+   * timeout, responses matching nothing, unsupported requests, or session-level notifications that
+   * have no bearing on the turn at all.
+   */
+  #noteActivity(turnId: string): void {
+    const waiter = this.#waiters.get(turnId)
+    if (waiter === undefined) {
+      return
+    }
+    clearTimeout(waiter.timeout)
+    this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
+  }
+
+  emitSessionStarted(issue: Issue): void {
+    this.#onEvent({
+      event: 'session_started',
+      timestamp: new Date(),
+      processId: this.processId,
+      message: issue.url,
+      usage: null,
+      threadId: this.#threadId,
+      turnId: this.#turnId,
+      sessionId: this.#threadId === null ? null : composeSessionId(this.#threadId, this.#turnId),
+    })
   }
 
   async stop(): Promise<void> {
@@ -238,28 +488,97 @@ class CodexConnection {
       return
     }
     this.#closed = true
-    this.#lines.close()
+    this.#fail(
+      new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
+      false,
+    )
+    this.#process.stdout.removeAllListeners('data')
+    this.#process.stderr.removeAllListeners('data')
     this.#process.stdin.end()
-    this.#process.kill('SIGTERM')
-    await new Promise<void>((resolvePromise) => {
-      if (this.#process.exitCode !== null) {
-        resolvePromise()
-      } else {
-        const timeout = setTimeout(() => {
-          this.#process.kill('SIGKILL')
-          resolvePromise()
-        }, 5_000)
-        this.#process.once('exit', () => {
-          clearTimeout(timeout)
-          resolvePromise()
-        })
+    this.#terminate('SIGTERM')
+    await this.#reapGroup()
+  }
+
+  /**
+   * Waits for the App Server's process group to empty, escalating to `SIGKILL` once the grace has
+   * passed. Polling rather than waiting on the leader's `exit`: the group emptying is not an event
+   * Node reports, so a tree whose last member leaves a moment after the leader would otherwise sit
+   * out the whole grace before anyone noticed, delaying workspace cleanup for ordinary sessions.
+   *
+   * Both phases are bounded, and the poll timers are referenced on purpose — an awaited promise
+   * does not hold the event loop open, so an unreferenced wait would let the host exit before the
+   * escalation ever fired and leave behind the descendant this exists to kill.
+   */
+  async #reapGroup(): Promise<void> {
+    const escalateAt = Date.now() + shutdownGraceMs
+    while (this.#processGroupIsAlive()) {
+      if (Date.now() >= escalateAt) {
+        this.#terminate('SIGKILL')
+        break
       }
+      await CodexConnection.#pause(groupReapPollMs)
+    }
+    // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
+    // finalizer complete — and terminal reconciliation start removing the workspace — while a
+    // descendant is still running in it.
+    const deadline = Date.now() + groupReapDeadlineMs
+    while (this.#processGroupIsAlive() && Date.now() < deadline) {
+      await CodexConnection.#pause(groupReapPollMs)
+    }
+  }
+
+  static #pause(milliseconds: number): Promise<void> {
+    return new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, milliseconds)
     })
   }
 
+  /** Whether the App Server's process group still has a member. */
+  #processGroupIsAlive(): boolean {
+    const { pid } = this.#process
+    if (pid === undefined) {
+      return false
+    }
+    try {
+      process.kill(-pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Signals the whole App Server process group, not only the shell that started it. */
+  #terminate(signal: NodeJS.Signals): void {
+    const { pid } = this.#process
+    if (pid === undefined) {
+      return
+    }
+    try {
+      process.kill(-pid, signal)
+    } catch {
+      try {
+        this.#process.kill(signal)
+      } catch {
+        // The process tree is already gone.
+      }
+    }
+  }
+
+  static #turnFailure(turnId: string, status: string): AgentError {
+    const cancelled = status === 'cancelled' || status === 'canceled'
+    return new AgentError({
+      category: cancelled ? 'turn_cancelled' : 'turn_failed',
+      message: `turn ${turnId} finished with status ${status}`,
+    })
+  }
+
+  /** Registers the pending entry before writing, so a response can never arrive unowned. */
   #request(method: string, params: JsonObject): Promise<JsonValue> {
-    const id = this.#nextId++
-    this.#write({ id, method, params })
+    if (this.#terminalError !== null) {
+      return Promise.reject(this.#terminalError)
+    }
+    const id = this.#nextId
+    this.#nextId += 1
     return new Promise<JsonValue>((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.#pending.delete(id)
@@ -268,6 +587,7 @@ class CodexConnection {
         )
       }, this.#readTimeoutMs)
       this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timeout })
+      this.#write({ id, method, params })
     })
   }
 
@@ -283,13 +603,7 @@ class CodexConnection {
   }
 
   #receiveLine(line: string): void {
-    if (Buffer.byteLength(line, 'utf8') > 10 * 1024 * 1024) {
-      this.#failAll(
-        new AgentError({
-          category: 'protocol_error',
-          message: 'Codex protocol line exceeds 10 MB',
-        }),
-      )
+    if (line.trim().length === 0) {
       return
     }
     let decoded: unknown
@@ -300,166 +614,277 @@ class CodexConnection {
       return
     }
     if (!isJsonValue(decoded) || !isJsonObject(decoded)) {
+      this.#emit('malformed', 'Codex emitted a non-object protocol message')
       return
     }
     const parsed = decoded
     const id = parsed['id']
+    const method = parsed['method']
     if (
       typeof id === 'number' &&
+      typeof method !== 'string' &&
       (parsed['result'] !== undefined || parsed['error'] !== undefined)
     ) {
-      const pending = this.#pending.get(id)
-      if (pending === undefined) {
-        return
-      }
-      clearTimeout(pending.timeout)
-      this.#pending.delete(id)
-      const error = parsed['error']
-      if (error !== undefined) {
-        pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
-      } else {
-        const result = parsed['result']
-        if (result === undefined) {
-          pending.reject(
-            new AgentError({
-              category: 'protocol_error',
-              message: 'JSON-RPC response has no result',
-            }),
-          )
-        } else {
-          pending.resolve(result)
-        }
-      }
+      this.#settleResponse(id, parsed)
       return
     }
-    const method = parsed['method']
     if (typeof method !== 'string') {
+      this.#emit('malformed', 'Codex emitted a message with no method or response payload')
       return
     }
-    if (typeof id === 'number') {
-      this.#handleServerRequest(id, method)
+    // `RequestId` is a string or an int64, so a server request carrying a string id is still a
+    // request. Reading it as a notification would leave it unanswered and stall the turn.
+    if (typeof id === 'string' || typeof id === 'number') {
+      this.#handleServerRequest(id, method, parsed)
       return
     }
     this.#handleNotification(method, parsed)
   }
 
-  #handleServerRequest(id: number, method: string): void {
-    if (
-      method === 'item/commandExecution/requestApproval' ||
-      method === 'item/fileChange/requestApproval'
-    ) {
-      this.#write({ id, result: { decision: 'acceptForSession' } })
-      this.#emit('approval_auto_approved', method)
+  #settleResponse(id: number, parsed: JsonObject): void {
+    const pending = this.#pending.get(id)
+    if (pending === undefined) {
+      // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
+      // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
+      this.#emit('unmatched_response', `no pending request for response id ${String(id)}`)
       return
     }
-    if (method === 'item/tool/requestUserInput' || method === 'tool/requestUserInput') {
+    clearTimeout(pending.timeout)
+    this.#pending.delete(id)
+    const error = parsed['error']
+    if (error !== undefined) {
+      pending.reject(new AgentError({ category: 'protocol_error', message: errorMessage(error) }))
+      return
+    }
+    const result = parsed['result']
+    if (result === undefined) {
+      pending.reject(
+        new AgentError({ category: 'protocol_error', message: 'response has no result' }),
+      )
+      return
+    }
+    this.#adoptIdentity(result)
+    pending.resolve(result)
+  }
+
+  /**
+   * Adopts the thread and turn ids carried by a response *while settling it*, not in the awaiting
+   * continuation. The App Server may batch a `turn/start` response and the notifications it
+   * triggers into one stdout chunk; those notifications are dispatched synchronously by the line
+   * reader, long before any `await` resumes, so an id adopted by the awaiter would arrive too late
+   * and every batched notification would report the previous turn — or none at all.
+   */
+  #adoptIdentity(result: JsonValue): void {
+    if (!isJsonObject(result)) {
+      return
+    }
+    const thread = result['thread']
+    if (isJsonObject(thread) && typeof thread['id'] === 'string') {
+      this.#threadId = thread['id']
+    }
+    const turn = result['turn']
+    if (isJsonObject(turn) && typeof turn['id'] === 'string') {
+      this.#turnId = turn['id']
+    }
+  }
+
+  /** `id` is echoed back in whichever form the server sent it. */
+  #handleServerRequest(id: string | number, method: string, message: JsonObject): void {
+    // A server request declares its own thread and turn, so its events are attributed from the
+    // request rather than from connection state, which is null on the first turn and names the
+    // previous one afterwards.
+    const identity = notificationIdentity(message)
+    // Only when the request names its turn; an unattributed one is not evidence that turn is alive.
+    if (identity.turnId !== null) {
+      this.#noteActivity(identity.turnId)
+    }
+    if (isPermissionsApproval(method)) {
+      this.#write({ id, result: withheldPermissionsGrant })
+      this.#emit('permissions_grant_withheld', method, identity)
+      return
+    }
+    if (isApprovalRequest(method)) {
+      this.#write({ id, result: { decision: 'acceptForSession' } })
+      this.#emit('approval_auto_approved', method, identity)
+      return
+    }
+    if (isUserInputRequest(method)) {
       this.#write({
         id,
         error: { code: -32000, message: 'Symphony does not support interactive input' },
       })
-      this.#failTurns(
+      this.#failCurrentTurn(
         new AgentError({
           category: 'input_required',
           message: 'Codex requested interactive input',
         }),
+        identity.turnId,
       )
       return
     }
     this.#write({ id, error: { code: -32601, message: `Unsupported client request: ${method}` } })
-    this.#emit('unsupported_tool_call', method)
+    this.#emit('unsupported_tool_call', method, identity)
   }
 
   #handleNotification(method: string, message: JsonObject): void {
+    const turn = this.#turnFrom(message)
+    const carried = notificationIdentity(message)
+    // A notification that names its own thread and turn is attributable even when it arrives before
+    // the response that would have taught the connection those ids.
+    const threadId = carried.threadId ?? this.#threadId
+    const turnId = carried.turnId ?? turn?.id ?? this.#turnId
+    // Re-arm the turn this notification names, not whichever turn happens to be waiting.
+    const attributed = carried.turnId ?? turn?.id
+    if (attributed !== undefined) {
+      this.#noteActivity(attributed)
+    }
     this.#onEvent({
       event: method,
       timestamp: new Date(),
       processId: this.processId,
       message: null,
       usage: usageFrom(message),
+      threadId,
+      turnId,
+      sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
     })
-    if (method !== 'turn/completed') {
+    if (method !== 'turn/completed' && method !== 'turn/failed') {
       return
     }
+    if (turn === null) {
+      return
+    }
+    // The reported status is the specific one — `cancelled`, say — so it always wins. `turn/failed`
+    // supplies `failed` only when the notification omitted it, since there the method says enough.
+    const status = turn.status ?? (method === 'turn/failed' ? 'failed' : null)
+    if (status === null) {
+      // The Turn schema requires `status`. Reading a missing one as success would hand off work
+      // the server never reported as complete, so the turn fails with a legible reason instead.
+      this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
+    }
+    this.#settle(
+      turn.id,
+      status === 'completed'
+        ? { _tag: 'completed' }
+        : { _tag: 'failed', error: CodexConnection.#turnFailure(turn.id, status ?? 'unreported') },
+    )
+  }
+
+  #turnFrom(message: JsonObject): Readonly<{ id: string; status: string | null }> | null {
     const params = message['params']
     if (!isJsonObject(params) || !isJsonObject(params['turn'])) {
-      return
+      return null
     }
     const turn = params['turn']
-    const turnId = turn['id']
+    const id = turn['id']
+    if (typeof id !== 'string') {
+      return null
+    }
     const status = turn['status']
-    if (typeof turnId !== 'string' || typeof status !== 'string') {
-      return
-    }
-    const waiter = this.#turns.get(turnId)
-    if (waiter === undefined) {
-      if (this.#earlyTurnStatuses.size >= 128) {
-        const oldestTurnId = this.#earlyTurnStatuses.keys().next().value
-        if (oldestTurnId !== undefined) {
-          this.#earlyTurnStatuses.delete(oldestTurnId)
-        }
-      }
-      this.#earlyTurnStatuses.set(turnId, status)
-      return
-    }
-    clearTimeout(waiter.timeout)
-    this.#turns.delete(turnId)
-    if (status === 'completed') {
-      waiter.resolve()
-    } else {
-      waiter.reject(
-        new AgentError({
-          category: 'turn_failed',
-          message: `turn ${turnId} finished with status ${status}`,
-        }),
-      )
-    }
+    return { id, status: typeof status === 'string' ? status : null }
   }
 
-  #emit(event: string, message: string): void {
-    this.#onEvent({ event, timestamp: new Date(), processId: this.processId, message, usage: null })
+  /**
+   * Emits a client-side event. Identity carried by the message that provoked it wins over
+   * connection state, which lags whenever a message arrives before the response that would set it.
+   */
+  #emit(
+    event: string,
+    message: string,
+    carried: Readonly<{ threadId: string | null; turnId: string | null }> = {
+      threadId: null,
+      turnId: null,
+    },
+  ): void {
+    const threadId = carried.threadId ?? this.#threadId
+    const turnId = carried.turnId ?? this.#turnId
+    this.#onEvent({
+      event,
+      timestamp: new Date(),
+      processId: this.processId,
+      message,
+      usage: null,
+      threadId,
+      turnId,
+      sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+    })
   }
 
-  #failTurns(error: AgentError): void {
-    this.#turnFailure = error
-    for (const waiter of this.#turns.values()) {
-      clearTimeout(waiter.timeout)
-      waiter.reject(error)
+  /**
+   * Records the session-level reason and settles everything still outstanding. Turns that already
+   * settled keep their own result — `#settle` ignores a second write — so finished work is never
+   * relabelled as a session failure.
+   */
+  #fail(error: AgentError, remember = true): void {
+    if (remember && this.#terminalError === null) {
+      this.#terminalError = error
     }
-    this.#turns.clear()
-  }
-
-  #failAll(error: AgentError): void {
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timeout)
       pending.reject(error)
     }
     this.#pending.clear()
-    this.#earlyTurnStatuses.clear()
-    this.#failTurns(error)
+    // The turn in flight counts even with no waiter registered yet: a caller between `startTurn`
+    // and `awaitTurn` has none, and `exit` can arrive before stdout finishes draining. Without
+    // this, a `turn/completed` still queued in the pipe would become that turn's first settlement
+    // and report success for a session already observed to have died.
+    const outstanding = new Set(this.#waiters.keys())
+    if (this.#turnId !== null) {
+      outstanding.add(this.#turnId)
+    }
+    for (const turnId of outstanding) {
+      this.#settle(turnId, { _tag: 'failed', error })
+    }
   }
 }
 
-export const runAgent = (
-  issue: Issue,
-  workspace: Workspace,
-  config: CodexConfig,
-  prompt: string,
-  maxTurns: number,
-  secretEnvironmentNames: readonly string[],
-  refreshIssue: () => Effect.Effect<Issue | null, AgentError>,
-  isRoutable: (issue: Issue) => boolean,
-  onEvent: (event: AgentEvent) => void,
-): Effect.Effect<AgentResult, AgentError> =>
-  Effect.scoped(
+export type AgentLaunch = Readonly<{
+  issue: Issue
+  workspace: Workspace
+  /** The configured workspace root; containment is re-verified against it at launch. */
+  workspaceRoot: string
+  config: CodexConfig
+  prompt: string
+  maxTurns: number
+  secretEnvironmentNames: readonly string[]
+  refreshIssue: () => Effect.Effect<Issue | null, AgentError>
+  isRoutable: (issue: Issue) => boolean
+  onEvent: (event: AgentEvent) => void
+}>
+
+const rejectWorkspaceLaunch = (error: WorkspaceError): AgentError =>
+  new AgentError({
+    category: 'workspace_rejected',
+    message: `refusing to launch Codex: ${error.message}`,
+    cause: error,
+  })
+
+const runVerifiedAgent = (
+  launch: AgentLaunch,
+  verified: VerifiedWorkspace,
+): Effect.Effect<AgentResult, AgentError> => {
+  /**
+   * A path string is re-resolved by the kernel at every consumer, so the identity is re-bound at
+   * each path-consuming boundary: after the process is created and before every turn. A directory
+   * renamed and replaced by a symlink in between is rejected rather than followed.
+   */
+  const rebind = (): Promise<void> =>
+    Effect.runPromise(
+      assertWorkspaceIdentity(launch.workspaceRoot, verified).pipe(
+        Effect.mapError(rejectWorkspaceLaunch),
+      ),
+    )
+
+  return Effect.scoped(
     Effect.acquireRelease(
       Effect.sync(
         () =>
           new CodexConnection(
-            config.command,
-            workspace.path,
-            config,
-            secretEnvironmentNames,
-            onEvent,
+            launch.config.command,
+            verified.path,
+            launch.config,
+            launch.secretEnvironmentNames,
+            launch.onEvent,
           ),
       ),
       (connection) => Effect.promise(() => connection.stop()),
@@ -467,18 +892,33 @@ export const runAgent = (
       Effect.flatMap((connection) =>
         Effect.tryPromise({
           try: async () => {
-            const threadId = await connection.initialize(config, workspace)
+            await rebind()
+            const threadId = await connection.initialize(launch.config, verified.path)
+            // Re-bound after the boundary too: a swap during the request window is then detected
+            // and the session torn down before any turn runs.
+            await rebind()
             let turnId = ''
             let turnCount = 0
-            while (turnCount < maxTurns) {
+            while (turnCount < launch.maxTurns) {
               const turnPrompt =
                 turnCount === 0
-                  ? prompt
+                  ? launch.prompt
                   : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
-              turnId = await connection.runTurn(threadId, workspace, config, turnPrompt)
+              await rebind()
+              turnId = await connection.startTurn(
+                threadId,
+                verified.path,
+                launch.config,
+                turnPrompt,
+              )
+              await rebind()
+              if (turnCount === 0) {
+                connection.emitSessionStarted(launch.issue)
+              }
+              await connection.awaitTurn(turnId)
               turnCount += 1
-              const refreshed = await Effect.runPromise(refreshIssue())
-              if (refreshed === null || !isRoutable(refreshed)) {
+              const refreshed = await Effect.runPromise(launch.refreshIssue())
+              if (refreshed === null || !launch.isRoutable(refreshed)) {
                 break
               }
             }
@@ -489,10 +929,28 @@ export const runAgent = (
               ? cause
               : new AgentError({
                   category: 'protocol_error',
-                  message: `Codex session failed for ${issue.identifier}`,
+                  message: `Codex session failed for ${launch.issue.identifier}`,
                   cause,
                 }),
         }),
       ),
+    ),
+  )
+}
+
+/**
+ * Launches Codex for one issue.
+ *
+ * Workspace containment is verified against the configured root immediately before the process is
+ * created, and the verified real path — not the caller-supplied one — becomes the subprocess cwd
+ * and the thread/turn `cwd`. Because a path string is re-resolved by the kernel at every consumer,
+ * the verified directory's identity is re-bound after the process is created and before every
+ * turn, so a stale, forged, or substituted workspace can never be entered.
+ */
+export const runAgent = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  Effect.scoped(
+    openVerifiedWorkspace(launch.workspaceRoot, launch.workspace).pipe(
+      Effect.mapError(rejectWorkspaceLaunch),
+      Effect.flatMap((verified) => runVerifiedAgent(launch, verified)),
     ),
   )

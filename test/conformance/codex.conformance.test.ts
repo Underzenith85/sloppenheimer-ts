@@ -42,17 +42,18 @@ const runScenario = async (
   }
   const run = (): Promise<AgentResult> =>
     Effect.runPromise(
-      runAgent(
+      runAgent({
         issue,
         workspace,
+        workspaceRoot: process.cwd(),
         config,
-        'conformance prompt',
-        1,
-        [],
-        () => Effect.succeed(null),
-        () => false,
-        (event) => events.push(event),
-      ),
+        prompt: 'conformance prompt',
+        maxTurns: 1,
+        secretEnvironmentNames: [],
+        refreshIssue: () => Effect.succeed(null),
+        isRoutable: () => false,
+        onEvent: (event) => events.push(event),
+      }),
     )
   return { events, result: await run() }
 }
@@ -64,7 +65,7 @@ describe('Core Conformance Codex App Server client', (): void => {
     expect(result).toEqual({ threadId: 'thread-fake', turnId: 'turn-fake', turnCount: 1 })
     expect(events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ event: 'session_started', message: 'thread-fake-turn-fake' }),
+        expect.objectContaining({ event: 'session_started', threadId: 'thread-fake' }),
         expect.objectContaining({
           event: 'turn/usageUpdated',
           usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 },

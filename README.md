@@ -46,7 +46,19 @@ fallback aliases `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environment
 `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` authentication sources are always preserved, and tracker
 configuration may not reuse those names. Each eligible issue must carry the `symphony` label.
 Workspaces live under `.symphony/workspaces` and are never treated as trusted paths until
-containment checks pass.
+containment checks pass. Containment is re-verified immediately before every agent launch, not only
+at creation: the path must be a strict descendant of the configured root both as written and after
+symlink resolution, and must be a real directory that still exists. The verified real path — not
+the caller-supplied one — becomes the Codex subprocess cwd and the thread and turn `cwd`, so a
+stale, forged, or substituted workspace can never be entered. Every executor, local or remote, goes
+through the same invariant.
+
+A path string is re-resolved by the kernel at every consumer, so verification alone is not enough:
+a directory can be renamed and the path repointed between the check and the use. The host therefore
+binds the verified directory's identity. It holds an open handle on it for the whole session, which
+keeps the inode allocated so a directory deleted and recreated at the same path cannot reuse it,
+and it re-confirms the device and inode at each path-consuming boundary — after the process is
+created and before every turn — rejecting a directory whose identity changed.
 
 The configured operator console is available at `http://127.0.0.1:3000`. It shows live and retrying
 agents, session totals, and the open GitHub backlog. **Start** adds the configured orchestration label;
@@ -72,6 +84,69 @@ changes, stale branches, and conflicts return to the coding agent with repair co
 squash-merged only through the repository protection rules with an expected-head guard. The
 operator console shows each active handoff and its current blocker; no handoff or pause transition
 removes the Symphony label.
+
+## Codex App Server client
+
+The client speaks the App Server protocol over the subprocess's stdio: stdout carries protocol
+framing only and stderr is diagnostic only, never parsed. Lines are split by a reader that enforces
+the 10 MB framing limit on the _pending_ buffer, so an unterminated line is rejected before it can
+grow without bound.
+
+Ordering is not assumed. A pending request is registered before its line is written, so a response
+can never arrive unowned. How a turn ended is one record per turn: whatever observes the end — a
+lifecycle notification, a request Symphony cannot serve, the turn timeout, or the session dying —
+writes a settlement against that turn id, and the first write wins. A completion that arrives
+before its waiter exists is therefore not lost, a turn the server already reported keeps its own
+result, and a later session-level error cannot relabel finished work. A process that exits or fails
+to start settles every outstanding request and turn once, including the turn in flight, so no call
+waits out its timeout after the session is already gone.
+
+Malformed protocol data is reported as an event rather than ending the session, and
+`session_started` carries the thread id, turn id, the composed `thread:turn` session id, and the
+issue URL. Every event is attributed from the `threadId` and `turnId` the provoking message carries
+where it has them, so a message that arrives before the response introducing those ids is still
+recorded against the right turn.
+
+Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
+`codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
+re-arms it, so a long but active turn never expires while a genuinely silent one does.
+`codex.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
+
+The App Server runs in its own process group. Shutdown, cancellation and interruption signal the
+whole tree — `SIGTERM`, then `SIGKILL` after a bounded grace — so tools the App Server itself
+started are not left behind, and every outstanding request and turn settles exactly once.
+
+Failures map onto stable categories: `spawn_failed`, `workspace_rejected`, `protocol_error`,
+`read_timeout`, `turn_timeout`, `turn_failed`, `turn_cancelled`, `input_required`, and
+`process_exited`.
+
+### Trust and safety posture
+
+SPEC §10.5 leaves approval, sandbox, and operator-confirmation behaviour implementation-defined and
+requires each implementation to document what it chose. Symphony answers all four server-initiated
+requests, so nothing stalls waiting on an operator who is not there:
+
+| Request                                 | Response                     | Effect                    |
+| --------------------------------------- | ---------------------------- | ------------------------- |
+| `item/commandExecution/requestApproval` | `decision: acceptForSession` | auto-approved             |
+| `item/fileChange/requestApproval`       | `decision: acceptForSession` | auto-approved             |
+| `item/permissions/requestApproval`      | empty grant, `scope: turn`   | answered, nothing widened |
+| `item/tool/requestUserInput`            | `-32000`                     | declined; the turn fails  |
+
+Any other server-initiated request is declined with `-32601` and the session continues.
+
+The first two match the high-trust example the SPEC sketches. The third is a deliberate departure:
+a permissions request asks to widen the sandbox the thread was started with, and granting what it
+asks would let the agent negotiate the containment that verifying the workspace before launch
+exists to establish. Symphony answers in the shape the protocol requires — so the turn proceeds
+rather than stalling — while granting nothing beyond the sandbox already configured, and records a
+`permissions_grant_withheld` event. Widening is an operator decision made in `WORKFLOW.md` through
+`codex.turn_sandbox_policy`, where it is reviewable, not one made by the agent mid-turn.
+
+`test/fixtures/fake-app-server.ts` is a deterministic stand-in used by the protocol suite; a
+separate test compares the methods, policy values, and permission types this client sends against
+`codex app-server generate-json-schema` when Codex is installed, and is inert when it is not, so no
+machine-specific schema is committed.
 
 ## Configuration
 
