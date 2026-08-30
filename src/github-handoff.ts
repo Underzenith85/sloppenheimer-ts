@@ -4,8 +4,11 @@ import type { JsonValue } from './domain.js'
 import { TrackerError } from './errors.js'
 import {
   githubJson,
+  githubMaxPages,
   githubPageSize,
   isJsonRecord,
+  parseNextUrl,
+  trackerPaginationError,
   trackerResponseError,
   type JsonRecord,
 } from './github-http.js'
@@ -189,7 +192,7 @@ const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation
   }
   for (const item of [...value].reverse()) {
     const comment = record(item, 'GitHub pull request comment is invalid')
-    const author = comment['author']
+    const author = comment['author'] ?? comment['user']
     const body = comment['body']
     if (!isJsonRecord(author) || typeof body !== 'string') {
       continue
@@ -197,7 +200,7 @@ const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation
     const login = author['login']
     if (
       typeof login !== 'string' ||
-      !login.startsWith('chatgpt-codex-connector') ||
+      login !== 'chatgpt-codex-connector' ||
       !body.includes('<!-- codex-pull-request-review-summary -->')
     ) {
       continue
@@ -215,6 +218,39 @@ const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation
   }
   return null
 }
+
+const fetchCodexReview = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  number: number,
+): Effect.Effect<CodexReviewObservation | null, TrackerError> =>
+  Effect.gen(function* () {
+    let nextUrl: string | null =
+      `${prefix}/issues/${String(number)}/comments?per_page=${String(githubPageSize)}`
+    let pages = 0
+    let latest: CodexReviewObservation | null = null
+    while (nextUrl !== null) {
+      if (pages >= githubMaxPages) {
+        return yield* Effect.fail(
+          trackerPaginationError('GitHub pull request comment pagination exceeded its limit'),
+        )
+      }
+      const requestUrl = nextUrl
+      const response = yield* githubJson(provider, requestUrl)
+      if (!isArray(response.body)) {
+        return yield* Effect.fail(
+          trackerResponseError('GitHub pull request comment list is missing'),
+        )
+      }
+      const decoded = decodeCodexReview(response.body)
+      if (decoded !== null) {
+        latest = decoded
+      }
+      nextUrl = parseNextUrl(response.linkHeader, requestUrl, provider.apiBaseUrl)
+      pages += 1
+    }
+    return latest
+  })
 
 export type GitHubPullRequestMonitor = Readonly<{
   inspect: (number: number) => Effect.Effect<PullRequestObservation, TrackerError>
@@ -313,12 +349,13 @@ export const makeGitHubPullRequestMonitor = (
             ),
             'GitHub check-run response is invalid',
           )
+          const codexReview = yield* fetchCodexReview(provider, prefix, number)
           const graphResponse = record(
             yield* json(provider, `${provider.apiBaseUrl.replace(/\/$/u, '')}/graphql`, {
               method: 'POST',
               body: JSON.stringify({
                 query:
-                  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision comments(first:100){nodes{body author{login}}} reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
+                  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
                 variables: { owner: provider.owner, name: provider.repository, number },
               }),
             }),
@@ -331,7 +368,6 @@ export const makeGitHubPullRequestMonitor = (
             'GitHub GraphQL pull request is missing',
           )
           const reviewDecision = graphPull['reviewDecision']
-          const comments = record(graphPull['comments'], 'GitHub pull request comments are missing')
           const threads = record(graphPull['reviewThreads'], 'GitHub review threads are missing')
           if (reviewDecision !== null && typeof reviewDecision !== 'string') {
             throw new TrackerError({
@@ -352,7 +388,7 @@ export const makeGitHubPullRequestMonitor = (
             checks: decodeChecks(checksResponse['check_runs']),
             reviewDecision,
             reviewThreads: decodeThreads(threads['nodes']),
-            codexReview: decodeCodexReview(comments['nodes']),
+            codexReview,
           }
         }),
       ),

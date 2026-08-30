@@ -323,19 +323,34 @@ describe('GitHub pull request monitor', (): void => {
           ],
         })
       }
+      if (url.includes('/issues/41/comments?')) {
+        if (url.includes('page=2')) {
+          return Response.json([
+            {
+              user: { login: 'chatgpt-codex-connector' },
+              body: '<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | `abcdef1` |',
+            },
+          ])
+        }
+        return Response.json(
+          [
+            {
+              user: { login: 'chatgpt-codex-connector-fake' },
+              body: '<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | `badcafe` |',
+            },
+          ],
+          {
+            headers: {
+              Link: '<https://api.github.test/repos/example/symphony/issues/41/comments?per_page=100&page=2>; rel="next"',
+            },
+          },
+        )
+      }
       return Response.json({
         data: {
           repository: {
             pullRequest: {
               reviewDecision: null,
-              comments: {
-                nodes: [
-                  {
-                    author: { login: 'chatgpt-codex-connector' },
-                    body: '<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | `abcdef1` |',
-                  },
-                ],
-              },
               reviewThreads: {
                 nodes: [
                   {
@@ -371,7 +386,7 @@ describe('GitHub pull request monitor', (): void => {
       commentHeadSha: 'reviewed-head',
     })
     expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(5)
   })
 
   it('requests Codex review only after verifying the current pull request head', async (): Promise<void> => {
