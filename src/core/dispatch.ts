@@ -2,11 +2,11 @@ import { Effect, Fiber, Queue, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue } from '../domain/domain.js'
-import { AgentError } from '../errors.js'
 import type { HostToolSession } from '../host-tools.js'
 import { mergeSparseObject, toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
 import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import { AgentError } from './agent-runner.js'
 import { adoptTracker, revalidateCredentials } from './workflow-reload.js'
 
 export const dispatch = (

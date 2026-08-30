@@ -1,9 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Effect } from 'effect'
 
-import type { Issue, JsonObject, JsonValue, Workspace } from './domain/domain.js'
+import type { JsonObject, JsonValue } from './domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from './config/env-reference.js'
-import { AgentError, type WorkspaceError } from './errors.js'
+import {
+  AgentError,
+  type AgentLaunch,
+  type AgentResult,
+  type AgentRunnerConfig,
+} from './core/agent-runner.js'
+import type { WorkspaceError } from './errors.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from './support/json.js'
 import type { HostToolResult, HostToolSession } from './host-tools.js'
 import { unsupportedHostTool } from './host-tools.js'
@@ -14,7 +20,6 @@ import {
   type AgentEvent,
   type AgentEventPayload,
 } from './telemetry.js'
-import type { CodexConfig } from './config/workflow.js'
 import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
@@ -47,6 +52,7 @@ export const isCancelledTurnStatus = (status: string): boolean =>
   status === 'cancelled' || status === 'canceled' || status === 'interrupted'
 
 export type { AgentEvent } from './telemetry.js'
+export type { AgentLaunch, AgentResult } from './core/agent-runner.js'
 
 /**
  * The environment values a session's telemetry must never echo. The tracker's own secret names come
@@ -67,12 +73,6 @@ export const sessionSecretValues = (
     .map((name) => environment[name])
     .filter((value): value is string => value !== undefined && value.length > 0)
 }
-
-export type AgentResult = Readonly<{
-  threadId: string
-  turnId: string
-  turnCount: number
-}>
 
 type PendingRequest = Readonly<{
   method: string
@@ -346,7 +346,7 @@ class CodexConnection {
   constructor(
     command: string,
     cwd: string,
-    config: CodexConfig,
+    config: AgentRunnerConfig,
     secretEnvironmentNames: readonly string[],
     hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
@@ -462,7 +462,7 @@ class CodexConnection {
     return this.#process.pid ?? null
   }
 
-  async initialize(config: CodexConfig, cwd: string): Promise<string> {
+  async initialize(config: AgentRunnerConfig, cwd: string): Promise<string> {
     await this.#request('initialize', {
       clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
       capabilities: { experimentalApi: true },
@@ -522,7 +522,7 @@ class CodexConnection {
   async startTurn(
     threadId: string,
     cwd: string,
-    config: CodexConfig,
+    config: AgentRunnerConfig,
     prompt: string,
     turnCount: number,
   ): Promise<string> {
@@ -1145,22 +1145,6 @@ class CodexConnection {
     }
   }
 }
-
-export type AgentLaunch = Readonly<{
-  issue: Issue
-  workspace: Workspace
-  /** The configured workspace root; containment is re-verified against it at launch. */
-  workspaceRoot: string
-  config: CodexConfig
-  prompt: string
-  maxTurns: number
-  secretEnvironmentNames: readonly string[]
-  /** Immutable adapter/tool/context selection for this session. */
-  hostTools?: HostToolSession
-  refreshIssue: () => Effect.Effect<Issue | null, AgentError>
-  isRoutable: (issue: Issue) => boolean
-  onEvent: (event: AgentEvent) => void
-}>
 
 const rejectWorkspaceLaunch = (error: WorkspaceError): AgentError =>
   new AgentError({

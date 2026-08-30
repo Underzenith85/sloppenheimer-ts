@@ -1,7 +1,6 @@
 import { resolve } from 'node:path'
 import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
 
-import { isCancelledTurnStatus, type AgentEvent, type runAgent } from '../codex.js'
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
   issueId,
@@ -32,6 +31,7 @@ import {
 import { issueBranchName, type TrackerAdapter } from '../tracker.js'
 import { type loadWorkflow, type Workflow } from '../config/workflow.js'
 import { workspaceKey, type WorkspaceManager } from '../workspace.js'
+import type { AgentEvent, AgentEventSemantics, AgentRunner } from './agent-runner.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 
@@ -278,7 +278,7 @@ export type OrchestratorDependencies = Readonly<{
   loadWorkflow: typeof loadWorkflow
   makeTracker: (workflow: Workflow) => TrackerAdapter
   makeWorkspaces: (workflow: Workflow) => WorkspaceManager
-  runAgent: typeof runAgent
+  runAgent: AgentRunner
   watchWorkflow: (path: string, onChange: () => void) => WorkflowWatcher
   /** Environment used by dispatch preflight validation of secret indirection. */
   environment: NodeJS.ProcessEnv
@@ -485,6 +485,7 @@ const identifierIssueNumber = (identifier: string): number | null => {
 export const startOrchestratorRuntime = (
   selectedWorkflowPath: string,
   dependencies: OrchestratorDependencies,
+  agentEventSemantics: AgentEventSemantics,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
   Effect.gen(function* () {
     const makeEffectiveWorkflow = (workflow: Workflow): EffectiveWorkflow => ({
@@ -1181,9 +1182,9 @@ export const startOrchestratorRuntime = (
             update.event === 'turn/terminated') &&
           update.turnStatus !== null
         ) {
-          const completed = update.turnStatus === 'completed'
-          const cancelled = isCancelledTurnStatus(update.turnStatus)
-          const outcome = completed ? 'completed' : cancelled ? 'cancelled' : 'failed'
+          const outcome = agentEventSemantics.turnOutcome(update.turnStatus)
+          const completed = outcome === 'completed'
+          const cancelled = outcome === 'cancelled'
           entry.turnActive = false
           yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
             ...sessionLogContext(entry),
@@ -1435,9 +1436,10 @@ export const startOrchestratorRuntime = (
 export const runOrchestratorRuntime = (
   selectedWorkflowPath: string,
   dependencies: OrchestratorDependencies,
+  agentEventSemantics: AgentEventSemantics,
 ): Effect.Effect<void, WorkflowError> =>
   Effect.scoped(
-    startOrchestratorRuntime(selectedWorkflowPath, dependencies).pipe(
+    startOrchestratorRuntime(selectedWorkflowPath, dependencies, agentEventSemantics).pipe(
       Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
     ),
   )

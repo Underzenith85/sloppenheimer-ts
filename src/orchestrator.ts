@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import chokidar from 'chokidar'
 import type { Effect, Scope } from 'effect'
 
-import { runAgent } from './codex.js'
+import { isCancelledTurnStatus, runAgent } from './codex.js'
 import { loadWorkflow } from './config/workflow.js'
 import {
   runOrchestrator as runOrchestratorCore,
@@ -10,6 +10,7 @@ import {
   type OrchestratorControl,
   type OrchestratorDependencies,
 } from './core/orchestrator.js'
+import type { AgentEventSemantics, AgentRunner } from './core/agent-runner.js'
 import type { WorkflowError } from './errors.js'
 import { makeGitHubTracker } from './tracker.js'
 import { makeWorkspaceManager } from './workspace.js'
@@ -32,12 +33,19 @@ export {
  * The composition root binds the concrete adapters.  `src/core` depends on these only through
  * `OrchestratorDependencies`, so the core runtime never imports an adapter implementation.
  */
+const codexAgentRunner: AgentRunner = runAgent
+
+const codexAgentEventSemantics: AgentEventSemantics = {
+  turnOutcome: (status) =>
+    status === 'completed' ? 'completed' : isCancelledTurnStatus(status) ? 'cancelled' : 'failed',
+}
+
 const defaultDependencies: OrchestratorDependencies = {
   loadWorkflow,
   makeTracker: (workflow) => makeGitHubTracker(workflow.tracker.provider),
   makeWorkspaces: (workflow) =>
     makeWorkspaceManager(workflow.config.workspaceRoot, workflow.config.hooks),
-  runAgent,
+  runAgent: codexAgentRunner,
   watchWorkflow: (path, onChange) => {
     const watcher = chokidar.watch(path, {
       awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
@@ -53,9 +61,9 @@ export const startOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
   dependencies: OrchestratorDependencies = defaultDependencies,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
-  startOrchestratorCore(selectedWorkflowPath, dependencies)
+  startOrchestratorCore(selectedWorkflowPath, dependencies, codexAgentEventSemantics)
 
 export const runOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
 ): Effect.Effect<void, WorkflowError> =>
-  runOrchestratorCore(selectedWorkflowPath, defaultDependencies)
+  runOrchestratorCore(selectedWorkflowPath, defaultDependencies, codexAgentEventSemantics)

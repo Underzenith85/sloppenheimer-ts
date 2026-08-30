@@ -1,6 +1,7 @@
 import { Effect, type Scope } from 'effect'
 
 import type { WorkflowError } from '../errors.js'
+import type { AgentEventSemantics } from './agent-runner.js'
 import {
   runOrchestratorRuntime,
   startOrchestratorRuntime,
@@ -26,10 +27,13 @@ export {
 export const startOrchestrator = (
   selectedWorkflowPath: string,
   dependencies: OrchestratorDependencies,
+  agentEventSemantics: AgentEventSemantics,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
-  startOrchestratorRuntime(selectedWorkflowPath, dependencies)
+  startOrchestratorRuntime(selectedWorkflowPath, dependencies, agentEventSemantics)
 
 export const runOrchestrator = (
   selectedWorkflowPath: string,
   dependencies: OrchestratorDependencies,
-): Effect.Effect<void, WorkflowError> => runOrchestratorRuntime(selectedWorkflowPath, dependencies)
+  agentEventSemantics: AgentEventSemantics,
+): Effect.Effect<void, WorkflowError> =>
+  runOrchestratorRuntime(selectedWorkflowPath, dependencies, agentEventSemantics)
