@@ -266,6 +266,11 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.result).toBeNull()
     expect(outcome.error?.category).toBe('turn_failed')
+    expect(
+      outcome.events
+        .filter((event) => event.event === 'turn/failed' || event.event === 'turn/completed')
+        .map((event) => event.event),
+    ).toEqual(['turn/failed'])
   }, 30_000)
 
   it('fails a turn whose completion omitted a status', async (): Promise<void> => {
@@ -281,6 +286,9 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.result).toBeNull()
     expect(outcome.error?.category).toBe('input_required')
+    expect(
+      outcome.events.filter((event) => event.event.startsWith('turn/')).map((event) => event.event),
+    ).toEqual(['turn/terminated'])
   }, 30_000)
 
   it('answers a permissions approval with a grant that widens nothing', async (): Promise<void> => {

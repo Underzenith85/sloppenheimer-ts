@@ -856,6 +856,9 @@ class CodexConnection {
       isTerminal && turn !== null
         ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
         : null
+    if (isTerminal && turn !== null && this.#settled.has(turn.id)) {
+      return
+    }
     const pendingTurnStart = [...this.#pending.values()].find(
       (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
     )

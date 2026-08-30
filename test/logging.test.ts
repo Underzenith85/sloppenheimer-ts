@@ -23,6 +23,11 @@ Authorization=[REDACTED]`,
     expect(redactSecretsInString('safe=value PASSWORD=two words hidden')).toBe(
       'safe=value PASSWORD=[REDACTED]',
     )
+    expect(
+      redactSecretsInString(
+        'PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nc2VjcmV0LWtleS1ib2R5\n-----END PRIVATE KEY-----',
+      ),
+    ).toBe('PRIVATE_KEY=[REDACTED]')
   })
 
   it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {

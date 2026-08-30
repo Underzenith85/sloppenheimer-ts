@@ -78,8 +78,14 @@ const redactUnquotedAssignments = (value: string): string => {
   return `${result}${value.slice(copiedThrough)}`
 }
 
+const redactPemPrivateKeys = (value: string): string =>
+  value.replace(
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----/gu,
+    '[REDACTED PEM PRIVATE KEY]',
+  )
+
 export const redactSecretsInString = (value: string): string =>
-  redactUnquotedAssignments(value)
+  redactUnquotedAssignments(redactPemPrivateKeys(value))
     .replace(/\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/\s@]+@/gu, '$1[REDACTED]@')
     .replace(/\b((?:Proxy-)?Authorization|Set-Cookie|Cookie)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
