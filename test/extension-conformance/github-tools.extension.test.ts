@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { runAgent, type AgentEvent } from '../../src/codex.js'
+import { runAgent, type AgentEvent } from '../../src/adapters/codex/codex.js'
 import { makeHostToolSession } from '../../src/core/dispatch.js'
 import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
