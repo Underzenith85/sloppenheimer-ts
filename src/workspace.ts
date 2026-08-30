@@ -8,6 +8,7 @@ import { Effect, type Scope } from 'effect'
 import type { IssueIdentifier, Workspace } from './domain/domain.js'
 import { WorkspaceError } from './errors.js'
 import type { HooksConfig } from './config/workflow.js'
+import { processGroupIsAlive } from './support/subprocess.js'
 
 export type HookPhase = 'after_create' | 'before_run' | 'after_run' | 'before_remove'
 
@@ -314,21 +315,14 @@ const runHookProcess = (
     })
 
     /**
-     * Whether the hook's original process group still has a member. Used to decide whether the
-     * forceful escalation is still needed; a group with no members must never be signalled again,
-     * because its leader's PID can be recycled.
+     * Whether the hook's original process group still has a member that can run. Used to decide
+     * whether the forceful escalation is still needed; a group with no running member must never be
+     * signalled again, because its leader's PID can be recycled. Zombies do not count as members:
+     * on a host that does not reap orphans they would otherwise keep a killed tree reporting alive.
      */
-    const processGroupIsAlive = (): boolean => {
+    const hookGroupIsAlive = (): boolean => {
       const { pid } = child
-      if (pid === undefined) {
-        return false
-      }
-      try {
-        process.kill(-pid, 0)
-        return true
-      } catch {
-        return false
-      }
+      return pid !== undefined && processGroupIsAlive(pid)
     }
 
     const terminate = (signal: NodeJS.Signals): void => {
@@ -352,11 +346,12 @@ const runHookProcess = (
         clearTimeout(timeoutTimer)
         timeoutTimer = undefined
       }
-      // The escalation survives settlement only while the group still has a member: a descendant
-      // that ignores `SIGTERM` and redirected its inherited pipes lets the shell emit `close` while
-      // the group is alive, so cancelling here would let it run on. Once the group is empty the
-      // timer is cancelled, so a recycled leader PID is never signalled.
-      if (graceTimer !== undefined && !processGroupIsAlive()) {
+      // The escalation survives settlement only while the group still has a running member: a
+      // descendant that ignores `SIGTERM` and redirected its inherited pipes lets the shell emit
+      // `close` while the group is alive, so cancelling here would let it run on. Once nothing but
+      // zombies is left the timer is cancelled, so a recycled leader PID is never signalled and a
+      // host that does not reap orphans cannot strand the escalation.
+      if (graceTimer !== undefined && !hookGroupIsAlive()) {
         clearTimeout(graceTimer)
         graceTimer = undefined
       }
@@ -427,7 +422,7 @@ const runHookProcess = (
       graceTimer = setTimeout(() => {
         // Re-checked at fire time as well, so an escalation retained at `close` is dropped if the
         // group emptied during the grace period.
-        if (processGroupIsAlive()) {
+        if (hookGroupIsAlive()) {
           terminate('SIGKILL')
         }
         settle(timeoutFailure())
@@ -443,7 +438,7 @@ const runHookProcess = (
       detach()
       terminate('SIGTERM')
       setTimeout(() => {
-        if (processGroupIsAlive()) {
+        if (hookGroupIsAlive()) {
           terminate('SIGKILL')
         }
       }, hookTerminationGraceMs).unref()
