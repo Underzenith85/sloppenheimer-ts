@@ -139,6 +139,7 @@ Do the work
       snapshot: Effect.die('unused'),
       refresh: Effect.void,
       setIssuePaused,
+      awaitTermination: Effect.never,
     })
 
     await Effect.runPromise(backend.backlog)
