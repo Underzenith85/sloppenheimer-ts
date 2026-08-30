@@ -288,6 +288,11 @@ export type OrchestratorDependencies = Readonly<{
   makeCodeReview?: (workflow: Workflow) => CodeReviewPort | null
   makeWorkspaces: (workflow: Workflow) => WorkspaceManager
   runAgent: AgentRunnerPort['run']
+  /**
+   * The injected runner's own reading of its turn statuses. It travels with `runAgent` so a
+   * non-Codex runner is never interpreted through another runner's status vocabulary.
+   */
+  agentEventSemantics: AgentEventSemantics
   watchWorkflow: (path: string, onChange: () => void) => WorkflowWatcher
   /** Environment used by dispatch preflight validation of secret indirection. */
   environment: NodeJS.ProcessEnv
@@ -497,7 +502,6 @@ const identifierIssueNumber = (identifier: string): number | null => {
 export const startOrchestratorRuntime = (
   selectedWorkflowPath: string,
   dependencies: OrchestratorDependencies,
-  agentEventSemantics: AgentEventSemantics,
 ): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
   Effect.gen(function* () {
     const configureCodeReview = (workflow: Workflow): CodeReviewPort | null => {
@@ -1229,7 +1233,7 @@ export const startOrchestratorRuntime = (
             update.event === 'turn/terminated') &&
           update.turnStatus !== null
         ) {
-          const outcome = agentEventSemantics.turnOutcome(update.turnStatus)
+          const outcome = dependencies.agentEventSemantics.turnOutcome(update.turnStatus)
           const completed = outcome === 'completed'
           const cancelled = outcome === 'cancelled'
           entry.turnActive = false
@@ -1483,10 +1487,9 @@ export const startOrchestratorRuntime = (
 export const runOrchestratorRuntime = (
   selectedWorkflowPath: string,
   dependencies: OrchestratorDependencies,
-  agentEventSemantics: AgentEventSemantics,
 ): Effect.Effect<void, WorkflowError> =>
   Effect.scoped(
-    startOrchestratorRuntime(selectedWorkflowPath, dependencies, agentEventSemantics).pipe(
+    startOrchestratorRuntime(selectedWorkflowPath, dependencies).pipe(
       Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
     ),
   )
