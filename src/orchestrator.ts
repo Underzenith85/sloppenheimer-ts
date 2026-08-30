@@ -1126,6 +1126,11 @@ export const startOrchestrator = (
         }
         let attemptFailed = false
         for (const issue of fetched.issues) {
+          if (!issue.dispatchable) {
+            recoveryResolved.add(issue.id)
+            recoveryCounts.skipped += 1
+            continue
+          }
           const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
           const isLabeled = requiredLabels.every(
             (label) => label.length > 0 && labels.has(label.trim().toLowerCase()),
@@ -1284,6 +1289,7 @@ export const startOrchestrator = (
                 : 'Verified repair head; waiting for resolved review state'
             continue
           }
+          const previousState = handoff.state
           const disposition = classifyPullRequest(inspected.observation)
           handoff.state = disposition.state
           handoff.headSha = inspected.observation.headSha
@@ -1296,9 +1302,10 @@ export const startOrchestrator = (
             continue
           }
           if (disposition.state === 'closed') {
-            noteHandoffOutcome(id, handoff, 'intervention_required')
-            state.handoffs.delete(id)
-            state.claimed.delete(id)
+            handoff.state = 'intervention_required'
+            if (previousState !== 'intervention_required') {
+              noteHandoffOutcome(id, handoff, 'intervention_required')
+            }
             continue
           }
           if (disposition.state === 'ready_to_merge') {

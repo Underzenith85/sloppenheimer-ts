@@ -406,6 +406,44 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('skips non-dispatchable pull request records during recovery', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-nondispatchable-handoff-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const pullRequestRecord = {
+      ...makeIssue('example/symphony#117', 1, null, ['symphony', 'ready']),
+      dispatchable: false,
+    }
+    const harness = makeHarness(isolated, () => [pullRequestRecord])
+    let discoveries = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        findExistingHandoff: () =>
+          Effect.sync(() => {
+            discoveries += 1
+            return { _tag: 'NoBranch' as const, branchName: 'symphony/issue-117' }
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(discoveries).toBe(0)
+    expect(harness.agentRuns()).toEqual([])
+    expect(snapshot.handoffs).toEqual([])
+    expect(snapshot.handoffRecovery).toMatchObject({ recovered: 0, skipped: 1 })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('supplements a partial store without duplicating its persisted handoff', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-partial-handoff-'))
     const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
@@ -652,6 +690,78 @@ describe('restored pull request handoffs', (): void => {
     expect(snapshot.handoffs).toEqual([])
     expect(snapshot.counts.completed).toBe(1)
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('retains the claim when a restored pull request is closed without merge', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-closed-handoff-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#112', 1, null, ['symphony', 'ready']),
+      id: issueId('112'),
+    }
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/117',
+          branchName: 'symphony/issue-112',
+          state: 'awaiting_checks',
+          headSha: 'closed-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (pullRequestNumber) =>
+          Effect.succeed({
+            number: pullRequestNumber,
+            url: 'https://github.test/example/symphony/pull/117',
+            headSha: 'closed-head',
+            merged: false as const,
+            closed: true,
+            mergeCommitSha: null,
+            mergeable: null,
+            mergeState: 'closed',
+            checks: [],
+            reviewDecision: null,
+            reviewThreads: [],
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(harness.agentRuns()).toEqual([])
+    expect(snapshot.handoffs).toHaveLength(1)
+    expect(snapshot.handoffs[0]).toMatchObject({
+      issueId: issue.id,
+      state: 'intervention_required',
+      reason: 'The pull request was closed without being merged',
+    })
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toMatchObject([
+      { issueId: issue.id, state: 'intervention_required' },
+    ])
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 })
