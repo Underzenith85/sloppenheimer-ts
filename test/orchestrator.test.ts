@@ -14,6 +14,7 @@ import {
   type JsonObject,
 } from '../src/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
+import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -334,6 +335,76 @@ const makeHarness = (
 
 const runWithTestClock = <Value>(effect: Effect.Effect<Value, WorkflowError>): Promise<Value> =>
   Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
+
+describe('restored pull request handoffs', (): void => {
+  it('removes a restored handoff after its pull request is confirmed merged', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-restored-handoff-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#63', 1, null, ['symphony', 'ready']),
+      id: issueId('63'),
+    }
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/44',
+          branchName: 'symphony/issue-63',
+          state: 'awaiting_checks',
+          headSha: null,
+          reason: 'GitHub pull request status is incomplete',
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    let inspections = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (pullRequestNumber) =>
+          Effect.sync(() => {
+            inspections += 1
+            return {
+              number: pullRequestNumber,
+              url: null,
+              headSha: null,
+              merged: true as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(inspections).toBe(1)
+    expect(snapshot.handoffs).toEqual([])
+    expect(snapshot.counts.completed).toBe(1)
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+})
 
 describe('startup terminal workspace cleanup', (): void => {
   it('fetches every terminal state once, cleans every issue, and continues after a cleanup failure', async (): Promise<void> => {
