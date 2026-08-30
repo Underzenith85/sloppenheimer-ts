@@ -1,4 +1,4 @@
-import { Effect } from 'effect'
+import { Effect, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
@@ -6,11 +6,17 @@ import { isJsonArray } from '../../support/json.js'
 import { logWarning } from '../../support/logging.js'
 import {
   githubAuthenticationEnvironmentNames,
+  sameTrackerProvider,
   type GitHubProviderConfig,
 } from '../../config/tracker-config.js'
 import type { HostToolResult, HostToolSpec } from '../../host-tools.js'
 import { unsupportedHostTool } from '../../host-tools.js'
-import type { IssueControlPort } from '../../ports/issue-control.js'
+import {
+  IssueControlFactory,
+  layerIssueControlFactory,
+  type IssueControlFactoryPort,
+  type IssueControlPort,
+} from '../../ports/issue-control.js'
 import type { TrackerPort } from '../../ports/tracker.js'
 import { githubJson, githubPageSize, trackerResponseError } from './client.js'
 import {
@@ -394,3 +400,16 @@ export const makeGitHubIssueControl = (provider: GitHubProviderConfig): IssueCon
     },
   }
 }
+
+/**
+ * Binds the console's issue surface to GitHub. `serves` is `sameTrackerProvider` because the
+ * instance captures the whole provider record — owner, repository, credential, and API base — and
+ * nothing else about the workflow reaches it.
+ */
+export const gitHubIssueControlFactory: IssueControlFactoryPort = {
+  make: (provider) => Effect.succeed(makeGitHubIssueControl(provider.provider)),
+  serves: sameTrackerProvider,
+}
+
+export const layerGitHubIssueControl: Layer.Layer<IssueControlFactory> =
+  layerIssueControlFactory(gitHubIssueControlFactory)
