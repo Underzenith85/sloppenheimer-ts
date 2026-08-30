@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { makeGitHubPullRequestMonitor } from '../src/github-handoff.js'
 import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
 import { classifyPullRequest } from '../src/domain/handoff.js'
-import { issueBranchName, makeGitHubTracker } from '../src/tracker.js'
+import { issueBranchName, makeGitHubCodeReview } from '../src/tracker.js'
 import type { GitHubProviderConfig } from '../src/config/workflow.js'
 
 const provider: GitHubProviderConfig = {
@@ -51,7 +51,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+      makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue),
     )
 
     expect(result).toEqual({ _tag: 'NoBranch', branchName: 'symphony/issue-28' })
@@ -89,7 +89,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+      makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue),
     )
 
     expect(result).toEqual({
@@ -121,7 +121,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).handoffCompletedWork(handoffIssue, ['symphony']),
+      makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue),
     )
 
     // Adopted rather than opened, which the agent detail reports as a reused pull request.
@@ -140,7 +140,7 @@ describe('GitHub pull request handoff', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await Effect.runPromise(
-      makeGitHubTracker(provider).findExistingHandoff(handoffIssue),
+      makeGitHubCodeReview(provider).findExistingHandoff(handoffIssue),
     )
 
     expect(result).toEqual({
