@@ -12,7 +12,7 @@ import {
   type TokenTotals,
 } from '../domain/domain.js'
 import { WorkflowError } from '../errors.js'
-import { classifyPullRequest, type HandoffSnapshot } from '../domain/handoff.js'
+import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
 import { mergeSparseObject } from '../support/json.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -29,7 +29,6 @@ import {
   type AgentDetailStatus,
   type AgentEvent,
 } from '../telemetry.js'
-import { issueBranchName, type CodeReviewPort, type TrackerPort } from '../tracker.js'
 import { type loadWorkflow, type Workflow } from '../config/workflow.js'
 import { workspaceKey, type WorkspaceManager } from '../workspace.js'
 import type {
@@ -37,6 +36,8 @@ import type {
   AgentRunnerConfig,
   AgentRunnerPort,
 } from '../ports/agent-runner.js'
+import type { CodeReviewPort } from '../ports/code-review.js'
+import type { TrackerPort } from '../ports/tracker.js'
 import { eventLoop } from './polling.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 

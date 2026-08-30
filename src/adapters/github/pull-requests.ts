@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 
-import type { JsonValue } from './domain/domain.js'
-import { TrackerError } from './errors.js'
+import type { JsonValue } from '../../domain/domain.js'
+import { TrackerError } from '../../errors.js'
 import {
   githubJson,
   githubMaxPages,
@@ -11,10 +11,10 @@ import {
   trackerPaginationError,
   trackerResponseError,
   type JsonRecord,
-} from './github-http.js'
-import type { CodexReviewObservation, PullRequestObservation } from './domain/handoff.js'
-import { isJsonArray } from './support/json.js'
-import type { GitHubProviderConfig } from './config/tracker-config.js'
+} from './client.js'
+import type { CodexReviewObservation, PullRequestObservation } from '../../domain/handoff.js'
+import { isJsonArray } from '../../support/json.js'
+import type { GitHubProviderConfig } from '../../config/tracker-config.js'
 
 const isArray = isJsonArray
 
