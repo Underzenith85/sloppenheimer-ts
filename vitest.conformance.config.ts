@@ -6,6 +6,7 @@ export default defineConfig({
     exclude: [
       'test/real-integration/**',
       'test/extension-conformance/**',
+      'test/cli.test.ts',
       'test/github-handoff.test.ts',
       'test/handoff.test.ts',
       'test/handoff-store.test.ts',
