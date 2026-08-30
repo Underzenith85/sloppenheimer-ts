@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Ref } from 'effect'
+import { Context, Effect, Layer, Option, Ref } from 'effect'
 
 import type { ValidatedTrackerProvider } from '../config/tracker-config.js'
 import type { Issue } from '../domain/domain.js'
@@ -76,18 +76,18 @@ export const layerCurrentIssueControl: Layer.Layer<
   CurrentIssueControl,
   Effect.gen(function* () {
     const factory = yield* IssueControlFactory
-    const held = yield* Ref.make<Held | null>(null)
+    const held = yield* Ref.make(Option.none<Held>())
     const gate = yield* Effect.makeSemaphore(1)
     return {
       forProvider: (provider) =>
         gate.withPermits(1)(
           Effect.gen(function* () {
             const current = yield* Ref.get(held)
-            if (current !== null && factory.serves(current.provider, provider)) {
-              return current.control
+            if (Option.isSome(current) && factory.serves(current.value.provider, provider)) {
+              return current.value.control
             }
             const control = yield* factory.make(provider)
-            yield* Ref.set(held, { provider, control })
+            yield* Ref.set(held, Option.some({ provider, control }))
             return control
           }),
         ),
