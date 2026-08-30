@@ -7,16 +7,122 @@
  * remembering to apply it; redacting at ingest means the retained value never held the secret at
  * all.
  *
- * This composes the host's structural redactor from `logging.ts` — secret-named keys in any quoting
- * style, `Authorization` and `Cookie` headers, bearer tokens, URL credentials, and PEM blocks —
- * rather than restating it. What is added here is what retained telemetry needs beyond it: values
- * that are credentials by *shape* wherever they appear, the resolved values of the environment
- * variables the host treats as secret, and the bounding every retained string is subject to.
+ * This composes the host's structural redactor — secret-named keys in any quoting style,
+ * `Authorization` and `Cookie` headers, bearer tokens, URL credentials, and PEM blocks — with what
+ * retained telemetry needs beyond it: values that are credentials by *shape* wherever they appear,
+ * the resolved values of the environment variables the host treats as secret, and the bounding
+ * every retained string is subject to.
  */
 
-import { redactSecretsInString } from './logging.js'
-
 export const redactionMarker = '[REDACTED]'
+
+const exactSecretKeys = new Set([
+  'authorization',
+  'credential',
+  'credentials',
+  'cookie',
+  'password',
+  'sessionid',
+  'set-cookie',
+  'setcookie',
+  'secret',
+  'token',
+  'apikey',
+  'accesskey',
+  'accesstoken',
+  'privatekey',
+  'refreshtoken',
+  'secretaccesskey',
+  'authtoken',
+])
+
+export const isSecretKey = (key: string): boolean => {
+  const lowerKey = key.toLowerCase()
+  if (exactSecretKeys.has(lowerKey)) {
+    return true
+  }
+  if (
+    /(?:^|[_.-])(?:api[_.-]?key|access[_.-]?key|private[_.-]?key|secret[_.-]?access[_.-]?key|access[_.-]?token|refresh[_.-]?token|auth[_.-]?token|session[_.-]?id|set[_.-]?cookie|cookie|authorization|credentials?|password|secret|token)$/u.test(
+      lowerKey,
+    )
+  ) {
+    return true
+  }
+  return /(?:ApiKey|AccessKey|PrivateKey|SecretAccessKey|AccessToken|RefreshToken|AuthToken|SetCookie|Cookie|Authorization|Credentials?|Password|Secret|Token)$/u.test(
+    key,
+  )
+}
+
+const redactQuotedField = (match: string, key: string, quote: string): string =>
+  isSecretKey(key) ? `${quote}${key}${quote}:${quote}[REDACTED]${quote}` : match
+
+const redactEscapedQuotedField = (match: string, key: string): string =>
+  isSecretKey(key) ? String.raw`\"${key}\":\"[REDACTED]\"` : match
+
+const redactAssignment = (match: string, key: string): string =>
+  isSecretKey(key) ? `${key}=[REDACTED]` : match
+
+const redactUnquotedAssignments = (value: string): string => {
+  const assignment = /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*/gu
+  let result = ''
+  let copiedThrough = 0
+  let match: RegExpExecArray | null
+  while ((match = assignment.exec(value)) !== null) {
+    const key = match[1]
+    if (key === undefined || !isSecretKey(key)) {
+      continue
+    }
+    const valueStart = assignment.lastIndex
+    const first = value[valueStart]
+    if (first === '"' || first === "'") {
+      continue
+    }
+    const carriageReturn = value.indexOf('\r', valueStart)
+    const newline = value.indexOf('\n', valueStart)
+    const candidates = [carriageReturn, newline].filter((index) => index >= 0)
+    const lineEnd = candidates.length === 0 ? value.length : Math.min(...candidates)
+    const nextAssignment = /\s+[A-Za-z_][A-Za-z0-9_.-]*\s*[:=]/u.exec(
+      value.slice(valueStart, lineEnd),
+    )
+    const redactionEnd = nextAssignment === null ? lineEnd : valueStart + nextAssignment.index
+    result += `${value.slice(copiedThrough, match.index)}${key}=[REDACTED]`
+    copiedThrough = redactionEnd
+    assignment.lastIndex = redactionEnd
+  }
+  return `${result}${value.slice(copiedThrough)}`
+}
+
+const redactPemPrivateKeys = (value: string): string =>
+  value.replace(
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?-----END \1-----/gu,
+    '[REDACTED PEM PRIVATE KEY]',
+  )
+
+export const redactSecretsInString = (value: string): string =>
+  redactUnquotedAssignments(redactPemPrivateKeys(value))
+    .replace(/\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/\s@]+@/gu, '$1[REDACTED]@')
+    .replace(/\b((?:Proxy-)?Authorization|Set-Cookie|Cookie)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
+    .replace(
+      /\\"([A-Za-z_][A-Za-z0-9_.-]*)\\"\s*:\s*\\"(?:[^"\\]|\\{2,}"|\\(?!"))*\\"/gu,
+      (match: string, key: string): string => redactEscapedQuotedField(match, key),
+    )
+    .replace(
+      /"([A-Za-z_][A-Za-z0-9_.-]*)"\s*:\s*"(?:\\.|[^"\\])*"/gu,
+      (match: string, key: string): string => redactQuotedField(match, key, '"'),
+    )
+    .replace(
+      /'([A-Za-z_][A-Za-z0-9_.-]*)'\s*:\s*'(?:\\.|[^'\\])*'/gu,
+      (match: string, key: string): string => redactQuotedField(match, key, "'"),
+    )
+    .replace(
+      /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*"(?:\\.|[^"\\])*"/gu,
+      (match: string, key: string): string => redactAssignment(match, key),
+    )
+    .replace(
+      /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*'(?:\\.|[^'\\])*'/gu,
+      (match: string, key: string): string => redactAssignment(match, key),
+    )
 
 /** The longest retained free-text summary. Anything longer is cut and reported as truncated. */
 export const summaryLimit = 240

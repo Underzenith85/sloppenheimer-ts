@@ -2,6 +2,7 @@ import { Effect } from 'effect'
 
 import type { JsonValue } from './domain.js'
 import { TrackerError } from './errors.js'
+import { isJsonValue } from './json.js'
 import type { GitHubProviderConfig } from './tracker-config.js'
 
 export const githubApiVersion = '2026-03-10'
@@ -12,25 +13,9 @@ export const githubPageSize = 100
 /** Bounded pagination: a scoped list that never terminates is a pagination integrity failure. */
 export const githubMaxPages = 100
 
-export type JsonRecord = Readonly<Record<string, JsonValue>>
-
-export const isJsonRecord = (value: unknown): value is JsonRecord =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
-export const isJsonValue = (value: unknown): value is JsonValue => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean' ||
-    (typeof value === 'number' && Number.isFinite(value))
-  ) {
-    return true
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonValue)
-  }
-  return isJsonRecord(value) && Object.values(value).every(isJsonValue)
-}
+/** GitHub-boundary aliases retained for readability in tracker and handoff parsing. */
+export type { JsonObject as JsonRecord } from './domain.js'
+export { isJsonObject as isJsonRecord } from './json.js'
 
 export const trackerResponseError = (message: string, cause?: unknown): TrackerError =>
   new TrackerError({
