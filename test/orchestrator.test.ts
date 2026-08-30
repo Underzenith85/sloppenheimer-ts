@@ -374,6 +374,7 @@ describe('restored pull request handoffs', (): void => {
             inspections += 1
             return {
               number: pullRequestNumber,
+              state: 'closed' as const,
               url: null,
               headSha: null,
               merged: true as const,
@@ -402,6 +403,85 @@ describe('restored pull request handoffs', (): void => {
     expect(snapshot.handoffs).toEqual([])
     expect(snapshot.counts.completed).toBe(1)
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('retains a closed unmerged handoff without dispatching repair work', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-closed-handoff-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+      id: issueId('75'),
+    }
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/50',
+          branchName: 'symphony/issue-75',
+          state: 'awaiting_checks',
+          headSha: 'closed-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    let inspections = 0
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (pullRequestNumber) =>
+          Effect.sync(() => {
+            inspections += 1
+            return {
+              number: pullRequestNumber,
+              state: 'closed' as const,
+              url: 'https://github.test/example/symphony/pull/50',
+              headSha: 'closed-head',
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: false,
+              mergeState: 'dirty',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(inspections).toBe(1)
+    expect(snapshot.running).toEqual([])
+    expect(snapshot.handoffs).toEqual([
+      expect.objectContaining({
+        issueId: '75',
+        state: 'closed_without_merge',
+        reason: 'The pull request was closed without being merged',
+        repairAttempts: 0,
+      }),
+    ])
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ state: 'closed_without_merge' }),
+    ])
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 })

@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import { classifyPullRequest, type PullRequestObservation } from '../src/handoff.js'
 
-type OpenPullRequestObservation = Extract<PullRequestObservation, { merged: false }>
+type OpenPullRequestObservation = Extract<PullRequestObservation, { state: 'open' }>
 
 const observation = (
   overrides: Partial<OpenPullRequestObservation> = {},
 ): OpenPullRequestObservation => ({
   number: 41,
+  state: 'open',
   url: 'https://github.com/example/symphony/pull/41',
   headSha: 'abc123',
   merged: false,
@@ -54,7 +55,37 @@ describe('pull request handoff state machine', (): void => {
       headSha: 'abc123',
     })
     expect(
-      classifyPullRequest({ ...observation(), merged: true, mergeCommitSha: 'merged123' }),
+      classifyPullRequest({
+        ...observation(),
+        state: 'closed',
+        merged: true,
+        mergeCommitSha: 'merged123',
+      }),
     ).toEqual({ state: 'merged', mergeCommitSha: 'merged123' })
+  })
+
+  it('classifies a closed pull request separately from a dirty open pull request', (): void => {
+    expect(
+      classifyPullRequest({
+        number: 41,
+        state: 'closed',
+        url: 'https://github.com/example/symphony/pull/41',
+        headSha: 'abc123',
+        merged: false,
+        mergeCommitSha: null,
+        mergeable: false,
+        mergeState: 'dirty',
+        checks: [],
+        reviewDecision: null,
+        reviewThreads: [],
+      }),
+    ).toEqual({
+      state: 'closed_without_merge',
+      reason: 'The pull request was closed without being merged',
+    })
+    expect(classifyPullRequest(observation({ mergeable: false, mergeState: 'dirty' }))).toEqual({
+      state: 'repair_needed',
+      reason: 'The pull request conflicts with protected main',
+    })
   })
 })

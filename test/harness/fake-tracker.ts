@@ -62,6 +62,7 @@ export class FakeTracker implements TrackerAdapter {
     this.calls.push({ operation: 'inspectPullRequest', pullRequestNumber })
     return Effect.succeed({
       number: pullRequestNumber,
+      state: 'open',
       url: `https://example.test/pulls/${String(pullRequestNumber)}`,
       headSha: 'fake-head',
       merged: false,
