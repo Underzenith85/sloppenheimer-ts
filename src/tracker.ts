@@ -6,6 +6,7 @@ import {
   type BlockerRef,
   type Issue,
   type IssueId,
+  type JsonObject,
   type JsonValue,
 } from './domain.js'
 import { TrackerError } from './errors.js'
@@ -26,6 +27,13 @@ import {
   type GitHubProviderConfig,
 } from './tracker-config.js'
 import type { PullRequestObservation } from './handoff.js'
+import type {
+  HostToolContext,
+  HostToolFailureCode,
+  HostToolResult,
+  HostToolSpec,
+} from './host-tools.js'
+import { unsupportedHostTool } from './host-tools.js'
 
 export type IssueFetchOptions = Readonly<{ hydrateDependencies: boolean }>
 
@@ -59,6 +67,14 @@ export type TrackerAdapter = Readonly<{
     expectedHeadSha: string,
   ) => Effect.Effect<string, TrackerError>
   resolveReviewThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
+  /** Provider-native mutations advertised only to sessions using this adapter instance. */
+  toolSpecs: readonly HostToolSpec[]
+  /** Total host-side boundary: every invocation resolves to a JSON-safe success or failure. */
+  executeTool: (
+    name: string,
+    argumentsValue: JsonValue,
+    context: HostToolContext,
+  ) => Promise<HostToolResult>
   secretEnvironmentNames: readonly string[]
 }>
 
@@ -111,6 +127,292 @@ type DependencyCacheEntry = Readonly<{
   issueUpdatedAt: number | null
   expiresAt: number
 }>
+
+const githubToolSpecs: readonly HostToolSpec[] = Object.freeze([
+  Object.freeze({
+    name: 'github_add_comment',
+    description:
+      'Add a comment to the current GitHub issue. The host chooses the repository and issue; authentication is never exposed.',
+    inputSchema: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: Object.freeze(['body']),
+      properties: Object.freeze({
+        body: Object.freeze({ type: 'string', minLength: 1, maxLength: 65_536 }),
+      }),
+    }),
+  }),
+  Object.freeze({
+    name: 'github_handoff_issue',
+    description:
+      'Update labels and/or open/closed state on the current GitHub issue for workflow handoff. Omitted fields are unchanged.',
+    inputSchema: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      minProperties: 1,
+      properties: Object.freeze({
+        state: Object.freeze({ type: 'string', enum: Object.freeze(['open', 'closed']) }),
+        add_labels: Object.freeze({
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          uniqueItems: true,
+          items: Object.freeze({ type: 'string', minLength: 1, maxLength: 100 }),
+        }),
+        remove_labels: Object.freeze({
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          uniqueItems: true,
+          items: Object.freeze({ type: 'string', minLength: 1, maxLength: 100 }),
+        }),
+      }),
+    }),
+  }),
+  Object.freeze({
+    name: 'github_link_pull_request',
+    description:
+      'Link a pull request in the configured repository to the current issue by adding a handoff comment after verifying the pull request exists.',
+    inputSchema: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: Object.freeze(['pull_request_number']),
+      properties: Object.freeze({
+        pull_request_number: Object.freeze({ type: 'integer', minimum: 1 }),
+      }),
+    }),
+  }),
+])
+
+const toolFailure = (
+  code: HostToolFailureCode,
+  message: string,
+  retryable = false,
+  retryAfterMs?: number,
+): HostToolResult => ({
+  success: false,
+  error: { code, message, retryable, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) },
+})
+
+const invalidToolArguments = (message: string): HostToolResult =>
+  toolFailure('invalid_arguments', message)
+
+const exactObject = (value: JsonValue, allowedKeys: ReadonlySet<string>): JsonObject | null => {
+  if (!isJsonRecord(value)) {
+    return null
+  }
+  return Object.keys(value).every((key) => allowedKeys.has(key)) ? value : null
+}
+
+const labelList = (value: JsonValue | undefined): readonly string[] | null => {
+  if (value === undefined) {
+    return []
+  }
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    return null
+  }
+  const labels: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' || item.trim().length === 0 || item.length > 100) {
+      return null
+    }
+    labels.push(item.trim().toLowerCase())
+  }
+  return new Set(labels).size === labels.length ? labels : null
+}
+
+const githubIssueNumber = (
+  provider: GitHubProviderConfig,
+  context: HostToolContext,
+): number | null => {
+  const nativeRef = context.nativeRef
+  if (
+    nativeRef === null ||
+    nativeRef['owner'] !== provider.owner ||
+    nativeRef['repository'] !== provider.repository
+  ) {
+    return null
+  }
+  const number = nativeRef['issue_number']
+  return typeof number === 'number' && Number.isSafeInteger(number) && number > 0 ? number : null
+}
+
+const hostToolFailureFrom = (error: TrackerError): HostToolResult => {
+  if (error.category === 'tracker_rate_limited') {
+    return toolFailure('rate_limited', 'GitHub rate limit exceeded', true, error.retryAfterMs)
+  }
+  if (error.category === 'tracker_request') {
+    return toolFailure('transport_error', 'GitHub request failed', true)
+  }
+  if (error.category === 'tracker_status' && /HTTP 401/u.test(error.message)) {
+    return toolFailure('missing_auth', 'GitHub rejected the configured credential')
+  }
+  if (error.category === 'tracker_status' && /HTTP 403/u.test(error.message)) {
+    return toolFailure('authorization_failed', 'GitHub denied this mutation')
+  }
+  return toolFailure('provider_error', error.message, error.retryable, error.retryAfterMs)
+}
+
+const githubToolValue = (effect: Effect.Effect<JsonValue, TrackerError>): Promise<HostToolResult> =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.match({
+        onFailure: hostToolFailureFrom,
+        onSuccess: (data): HostToolResult => ({ success: true, data }),
+      }),
+    ),
+  )
+
+const requiredResponseUrl = (body: JsonValue | null, field: string): string => {
+  if (!isJsonRecord(body) || typeof body[field] !== 'string' || body[field].length === 0) {
+    throw trackerResponseError(`GitHub response is missing ${field}`)
+  }
+  return body[field]
+}
+
+const makeGitHubToolExecutor =
+  (provider: GitHubProviderConfig, prefix: string): TrackerAdapter['executeTool'] =>
+  async (name, argumentsValue, context): Promise<HostToolResult> => {
+    if (!githubToolSpecs.some((spec) => spec.name === name)) {
+      return unsupportedHostTool(name)
+    }
+    if (provider.token.length === 0) {
+      return toolFailure('missing_auth', 'GitHub credential is not configured')
+    }
+    const issueNumber = githubIssueNumber(provider, context)
+    if (issueNumber === null) {
+      return invalidToolArguments('Session issue context is invalid for this GitHub adapter')
+    }
+    const issuePath = `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}`
+    if (name === 'github_add_comment') {
+      const argumentsObject = exactObject(argumentsValue, new Set(['body']))
+      const body = argumentsObject?.['body']
+      if (
+        argumentsObject === null ||
+        typeof body !== 'string' ||
+        body.trim().length === 0 ||
+        body.length > 65_536
+      ) {
+        return invalidToolArguments('github_add_comment requires only a non-empty body string')
+      }
+      return githubToolValue(
+        githubJson(provider, `${issuePath}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ body }),
+        }).pipe(
+          Effect.flatMap(({ body: responseBody }) =>
+            Effect.try({
+              try: (): JsonValue => ({
+                issue_number: issueNumber,
+                comment_url: requiredResponseUrl(responseBody, 'html_url'),
+              }),
+              catch: (cause: unknown) =>
+                cause instanceof TrackerError
+                  ? cause
+                  : trackerResponseError('GitHub comment response is invalid', cause),
+            }),
+          ),
+        ),
+      )
+    }
+    if (name === 'github_handoff_issue') {
+      const argumentsObject = exactObject(
+        argumentsValue,
+        new Set(['state', 'add_labels', 'remove_labels']),
+      )
+      if (argumentsObject === null || Object.keys(argumentsObject).length === 0) {
+        return invalidToolArguments('github_handoff_issue requires at least one supported field')
+      }
+      const state = argumentsObject['state']
+      const addLabels = labelList(argumentsObject['add_labels'])
+      const removeLabels = labelList(argumentsObject['remove_labels'])
+      if (
+        (state !== undefined && state !== 'open' && state !== 'closed') ||
+        addLabels === null ||
+        removeLabels === null ||
+        addLabels.some((label) => removeLabels.includes(label))
+      ) {
+        return invalidToolArguments('github_handoff_issue arguments do not match its schema')
+      }
+      const mutations: Effect.Effect<unknown, TrackerError>[] = []
+      if (state !== undefined) {
+        mutations.push(
+          githubJson(provider, issuePath, {
+            method: 'PATCH',
+            body: JSON.stringify({ state }),
+          }),
+        )
+      }
+      if (addLabels.length > 0) {
+        mutations.push(
+          githubJson(provider, `${issuePath}/labels`, {
+            method: 'POST',
+            body: JSON.stringify({ labels: addLabels }),
+          }),
+        )
+      }
+      for (const label of removeLabels) {
+        mutations.push(
+          githubJson(
+            provider,
+            `${issuePath}/labels/${encodeURIComponent(label)}`,
+            { method: 'DELETE' },
+            [404],
+          ),
+        )
+      }
+      return githubToolValue(
+        Effect.forEach(mutations, (mutation) => mutation, { concurrency: 1 }).pipe(
+          Effect.as({
+            issue_number: issueNumber,
+            state: state ?? null,
+            added_labels: addLabels,
+            removed_labels: removeLabels,
+          }),
+        ),
+      )
+    }
+    const argumentsObject = exactObject(argumentsValue, new Set(['pull_request_number']))
+    const pullRequestNumber = argumentsObject?.['pull_request_number']
+    if (
+      argumentsObject === null ||
+      typeof pullRequestNumber !== 'number' ||
+      !Number.isSafeInteger(pullRequestNumber) ||
+      pullRequestNumber <= 0
+    ) {
+      return invalidToolArguments(
+        'github_link_pull_request requires only a positive pull_request_number integer',
+      )
+    }
+    return githubToolValue(
+      githubJson(
+        provider,
+        `${provider.apiBaseUrl}${prefix}/pulls/${String(pullRequestNumber)}`,
+      ).pipe(
+        Effect.flatMap(({ body }) =>
+          Effect.try({
+            try: () => requiredResponseUrl(body, 'html_url'),
+            catch: (cause: unknown) =>
+              cause instanceof TrackerError
+                ? cause
+                : trackerResponseError('GitHub pull request response is invalid', cause),
+          }),
+        ),
+        Effect.flatMap((pullRequestUrl) =>
+          githubJson(provider, `${issuePath}/comments`, {
+            method: 'POST',
+            body: JSON.stringify({ body: `Linked pull request for handoff: ${pullRequestUrl}` }),
+          }).pipe(
+            Effect.as({
+              issue_number: issueNumber,
+              pull_request_number: pullRequestNumber,
+              pull_request_url: pullRequestUrl,
+            }),
+          ),
+        ),
+      ),
+    )
+  }
 
 const nullableString = (value: JsonValue | undefined): string | null => {
   if (typeof value !== 'string') {
@@ -506,11 +808,14 @@ const hydrateDependencies = (
     { concurrency: dependencyConcurrency },
   )
 
-export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapter => {
+export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): TrackerAdapter => {
+  const provider = Object.freeze({ ...configuredProvider })
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
   const pullRequests = makeGitHubPullRequestMonitor(provider)
   return {
+    toolSpecs: githubToolSpecs,
+    executeTool: makeGitHubToolExecutor(provider, prefix),
     secretEnvironmentNames: [
       ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
     ],

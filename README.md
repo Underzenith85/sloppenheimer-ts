@@ -307,6 +307,29 @@ secret and must be a `$VAR` reference. The host keeps the reference's variable n
 rather than a second plaintext copy, and strips that name plus `GITHUB_TOKEN` and `GH_TOKEN` from
 Codex subprocess environments while always preserving `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`.
 
+**Host-side tool profile.** A GitHub-backed session advertises three App Server dynamic tools. No
+other adapter's tools are included. The profile, validated provider configuration, normalized issue
+identity, and `nativeRef` are captured with the immutable session snapshot; model-authored arguments
+cannot select a repository or issue. The tracker token stays in the host HTTP client and is absent
+from the child environment, tool schemas, arguments, results, telemetry, and logs.
+
+| Tool                       | Accepted arguments                                    | Host mutation                                                                    |
+| -------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `github_add_comment`       | exactly `{ body }`                                    | `POST` one comment on the current issue                                          |
+| `github_handoff_issue`     | one or more of `state`, `add_labels`, `remove_labels` | update open/closed state, add labels, and idempotently remove labels             |
+| `github_link_pull_request` | exactly `{ pull_request_number }`                     | verify the in-repository PR, then add a current-issue comment containing its URL |
+
+These are write tools: a valid invocation is authorization to perform the documented mutation with
+the configured tracker credential. They do not expose arbitrary URLs, repository selection, issue
+selection, comment deletion, label creation, PR editing, merging, or general GitHub API access.
+Handoff operations run in state/add/remove order and are not transactional; an earlier mutation can
+remain applied if GitHub rejects a later one. Removing a label that is already absent is successful.
+Object keys, enum values, integer bounds, label arrays, and string bounds are checked exactly before
+any request. Every call completes with a JSON-safe success/failure object. Failures distinguish
+`invalid_arguments`, `missing_auth`, `authorization_failed`, `rate_limited` (including retry delay),
+`transport_error`, `provider_error`, and `unsupported_tool`; malformed and unsupported calls are
+answered immediately rather than leaving the App Server turn waiting.
+
 **Scope.** Every request is scoped to `/repos/{owner}/{repository}` on the configured
 `api_base_url`. Pagination links to a different origin are rejected, so the token is never sent
 off-origin. Dispatch identity is the opaque issue number; native identity is

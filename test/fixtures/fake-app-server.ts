@@ -44,6 +44,10 @@ const expectedTurnSandboxPolicy =
   isJsonRecord(expectedArgument) && isJsonRecord(expectedArgument['turnSandboxPolicy'])
     ? expectedArgument['turnSandboxPolicy']
     : null
+const expectedDynamicTools =
+  isJsonRecord(expectedArgument) && isUnknownArray(expectedArgument['dynamicTools'])
+    ? expectedArgument['dynamicTools']
+    : null
 
 const rejectRequest = (id: unknown, message: string): void => {
   send({ id, error: { code: -32602, message } })
@@ -78,7 +82,8 @@ const hasThreadPayload = (params: unknown): params is JsonRecord & Readonly<{ cw
   params['cwd'] === process.cwd() &&
   params['approvalPolicy'] === expectedApprovalPolicy &&
   params['sandbox'] === expectedThreadSandbox &&
-  params['serviceName'] === 'symphony_ts'
+  params['serviceName'] === 'symphony_ts' &&
+  (expectedDynamicTools === null || isDeepStrictEqual(params['dynamicTools'], expectedDynamicTools))
 
 const hasTurnPayload = (params: unknown): boolean => {
   if (!isJsonRecord(params) || !isUnknownArray(params['input'])) {
@@ -231,6 +236,38 @@ const handleTurnStart = (id: unknown, params: unknown): void => {
     case 'unsupported-request': {
       send({ id, result: { turn } })
       send({ id: 9002, method: 'item/unknown/doSomething', params: {} })
+      return
+    }
+    case 'host-tool': {
+      send({ id, result: { turn } })
+      send({
+        id: 9010,
+        method: 'item/tool/call',
+        params: {
+          threadId: thread.id,
+          turnId: turn.id,
+          callId: 'call-1',
+          tool: 'github_add_comment',
+          arguments: {
+            body: process.env['SYMPHONY_HOST_TOOL_TOKEN'] ?? 'host-side comment',
+          },
+        },
+      })
+      return
+    }
+    case 'host-tool-unsupported': {
+      send({ id, result: { turn } })
+      send({
+        id: 9011,
+        method: 'item/tool/call',
+        params: {
+          threadId: thread.id,
+          turnId: turn.id,
+          callId: 'call-2',
+          tool: 'github_not_selected',
+          arguments: {},
+        },
+      })
       return
     }
     case 'input-required': {
@@ -593,6 +630,34 @@ const handle = (message: JsonRecord): void => {
   }
   if (id === 9003 || id === 9006) {
     send({ method: 'request/rejected', params: message })
+    return
+  }
+  if (id === 9010 || id === 9011) {
+    const result = message['result']
+    if (!isJsonRecord(result) || !isUnknownArray(result['contentItems'])) {
+      send({ method: 'tool/invalid-response', params: message })
+      return
+    }
+    const content = result['contentItems'][0]
+    if (
+      !isJsonRecord(content) ||
+      content['type'] !== 'inputText' ||
+      typeof content['text'] !== 'string'
+    ) {
+      send({ method: 'tool/invalid-response', params: message })
+      return
+    }
+    const decoded: unknown = JSON.parse(content['text'])
+    const expectedSuccess = id === 9010
+    if (
+      !isJsonRecord(decoded) ||
+      decoded['success'] !== expectedSuccess ||
+      result['success'] !== expectedSuccess
+    ) {
+      send({ method: 'tool/invalid-response', params: message })
+      return
+    }
+    completeTurn()
   }
 }
 

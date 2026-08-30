@@ -1,7 +1,8 @@
 import { Effect } from 'effect'
 
-import type { Issue, IssueId } from '../../src/domain.js'
+import type { Issue, IssueId, JsonValue } from '../../src/domain.js'
 import type { PullRequestObservation } from '../../src/handoff.js'
+import type { HostToolContext, HostToolResult, HostToolSpec } from '../../src/host-tools.js'
 import type { HandoffResult, IssueFetchOptions, TrackerAdapter } from '../../src/tracker.js'
 
 export type TrackerCall =
@@ -26,6 +27,7 @@ export type TrackerCall =
 export class FakeTracker implements TrackerAdapter {
   readonly calls: TrackerCall[] = []
   readonly secretEnvironmentNames: readonly string[]
+  readonly toolSpecs: readonly HostToolSpec[] = []
   issues: readonly Issue[]
 
   constructor(issues: readonly Issue[] = [], secretEnvironmentNames: readonly string[] = []) {
@@ -89,6 +91,21 @@ export class FakeTracker implements TrackerAdapter {
   resolveReviewThreads(threadIds: readonly string[]): Effect.Effect<void> {
     this.calls.push({ operation: 'resolveReviewThreads', threadIds })
     return Effect.void
+  }
+
+  executeTool(
+    name: string,
+    _argumentsValue: JsonValue,
+    _context: HostToolContext,
+  ): Promise<HostToolResult> {
+    return Promise.resolve({
+      success: false,
+      error: {
+        code: 'unsupported_tool',
+        message: `Unsupported host tool: ${name}`,
+        retryable: false,
+      },
+    })
   }
 }
 
