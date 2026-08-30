@@ -1206,6 +1206,57 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('cancels a stalled worker and schedules its first retry', async (): Promise<void> => {
+    const stalledWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+      },
+    }
+    const issue = makeIssue('example/symphony#19', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(stalledWorkflow, () => [issue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    let interrupted = false
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: ({ onEvent }) =>
+        Effect.sync(() => {
+          onEvent(makeAgentEvent({ timestamp: new Date(0), message: 'last progress' }))
+          resolveStarted()
+        }).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true
+            }),
+          ),
+        ),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* Effect.promise(() => started)
+          yield* Effect.yieldNow()
+          yield* Effect.yieldNow()
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(interrupted).toBe(true)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toHaveLength(1)
+          expect(snapshot.retrying[0]).toMatchObject({ attempt: 1, error: 'agent stalled' })
+        }),
+      ),
+    )
+  })
+
   it('retains ended usage while a retry starts a fresh absolute counter', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [issue])
