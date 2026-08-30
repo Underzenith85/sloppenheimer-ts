@@ -717,7 +717,15 @@ export const startOrchestrator = (
                     issueIsRoutableInSnapshot(refreshed, execution),
                   onEvent: (update) => {
                     if (update.usage !== null) {
-                      pendingUsage.set(issue.id, update.usage)
+                      const previous = pendingUsage.get(issue.id)
+                      pendingUsage.set(issue.id, {
+                        inputTokens: Math.max(previous?.inputTokens ?? 0, update.usage.inputTokens),
+                        outputTokens: Math.max(
+                          previous?.outputTokens ?? 0,
+                          update.usage.outputTokens,
+                        ),
+                        totalTokens: Math.max(previous?.totalTokens ?? 0, update.usage.totalTokens),
+                      })
                     }
                     if (update.rateLimits !== null) {
                       pendingRateLimits = update.rateLimits

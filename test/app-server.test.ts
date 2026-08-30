@@ -310,6 +310,11 @@ describe('App Server session lifecycle', (): void => {
 
     expect(outcome.error).toBeNull()
     expect(outcome.result?.turnCount).toBe(1)
+    const startedIndex = outcome.events.findIndex((event) => event.event === 'turn_started')
+    const completedIndex = outcome.events.findIndex((event) => event.event === 'turn/completed')
+    expect(startedIndex).toBeGreaterThanOrEqual(0)
+    expect(startedIndex).toBeLessThan(completedIndex)
+    expect(outcome.events[completedIndex]?.turnCount).toBe(1)
   })
 
   it('reports a failed turn', async (): Promise<void> => {

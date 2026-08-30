@@ -323,6 +323,7 @@ class CodexConnection {
   /** Callers waiting on turns that have not settled yet. */
   readonly #waiters = new Map<string, TurnWaiter>()
   readonly #turnUsage = new Map<string, NonNullable<AgentEvent['usage']>>()
+  readonly #startedTurns = new Set<string>()
   #nextId = 1
   #closed = false
   /**
@@ -768,8 +769,7 @@ class CodexConnection {
       this.#emit('session_started', null)
     }
     if (pending.method === 'turn/start' && pending.turnCount !== null && this.#turnId !== null) {
-      this.#turnCount = pending.turnCount
-      this.#emit('turn_started', null)
+      this.#ensureTurnStarted(this.#turnId, pending.turnCount, this.#threadId)
     }
     pending.resolve(result)
   }
@@ -793,6 +793,16 @@ class CodexConnection {
     if (isJsonObject(turn) && typeof turn['id'] === 'string') {
       this.#turnId = turn['id']
     }
+  }
+
+  #ensureTurnStarted(turnId: string, turnCount: number, threadId: string | null): void {
+    if (this.#startedTurns.has(turnId)) {
+      return
+    }
+    this.#startedTurns.add(turnId)
+    this.#turnId = turnId
+    this.#turnCount = turnCount
+    this.#emit('turn_started', null, { threadId, turnId })
   }
 
   /** `id` is echoed back in whichever form the server sent it. */
@@ -846,6 +856,12 @@ class CodexConnection {
       isTerminal && turn !== null
         ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
         : null
+    const pendingTurnStart = [...this.#pending.values()].find(
+      (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
+    )
+    if (turnId !== null && pendingTurnStart !== undefined && pendingTurnStart.turnCount !== null) {
+      this.#ensureTurnStarted(turnId, pendingTurnStart.turnCount, threadId)
+    }
     let usage = telemetry.usage
     if (method === 'turn/usage' && usage !== null && turnId !== null) {
       const previous = this.#turnUsage.get(turnId)
