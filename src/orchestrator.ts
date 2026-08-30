@@ -520,7 +520,7 @@ export const startOrchestrator = (
     const detailRecord = (
       issue: Issue,
       attempt: number | null,
-      execution: ExecutionSnapshot,
+      dispatchLabels: readonly string[],
     ): AgentDetailRecord => {
       noteIssue(issue)
       // A new session supersedes whatever aged out for this issue.
@@ -544,7 +544,7 @@ export const startOrchestrator = (
         startedAt: now,
         workspacePathKey: workspaceKey(issue.identifier),
         expectedBranch: issue.branchName ?? issueBranchName(issue),
-        dispatchLabels: execution.requiredLabels,
+        dispatchLabels,
       })
       state.details.set(issue.id, record)
       return record
@@ -605,10 +605,7 @@ export const startOrchestrator = (
         }
         next.set(
           identifier,
-          state.claimed.has(id) &&
-            !state.running.has(id) &&
-            !state.retries.has(id) &&
-            !state.handoffs.has(id)
+          state.claimed.has(id) && !state.running.has(id) && !state.handoffs.has(id)
             ? { _tag: 'Unavailable', reason: 'The agent session is still starting' }
             : { _tag: 'NoSession' },
         )
@@ -830,6 +827,10 @@ export const startOrchestrator = (
         }
 
         const base = effectiveOverride ?? lastKnownGood
+        // Opened before preflight, not after the worker starts: a dispatch that fails validation or
+        // prompt rendering schedules a retry, and that retry's published link has to resolve to the
+        // reason it failed rather than to "no active session".
+        detailRecord(issue, attempt, base.workflow.config.tracker.requiredLabels)
         const preflight = yield* revalidateCredentials(base).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
@@ -925,7 +926,6 @@ export const startOrchestrator = (
           }),
         )
         const fiber = yield* Effect.forkScoped(worker)
-        detailRecord(issue, attempt, execution)
         state.running.set(issue.id, {
           runId,
           issue,

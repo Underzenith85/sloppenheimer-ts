@@ -638,6 +638,14 @@ export type AgentDetailSnapshot = Readonly<{
   }>
 }>
 
+/**
+ * Publishes an array whose elements a consumer cannot reach back through. Freezing only the array
+ * would leave every element shared with the actor's own record, so a cast consumer could edit one
+ * in place and have the actor carry that edit forward on its next update.
+ */
+const frozen = <Value extends object>(values: readonly Value[]): readonly Value[] =>
+  Object.freeze(values.map((value) => Object.freeze({ ...value })))
+
 type ChangedPath = { addedLines: number; deletedLines: number; lastActivityAt: Date }
 
 /**
@@ -653,6 +661,12 @@ export type AgentDetailRecord = {
   startedAt: Date
   attempt: number
   sequence: number
+  /**
+   * Attempts started beyond the first. Counted rather than derived from the retained attempt
+   * summaries, which are bounded: a long-running failing issue would otherwise report a retry total
+   * frozen at the retention limit while its attempt number kept climbing.
+   */
+  retries: number
   events: AgentTimelineEvent[]
   dropped: number
   phase: AgentPhase
@@ -712,6 +726,7 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   startedAt: input.startedAt,
   attempt: input.attempt ?? 0,
   sequence: 0,
+  retries: 0,
   events: [],
   dropped: 0,
   phase: 'starting',
@@ -914,7 +929,16 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
       return
     }
     case 'tool': {
-      setPhase(record, 'running_tool', `Calling ${payload.name}`, at)
+      // A finished tool call is not a running one. Leaving the phase at `running_tool` would keep
+      // the inspector reporting "Calling …" for work that already returned, and eventually report
+      // that finished call as stalled while the model is simply deciding what to do next.
+      if (payload.state === 'completed') {
+        setPhase(record, 'awaiting_model', `Finished ${payload.name}`, at)
+      } else if (payload.state === 'failed') {
+        setPhase(record, 'awaiting_model', `${payload.name} failed`, at)
+      } else {
+        setPhase(record, 'running_tool', `Calling ${payload.name}`, at)
+      }
       push(record, {
         ...base,
         operation: record.operation,
@@ -931,7 +955,14 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
         record.qualityPhase = payload.quality
         record.qualityCommandState = payload.state
       }
-      setPhase(record, 'running_command', `Running ${payload.program}`, at)
+      const exit = payload.exitCode === null ? '' : ` (exit ${String(payload.exitCode)})`
+      if (payload.state === 'completed') {
+        setPhase(record, 'awaiting_model', `Finished ${payload.program}${exit}`, at)
+      } else if (payload.state === 'failed') {
+        setPhase(record, 'awaiting_model', `${payload.program} failed${exit}`, at)
+      } else {
+        setPhase(record, 'running_command', `Running ${payload.program}`, at)
+      }
       push(record, {
         ...base,
         operation: record.operation,
@@ -1083,6 +1114,7 @@ export const recordAttemptStarted = (
   attemptNumber: number,
 ): void => {
   record.attempt = attemptNumber
+  record.retries += 1
   record.startedAt = at
   record.lastActivityAt = null
   record.turnId = null
@@ -1236,9 +1268,9 @@ export const buildAgentDetail = (
     }),
     attempt: Object.freeze({
       current: record.attempt,
-      retries: Math.max(record.attempts.length - 1, 0),
-      attempts: Object.freeze([...record.attempts]),
-      sessions: Object.freeze([...record.sessions]),
+      retries: record.retries,
+      attempts: frozen(record.attempts),
+      sessions: frozen(record.sessions),
     }),
     phase: Object.freeze({
       phase,
@@ -1256,7 +1288,7 @@ export const buildAgentDetail = (
       stalled,
     }),
     usage: Object.freeze({ ...record.tokens }),
-    rateLimits: Object.freeze([...record.rateLimits]),
+    rateLimits: frozen(record.rateLimits),
     workspace: Object.freeze({
       pathKey: record.workspacePathKey,
       branch: context.branch ?? record.handoff.expectedBranch,
@@ -1287,8 +1319,9 @@ export const buildAgentDetail = (
             dueAt: context.retry.dueAt.toISOString(),
             reason: context.retry.reason === null ? null : boundRedacted(context.retry.reason).text,
           }),
-    errors: Object.freeze([...record.errors]),
+    errors: frozen(record.errors),
     timeline: Object.freeze({
+      // Timeline events are frozen as they are appended, so the array copy is enough here.
       events: Object.freeze([...record.events]),
       retained: record.events.length,
       dropped: record.dropped,

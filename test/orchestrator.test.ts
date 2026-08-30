@@ -1483,6 +1483,39 @@ describe('live agent detail', (): void => {
     expect(lookups.running._tag).toBe('Found')
   })
 
+  it('keeps a retry scheduled before the session starts inspectable', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+    // Dispatch preflight fails without the referenced secret, so the retry is scheduled before any
+    // agent session exists — and its published link still has to resolve.
+    const harness = makeHarness(workflow, () => [issue], undefined, {})
+    const factory = makeAgentFactory()
+
+    const lookup = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.dependencies,
+            runAgent: factory.runAgent,
+          })
+          return yield* Effect.promise(() =>
+            waitUntil(() => {
+              const found = readDetail(control, 'example/symphony#16')
+              return found._tag === 'Found' && found.detail.status === 'retrying' ? found : null
+            }, 'the pre-launch retry to be inspectable'),
+          )
+        }),
+      ),
+    )
+
+    expect(lookup._tag).toBe('Found')
+    if (lookup._tag === 'Found') {
+      expect(lookup.detail.retry?.attempt).toBe(1)
+      expect(lookup.detail.retry?.reason).toContain('environment variable')
+      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual(['retry'])
+      expect(factory.agents.size).toBe(0)
+    }
+  })
+
   it('serves detail while a tracker poll is blocked, and hands out immutable snapshots', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
     let blockPolling = false

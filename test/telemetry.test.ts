@@ -13,6 +13,7 @@ import {
   recordCancellation,
   recordHandoff,
   recordRetryScheduled,
+  retainedAttemptLimit,
   timelineEventLimit,
   type AgentDetailRecord,
   type AgentDetailSnapshot,
@@ -336,6 +337,88 @@ describe('agent detail records', (): void => {
     })
   })
 
+  it('leaves the running phase when a tool or command finishes', (): void => {
+    const record = makeRecord()
+    recordAgentEvent(
+      record,
+      event({
+        kind: 'command',
+        program: 'pnpm',
+        argumentCount: 1,
+        quality: 'check',
+        state: 'started',
+        exitCode: null,
+        durationMs: null,
+      }),
+    )
+    expect(snapshotOf(record).phase).toMatchObject({
+      phase: 'running_command',
+      operation: 'Running pnpm',
+    })
+
+    recordAgentEvent(
+      record,
+      event(
+        {
+          kind: 'command',
+          program: 'pnpm',
+          argumentCount: 1,
+          quality: 'check',
+          state: 'completed',
+          exitCode: 0,
+          durationMs: 900,
+        },
+        { timestamp: new Date('2026-08-30T10:00:08.000Z') },
+      ),
+    )
+    expect(snapshotOf(record).phase).toMatchObject({
+      phase: 'awaiting_model',
+      operation: 'Finished pnpm (exit 0)',
+    })
+
+    recordAgentEvent(
+      record,
+      event(
+        { kind: 'tool', name: 'search', state: 'completed', inputBytes: 12, outputBytes: 34 },
+        { timestamp: new Date('2026-08-30T10:00:09.000Z') },
+      ),
+    )
+    expect(snapshotOf(record).phase).toMatchObject({
+      phase: 'awaiting_model',
+      operation: 'Finished search',
+    })
+
+    recordAgentEvent(
+      record,
+      event(
+        { kind: 'tool', name: 'search', state: 'started', inputBytes: 12, outputBytes: null },
+        { timestamp: new Date('2026-08-30T10:00:10.000Z') },
+      ),
+    )
+    expect(snapshotOf(record).phase.phase).toBe('running_tool')
+  })
+
+  it('counts every retry, including attempts older than the retained summaries', (): void => {
+    const record = makeRecord()
+    const total = retainedAttemptLimit + 5
+    for (let attempt = 1; attempt <= total; attempt += 1) {
+      recordRetryScheduled(
+        record,
+        new Date(startedAt.getTime() + attempt * 2_000),
+        attempt,
+        new Date(startedAt.getTime() + attempt * 2_000 + 1_000),
+        'turn failed',
+      )
+      recordAttemptStarted(record, new Date(startedAt.getTime() + attempt * 2_000 + 1_000), attempt)
+    }
+    const snapshot = snapshotOf(record, new Date(startedAt.getTime() + 120_000))
+
+    expect(snapshot.attempt.current).toBe(total)
+    expect(snapshot.attempt.retries).toBe(total)
+    // The summaries stay bounded even though the count does not.
+    expect(snapshot.attempt.attempts).toHaveLength(retainedAttemptLimit)
+  })
+
   it('reports the stall deadline, countdown, and stalled phase from the last activity', (): void => {
     const record = makeRecord()
     recordAgentEvent(record, event({ kind: 'reasoning' }))
@@ -447,6 +530,11 @@ describe('agent detail records', (): void => {
 
     expect(Object.isFrozen(snapshot)).toBe(true)
     expect(Object.isFrozen(snapshot.timeline.events)).toBe(true)
+    // Elements too: freezing only the arrays would leave each element shared with the actor's own
+    // record, so an edit in place would be carried forward by the next actor update.
+    expect(snapshot.timeline.events.every((entry) => Object.isFrozen(entry))).toBe(true)
+    expect(snapshot.attempt.attempts.every((attempt) => Object.isFrozen(attempt))).toBe(true)
+    expect(snapshot.errors.every((error) => Object.isFrozen(error))).toBe(true)
     const events = snapshot.timeline.events as unknown as { push: (value: unknown) => number }
     expect(() => events.push('tampered')).toThrow()
   })
