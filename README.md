@@ -360,4 +360,19 @@ refresh fails the call, because the caller asked for that specific record.
 | Non-JSON or schema-violating payload                                       | `tracker_response`     | no        | —                                                           |
 | Cyclic, off-origin, malformed or unbounded pagination                      | `tracker_pagination`   | no        | —                                                           |
 
+## Conformance profiles
+
+`pnpm test:conformance` runs the deterministic Core Conformance profile. The default `pnpm test`
+also runs the shipped extension suites and never discovers real-integration tests.
+
+`pnpm test:real-integration` runs the opt-in GitHub/Codex smoke profile. It reports missing
+`SYMPHONY_INTEGRATION_REPOSITORY`, `GITHUB_TOKEN`, and
+`OPENAI_API_KEY`/`CODEX_ACCESS_TOKEN` as skipped.
+When a CI job explicitly sets `SYMPHONY_REAL_INTEGRATION=1`, missing credentials or integration
+failures fail the job. The profile creates a uniquely named temporary workspace and removes it in a
+`finally` block; its GitHub check is read-only and creates no tracker artifacts.
+
+The complete bullet-to-test mapping is in
+[the Section 17/18 conformance matrix](docs/conformance-matrix.md).
+
 This project is independent of OpenAI and is not an official OpenAI distribution.

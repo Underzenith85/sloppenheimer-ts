@@ -1,10 +1,8 @@
-import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
 import { Effect, Fiber } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -19,7 +17,7 @@ import {
 } from '../src/codex.js'
 import { issueId, issueIdentifier, type Issue } from '../src/domain.js'
 import type { AgentError } from '../src/errors.js'
-import { codexApprovalPolicies, codexSandboxModes, type CodexConfig } from '../src/workflow.js'
+import type { CodexConfig } from '../src/workflow.js'
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -426,7 +424,7 @@ describe('App Server request handling', (): void => {
     const outcome = await runScenario('unsupported-request', { turnTimeoutMs: 1_000 })
 
     expect(outcome.events.map((event) => event.event)).toContain('unsupported_tool_call')
-    expect(outcome.error?.category).toBe('turn_timeout')
+    expect(outcome.error).toBeNull()
   })
 
   it('fails the turn when Codex requires interactive input', async (): Promise<void> => {
@@ -501,82 +499,6 @@ describe('App Server request handling', (): void => {
       totalTokens: 18,
     })
   })
-})
-
-const execFileAsync = promisify(execFile)
-
-const schemaArguments = ['app-server', 'generate-json-schema'] as const
-const bufferLimit = { maxBuffer: 64 * 1024 * 1024 } as const
-
-/**
- * The schema of the installed Codex, or null when Codex is absent. Only a missing executable is a
- * skip: any other failure — a rejected invocation above all — must fail the test rather than be
- * swallowed into a silent pass that checks nothing.
- */
-const codexSchema = async (): Promise<string | null> => {
-  const help = await execFileAsync('codex', [...schemaArguments, '--help'], bufferLimit).catch(
-    (cause: unknown) => {
-      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
-        return null
-      }
-      throw cause
-    },
-  )
-  if (help === null) {
-    return null
-  }
-  if (!help.stdout.includes('--out')) {
-    const { stdout } = await execFileAsync('codex', [...schemaArguments], bufferLimit)
-    return stdout
-  }
-  // This build writes a bundle of schema files into a directory instead of printing to stdout.
-  const directory = await mkdtemp(join(tmpdir(), 'symphony-codex-schema-'))
-  roots.push(directory)
-  await execFileAsync('codex', [...schemaArguments, '--out', directory], bufferLimit)
-  const entries = await readdir(directory, { recursive: true, withFileTypes: true })
-  const files = entries.filter((entry) => entry.isFile())
-  const contents = await Promise.all(
-    files.map((entry) => readFile(join(entry.parentPath, entry.name), 'utf8')),
-  )
-  return contents.join('\n')
-}
-
-describe('installed Codex App Server schema', (): void => {
-  it('declares every method and policy value this client sends', async (): Promise<void> => {
-    const schema = await codexSchema()
-    if (schema === null) {
-      // Codex is not installed here; the deterministic suite above still covers the protocol.
-      expect(schema).toBeNull()
-      return
-    }
-
-    // A schema that came back empty means the invocation produced nothing, not that it agreed.
-    expect(schema.length).toBeGreaterThan(0)
-
-    for (const method of [
-      'initialize',
-      'thread/start',
-      'turn/start',
-      // Every server-initiated request this client answers, each with its own response shape.
-      'item/commandExecution/requestApproval',
-      'item/fileChange/requestApproval',
-      'item/permissions/requestApproval',
-      'item/tool/requestUserInput',
-    ]) {
-      expect(schema).toContain(method)
-    }
-    // The permissions grant this client sends must still be the shape the schema declares.
-    expect(schema).toContain('GrantedPermissionProfile')
-    expect(schema).toContain('PermissionGrantScope')
-    // Every policy this client can send must be declared. A build that also offers values Symphony
-    // never sends is still compatible, so the check is one-directional.
-    for (const policy of codexApprovalPolicies) {
-      expect(schema).toContain(`"${policy}"`)
-    }
-    for (const mode of codexSandboxModes) {
-      expect(schema).toContain(`"${mode}"`)
-    }
-  }, 60_000)
 })
 
 describe('App Server timeouts and shutdown', (): void => {

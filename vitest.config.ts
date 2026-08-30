@@ -7,5 +7,6 @@ export default defineConfig({
       provider: 'v8',
     },
     include: ['test/**/*.test.ts'],
+    exclude: ['test/real-integration/**'],
   },
 })

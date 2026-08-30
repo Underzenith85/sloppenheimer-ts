@@ -4,6 +4,7 @@
 
 import { spawn } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 
 type JsonRecord = Record<string, unknown>
 
@@ -19,12 +20,104 @@ const sendRaw = (text: string): void => {
 
 const thread = { id: 'thread-1' } as const
 const turn = { id: 'turn-1', status: 'completed' } as const
+type StartupPhase = 'initialize' | 'initialized' | 'rate-limits' | 'thread' | 'turn' | 'ready'
+
+let startupPhase: StartupPhase = 'initialize'
+let startupViolation: string | null = null
+let workspaceCwd: string | null = null
+
+const isJsonRecord = (value: unknown): value is JsonRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isUnknownArray = (value: unknown): value is readonly unknown[] => Array.isArray(value)
+
+const expectedArgument: unknown = process.argv[3] === undefined ? null : JSON.parse(process.argv[3])
+const expectedApprovalPolicy =
+  isJsonRecord(expectedArgument) && typeof expectedArgument['approvalPolicy'] === 'string'
+    ? expectedArgument['approvalPolicy']
+    : 'never'
+const expectedThreadSandbox =
+  isJsonRecord(expectedArgument) && typeof expectedArgument['threadSandbox'] === 'string'
+    ? expectedArgument['threadSandbox']
+    : 'workspace-write'
+const expectedTurnSandboxPolicy =
+  isJsonRecord(expectedArgument) && isJsonRecord(expectedArgument['turnSandboxPolicy'])
+    ? expectedArgument['turnSandboxPolicy']
+    : null
+
+const rejectRequest = (id: unknown, message: string): void => {
+  send({ id, error: { code: -32602, message } })
+}
+
+const requirePhase = (expected: StartupPhase, id: unknown): boolean => {
+  if (startupPhase === expected) {
+    return true
+  }
+  const message = `expected startup phase ${expected}, received ${startupPhase}`
+  startupViolation = message
+  rejectRequest(id, message)
+  return false
+}
+
+const hasInitializePayload = (params: unknown): boolean => {
+  if (!isJsonRecord(params) || !isJsonRecord(params['clientInfo'])) {
+    return false
+  }
+  const clientInfo = params['clientInfo']
+  return (
+    clientInfo['name'] === 'symphony_ts' &&
+    clientInfo['title'] === 'Symphony TypeScript' &&
+    clientInfo['version'] === '0.1.0'
+  )
+}
+
+const hasThreadPayload = (params: unknown): params is JsonRecord & Readonly<{ cwd: string }> =>
+  isJsonRecord(params) &&
+  typeof params['cwd'] === 'string' &&
+  params['cwd'].length > 0 &&
+  params['cwd'] === process.cwd() &&
+  params['approvalPolicy'] === expectedApprovalPolicy &&
+  params['sandbox'] === expectedThreadSandbox &&
+  params['serviceName'] === 'symphony_ts'
+
+const hasTurnPayload = (params: unknown): boolean => {
+  if (!isJsonRecord(params) || !isUnknownArray(params['input'])) {
+    return false
+  }
+  const [input, ...additionalInputs] = params['input']
+  const sandboxPolicy = params['sandboxPolicy']
+  const requiredSandboxPolicy = expectedTurnSandboxPolicy ?? {
+    type: 'workspaceWrite',
+    writableRoots: [workspaceCwd],
+    networkAccess: true,
+  }
+  return (
+    isJsonRecord(input) &&
+    additionalInputs.length === 0 &&
+    input['type'] === 'text' &&
+    typeof input['text'] === 'string' &&
+    input['text'].length > 0 &&
+    params['threadId'] === thread.id &&
+    params['cwd'] === workspaceCwd &&
+    params['approvalPolicy'] === expectedApprovalPolicy &&
+    isDeepStrictEqual(sandboxPolicy, requiredSandboxPolicy)
+  )
+}
 
 const completeTurn = (status: string = 'completed'): void => {
   send({ method: 'turn/completed', params: { turn: { ...turn, status } } })
 }
 
-const handleInitialize = (id: unknown): void => {
+const handleInitialize = (id: unknown, params: unknown): void => {
+  if (!requirePhase('initialize', id)) {
+    return
+  }
+  if (!hasInitializePayload(params)) {
+    startupViolation = 'initialize payload did not declare the Symphony client identity'
+    rejectRequest(id, startupViolation)
+    return
+  }
+  startupPhase = 'initialized'
   if (scenario === 'startup-silent') {
     return
   }
@@ -67,7 +160,17 @@ const handleInitialize = (id: unknown): void => {
   send({ id, result: { userAgent: 'fake-app-server/1.0' } })
 }
 
-const handleThreadStart = (id: unknown): void => {
+const handleThreadStart = (id: unknown, params: unknown): void => {
+  if (!requirePhase('thread', id)) {
+    return
+  }
+  if (!hasThreadPayload(params)) {
+    startupViolation = 'thread/start payload did not preserve approval and sandbox policy'
+    rejectRequest(id, startupViolation)
+    return
+  }
+  workspaceCwd = params['cwd']
+  startupPhase = 'turn'
   if (scenario === 'thread-error') {
     send({ id, error: { code: -32000, message: 'thread/start refused' } })
     return
@@ -79,7 +182,16 @@ const handleThreadStart = (id: unknown): void => {
   send({ id, result: { thread } })
 }
 
-const handleTurnStart = (id: unknown): void => {
+const handleTurnStart = (id: unknown, params: unknown): void => {
+  if (!requirePhase('turn', id)) {
+    return
+  }
+  if (!hasTurnPayload(params)) {
+    startupViolation = 'turn/start payload did not preserve input, approval, and sandbox policy'
+    rejectRequest(id, startupViolation)
+    return
+  }
+  startupPhase = 'ready'
   switch (scenario) {
     case 'immediate-completion': {
       // The completion is written before the response: the ordering race that must not lose a turn.
@@ -105,6 +217,15 @@ const handleTurnStart = (id: unknown): void => {
     case 'approval': {
       send({ id, result: { turn } })
       send({ id: 9001, method: 'item/commandExecution/requestApproval', params: { command: 'ls' } })
+      return
+    }
+    case 'file-approval': {
+      send({ id, result: { turn } })
+      send({
+        id: 9008,
+        method: 'item/fileChange/requestApproval',
+        params: { path: 'README.md' },
+      })
       return
     }
     case 'unsupported-request': {
@@ -371,15 +492,38 @@ const handleTurnStart = (id: unknown): void => {
 const handle = (message: JsonRecord): void => {
   const id = message['id']
   const method = message['method']
+  const params = message['params']
+
+  if (startupViolation !== null && method !== undefined) {
+    rejectRequest(id, startupViolation)
+    return
+  }
 
   if (method === 'initialize') {
-    handleInitialize(id)
+    handleInitialize(id, params)
     return
   }
   if (method === 'initialized') {
+    if (!requirePhase('initialized', id)) {
+      return
+    }
+    if (!isJsonRecord(params) || Object.keys(params).length !== 0) {
+      startupViolation = 'initialized notification payload must be empty'
+      return
+    }
+    startupPhase = 'rate-limits'
     return
   }
   if (method === 'account/rateLimits/read') {
+    if (!requirePhase('rate-limits', id)) {
+      return
+    }
+    if (!isJsonRecord(params) || Object.keys(params).length !== 0) {
+      startupViolation = 'account/rateLimits/read payload must be empty'
+      rejectRequest(id, startupViolation)
+      return
+    }
+    startupPhase = 'thread'
     if (scenario === 'sparse-rate-limit-before-read') {
       send({
         method: 'account/rateLimits/updated',
@@ -400,11 +544,11 @@ const handle = (message: JsonRecord): void => {
     return
   }
   if (method === 'thread/start') {
-    handleThreadStart(id)
+    handleThreadStart(id, params)
     return
   }
   if (method === 'turn/start') {
-    handleTurnStart(id)
+    handleTurnStart(id, params)
     return
   }
   if (typeof method === 'string') {
@@ -412,18 +556,42 @@ const handle = (message: JsonRecord): void => {
     return
   }
   // Client responses to server-initiated requests.
-  if (id === 9001 || id === 9007 || id === 'approval-1') {
+  if (id === 9001 || id === 9007 || id === 9008 || id === 'approval-1') {
+    const result = message['result']
+    if (!isJsonRecord(result) || result['decision'] !== 'acceptForSession') {
+      send({ method: 'approval/rejected', params: { reason: 'invalid approval response' } })
+      return
+    }
     send({ method: 'approval/observed', params: message })
     completeTurn()
     return
   }
   if (id === 9004) {
+    if (
+      !isDeepStrictEqual(message['result'], {
+        permissions: {},
+        scope: 'turn',
+      })
+    ) {
+      send({ method: 'permissions/rejected', params: { reason: 'invalid permissions response' } })
+      return
+    }
     // The permissions grant is a result, not an error: the turn proceeds once it is answered.
     send({ method: 'permissions/observed', params: message })
     completeTurn()
     return
   }
-  if (id === 9002 || id === 9003 || id === 9006) {
+  if (id === 9002) {
+    const error = message['error']
+    if (!isJsonRecord(error) || error['code'] !== -32_601) {
+      send({ method: 'request/invalid-rejection', params: message })
+      return
+    }
+    send({ method: 'request/rejected', params: message })
+    completeTurn()
+    return
+  }
+  if (id === 9003 || id === 9006) {
     send({ method: 'request/rejected', params: message })
   }
 }
