@@ -15,6 +15,7 @@ import {
 } from '../src/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
+import type { CodexReviewObservation } from '../src/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -285,6 +286,7 @@ const makeHarness = (
           Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
         inspectPullRequest: () => Effect.die('unused'),
         mergePullRequest: () => Effect.die('unused'),
+        requestPullRequestReview: () => Effect.die('unused'),
         resolveReviewThreads: () => Effect.die('unused'),
         toolSpecs: [],
         executeTool: async (name) => ({
@@ -778,6 +780,198 @@ describe('restored pull request handoffs', (): void => {
     ])
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
       expect.objectContaining({ state: 'closed_without_merge' }),
+    ])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('requests and awaits Codex review of the repaired head before merging', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repaired-review-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const repairedHead = 'abcdef1234567890abcdef1234567890abcdef12'
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'awaiting_checks',
+          headSha: repairedHead,
+          reason: null,
+          repairAttempts: 1,
+          reviewRequestedHeadSha: null,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    let codexReview: CodexReviewObservation | null = null
+    const requestedHeads: string[] = []
+    const mergedHeads: string[] = []
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: repairedHead,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [
+              {
+                name: 'quality',
+                status: 'completed' as const,
+                conclusion: 'success',
+                url: null,
+              },
+            ],
+            reviewDecision: null,
+            reviewThreads: [],
+            codexReview,
+          }),
+        requestPullRequestReview: (_number, expectedHeadSha) =>
+          Effect.sync(() => {
+            requestedHeads.push(expectedHeadSha)
+          }),
+        mergePullRequest: (_number, expectedHeadSha) =>
+          Effect.sync(() => {
+            mergedHeads.push(expectedHeadSha)
+            return 'merged-head'
+          }),
+      }),
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          let snapshot = yield* control.snapshot
+          expect(requestedHeads).toEqual([repairedHead])
+          expect(mergedHeads).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({
+            state: 'awaiting_checks',
+            reviewRequestedHeadSha: repairedHead,
+          })
+
+          codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'pending' }
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(mergedHeads).toEqual([])
+          expect(snapshot.handoffs[0]?.reason).toBe(
+            'Waiting for Codex review of the repaired head to complete',
+          )
+
+          codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'completed' }
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(mergedHeads).toEqual([repairedHead])
+          expect(snapshot.handoffs).toEqual([])
+        }),
+      ),
+    )
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('persists the repair marker while its agent is running', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-running-repair-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const reviewedHead = 'abcdef1234567890abcdef1234567890abcdef12'
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'repair_needed',
+          headSha: reviewedHead,
+          reason: 'Unresolved review feedback',
+          repairAttempts: 0,
+          reviewRequestedHeadSha: null,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: reviewedHead,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [
+              {
+                name: 'quality',
+                status: 'completed' as const,
+                conclusion: 'success',
+                url: null,
+              },
+            ],
+            reviewDecision: null,
+            reviewThreads: [
+              {
+                id: 'thread-1',
+                resolved: false,
+                body: 'Fix this',
+                url: null,
+                commentHeadSha: reviewedHead,
+              },
+            ],
+          }),
+      }),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.running).toHaveLength(1)
+    expect(snapshot.handoffs).toEqual([
+      expect.objectContaining({
+        issueId: '20',
+        state: 'repair_needed',
+        repairAttempts: 1,
+        reviewRequestedHeadSha: null,
+      }),
+    ])
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ issueId: '20', repairAttempts: 1 }),
     ])
     await rm(workspaceRoot, { force: true, recursive: true })
   })

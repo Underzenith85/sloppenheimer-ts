@@ -46,3 +46,12 @@ Description:
 Follow the repository's TypeScript 7 conventions. Never use `any`, never omit braces around a
 control-flow body, and do not add TypeScript 6 compatibility. Create a branch named
 `symphony/issue-{{ issue.id }}`, run `pnpm check`, commit the implementation, and push the branch.
+
+When the description contains a `Pull request repair` section, update the existing pull-request
+branch instead of opening a replacement. Rebase the repaired branch onto the latest protected
+`main`, rerun `pnpm check`, and push the rebased head with `--force-with-lease` pinned to the head
+SHA supplied in the repair description. After the push succeeds, finish the handoff. Symphony
+submits `@codex review` on the existing pull request with its host-side GitHub credential after
+observing the pushed head; the repair agent must not use or request GitHub credentials. Do not
+resolve review threads yourself or merge the pull request; Symphony will do those only after CI
+passes and the latest-head review is verified.

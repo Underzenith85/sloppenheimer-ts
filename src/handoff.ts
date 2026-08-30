@@ -10,6 +10,12 @@ export type PullRequestReviewThread = Readonly<{
   resolved: boolean
   body: string
   url: string | null
+  commentHeadSha?: string | null
+}>
+
+export type CodexReviewObservation = Readonly<{
+  headShaPrefix: string
+  status: 'pending' | 'completed'
 }>
 
 type PullRequestObservationDetails = Readonly<{
@@ -17,6 +23,7 @@ type PullRequestObservationDetails = Readonly<{
   checks: readonly PullRequestCheck[]
   reviewDecision: string | null
   reviewThreads: readonly PullRequestReviewThread[]
+  codexReview?: CodexReviewObservation | null
 }>
 
 export type PullRequestObservation = PullRequestObservationDetails &
@@ -120,5 +127,6 @@ export type HandoffSnapshot = Readonly<{
   headSha: string | null
   reason: string | null
   repairAttempts: number
+  reviewRequestedHeadSha?: string | null
   observedAt: string
 }>

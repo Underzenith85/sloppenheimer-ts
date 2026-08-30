@@ -292,6 +292,7 @@ describe('GitHub pull request monitor', (): void => {
       checks: [],
       reviewDecision: null,
       reviewThreads: [],
+      codexReview: null,
     })
     expect(classifyPullRequest(result).state).toBe('closed_without_merge')
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -322,6 +323,29 @@ describe('GitHub pull request monitor', (): void => {
           ],
         })
       }
+      if (url.includes('/issues/41/comments?')) {
+        if (url.includes('page=2')) {
+          return Response.json([
+            {
+              user: { login: 'chatgpt-codex-connector' },
+              body: '<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | `abcdef1` |',
+            },
+          ])
+        }
+        return Response.json(
+          [
+            {
+              user: { login: 'chatgpt-codex-connector-fake' },
+              body: '<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | `badcafe` |',
+            },
+          ],
+          {
+            headers: {
+              Link: '<https://api.github.test/repos/example/symphony/issues/41/comments?per_page=100&page=2>; rel="next"',
+            },
+          },
+        )
+      }
       return Response.json({
         data: {
           repository: {
@@ -333,7 +357,13 @@ describe('GitHub pull request monitor', (): void => {
                     id: 'thread-1',
                     isResolved: false,
                     comments: {
-                      nodes: [{ body: 'Fix this', url: 'https://github.test/comment' }],
+                      nodes: [
+                        {
+                          body: 'Fix this',
+                          url: 'https://github.test/comment',
+                          commit: { oid: 'reviewed-head' },
+                        },
+                      ],
                     },
                   },
                 ],
@@ -350,8 +380,47 @@ describe('GitHub pull request monitor', (): void => {
     expect(result.headSha).toBe('head-1')
     expect(result.mergeCommitSha).toBeNull()
     expect(result.checks[0]?.name).toBe('quality')
-    expect(result.reviewThreads[0]).toMatchObject({ resolved: false, body: 'Fix this' })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(result.reviewThreads[0]).toMatchObject({
+      resolved: false,
+      body: 'Fix this',
+      commentHeadSha: 'reviewed-head',
+    })
+    expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+  })
+
+  it('requests Codex review only after verifying the current pull request head', async (): Promise<void> => {
+    const requests: Array<Readonly<{ url: string; method: string; body: string | null }>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url = requestUrl(input)
+        requests.push({
+          url,
+          method: init?.method ?? 'GET',
+          body: typeof init?.body === 'string' ? init.body : null,
+        })
+        if (url.endsWith('/pulls/41')) {
+          return Response.json({ head: { sha: 'head-1' } })
+        }
+        return Response.json({ html_url: 'https://github.test/comment/1' }, { status: 201 })
+      }),
+    )
+
+    await Effect.runPromise(makeGitHubPullRequestMonitor(provider).requestReview(41, 'head-1'))
+
+    expect(requests).toEqual([
+      {
+        url: 'https://api.github.test/repos/example/symphony/pulls/41',
+        method: 'GET',
+        body: null,
+      },
+      {
+        url: 'https://api.github.test/repos/example/symphony/issues/41/comments',
+        method: 'POST',
+        body: JSON.stringify({ body: '@codex review' }),
+      },
+    ])
   })
 
   it('guards the merge with the observed head SHA', async (): Promise<void> => {
