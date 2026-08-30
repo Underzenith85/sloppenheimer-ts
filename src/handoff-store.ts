@@ -2,42 +2,65 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { Effect } from 'effect'
 
+import { HandoffStoreError } from './errors.js'
 import type { HandoffSnapshot } from './handoff.js'
-import { logWarning } from './logging.js'
 
 const isSnapshot = (value: unknown): value is HandoffSnapshot => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false
   }
   const candidate = value as Record<string, unknown>
+  const states = new Set([
+    'merged',
+    'closed',
+    'awaiting_checks',
+    'repair_needed',
+    'ready_to_merge',
+    'merging',
+    'intervention_required',
+  ])
   return (
     typeof candidate['issueId'] === 'string' &&
     typeof candidate['identifier'] === 'string' &&
     typeof candidate['pullRequestUrl'] === 'string' &&
     typeof candidate['branchName'] === 'string' &&
     typeof candidate['state'] === 'string' &&
+    states.has(candidate['state']) &&
     (candidate['headSha'] === null || typeof candidate['headSha'] === 'string') &&
     (candidate['reason'] === null || typeof candidate['reason'] === 'string') &&
     typeof candidate['repairAttempts'] === 'number' &&
-    typeof candidate['observedAt'] === 'string'
+    Number.isSafeInteger(candidate['repairAttempts']) &&
+    candidate['repairAttempts'] >= 0 &&
+    typeof candidate['observedAt'] === 'string' &&
+    !Number.isNaN(Date.parse(candidate['observedAt']))
   )
 }
 
-export const loadHandoffs = (path: string): Effect.Effect<readonly HandoffSnapshot[]> =>
+const storeError = (operation: 'read' | 'write', path: string, cause: unknown): HandoffStoreError =>
+  new HandoffStoreError({
+    operation,
+    message: `Could not ${operation} handoff store ${path}${cause instanceof Error ? `: ${cause.message}` : ''}`,
+    cause,
+  })
+
+export const loadHandoffs = (
+  path: string,
+): Effect.Effect<readonly HandoffSnapshot[], HandoffStoreError> =>
   Effect.tryPromise({
     try: async () => {
       try {
         const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-          return []
+          throw new Error('handoff store root is not an object')
         }
         if (!('version' in parsed) || !('handoffs' in parsed)) {
-          return []
+          throw new Error('handoff store is missing version or handoffs')
         }
         const handoffs = parsed.handoffs
-        return parsed.version === 1 && Array.isArray(handoffs) && handoffs.every(isSnapshot)
-          ? handoffs
-          : []
+        if (parsed.version !== 1 || !Array.isArray(handoffs) || !handoffs.every(isSnapshot)) {
+          throw new Error('handoff store has an unsupported version or malformed handoff')
+        }
+        return handoffs
       } catch (cause: unknown) {
         if (
           typeof cause === 'object' &&
@@ -50,22 +73,13 @@ export const loadHandoffs = (path: string): Effect.Effect<readonly HandoffSnapsh
         throw cause
       }
     },
-    catch: (cause) => cause,
-  }).pipe(
-    Effect.catchAll((cause) =>
-      logWarning('handoff persistence load failed; continuing with empty state', {
-        action: 'handoff_load',
-        outcome: 'failed',
-        path,
-        error: cause instanceof Error ? cause.message : String(cause),
-      }).pipe(Effect.as<readonly HandoffSnapshot[]>([])),
-    ),
-  )
+    catch: (cause: unknown) => storeError('read', path, cause),
+  })
 
 export const saveHandoffs = (
   path: string,
   handoffs: readonly HandoffSnapshot[],
-): Effect.Effect<void> =>
+): Effect.Effect<void, HandoffStoreError> =>
   Effect.tryPromise({
     try: async () => {
       await mkdir(dirname(path), { recursive: true })
@@ -75,14 +89,5 @@ export const saveHandoffs = (
       })
       await rename(temporaryPath, path)
     },
-    catch: (cause) => cause,
-  }).pipe(
-    Effect.catchAll((cause) =>
-      logWarning('handoff persistence save failed; state was not persisted', {
-        action: 'handoff_save',
-        outcome: 'failed',
-        path,
-        error: cause instanceof Error ? cause.message : String(cause),
-      }),
-    ),
-  )
+    catch: (cause: unknown) => storeError('write', path, cause),
+  })

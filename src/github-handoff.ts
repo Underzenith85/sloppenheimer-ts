@@ -219,6 +219,22 @@ export const makeGitHubPullRequestMonitor = (
           }
           const headSha = requiredString(number, 'head.sha', headValue['sha'])
           const url = requiredString(number, 'html_url', pull['html_url'])
+          const state = typeof pull['state'] === 'string' ? pull['state'] : 'open'
+          if (state === 'closed') {
+            return {
+              number,
+              url,
+              headSha,
+              merged: false,
+              closed: true,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'closed',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }
+          }
           const mergeCommitSha = nullableString(
             number,
             'merge_commit_sha',
@@ -264,6 +280,7 @@ export const makeGitHubPullRequestMonitor = (
             url,
             headSha,
             merged: false,
+            closed: false,
             mergeCommitSha,
             mergeable,
             mergeState,

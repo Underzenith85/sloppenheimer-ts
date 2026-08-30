@@ -33,6 +33,8 @@ export type PullRequestObservation = PullRequestObservationDetails &
         url: string
         headSha: string
         merged: false
+        /** Absent on observations supplied by older/custom adapters; absence means open. */
+        closed?: boolean
         mergeCommitSha: string | null
         mergeable: boolean | null
         mergeState: string
@@ -41,6 +43,7 @@ export type PullRequestObservation = PullRequestObservationDetails &
 
 export type HandoffDisposition =
   | Readonly<{ state: 'merged'; mergeCommitSha: string | null }>
+  | Readonly<{ state: 'closed'; reason: string }>
   | Readonly<{ state: 'awaiting_checks'; reason: string }>
   | Readonly<{ state: 'repair_needed'; reason: string }>
   | Readonly<{ state: 'ready_to_merge'; headSha: string }>
@@ -50,6 +53,9 @@ const successfulConclusions = new Set(['success', 'neutral', 'skipped'])
 export const classifyPullRequest = (observation: PullRequestObservation): HandoffDisposition => {
   if (observation.merged) {
     return { state: 'merged', mergeCommitSha: observation.mergeCommitSha }
+  }
+  if (observation.closed === true) {
+    return { state: 'closed', reason: 'The pull request was closed without being merged' }
   }
   if (observation.mergeable === false || observation.mergeState === 'dirty') {
     return { state: 'repair_needed', reason: 'The pull request conflicts with protected main' }

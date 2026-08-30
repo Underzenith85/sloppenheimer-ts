@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Logger } from 'effect'
+import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
@@ -36,7 +36,7 @@ describe('handoff persistence', (): void => {
     expect(await readFile(path, 'utf8')).toContain('"version": 1')
   })
 
-  it('treats missing or malformed state as an empty recovery set', async (): Promise<void> => {
+  it('treats missing state as an empty recovery set', async (): Promise<void> => {
     const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
     directories.push(directory)
     await expect(Effect.runPromise(loadHandoffs(join(directory, 'missing.json')))).resolves.toEqual(
@@ -44,25 +44,31 @@ describe('handoff persistence', (): void => {
     )
   })
 
-  it('logs a failing write instead of silently discarding it', async (): Promise<void> => {
+  it('surfaces a failing write instead of silently discarding it', async (): Promise<void> => {
     const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
     directories.push(directory)
     const path = join(directory, 'handoffs.json')
     await mkdir(`${path}.tmp`)
-    const logs: string[] = []
-    const logger = Logger.replace(
-      Logger.defaultLogger,
-      Logger.make(({ message }: Readonly<{ message: unknown }>) => {
-        logs.push(JSON.stringify(message))
-      }),
-    )
 
-    await expect(
-      Effect.runPromise(saveHandoffs(path, []).pipe(Effect.provide(logger))),
-    ).resolves.toBeUndefined()
-    expect(logs).toContainEqual(expect.stringContaining('handoff persistence save failed'))
-    expect(logs).toContainEqual(expect.stringContaining('handoff_save'))
-    expect(logs).toContainEqual(expect.stringContaining(path))
-    expect(logs).toContainEqual(expect.stringContaining('EISDIR'))
+    const result = await Effect.runPromise(Effect.either(saveHandoffs(path, [])))
+    expect(result._tag).toBe('Left')
+    if (result._tag === 'Left') {
+      expect(result.left.operation).toBe('write')
+      expect(result.left.message).toContain(`Could not write handoff store ${path}`)
+    }
+  })
+
+  it('surfaces malformed state instead of silently replacing it', async (): Promise<void> => {
+    const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
+    directories.push(directory)
+    const path = join(directory, 'handoffs.json')
+    await writeFile(path, '{"version":1,"handoffs":[null]}')
+
+    const result = await Effect.runPromise(Effect.either(loadHandoffs(path)))
+    expect(result._tag).toBe('Left')
+    if (result._tag === 'Left') {
+      expect(result.left.operation).toBe('read')
+      expect(result.left.message).toContain(`Could not read handoff store ${path}`)
+    }
   })
 })

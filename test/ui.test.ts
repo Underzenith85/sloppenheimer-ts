@@ -28,6 +28,14 @@ const snapshot: OrchestratorSnapshot = {
   counts: { running: 1, retrying: 1, completed: 0 },
   pausedIssueNumbers: [],
   handoffs: [],
+  handoffRecovery: {
+    status: 'completed',
+    loaded: 0,
+    recovered: 0,
+    skipped: 0,
+    failed: 0,
+    storeError: null,
+  },
   running: [
     {
       issueId: issueId('17'),

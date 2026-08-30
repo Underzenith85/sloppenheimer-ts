@@ -50,6 +50,7 @@ export type TrackerAdapter = Readonly<{
     issue: Issue,
     dispatchLabels: readonly string[],
   ) => Effect.Effect<HandoffResult, TrackerError>
+  findExistingHandoff: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
   inspectPullRequest: (
     pullRequestNumber: number,
   ) => Effect.Effect<PullRequestObservation, TrackerError>
@@ -622,6 +623,28 @@ export const makeGitHubTracker = (provider: GitHubProviderConfig): TrackerAdapte
             ),
           )
         }),
+      )
+    },
+    findExistingHandoff: (issue) => {
+      const branchName = issueBranchName(issue)
+      return findPullRequest(provider, prefix, branchName).pipe(
+        Effect.flatMap((pullRequestUrl) =>
+          pullRequestUrl === null
+            ? Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName })
+            : Effect.try({
+                try: (): HandoffResult => ({
+                  _tag: 'PullRequest',
+                  branchName,
+                  pullRequestUrl,
+                  pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
+                  created: false,
+                }),
+                catch: (cause: unknown) =>
+                  cause instanceof TrackerError
+                    ? cause
+                    : trackerResponseError('GitHub pull request URL is invalid', cause),
+              }),
+        ),
       )
     },
     inspectPullRequest: pullRequests.inspect,
