@@ -14,13 +14,15 @@ import {
   type AgentEvent,
   type AgentLaunch,
   type AgentResult,
-} from '../src/codex.js'
-import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
-import type { AgentError } from '../src/errors.js'
-import type { CodexConfig } from '../src/config/workflow.js'
+} from '../../../src/adapters/codex/codex.js'
+import { issueId, issueIdentifier, type Issue } from '../../../src/domain/domain.js'
+import type { AgentError } from '../../../src/errors.js'
+import type { CodexConfig } from '../../../src/config/workflow.js'
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
   'fixtures',
   'fake-app-server.ts',
 )
