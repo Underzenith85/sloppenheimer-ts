@@ -127,6 +127,8 @@ export type HandoffSnapshot = Readonly<{
   headSha: string | null
   reason: string | null
   repairAttempts: number
+  repairHeadShas?: readonly string[]
+  repairStartedHeadSha?: string | null
   reviewRequestedHeadSha?: string | null
   reviewCompletedHeadSha?: string | null
   observedAt: string

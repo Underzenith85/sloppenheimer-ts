@@ -75,7 +75,8 @@ type HandoffEntry = {
   state: HandoffSnapshot['state']
   headSha: string | null
   reason: string | null
-  repairAttempts: number
+  repairHeadShas: string[]
+  repairStartedHeadSha: string | null
   reviewRequestedHeadSha: string | null
   reviewCompletedHeadSha: string | null
   observedAt: Date
@@ -693,7 +694,9 @@ export const startOrchestrator = (
         state: handoff.state,
         headSha: handoff.headSha,
         reason: handoff.reason,
-        repairAttempts: handoff.repairAttempts,
+        repairAttempts: handoff.repairHeadShas.length,
+        repairHeadShas: handoff.repairHeadShas,
+        repairStartedHeadSha: handoff.repairStartedHeadSha,
         reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
         reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
         observedAt: handoff.observedAt.toISOString(),
@@ -758,10 +761,18 @@ export const startOrchestrator = (
             pullRequestNumber,
             pullRequestUrl: restored.pullRequestUrl,
             branchName: restored.branchName,
-            state: restored.state,
+            state:
+              restored.repairHeadShas === undefined &&
+              restored.state === 'intervention_required' &&
+              restored.reason?.startsWith('Repair limit reached.') === true
+                ? 'repair_needed'
+                : restored.state,
             headSha: restored.headSha,
             reason: restored.reason,
-            repairAttempts: restored.repairAttempts,
+            // Legacy snapshots conflated worker retries with repairs. An absent head list therefore
+            // migrates to zero verified repairs instead of preserving a contaminated counter.
+            repairHeadShas: [...(restored.repairHeadShas ?? [])],
+            repairStartedHeadSha: null,
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
@@ -909,10 +920,10 @@ export const startOrchestrator = (
       issue: Issue,
       attempt: number | null,
       effectiveOverride?: EffectiveWorkflow,
-    ): Effect.Effect<void, never, Scope.Scope> =>
+    ): Effect.Effect<boolean, never, Scope.Scope> =>
       Effect.gen(function* () {
         if (state.running.has(issue.id)) {
-          return
+          return false
         }
         state.claimed.add(issue.id)
         const retry = state.retries.get(issue.id)
@@ -940,7 +951,7 @@ export const startOrchestrator = (
             error: preflight.error.message,
           })
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
-          return
+          return false
         }
         const effective = preflight.value
         if (effectiveOverride === undefined && effective !== lastKnownGood) {
@@ -956,7 +967,7 @@ export const startOrchestrator = (
         )
         if (renderedPrompt._tag === 'Failed') {
           yield* scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
-          return
+          return false
         }
         const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
         const hostTools: HostToolSession = Object.freeze({
@@ -1085,6 +1096,7 @@ export const startOrchestrator = (
           action: 'dispatch',
           outcome: 'started',
         })
+        return true
       })
 
     /** Mirrors an observed pull-request disposition onto the issue's retained handoff detail. */
@@ -1229,7 +1241,8 @@ export const startOrchestrator = (
             state: disposition.state,
             headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
             reason: 'reason' in disposition ? disposition.reason : null,
-            repairAttempts: 0,
+            repairHeadShas: [],
+            repairStartedHeadSha: null,
             reviewRequestedHeadSha: null,
             reviewCompletedHeadSha: null,
             observedAt,
@@ -1264,10 +1277,13 @@ export const startOrchestrator = (
     const reconcileHandoffs = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         for (const [id, handoff] of state.handoffs) {
-          if (state.running.has(id)) {
+          if (state.running.has(id) || state.retries.has(id)) {
             continue
           }
-          if (handoff.state === 'closed_without_merge') {
+          if (
+            handoff.state === 'closed_without_merge' ||
+            handoff.state === 'intervention_required'
+          ) {
             continue
           }
           const handoffIssueNumber = identifierIssueNumber(handoff.issue.identifier)
@@ -1286,6 +1302,30 @@ export const startOrchestrator = (
           if (inspected._tag === 'Failed') {
             handoff.reason = inspected.error.message
             continue
+          }
+          if (inspected.observation.state === 'open' && handoff.repairStartedHeadSha !== null) {
+            const repairedHeadSha = inspected.observation.headSha
+            if (repairedHeadSha !== handoff.repairStartedHeadSha) {
+              if (handoff.repairHeadShas.includes(repairedHeadSha)) {
+                handoff.repairStartedHeadSha = null
+                handoff.state = 'intervention_required'
+                handoff.headSha = repairedHeadSha
+                handoff.reason =
+                  'Repair agent returned the pull request to an already observed repair head.'
+                continue
+              }
+              handoff.repairHeadShas.push(repairedHeadSha)
+              handoff.repairStartedHeadSha = null
+            } else {
+              const unchangedDisposition = classifyPullRequest(inspected.observation)
+              handoff.repairStartedHeadSha = null
+              if (unchangedDisposition.state === 'repair_needed') {
+                handoff.state = 'intervention_required'
+                handoff.headSha = repairedHeadSha
+                handoff.reason = `Repair agent completed without changing the pull request head. ${unchangedDisposition.reason}`
+                continue
+              }
+            }
           }
           if (inspected.observation.state === 'open') {
             const observedHeadSha = inspected.observation.headSha
@@ -1357,7 +1397,7 @@ export const startOrchestrator = (
             )
             .map((thread) => thread.id)
           const repairedHeadIsVerified =
-            handoff.repairAttempts > 0 &&
+            handoff.repairHeadShas.length > 0 &&
             inspected.observation.mergeable === true &&
             inspected.observation.mergeState !== 'dirty' &&
             inspected.observation.mergeState !== 'behind' &&
@@ -1429,7 +1469,7 @@ export const startOrchestrator = (
             continue
           }
           if (disposition.state === 'repair_needed') {
-            if (handoff.repairAttempts >= 3) {
+            if (handoff.repairHeadShas.length >= 3) {
               handoff.state = 'intervention_required'
               handoff.reason = `Repair limit reached. ${disposition.reason}`
               continue
@@ -1448,9 +1488,15 @@ export const startOrchestrator = (
               workspaces: handoff.execution.workspaces,
               loadedAt: handoff.observedAt,
             }
-            handoff.repairAttempts += 1
-            handoff.reason = `Repair agent running. ${disposition.reason}`
-            yield* dispatch(repairIssue, handoff.repairAttempts, effective)
+            const started = yield* dispatch(
+              repairIssue,
+              handoff.repairHeadShas.length + 1,
+              effective,
+            )
+            if (started) {
+              handoff.repairStartedHeadSha = inspected.observation.headSha
+              handoff.reason = `Repair agent running. ${disposition.reason}`
+            }
           }
         }
         // One timeline entry per observed transition, not one per poll: an unchanged disposition is
@@ -2052,18 +2098,20 @@ export const startOrchestrator = (
                   message: record.handoff.dispatchLabels.reason,
                 })
               }
+              const existingHandoff = state.handoffs.get(event.issueId)
               state.handoffs.set(event.issueId, {
-                issue: entry.issue,
+                issue: existingHandoff?.issue ?? entry.issue,
                 execution: entry.execution,
                 pullRequestNumber: handoff.result.pullRequestNumber,
                 pullRequestUrl: handoff.result.pullRequestUrl,
                 branchName: handoff.result.branchName,
                 state: 'awaiting_checks',
-                headSha: null,
+                headSha: existingHandoff?.headSha ?? null,
                 reason: 'Awaiting the first protected-branch observation',
-                repairAttempts: event.attempt ?? 0,
-                reviewRequestedHeadSha: null,
-                reviewCompletedHeadSha: null,
+                repairHeadShas: existingHandoff?.repairHeadShas ?? [],
+                repairStartedHeadSha: existingHandoff?.repairStartedHeadSha ?? null,
+                reviewRequestedHeadSha: existingHandoff?.reviewRequestedHeadSha ?? null,
+                reviewCompletedHeadSha: existingHandoff?.reviewCompletedHeadSha ?? null,
                 observedAt: new Date(),
               })
               yield* persistHandoffs()
@@ -2137,7 +2185,12 @@ export const startOrchestrator = (
               )
               break
             }
-            yield* dispatch(issue, event.attempt)
+            const started = yield* dispatch(issue, event.attempt)
+            const handoff = state.handoffs.get(issue.id)
+            if (started && handoff !== undefined && handoff.headSha !== null) {
+              handoff.repairStartedHeadSha ??= handoff.headSha
+              yield* persistHandoffs()
+            }
             break
           }
           case 'SetIssuePaused': {
