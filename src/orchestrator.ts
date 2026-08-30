@@ -177,7 +177,7 @@ type PublishedDetail =
   | Readonly<{ _tag: 'Unavailable'; reason: string }>
 
 /** How many finished agents keep their timeline for post-mortem inspection. */
-const retainedCompletedDetails = 16
+export const retainedCompletedDetails = 16
 
 type RuntimeState = {
   running: Map<IssueId, RunningEntry>
@@ -192,6 +192,12 @@ type RuntimeState = {
   details: Map<IssueId, AgentDetailRecord>
   /** Issues whose detail record outlived its session, oldest first. */
   finishedDetails: IssueId[]
+  /**
+   * Issues whose retained detail has since been evicted. A session that ended and then aged out
+   * keeps answering as completed rather than degrading into "no session", which would tell an
+   * operator the agent never ran.
+   */
+  agedOutDetails: Set<IssueId>
   identifiers: Map<IssueId, IssueIdentifier>
 }
 
@@ -264,6 +270,7 @@ const initialState = (): RuntimeState => ({
   rateLimits: null,
   details: new Map(),
   finishedDetails: [],
+  agedOutDetails: new Set(),
   identifiers: new Map(),
 })
 
@@ -516,6 +523,8 @@ export const startOrchestrator = (
       execution: ExecutionSnapshot,
     ): AgentDetailRecord => {
       noteIssue(issue)
+      // A new session supersedes whatever aged out for this issue.
+      state.agedOutDetails.delete(issue.id)
       const now = new Date()
       const existing = state.details.get(issue.id)
       if (existing !== undefined) {
@@ -576,6 +585,13 @@ export const startOrchestrator = (
         const record = evicted === undefined ? undefined : state.details.get(evicted)
         if (evicted !== undefined && record !== undefined) {
           state.details.delete(evicted)
+          state.agedOutDetails.add(evicted)
+          if (state.agedOutDetails.size > rememberedIdentifiers) {
+            const oldest = state.agedOutDetails.values().next()
+            if (!oldest.done) {
+              state.agedOutDetails.delete(oldest.value)
+            }
+          }
           next.set(record.identifier, { _tag: 'Completed' })
         }
       }
@@ -583,7 +599,7 @@ export const startOrchestrator = (
         if (next.has(identifier)) {
           continue
         }
-        if (state.completed.has(id)) {
+        if (state.completed.has(id) || state.agedOutDetails.has(id)) {
           next.set(identifier, { _tag: 'Completed' })
           continue
         }

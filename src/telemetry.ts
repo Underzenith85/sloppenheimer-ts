@@ -1015,18 +1015,26 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
   }
 }
 
-/** Closes the current attempt and, when a session is open, marks it ended. */
+/**
+ * Closes the current attempt and, when a session is open, marks it ended.
+ *
+ * `relabel` re-states the outcome of an attempt that has already ended, keeping the moment it ended.
+ * Scheduling a retry is the latest and most specific word on how an attempt turned out — later than
+ * the cancellation or failed handoff that closed it moments earlier — so that path corrects the
+ * label rather than leaving the attempt history claiming an ending that did not hold.
+ */
 const endAttempt = (
   record: AgentDetailRecord,
   at: Date,
   outcome: AgentAttemptSummary['outcome'],
   reason: string | null,
+  relabel = false,
 ): void => {
   const attempt = record.attempts.at(-1)
-  if (attempt !== undefined && attempt.endedAt === null) {
+  if (attempt !== undefined && (attempt.endedAt === null || relabel)) {
     record.attempts[record.attempts.length - 1] = {
       ...attempt,
-      endedAt: at.toISOString(),
+      endedAt: attempt.endedAt ?? at.toISOString(),
       outcome,
       reason,
     }
@@ -1049,7 +1057,7 @@ export const recordRetryScheduled = (
   reason: string | null,
 ): void => {
   const summary = reason === null ? null : boundRedacted(reason).text
-  endAttempt(record, at, 'retrying', summary)
+  endAttempt(record, at, 'retrying', summary, true)
   setPhase(record, 'retrying', summary ?? 'Waiting to retry', at)
   push(record, {
     sequence: nextSequence(record),
@@ -1137,6 +1145,13 @@ export type HandoffObservation = Readonly<{
   outcome?: AgentHandoffDetail['outcome']
 }>
 
+/** The handoff outcomes that end an attempt rather than being followed by another one. */
+const handedOffOutcomes: ReadonlySet<AgentHandoffDetail['outcome']> = new Set([
+  'pull_request_open',
+  'merged',
+  'intervention_required',
+])
+
 export const recordHandoff = (
   record: AgentDetailRecord,
   at: Date,
@@ -1151,7 +1166,10 @@ export const recordHandoff = (
   }
   if (observation.outcome !== undefined) {
     record.handoff.outcome = observation.outcome
-    if (observation.outcome !== 'in_progress') {
+    // Only an outcome that actually ends the work closes the attempt. A missing branch or a failed
+    // handoff is followed by another attempt, so closing it here would label a retrying attempt as
+    // handed off — and the retry that follows could no longer correct it.
+    if (handedOffOutcomes.has(observation.outcome)) {
       endAttempt(record, at, 'handed_off', summary)
     }
   }

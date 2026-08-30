@@ -112,6 +112,12 @@ const detailLookups = new Map<string, AgentDetailLookup>([
     },
   ],
   ['example/symphony#19', { _tag: 'Completed', identifier: 'example/symphony#19' }],
+  [
+    // A GitHub owner and repository can together run well past a hundred characters; the endpoint
+    // must accept every identifier the runtime snapshot publishes a link for.
+    `${'o'.repeat(39)}/${'r'.repeat(100)}#7`,
+    { _tag: 'Found', detail: makeDetail(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`) },
+  ],
   ['example/symphony#20', { _tag: 'NoSession', identifier: 'example/symphony#20' }],
   [
     'example/symphony#21',
@@ -249,6 +255,7 @@ describe('operator server', (): void => {
       const unavailable = await detailFor('example/symphony#21')
       const missing = await detailFor('example/symphony#99')
       const malformed = await detailFor('not an identifier')
+      const longIdentifier = await detailFor(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`)
       const wrongMethod = await fetch(
         `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
         { method: 'POST' },
@@ -272,6 +279,7 @@ describe('operator server', (): void => {
       expect(await missing.json()).toMatchObject({ error: { code: 'agent_not_found' } })
       expect(malformed.status).toBe(400)
       expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_identifier' } })
+      expect(longIdentifier.status).toBe(200)
       expect(wrongMethod.status).toBe(405)
     })
   })

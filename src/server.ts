@@ -66,8 +66,12 @@ const hostIsLoopback = (value: string | undefined): boolean => {
 /**
  * The shape a tracker identifier may take. Rejecting anything else keeps a malformed path from
  * reaching the actor at all, and keeps the reflected error free of caller-supplied text.
+ *
+ * The length bound only excludes paths no tracker could have produced: a GitHub owner and
+ * repository can together run to 140 characters, and a `detailUrl` the runtime snapshot publishes
+ * must never be rejected by the endpoint it points at.
  */
-const issueIdentifierPattern = /^[\w.\-/]{1,120}#\d{1,12}$/u
+const issueIdentifierPattern = /^[\w.\-/]{1,512}#\d{1,12}$/u
 
 const isIssueIdentifier = (value: string): boolean => issueIdentifierPattern.test(value)
 
@@ -261,8 +265,16 @@ const makeRouter = (
   )
 }
 
+/**
+ * The router's own limit on a path segment. Its default of 100 characters is shorter than a tracker
+ * identifier can legitimately be — a GitHub owner and repository together reach 140 — and a segment
+ * over the limit fails to match, so a published `detailUrl` would 404 before any handler ran.
+ */
+const maxIdentifierParamLength = 1024
+
 const makeApp = (backend: OperatorBackend, csrfToken: string): HttpApp.Default<never, never> => {
   const handled = makeRouter(backend, csrfToken).pipe(
+    HttpRouter.withRouterConfig({ maxParamLength: maxIdentifierParamLength }),
     Effect.catchTag('RouteNotFound', () => Effect.succeed(notFound)),
     Effect.catchAllCause((cause) =>
       Effect.logError('operator request failed', { cause: Cause.pretty(cause) }).pipe(

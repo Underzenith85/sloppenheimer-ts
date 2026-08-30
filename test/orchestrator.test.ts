@@ -11,6 +11,7 @@ import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/
 import {
   flattenRateLimits,
   issueIsRoutable,
+  retainedCompletedDetails,
   retryDelayMs,
   sortIssues,
   startOrchestrator,
@@ -1536,5 +1537,67 @@ describe('live agent detail', (): void => {
       expect(observed.after.detail.timeline.events).toHaveLength(1)
       expect(observed.after.detail.activity.elapsedMs).toBeGreaterThanOrEqual(0)
     }
+  })
+})
+
+describe('aged-out agent detail', (): void => {
+  it('keeps reporting an evicted session as completed on later publications', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-aged-out-'))
+    const total = retainedCompletedDetails + 1
+    const issues = Array.from({ length: total }, (_unused, index) => ({
+      ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
+      id: issueId(String(index + 20)),
+    }))
+    const isolated: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        workspaceRoot,
+        agent: { ...workflow.config.agent, maxConcurrentAgents: total },
+      },
+    }
+    const harness = makeHarness(isolated, () => issues)
+    const factory = makeAgentFactory()
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: factory.runAgent,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: (issue) =>
+          Effect.succeed({
+            _tag: 'PullRequest',
+            branchName: `symphony/issue-${issue.id}`,
+            pullRequestUrl: `https://example.test/pull/${issue.id}`,
+            pullRequestNumber: Number(issue.id),
+            created: true,
+          }),
+      }),
+    }
+
+    const observed = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          for (const issue of issues) {
+            const agent = yield* Effect.promise(() => awaitAgent(factory.agents, issue.identifier))
+            agent.settle('completed')
+          }
+          const evicted = yield* Effect.promise(() =>
+            waitUntil(() => {
+              const aged = issues.filter(
+                (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
+              )
+              return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
+            }, 'the oldest detail to age out'),
+          )
+          // Any later publication must not downgrade the aged-out answer to "no session".
+          yield* control.setIssuePaused(9_999, true)
+          return { evicted, after: readDetail(control, evicted) }
+        }),
+      ),
+    )
+
+    expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
+    await rm(workspaceRoot, { force: true, recursive: true })
   })
 })

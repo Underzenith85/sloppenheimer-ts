@@ -356,6 +356,48 @@ describe('agent detail records', (): void => {
     expect(late.phase.phase).toBe('stalled')
   })
 
+  it('keeps an attempt that is retried out of the handed-off outcome', (): void => {
+    const record = makeRecord()
+    recordAgentEvent(record, event({ kind: 'reasoning' }))
+    // The worker finished, but there was no branch to hand off, so the session continues.
+    recordHandoff(record, new Date('2026-08-30T10:00:10.000Z'), {
+      step: 'remote_branch',
+      status: 'absent',
+      message: 'No remote branch symphony/issue-34 exists yet; continuing the session',
+      remoteBranch: 'symphony/issue-34',
+      outcome: 'no_branch',
+    })
+    recordRetryScheduled(
+      record,
+      new Date('2026-08-30T10:00:11.000Z'),
+      1,
+      new Date('2026-08-30T10:00:12.000Z'),
+      null,
+    )
+    const continued = snapshotOf(record, new Date('2026-08-30T10:00:12.000Z'))
+
+    expect(continued.attempt.attempts.map((attempt) => attempt.outcome)).toEqual(['retrying'])
+    expect(continued.attempt.attempts.at(-1)?.endedAt).toBe('2026-08-30T10:00:11.000Z')
+
+    // A cancellation followed by a retry is the same story: the retry is the later, more specific
+    // account of how that attempt ended.
+    const cancelled = makeRecord()
+    recordCancellation(cancelled, new Date('2026-08-30T10:00:10.000Z'), 'the agent stalled')
+    recordRetryScheduled(
+      cancelled,
+      new Date('2026-08-30T10:00:11.000Z'),
+      1,
+      new Date('2026-08-30T10:00:21.000Z'),
+      'agent stalled',
+    )
+
+    expect(
+      snapshotOf(cancelled, new Date('2026-08-30T10:00:12.000Z')).attempt.attempts.map(
+        (attempt) => attempt.outcome,
+      ),
+    ).toEqual(['retrying'])
+  })
+
   it('tracks handoff progress and cancellation as explicit timeline steps', (): void => {
     const record = makeRecord()
     recordHandoff(record, new Date('2026-08-30T10:01:00.000Z'), {
