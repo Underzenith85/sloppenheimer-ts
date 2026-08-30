@@ -737,6 +737,8 @@ const renderGraph = (snapshot: BacklogSnapshot): void => {
     const end = layout.positions.get(edge.dependent)
     if (start !== undefined && end !== undefined) {
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      const blocker = snapshot.nodes.find((node) => node.identifier === edge.blocker)
+      path.setAttribute('class', blocker?.readiness === 'completed' ? 'satisfied' : 'active')
       const startX = start.x + 224
       const endX = end.x
       const middle = (startX + endX) / 2

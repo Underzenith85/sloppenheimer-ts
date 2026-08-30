@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,22 +17,19 @@ afterEach(async (): Promise<void> => {
 })
 
 /**
- * The schema of the installed Codex, or null when Codex is absent. Only a missing executable is a
- * skip: any other failure — a rejected invocation above all — must fail the test rather than be
- * swallowed into a silent pass that checks nothing.
+ * Whether a `codex` executable is on PATH. Only a missing executable is a skip: any other failure —
+ * a rejected invocation above all — must fail the test rather than be swallowed into a silent pass
+ * that checks nothing, so anything but `ENOENT` leaves the check enabled.
  */
-const codexSchema = async (): Promise<string | null> => {
-  const help = await execFileAsync('codex', [...schemaArguments, '--help'], bufferLimit).catch(
-    (cause: unknown) => {
-      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
-        return null
-      }
-      throw cause
-    },
-  )
-  if (help === null) {
-    return null
-  }
+const codexIsInstalled = ((): boolean => {
+  const probe = spawnSync('codex', ['--version'], { stdio: 'ignore', timeout: 30_000 })
+  const error: NodeJS.ErrnoException | undefined = probe.error
+  return error?.code !== 'ENOENT'
+})()
+
+/** The schema of the installed Codex. Every failure propagates. */
+const codexSchema = async (): Promise<string> => {
+  const help = await execFileAsync('codex', [...schemaArguments, '--help'], bufferLimit)
   if (!help.stdout.includes('--out')) {
     const { stdout } = await execFileAsync('codex', [...schemaArguments], bufferLimit)
     return stdout
@@ -48,34 +45,41 @@ const codexSchema = async (): Promise<string | null> => {
   return contents.join('\n')
 }
 
-describe('installed Codex App Server schema', (): void => {
-  it('declares every method and policy value this client sends', async (): Promise<void> => {
-    const schema = await codexSchema()
-    if (schema === null) {
-      expect(schema).toBeNull()
-      return
-    }
+// SPEC 17.8: a check that cannot run is reported as skipped, never as a silent pass.
+const installedCodex = codexIsInstalled ? it : it.skip
 
-    expect(schema.length).toBeGreaterThan(0)
-    for (const method of [
-      'initialize',
-      'thread/start',
-      'turn/start',
-      'item/commandExecution/requestApproval',
-      'item/fileChange/requestApproval',
-      'item/permissions/requestApproval',
-      'item/tool/requestUserInput',
-    ]) {
-      expect(schema).toContain(method)
-    }
-    expect(schema).toContain('GrantedPermissionProfile')
-    expect(schema).toContain('PermissionGrantScope')
-    for (const policy of codexApprovalPolicies) {
-      expect(schema).toContain(`"${policy}"`)
-    }
-    for (const mode of codexSandboxModes) {
-      expect(schema).toContain(`"${mode}"`)
-    }
-    expect(schema).toContain('experimentalApi')
-  }, 60_000)
+describe('installed Codex App Server schema', (): void => {
+  if (!codexIsInstalled) {
+    it.skip('codex executable unavailable: install Codex to run this check', (): void => {})
+  }
+
+  installedCodex(
+    'declares every method and policy value this client sends',
+    async (): Promise<void> => {
+      const schema = await codexSchema()
+
+      expect(schema.length).toBeGreaterThan(0)
+      for (const method of [
+        'initialize',
+        'thread/start',
+        'turn/start',
+        'item/commandExecution/requestApproval',
+        'item/fileChange/requestApproval',
+        'item/permissions/requestApproval',
+        'item/tool/requestUserInput',
+      ]) {
+        expect(schema).toContain(method)
+      }
+      expect(schema).toContain('GrantedPermissionProfile')
+      expect(schema).toContain('PermissionGrantScope')
+      for (const policy of codexApprovalPolicies) {
+        expect(schema).toContain(`"${policy}"`)
+      }
+      for (const mode of codexSandboxModes) {
+        expect(schema).toContain(`"${mode}"`)
+      }
+      expect(schema).toContain('experimentalApi')
+    },
+    60_000,
+  )
 })

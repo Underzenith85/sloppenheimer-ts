@@ -1,12 +1,18 @@
 #!/usr/bin/env node
-import { Cause, Effect, Exit } from 'effect'
+import { Cause, Effect, Exit, Layer } from 'effect'
 
+import { githubHttpClientLayer } from './adapters/github/index.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { logInfo } from './support/logging.js'
 import { makeOperatorBackend } from './operator/operator.js'
 import { startOrchestrator } from './orchestrator.js'
 import { startOperatorServer } from './operator/server.js'
 import { loadWorkflow } from './config/workflow.js'
+import { layerGitHubIssueControl } from './adapters/github/index.js'
+import { layerCurrentIssueControl } from './ports/index.js'
+
+/** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
+const issueControlLayer = layerCurrentIssueControl.pipe(Layer.provide(layerGitHubIssueControl))
 
 const shutdownTimeoutMs = 10_000
 
@@ -45,6 +51,10 @@ const main = async (): Promise<number> => {
   process.once('SIGINT', requestShutdown)
   process.once('SIGTERM', requestShutdown)
 
+  /**
+   * The composition root binds the HTTP transport the GitHub adapter talks through. The adapter
+   * falls back to this same layer when it is run without one, so a test can substitute a client.
+   */
   const program = Effect.scoped(
     Effect.gen(function* () {
       const orchestrator = yield* startOrchestrator(options.workflowPath)
@@ -52,15 +62,16 @@ const main = async (): Promise<number> => {
       const workflow = yield* loadWorkflow(options.workflowPath)
       const port = options.port ?? workflow.config.serverPort
       if (port !== null) {
-        const server = yield* startOperatorServer(
-          port,
-          makeOperatorBackend(options.workflowPath, orchestrator),
+        const issueControl = yield* Layer.build(issueControlLayer)
+        const backend = yield* makeOperatorBackend(options.workflowPath, orchestrator).pipe(
+          Effect.provide(issueControl),
         )
+        const server = yield* startOperatorServer(port, backend)
         yield* logInfo('operator console listening', { url: server.url })
       }
       return yield* orchestrator.awaitTermination
     }),
-  )
+  ).pipe(Effect.provide(githubHttpClientLayer))
 
   const exit = await Effect.runPromiseExit(program, {
     signal: controller.signal,

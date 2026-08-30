@@ -131,6 +131,14 @@ The App Server runs in its own process group. Shutdown, cancellation and interru
 whole tree — `SIGTERM`, then `SIGKILL` after a bounded grace — so tools the App Server itself
 started are not left behind, and every outstanding request and turn settles exactly once.
 
+Whether a tree is still alive is decided by process state, not by whether the group still answers a
+signal: on Linux the group's members are read from `/proc`, and a group holding nothing but unreaped
+zombies counts as dead. Without that, a host whose PID 1 does not reap orphans — a container, the
+intended deployment target — would report a killed tree as alive forever and hold every escalation
+open to its bound. Where `/proc` is unavailable the probe falls back to `kill(-pid, 0)` alone, which
+may over-report liveness but never under-reports it, so a descendant that is still running is never
+abandoned. The same rule governs the workspace hook trees.
+
 Failures map onto stable categories: `spawn_failed`, `workspace_rejected`, `protocol_error`,
 `read_timeout`, `turn_timeout`, `turn_failed`, `turn_cancelled`, `input_required`, and
 `process_exited`.

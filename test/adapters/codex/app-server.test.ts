@@ -18,6 +18,7 @@ import {
 import { issueId, issueIdentifier, type Issue } from '../../../src/domain/domain.js'
 import type { AgentError } from '../../../src/errors.js'
 import type { CodexConfig } from '../../../src/config/workflow.js'
+import { processIsAlive } from '../../harness/processes.js'
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -100,15 +101,6 @@ const runScenario = async (
   return exit._tag === 'Right'
     ? { result: exit.right, error: null, events, path }
     : { result: null, error: exit.left, events, path }
-}
-
-const processIsAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
 }
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<boolean> => {
