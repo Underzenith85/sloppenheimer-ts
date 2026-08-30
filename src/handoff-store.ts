@@ -31,6 +31,15 @@ const isSnapshot = (value: unknown): value is HandoffSnapshot => {
     typeof candidate['repairAttempts'] === 'number' &&
     Number.isSafeInteger(candidate['repairAttempts']) &&
     candidate['repairAttempts'] >= 0 &&
+    (candidate['repairHeadShas'] === undefined ||
+      (Array.isArray(candidate['repairHeadShas']) &&
+        candidate['repairHeadShas'].every((headSha) => typeof headSha === 'string'))) &&
+    (candidate['repairObservedHeadShas'] === undefined ||
+      (Array.isArray(candidate['repairObservedHeadShas']) &&
+        candidate['repairObservedHeadShas'].every((headSha) => typeof headSha === 'string'))) &&
+    (candidate['repairStartedHeadSha'] === undefined ||
+      candidate['repairStartedHeadSha'] === null ||
+      typeof candidate['repairStartedHeadSha'] === 'string') &&
     (candidate['reviewRequestedHeadSha'] === undefined ||
       candidate['reviewRequestedHeadSha'] === null ||
       typeof candidate['reviewRequestedHeadSha'] === 'string') &&

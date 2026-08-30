@@ -281,18 +281,24 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 message: record.handoff.dispatchLabels.reason,
               })
             }
+            // Carried over, not reset: the worker attempt number is not a repair count, and an
+            // existing handoff already holds the heads that were actually observed.
+            const existingHandoff = context.state.handoffs.get(event.issueId)
             context.state.handoffs.set(event.issueId, {
-              issue: entry.issue,
+              issue: existingHandoff?.issue ?? entry.issue,
               execution: entry.execution,
               pullRequestNumber: handoff.result.pullRequestNumber,
               pullRequestUrl: handoff.result.pullRequestUrl,
               branchName: handoff.result.branchName,
               state: 'awaiting_checks',
-              headSha: null,
+              headSha: existingHandoff?.headSha ?? null,
               reason: 'Awaiting the first protected-branch observation',
-              repairAttempts: event.attempt ?? 0,
-              reviewRequestedHeadSha: null,
-              reviewCompletedHeadSha: null,
+              repairHeadShas: existingHandoff?.repairHeadShas ?? [],
+              repairObservedHeadShas: existingHandoff?.repairObservedHeadShas ?? [],
+              repairStartedHeadSha: existingHandoff?.repairStartedHeadSha ?? null,
+              repairBaselineRestored: existingHandoff?.repairBaselineRestored ?? false,
+              reviewRequestedHeadSha: existingHandoff?.reviewRequestedHeadSha ?? null,
+              reviewCompletedHeadSha: existingHandoff?.reviewCompletedHeadSha ?? null,
               observedAt: new Date(),
             })
             yield* context.persistHandoffsEffect()
@@ -373,6 +379,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             )
             break
           }
+          // A worker retry is a continuation, not a repair, so it establishes no repair baseline.
+          // Repairs are baselined only where they are dispatched as repairs, in reconciliation,
+          // from a head observed in the same pass.
           yield* dispatch(context, issue, event.attempt)
           break
         }
