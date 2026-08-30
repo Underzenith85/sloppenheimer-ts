@@ -24,14 +24,16 @@ export const reconcileHandoffs = (
       if (handoffIssueNumber !== null && context.state.pausedIssueNumbers.has(handoffIssueNumber)) {
         continue
       }
-      const inspected = yield* handoff.execution.tracker
-        .inspectPullRequest(handoff.pullRequestNumber)
-        .pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-          }),
-        )
+      const codeReview = handoff.execution.codeReview
+      if (codeReview === null) {
+        continue
+      }
+      const inspected = yield* codeReview.inspectPullRequest(handoff.pullRequestNumber).pipe(
+        Effect.match({
+          onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+          onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+        }),
+      )
       handoff.observedAt = new Date()
       if (inspected._tag === 'Failed') {
         handoff.reason = inspected.error.message
@@ -58,7 +60,7 @@ export const reconcileHandoffs = (
             }
             continue
           }
-          const requested = yield* handoff.execution.tracker
+          const requested = yield* codeReview
             .requestPullRequestReview(handoff.pullRequestNumber, observedHeadSha)
             .pipe(
               Effect.match({
@@ -117,14 +119,12 @@ export const reconcileHandoffs = (
             ['success', 'neutral', 'skipped'].includes(check.conclusion),
         )
       if (unresolvedThreadIds.length > 0 && repairedHeadIsVerified) {
-        const resolved = yield* handoff.execution.tracker
-          .resolveReviewThreads(unresolvedThreadIds)
-          .pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: () => ({ _tag: 'Succeeded' as const }),
-            }),
-          )
+        const resolved = yield* codeReview.resolveReviewThreads(unresolvedThreadIds).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: () => ({ _tag: 'Succeeded' as const }),
+          }),
+        )
         handoff.state = 'awaiting_checks'
         handoff.reason =
           resolved._tag === 'Failed'
@@ -149,7 +149,7 @@ export const reconcileHandoffs = (
       }
       if (disposition.state === 'ready_to_merge') {
         handoff.state = 'merging'
-        const merged = yield* handoff.execution.tracker
+        const merged = yield* codeReview
           .mergePullRequest(handoff.pullRequestNumber, disposition.headSha)
           .pipe(
             Effect.match({
@@ -194,6 +194,7 @@ export const reconcileHandoffs = (
         const effective: EffectiveWorkflow = {
           workflow: handoff.execution.workflow,
           tracker: handoff.execution.tracker,
+          codeReview,
           workspaces: handoff.execution.workspaces,
           loadedAt: handoff.observedAt,
         }

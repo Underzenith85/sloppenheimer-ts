@@ -37,7 +37,7 @@ import { unsupportedHostTool } from './host-tools.js'
 
 export type IssueFetchOptions = Readonly<{ hydrateDependencies: boolean }>
 
-export type TrackerAdapter = Readonly<{
+export type TrackerPort = Readonly<{
   /**
    * Reads every normalized record in provider scope for the given states, including
    * `dispatchable=false`; dispatch filtering belongs to the orchestrator.
@@ -54,23 +54,6 @@ export type TrackerAdapter = Readonly<{
     ids: readonly IssueId[],
     options?: IssueFetchOptions,
   ) => Effect.Effect<readonly Issue[], TrackerError>
-  handoffCompletedWork: (
-    issue: Issue,
-    dispatchLabels: readonly string[],
-  ) => Effect.Effect<HandoffResult, TrackerError>
-  findExistingHandoff: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
-  inspectPullRequest: (
-    pullRequestNumber: number,
-  ) => Effect.Effect<PullRequestObservation, TrackerError>
-  mergePullRequest: (
-    pullRequestNumber: number,
-    expectedHeadSha: string,
-  ) => Effect.Effect<string, TrackerError>
-  requestPullRequestReview: (
-    pullRequestNumber: number,
-    expectedHeadSha: string,
-  ) => Effect.Effect<void, TrackerError>
-  resolveReviewThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
   /** Provider-native mutations advertised only to sessions using this adapter instance. */
   toolSpecs: readonly HostToolSpec[]
   /** Total host-side boundary: every invocation resolves to a JSON-safe success or failure. */
@@ -92,6 +75,23 @@ export type HandoffResult =
       /** Whether this handoff opened the pull request or adopted one that already existed. */
       created: boolean
     }>
+
+export type CodeReviewPort = Readonly<{
+  handoffCompletedWork: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
+  findExistingHandoff: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
+  inspectPullRequest: (
+    pullRequestNumber: number,
+  ) => Effect.Effect<PullRequestObservation, TrackerError>
+  mergePullRequest: (
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+  ) => Effect.Effect<string, TrackerError>
+  requestPullRequestReview: (
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+  ) => Effect.Effect<void, TrackerError>
+  resolveReviewThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
+}>
 
 export type GitHubIssueControl = Readonly<{
   listOpenIssues: () => Effect.Effect<readonly Issue[], TrackerError>
@@ -275,7 +275,7 @@ const requiredResponseUrl = (body: JsonValue | null, field: string): string => {
 }
 
 const makeGitHubToolExecutor =
-  (provider: GitHubProviderConfig, prefix: string): TrackerAdapter['executeTool'] =>
+  (provider: GitHubProviderConfig, prefix: string): TrackerPort['executeTool'] =>
   async (name, argumentsValue, context): Promise<HostToolResult> => {
     if (!githubToolSpecs.some((spec) => spec.name === name)) {
       return unsupportedHostTool(name)
@@ -812,11 +812,10 @@ const hydrateDependencies = (
     { concurrency: dependencyConcurrency },
   )
 
-export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): TrackerAdapter => {
+export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): TrackerPort => {
   const provider = Object.freeze({ ...configuredProvider })
   const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
   const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
-  const pullRequests = makeGitHubPullRequestMonitor(provider)
   return {
     toolSpecs: githubToolSpecs,
     executeTool: makeGitHubToolExecutor(provider, prefix),
@@ -900,7 +899,15 @@ export const makeGitHubTracker = (configuredProvider: GitHubProviderConfig): Tra
         ),
       )
     },
-    handoffCompletedWork: (issue, _dispatchLabels) => {
+  }
+}
+
+export const makeGitHubCodeReview = (configuredProvider: GitHubProviderConfig): CodeReviewPort => {
+  const provider = Object.freeze({ ...configuredProvider })
+  const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+  const pullRequests = makeGitHubPullRequestMonitor(provider)
+  return {
+    handoffCompletedWork: (issue) => {
       const branchName = issueBranchName(issue)
       return githubBranchExists(provider, prefix, branchName).pipe(
         Effect.flatMap((exists) => {

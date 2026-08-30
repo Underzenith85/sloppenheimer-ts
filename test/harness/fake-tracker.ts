@@ -3,7 +3,12 @@ import { Effect } from 'effect'
 import type { Issue, IssueId, JsonValue } from '../../src/domain/domain.js'
 import type { PullRequestObservation } from '../../src/domain/handoff.js'
 import type { HostToolContext, HostToolResult, HostToolSpec } from '../../src/host-tools.js'
-import type { HandoffResult, IssueFetchOptions, TrackerAdapter } from '../../src/tracker.js'
+import type {
+  CodeReviewPort,
+  HandoffResult,
+  IssueFetchOptions,
+  TrackerPort,
+} from '../../src/tracker.js'
 
 export type TrackerCall =
   | Readonly<{
@@ -28,8 +33,8 @@ export type TrackerCall =
     }>
   | Readonly<{ operation: 'resolveReviewThreads'; threadIds: readonly string[] }>
 
-/** Exact in-memory implementation of the production TrackerAdapter boundary. */
-export class FakeTracker implements TrackerAdapter {
+/** Exact in-memory implementation of both production ports for conformance scenarios. */
+export class FakeTracker implements TrackerPort, CodeReviewPort {
   readonly calls: TrackerCall[] = []
   readonly secretEnvironmentNames: readonly string[]
   readonly toolSpecs: readonly HostToolSpec[] = []
@@ -122,5 +127,5 @@ export class FakeTracker implements TrackerAdapter {
   }
 }
 
-const trackerBoundary: TrackerAdapter = new FakeTracker()
+const trackerBoundary: TrackerPort = new FakeTracker()
 void trackerBoundary
