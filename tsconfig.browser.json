@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "noEmit": false,
+    "outDir": ".operator-ui-build",
+    "rootDir": "src",
+    "sourceMap": false
+  },
+  "include": ["src/operator/ui/app.ts"],
+  "exclude": []
+}
