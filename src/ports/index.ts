@@ -40,6 +40,7 @@ export {
   type CodeReviewPort,
   type HandoffResult,
 } from './code-review.js'
+export { type IssueControlPort } from './issue-control.js'
 export {
   CurrentTracker,
   layerCurrentTracker,

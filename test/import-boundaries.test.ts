@@ -57,10 +57,13 @@ const fixtures: Readonly<Record<string, string>> = {
     "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps the modules #84 left at the `src/` root reachable from core/.
   'src/core/permitted-allow-list.ts':
-    "import '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\nimport '../tracker.js'\n",
+    "import '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\n",
   // #89 retired Codex's entry: the backend now lives under adapters/ behind the agent-runner port,
   // so a root module of that name is no longer a module core may reach for.
   'src/core/violates-retired-codex-allow-list.ts': "import '../codex.js'\n",
+  // #90 retired the tracker's entry for the same reason: the GitHub tracker and code-review
+  // implementations now live under adapters/ behind their ports.
+  'src/core/violates-retired-tracker-allow-list.ts': "import '../tracker.js'\n",
   // #91 retired the workspace entry the same way: the manager and the hooks live under adapters/,
   // and the containment rules core still calls moved down into domain/.
   'src/core/violates-retired-workspace-allow-list.ts': "import '../workspace.js'\n",

@@ -11,7 +11,7 @@ import type {
   OrchestratorControl,
   OrchestratorSnapshot,
 } from '../orchestrator.js'
-import { makeGitHubIssueControl } from '../tracker.js'
+import { makeGitHubIssueControl } from '../adapters/github/index.js'
 import { TrackerError, WorkflowError } from '../errors.js'
 import { loadWorkflow, type Workflow } from '../config/workflow.js'
 
