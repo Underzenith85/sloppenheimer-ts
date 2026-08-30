@@ -131,10 +131,9 @@ const sanitize = (value: unknown, depth = 0): unknown => {
 
 const sanitizeFields = (fields: LogFields): LogFields =>
   Object.fromEntries(
-    Object.entries(fields).map(([key, value]) => [
-      key,
-      isSecretKey(key) ? '[REDACTED]' : sanitize(value),
-    ]),
+    Object.entries({ action: 'unspecified', outcome: 'unknown', error: null, ...fields }).map(
+      ([key, value]) => [key, isSecretKey(key) ? '[REDACTED]' : sanitize(value)],
+    ),
   )
 
 const fallbackWarning = (level: string, message: string): Effect.Effect<void> =>

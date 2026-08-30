@@ -1127,6 +1127,18 @@ describe('session telemetry accounting', (): void => {
           )
           harness.emitAgentEvent(
             makeAgentEvent({
+              event: 'account/rateLimits/updated',
+              message: null,
+              usage: null,
+              rateLimits: {
+                limitId: null,
+                primary: null,
+                secondary: { usedPercent: 5, windowDurationMins: 1_440 },
+              },
+            }),
+          )
+          harness.emitAgentEvent(
+            makeAgentEvent({
               event: 'turn/terminated',
               message: null,
               turnStatus: 'timed_out',
@@ -1147,7 +1159,11 @@ describe('session telemetry accounting', (): void => {
             tokens: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
           })
           expect(live.totals).toMatchObject({ inputTokens: 14, outputTokens: 7, totalTokens: 21 })
-          expect(live.rateLimits).toMatchObject({ limitId: 'codex' })
+          expect(live.rateLimits).toMatchObject({
+            limitId: 'codex',
+            primary: { usedPercent: 25, windowDurationMins: 300 },
+            secondary: { usedPercent: 5, windowDurationMins: 1_440 },
+          })
 
           yield* control.setIssuePaused(16, true)
           const cancelled = yield* control.snapshot

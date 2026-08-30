@@ -314,6 +314,24 @@ const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_identifier: issue.identifier,
 })
 
+const isJsonObjectValue = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const mergeSparseObject = (current: JsonObject | null, update: JsonObject): JsonObject => {
+  const merged: Record<string, JsonObject[string]> = { ...(current ?? {}) }
+  for (const [key, value] of Object.entries(update)) {
+    const existing = merged[key]
+    if (value === null && existing !== undefined) {
+      continue
+    }
+    merged[key] =
+      isJsonObjectValue(existing) && isJsonObjectValue(value)
+        ? mergeSparseObject(existing, value)
+        : value
+  }
+  return merged
+}
+
 const sessionLogContext = (
   entry: RunningEntry,
 ): Readonly<Record<string, string | number | null>> => ({
@@ -903,7 +921,7 @@ export const startOrchestrator = (
         }
       }
       if (pendingRateLimits !== null) {
-        state.rateLimits = pendingRateLimits
+        state.rateLimits = mergeSparseObject(state.rateLimits, pendingRateLimits)
         pendingRateLimits = null
       }
       pendingUsage.delete(id)
@@ -1211,7 +1229,7 @@ export const startOrchestrator = (
                 }
               }
               if (event.update.rateLimits !== null) {
-                state.rateLimits = event.update.rateLimits
+                state.rateLimits = mergeSparseObject(state.rateLimits, event.update.rateLimits)
                 if (pendingRateLimits === event.update.rateLimits) {
                   pendingRateLimits = null
                 }

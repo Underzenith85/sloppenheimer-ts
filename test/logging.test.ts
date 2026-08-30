@@ -62,5 +62,8 @@ Authorization=[REDACTED]`,
     expect(JSON.stringify(entries)).not.toContain('deep-secret')
     expect(JSON.stringify(entries)).not.toContain('structured-secret')
     expect(JSON.stringify(entries)).toContain('[TRUNCATED]')
+    expect(JSON.stringify(entries)).toContain('"action":"unspecified"')
+    expect(JSON.stringify(entries)).toContain('"outcome":"unknown"')
+    expect(JSON.stringify(entries)).toContain('"error":null')
   })
 })
