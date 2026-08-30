@@ -9,6 +9,7 @@ export default defineConfig({
       'test/github-handoff.test.ts',
       'test/handoff.test.ts',
       'test/handoff-store.test.ts',
+      'test/installed-codex.integration.test.ts',
     ],
   },
 })
