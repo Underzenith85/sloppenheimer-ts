@@ -190,15 +190,12 @@ export const makeGitHubPullRequestMonitor = (
           }
           const pull = pullValue
           const merged = requiredBoolean(number, 'merged', pull['merged'])
-          const mergeCommitSha = nullableString(
-            number,
-            'merge_commit_sha',
-            pull['merge_commit_sha'],
-          )
           if (merged) {
             const head = pull['head']
             const headSha =
               isJsonRecord(head) && typeof head['sha'] === 'string' ? head['sha'] : null
+            const mergeCommitSha =
+              typeof pull['merge_commit_sha'] === 'string' ? pull['merge_commit_sha'] : null
             return {
               number,
               url: typeof pull['html_url'] === 'string' ? pull['html_url'] : null,
@@ -222,6 +219,11 @@ export const makeGitHubPullRequestMonitor = (
           }
           const headSha = requiredString(number, 'head.sha', headValue['sha'])
           const url = requiredString(number, 'html_url', pull['html_url'])
+          const mergeCommitSha = nullableString(
+            number,
+            'merge_commit_sha',
+            pull['merge_commit_sha'],
+          )
           const mergeable = nullableBoolean(number, 'mergeable', pull['mergeable'])
           const mergeState = requiredString(number, 'mergeable_state', pull['mergeable_state'])
           const checksResponse = record(

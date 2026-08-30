@@ -131,11 +131,10 @@ describe('GitHub pull request handoff', (): void => {
 })
 
 describe('GitHub pull request monitor', (): void => {
-  it('accepts a merged pull request without inspecting open-PR status', async (): Promise<void> => {
+  it('accepts a merged pull request with an omitted merge SHA', async (): Promise<void> => {
     const fetchMock = vi.fn(async (): Promise<Response> =>
       Response.json({
         merged: true,
-        merge_commit_sha: null,
         mergeable: null,
         mergeable_state: 'unknown',
       }),
