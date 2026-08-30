@@ -19,5 +19,231 @@
     "typescript/no-unsafe-member-access": "error",
     "typescript/no-unsafe-return": "error",
     "typescript/switch-exhaustiveness-check": "error"
-  }
+  },
+
+  // Module import direction (#86).
+  //
+  //   support/  <-  domain/  <-  ports/  <-  core/  <-  config/, operator/, adapters/, src root
+  //
+  // `src/` root is the composition root: it binds concrete adapters and is deliberately
+  // unrestricted.  `adapters/` is restricted only as an import target, never as a source.
+  //
+  // These groups match the import specifier as written, not its resolved target, so each layer
+  // takes two overrides.  The later override wins outright for the files it matches; oxlint does
+  // not merge two settings of the same rule.
+  //
+  //   1. Every file in the layer, at any depth, is denied the sibling layers by name.  A named
+  //      group is depth-independent: it never matches a same-layer import, and it still matches
+  //      `../../core/x.js` from a nested module.
+  //   2. Files directly in the layer are denied everything that leaves it, with the layers below
+  //      re-admitted by negation.  At depth one `../` unambiguously means "out of the layer", so
+  //      this also catches the `src/` root and any directory not named in rule 1.
+  //
+  // Rule 2 cannot be extended to nested modules: from `src/support/parsers/value.ts`, `../json.js`
+  // is a same-layer import, while from `src/support/json.ts` the identical specifier escapes to the
+  // `src/` root.  Nested modules therefore keep rule 1 only, which trades an undetected import of a
+  // root module for never rejecting a compliant one.  Prefer flat layers.
+  "overrides": [
+    {
+      "files": ["src/support/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "**/adapters/**",
+                  "**/config/**",
+                  "**/core/**",
+                  "**/domain/**",
+                  "**/operator/**",
+                  "**/ports/**"
+                ],
+                "message": "support/ is the bottom layer: it may import only from support/ itself and from third-party or Node packages."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/support/*"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**"],
+                "message": "support/ is the bottom layer: it may import only from support/ itself and from third-party or Node packages."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/domain/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "**/adapters/**",
+                  "**/config/**",
+                  "**/core/**",
+                  "**/operator/**",
+                  "**/ports/**"
+                ],
+                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, operator/, adapters/, or the composition root."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/domain/*"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**", "!../support/**"],
+                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, operator/, adapters/, or the composition root."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/ports/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/adapters/**", "**/config/**", "**/core/**", "**/operator/**"],
+                "message": "ports/ may import only from domain/ and support/. The migration allow-list covers the flat port modules that exist today; a nested port has no exemption."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/ports/*"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            // Migration allow-list.  #88 declared the ports against configuration and error
+            // vocabulary that has not been placed in a layer yet.  `patterns` exempts these
+            // modules from the escape rule below; `paths` then holds them to `import type`, so a
+            // port cannot quietly acquire a runtime dependency on configuration or on root
+            // infrastructure.  The two compose: a second `patterns` group would not, because a
+            // negation there suppresses any later group for the same specifier.
+            "paths": [
+              {
+                "name": "../config/tracker-config.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #94 removes the GitHub-shaped provider type from the core surface."
+              },
+              {
+                "name": "../config/workflow.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #94 and #105 settle the workflow configuration type surface."
+              },
+              {
+                "name": "../errors.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #109 moves the remaining root modules into their layers."
+              },
+              {
+                "name": "../host-tools.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #109 moves the remaining root modules into their layers."
+              },
+              {
+                "name": "../telemetry.js",
+                "allowTypeImports": true,
+                "message": "ports/ may reference this only as a type until #98 converts the telemetry record to pure reducers."
+              }
+            ],
+            "patterns": [
+              {
+                "group": [
+                  "../**",
+                  "!../domain/**",
+                  "!../support/**",
+                  "!../config/tracker-config.js",
+                  "!../config/workflow.js",
+                  "!../errors.js",
+                  "!../host-tools.js",
+                  "!../telemetry.js"
+                ],
+                "message": "ports/ may import only from domain/ and support/."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/core/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/adapters/**", "**/operator/**"],
+                "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/core/*"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**",
+                  "!../config/**",
+                  "!../domain/**",
+                  "!../ports/**",
+                  "!../support/**",
+
+                  // Migration allow-list.  These modules are adapters and infrastructure that still
+                  // sit at the `src/` root because #84 moved only the leaf modules.  Each entry is
+                  // removed by the issue under #76 named beside it; none of them may be replaced by
+                  // an import of `../adapters/**`, which stays denied above.
+                  "!../codex.js", // #89 introduces the AgentRunner port and moves Codex under adapters/
+                  "!../tracker.js", // #90 splits tracker.ts into the tracker port and the GitHub adapter
+                  "!../workspace.js", // #91 splits workspace.ts into containment policy, hooks, and manager
+                  "!../telemetry.js", // #98 converts the telemetry record to pure reducers
+                  "!../errors.js", // #109 moves the remaining root modules into their layers
+                  "!../handoff-store.js", // #109 moves the remaining root modules into their layers
+                  "!../host-tools.js" // #109 moves the remaining root modules into their layers
+                ],
+                "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }
