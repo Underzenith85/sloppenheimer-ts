@@ -984,16 +984,15 @@ export const startOrchestrator = (
           update.turnStatus !== null
         ) {
           const completed = update.turnStatus === 'completed'
+          const cancelled = update.turnStatus === 'cancelled' || update.turnStatus === 'canceled'
+          const outcome = completed ? 'completed' : cancelled ? 'cancelled' : 'failed'
           entry.turnActive = false
-          yield* (completed ? logInfo : logError)(
-            completed ? 'action=turn outcome=completed' : 'action=turn outcome=failed',
-            {
-              ...sessionLogContext(entry),
-              action: 'turn',
-              outcome: completed ? 'completed' : 'failed',
-              error: completed ? null : `turn finished with status ${update.turnStatus}`,
-            },
-          )
+          yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome,
+            error: completed || cancelled ? null : `turn finished with status ${update.turnStatus}`,
+          })
         }
       })
 
@@ -1012,9 +1011,11 @@ export const startOrchestrator = (
         if (entry === undefined) {
           return null
         }
+        const queuedBeforeInterruption = pendingLifecycle.get(id)?.length ?? 0
         yield* Fiber.interrupt(entry.fiber)
+        const queuedLifecycle = takePendingLifecycle(id)
         yield* Effect.forEach(
-          takePendingLifecycle(id),
+          queuedLifecycle.slice(0, queuedBeforeInterruption),
           (update) => applyLifecycleUpdate(entry, update),
           {
             discard: true,
@@ -1027,6 +1028,7 @@ export const startOrchestrator = (
             outcome: 'cancelled',
             error: null,
           })
+          entry.turnActive = false
         }
         applyPendingTelemetry(id, entry)
         endRunning(id, null)
