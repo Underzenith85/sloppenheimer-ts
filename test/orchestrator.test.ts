@@ -1452,8 +1452,13 @@ describe('live agent detail', (): void => {
             awaitDetail(
               control,
               'example/symphony#13',
-              (candidate) => candidate.status === 'completed',
-              'the completed session',
+              // The worker leaves `running` before the tracker is asked, so the handoff transition
+              // is published as a completed status while the handoff itself is still pending.
+              // Waiting on the status alone would race that publication and assert against a
+              // half-finished handoff; the terminal outcome is what these assertions need.
+              (candidate) =>
+                candidate.status === 'completed' && candidate.handoff.outcome !== 'in_progress',
+              'the completed handoff',
             ),
           )
         }),
