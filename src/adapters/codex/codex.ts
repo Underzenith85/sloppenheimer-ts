@@ -16,11 +16,8 @@ import {
   type AgentEvent,
   type AgentEventPayload,
 } from '../../telemetry.js'
-import {
-  assertWorkspaceIdentity,
-  openVerifiedWorkspace,
-  type VerifiedWorkspace,
-} from '../../workspace.js'
+import { assertWorkspaceIdentity, openVerifiedWorkspace } from '../node/workspace-identity.js'
+import type { VerifiedWorkspace } from '../../domain/workspace-containment.js'
 
 export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,

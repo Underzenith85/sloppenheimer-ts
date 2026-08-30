@@ -68,8 +68,8 @@ never rejecting a compliant one. Prefer flat layers.
 and asserts the rule still fires.
 
 Some vocabulary has not been placed in a layer yet: the modules #84 left at the `src/` root, and the
-workflow configuration types that #88 declared the ports against. `core/` and `ports/` reach them
-through migration allow-lists in `.oxlintrc.json`, where each entry names the issue under
+workflow configuration types that #88 declared the ports against. `core/`, `ports/`, and `domain/`
+reach them through migration allow-lists in `.oxlintrc.json`, where each entry names the issue under
 [#76](https://github.com/Underzenith85/symphony-ts/issues/76) that removes it. The entries name
 files rather than directories, so the rest of each directory stays denied.
 
@@ -79,8 +79,13 @@ acquire a real dependency on configuration or on root infrastructure under cover
 The `core/` allow-list is not so restricted: `core/` legitimately calls into those modules today.
 The exemption covers the flat modules that exist now — a nested port has none.
 
+The `domain/` allow-list is a single entry, `../errors.js`. #91 moved the workspace containment
+rules into `domain/`, and they reject by constructing a `WorkspaceError`, so this one cannot be held
+to `import type`. The error vocabulary is domain vocabulary that has not moved yet rather than root
+infrastructure a domain module has no business calling; #109 removes the entry with the file.
+
 Add to an allow-list only for a type that has not moved yet; never to admit an import of
-`adapters/`, which stays denied at both tiers.
+`adapters/`, which stays denied at every tier.
 
 ## TypeScript and Effect
 

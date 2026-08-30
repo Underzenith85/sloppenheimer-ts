@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
 import type { HooksConfig } from '../src/config/workflow.js'
-import { containedWorkspacePath, makeWorkspaceManager, workspaceKey } from '../src/workspace.js'
+import { makeWorkspaceManager } from '../src/adapters/node/workspace-manager.js'
+import { containedWorkspacePath, workspaceKey } from '../src/domain/workspace-containment.js'
 import { processIsAlive } from './harness/processes.js'
 
 const roots: string[] = []

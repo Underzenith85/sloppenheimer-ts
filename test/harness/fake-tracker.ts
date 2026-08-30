@@ -3,12 +3,8 @@ import { Effect } from 'effect'
 import type { Issue, IssueId, JsonValue } from '../../src/domain/domain.js'
 import type { PullRequestObservation } from '../../src/domain/handoff.js'
 import type { HostToolContext, HostToolResult, HostToolSpec } from '../../src/host-tools.js'
-import type {
-  CodeReviewPort,
-  HandoffResult,
-  IssueFetchOptions,
-  TrackerPort,
-} from '../../src/tracker.js'
+import type { CodeReviewPort, HandoffResult } from '../../src/ports/code-review.js'
+import type { IssueFetchOptions, TrackerPort } from '../../src/ports/tracker.js'
 
 export type TrackerCall =
   | Readonly<{

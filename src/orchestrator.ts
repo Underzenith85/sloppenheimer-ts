@@ -11,8 +11,8 @@ import {
   type OrchestratorDependencies,
 } from './core/orchestrator.js'
 import type { WorkflowError } from './errors.js'
-import { makeGitHubCodeReview, makeGitHubTracker } from './tracker.js'
-import { makeWorkspaceManager } from './workspace.js'
+import { makeGitHubCodeReview, makeGitHubTracker } from './adapters/github/index.js'
+import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 
 export {
   issueIsRoutable,

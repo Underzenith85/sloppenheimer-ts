@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 
 import type { IssueIdentifier, Workspace } from '../../src/domain/domain.js'
-import type { WorkspaceManager } from '../../src/workspace.js'
+import type { WorkspaceManagerPort } from '../../src/ports/workspace.js'
 
 export type WorkspaceOperation = Readonly<{
   operation: 'create' | 'exists' | 'beforeRun' | 'afterRun' | 'remove'
@@ -10,7 +10,7 @@ export type WorkspaceOperation = Readonly<{
 }>
 
 /** A typed workspace/process seam used without touching the host filesystem. */
-export class FakeWorkspaceProcess implements WorkspaceManager {
+export class FakeWorkspaceProcess implements WorkspaceManagerPort {
   readonly operations: WorkspaceOperation[] = []
   readonly #root: string
   readonly #existing = new Set<IssueIdentifier>()
@@ -49,5 +49,5 @@ export class FakeWorkspaceProcess implements WorkspaceManager {
   }
 }
 
-const workspaceBoundary: WorkspaceManager = new FakeWorkspaceProcess()
+const workspaceBoundary: WorkspaceManagerPort = new FakeWorkspaceProcess()
 void workspaceBoundary
