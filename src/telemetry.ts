@@ -206,7 +206,13 @@ export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLim
       resetsInSeconds: firstNumber(window, ['resetsInSeconds', 'resets_in_seconds']),
     })
   }
-  return Object.freeze(windows.sort((left, right) => left.name.localeCompare(right.name)))
+  // Frozen on construction, so the copies a timeline event and a published snapshot each hold
+  // cannot be edited into the actor's own reading.
+  return Object.freeze(
+    windows
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((window) => Object.freeze(window)),
+  )
 }
 
 const itemState = (method: string, item: JsonObject): ToolState => {
@@ -272,7 +278,7 @@ const itemPayload = (
   }
   if (type.includes('command') || type.includes('exec') || type.includes('shell')) {
     const raw = commandText(item['command'] ?? item['commandLine'])
-    const summary = commandSummary(raw ?? 'unknown')
+    const summary = commandSummary(raw ?? 'unknown', redactor)
     return {
       kind: 'command',
       program: summary.program,

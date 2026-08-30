@@ -1637,6 +1637,18 @@ export const startOrchestrator = (
               )
             }
             if (event.outcome === 'normal') {
+              // Published before the tracker call, not after it: the worker is already out of the
+              // running map, so an open detail panel would otherwise keep reading the previous
+              // snapshot as running — and count it down to stalled — for as long as the handoff
+              // request takes.
+              if (record !== undefined) {
+                recordHandoff(record, new Date(), {
+                  step: 'remote_branch',
+                  status: 'pending',
+                  message: 'Looking for a pushed branch to hand off',
+                })
+              }
+              publishDetails()
               const handoff = yield* entry.execution.tracker
                 .handoffCompletedWork(entry.issue, entry.execution.requiredLabels)
                 .pipe(

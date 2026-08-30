@@ -117,6 +117,7 @@ export const pathKey = (value: string, limit = 160): string => {
  */
 export const commandSummary = (
   command: string | readonly string[],
+  redactor: Redactor = redact,
 ): Readonly<{ program: string; argumentCount: number }> => {
   const parts = Array.isArray(command)
     ? [...(command as readonly string[])]
@@ -137,8 +138,10 @@ export const commandSummary = (
       ? (pathKey(first, 60).split('/').at(-1) ?? 'unknown')
       : (script.trim().split(/\s+/u)[0] ?? 'unknown')
   return {
-    // A quoted shell script arrives with its opening quote attached to the program word.
-    program: bound(redact(program.replace(/^["']|["']$/gu, '')), 60).text,
+    // A quoted shell script arrives with its opening quote attached to the program word. The
+    // session's own redactor is used, not the shape-based one alone: a configured secret has no
+    // distinguishing shape, and nothing rules out its appearing where a program name is expected.
+    program: bound(redactor(program.replace(/^["']|["']$/gu, '')), 60).text,
     argumentCount: Math.max(parts.length - 1, 0),
   }
 }

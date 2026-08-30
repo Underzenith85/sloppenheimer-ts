@@ -101,6 +101,24 @@ describe('field-level redaction', (): void => {
     expect(redactor('an x marks the spot')).toBe('an x marks the spot')
   })
 
+  it('applies the session redactor to a command program name', (): void => {
+    const redactor = makeRedactor(['s3cret-token-value'])
+
+    // A configured secret has no distinguishing shape, so only the session's own redactor can
+    // remove it — including from the one command word that is retained.
+    expect(commandSummary('s3cret-token-value --flag', redactor)).toEqual({
+      program: '[REDACTED]',
+      argumentCount: 1,
+    })
+    expect(
+      normalizePayload(
+        'item/started',
+        { item: { type: 'commandExecution', command: 's3cret-token-value run' } },
+        redactor,
+      ),
+    ).toMatchObject({ kind: 'command', program: '[REDACTED]' })
+  })
+
   it('bounds oversized text and reports the truncation', (): void => {
     const long = 'a'.repeat(5_000)
 
@@ -522,6 +540,30 @@ describe('agent detail records', (): void => {
       'cancellation',
     ])
     expect(snapshot.phase.phase).toBe('cancelled')
+  })
+
+  it('freezes rate-limit windows wherever they are shared', (): void => {
+    const record = makeRecord()
+    recordAgentEvent(
+      record,
+      event(
+        { kind: 'none' },
+        {
+          event: 'account/rateLimits/updated',
+          rateLimits: { primary: { usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 } },
+        },
+      ),
+    )
+    const snapshot = snapshotOf(record)
+    const [entry] = snapshot.timeline.events
+
+    expect(snapshot.rateLimits.every((window) => Object.isFrozen(window))).toBe(true)
+    // The array a timeline event holds is the same reading; its elements must be frozen too, or a
+    // consumer could edit the actor's own record through the event.
+    expect(entry?.category).toBe('usage')
+    if (entry?.category === 'usage') {
+      expect(entry.rateLimits.every((window) => Object.isFrozen(window))).toBe(true)
+    }
   })
 
   it('publishes frozen snapshots that cannot be edited by a consumer', (): void => {

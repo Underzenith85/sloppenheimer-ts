@@ -176,6 +176,9 @@ let detailIdentifier = null
 let detailTrigger = null
 let detailNotice = ''
 let announcedStatus = ''
+// Detail requests can outlive the polling interval, so responses are matched to the request that
+// asked for them: an older one finishing late must not walk the panel backwards.
+let detailRequest = 0
 
 const formatClock = (milliseconds) => {
   const total = Math.max(Math.round(milliseconds / 1000), 0)
@@ -391,9 +394,11 @@ const loadDetail = async () => {
     return
   }
   const target = detailIdentifier
+  detailRequest += 1
+  const generation = detailRequest
   try {
     const result = await requestStatus('/api/v1/agents/' + encodeURIComponent(target))
-    if (target !== detailIdentifier) {
+    if (target !== detailIdentifier || generation !== detailRequest) {
       return
     }
     if (result.ok) {
@@ -404,6 +409,9 @@ const loadDetail = async () => {
       detailNotice = result.payload?.error?.message ?? 'Detail request failed with HTTP ' + String(result.status)
     }
   } catch (error) {
+    if (target !== detailIdentifier || generation !== detailRequest) {
+      return
+    }
     // A transport failure keeps the last known detail on screen and retries on the next tick.
     detailNotice = 'Agent detail is temporarily unreachable. Retrying…'
   }

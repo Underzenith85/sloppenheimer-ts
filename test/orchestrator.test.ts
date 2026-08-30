@@ -1463,12 +1463,74 @@ describe('live agent detail', (): void => {
       dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
       outcome: 'pull_request_open',
     })
+    // Four steps: the transition published before the tracker was asked, then the branch, the
+    // pull request, and the dispatch-label step it does not perform.
     expect(detail.timeline.events.map((event) => event.category)).toEqual([
       'handoff',
       'handoff',
       'handoff',
+      'handoff',
     ])
+    expect(
+      detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
+    ).toEqual(['pending', 'observed', 'observed', 'not_performed'])
     expect(detail.activity.stallDeadline).toBeNull()
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('publishes the handoff transition before waiting on the tracker', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-handoff-timing-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#19', 1, null, ['symphony', 'ready']),
+      id: issueId('19'),
+    }
+    const harness = makeHarness(isolated, () => [issue])
+    const factory = makeAgentFactory()
+    let releaseHandoff = (): void => undefined
+    const handoffReached = new Promise<void>((resolve) => {
+      releaseHandoff = resolve
+    })
+    let blockHandoff = true
+    const dependencies: OrchestratorDependencies = {
+      ...harness.dependencies,
+      runAgent: factory.runAgent,
+      makeTracker: (effectiveWorkflow) => ({
+        ...harness.dependencies.makeTracker(effectiveWorkflow),
+        handoffCompletedWork: () =>
+          blockHandoff
+            ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
+            : Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-19' }),
+      }),
+    }
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startOrchestrator('/tmp/WORKFLOW.md', dependencies)
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#19'),
+          )
+          agent.settle('completed')
+          yield* Effect.promise(() => handoffReached)
+          // The worker has left the running map and the tracker has not answered yet: the
+          // published detail must already say so rather than still counting down to stalled.
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#19',
+              (candidate) => candidate.phase.phase === 'handing_off',
+              'the handoff transition',
+            ),
+          )
+        }),
+      ),
+    )
+
+    expect(detail.status).toBe('completed')
+    expect(detail.activity.stallDeadline).toBeNull()
+    expect(detail.timeline.events.at(-1)).toMatchObject({ category: 'handoff', status: 'pending' })
+    blockHandoff = false
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 

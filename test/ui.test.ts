@@ -231,8 +231,14 @@ let detailPending: boolean
 const jsonResponse = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
+let serveOverride: ((path: string) => Promise<Response> | null) | null = null
+
 const serve = async (path: string): Promise<Response> => {
   requestLog.push(path)
+  const overridden = serveOverride?.(path) ?? null
+  if (overridden !== null) {
+    return overridden
+  }
   if (path === '/api/v1/state') {
     return jsonResponse(200, snapshot)
   }
@@ -333,6 +339,7 @@ beforeEach((): void => {
   intervals = []
   requestLog = []
   detailPending = false
+  serveOverride = null
   detailResponses = new Map([
     [runningIdentifier, { status: 200, body: { version: 'v1', detail: runningDetail() } }],
     [retryingIdentifier, { status: 200, body: { version: 'v1', detail: retryingDetail() } }],
@@ -462,6 +469,54 @@ describe('operator console agent detail', (): void => {
     expect(query('#agent-detail').getAttribute('data-state')).toBe('stalled')
     // The one-second refresh recomputes the warning without asking the orchestrator again.
     expect(requestLog.filter((path) => path.startsWith('/api/v1/agents/')).length).toBe(requests)
+  })
+
+  it('ignores a stale detail response that finishes after a newer one', async (): Promise<void> => {
+    // The first request is left hanging and released only after a later one has already answered.
+    let releaseFirst = (_response: Response): void => undefined
+    let served = 0
+    const stale = {
+      ...runningDetail(false),
+      phase: {
+        phase: 'starting' as const,
+        operation: 'Stale operation',
+        since: new Date().toISOString(),
+      },
+    }
+    const fresh = {
+      ...runningDetail(false),
+      phase: {
+        phase: 'editing' as const,
+        operation: 'Fresh operation',
+        since: new Date().toISOString(),
+      },
+    }
+    const originalServe = serveOverride
+    serveOverride = (path: string): Promise<Response> | null => {
+      if (!path.startsWith('/api/v1/agents/')) {
+        return null
+      }
+      served += 1
+      if (served === 1) {
+        return new Promise<Response>((resolve) => {
+          releaseFirst = resolve
+        })
+      }
+      return Promise.resolve(jsonResponse(200, { version: 'v1', detail: fresh }))
+    }
+    try {
+      await boot()
+      await openRunning()
+      await tick(2_000)
+      expect(textOf('#detail-operation')).toBe('Fresh operation')
+
+      releaseFirst(jsonResponse(200, { version: 'v1', detail: stale }))
+      await flush()
+
+      expect(textOf('#detail-operation')).toBe('Fresh operation')
+    } finally {
+      serveOverride = originalServe
+    }
   })
 
   it('recovers after a failed detail request', async (): Promise<void> => {
