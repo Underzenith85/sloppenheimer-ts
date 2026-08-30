@@ -28,7 +28,7 @@ const isSecretKey = (key: string): boolean => {
     return true
   }
   if (
-    /(?:^|[_-])(?:api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|credentials?|password|secret|token)$/u.test(
+    /(?:^|[_.-])(?:api[_.-]?key|access[_.-]?key|private[_.-]?key|secret[_.-]?access[_.-]?key|access[_.-]?token|refresh[_.-]?token|auth[_.-]?token|credentials?|password|secret|token)$/u.test(
       lowerKey,
     )
   ) {
@@ -53,26 +53,26 @@ export const redactSecretsInString = (value: string): string =>
     .replace(/\b((?:Proxy-)?Authorization|Set-Cookie|Cookie)\s*[:=][^\r\n]*/giu, '$1=[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
     .replace(
-      /\\"([A-Za-z_][A-Za-z0-9_-]*)\\"\s*:\s*\\"(?:[^"\\]|\\{2,}"|\\(?!"))*\\"/gu,
+      /\\"([A-Za-z_][A-Za-z0-9_.-]*)\\"\s*:\s*\\"(?:[^"\\]|\\{2,}"|\\(?!"))*\\"/gu,
       (match: string, key: string): string => redactEscapedQuotedField(match, key),
     )
     .replace(
-      /"([A-Za-z_][A-Za-z0-9_-]*)"\s*:\s*"(?:\\.|[^"\\])*"/gu,
+      /"([A-Za-z_][A-Za-z0-9_.-]*)"\s*:\s*"(?:\\.|[^"\\])*"/gu,
       (match: string, key: string): string => redactQuotedField(match, key, '"'),
     )
     .replace(
-      /'([A-Za-z_][A-Za-z0-9_-]*)'\s*:\s*'(?:\\.|[^'\\])*'/gu,
+      /'([A-Za-z_][A-Za-z0-9_.-]*)'\s*:\s*'(?:\\.|[^'\\])*'/gu,
       (match: string, key: string): string => redactQuotedField(match, key, "'"),
     )
     .replace(
-      /\b([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*"(?:\\.|[^"\\])*"/gu,
+      /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*"(?:\\.|[^"\\])*"/gu,
       (match: string, key: string): string => redactAssignment(match, key),
     )
     .replace(
-      /\b([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*'(?:\\.|[^'\\])*'/gu,
+      /\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*'(?:\\.|[^'\\])*'/gu,
       (match: string, key: string): string => redactAssignment(match, key),
     )
-    .replace(/\b([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*\S+/gu, (match: string, key: string): string =>
+    .replace(/\b([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*\S+/gu, (match: string, key: string): string =>
       redactAssignment(match, key),
     )
 
