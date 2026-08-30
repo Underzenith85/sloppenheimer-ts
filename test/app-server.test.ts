@@ -519,7 +519,8 @@ describe('App Server timeouts and shutdown', (): void => {
     expect(outcome.error?.category).toBe('turn_timeout')
     expect(Number.isSafeInteger(grandchild)).toBe(true)
     expect(grandchild).toBeGreaterThan(0)
-    expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
+    // Already gone when the run returns: shutdown does not finish while the group is alive.
+    expect(processIsAlive(grandchild)).toBe(false)
   }, 30_000)
 
   it('still forces termination when a descendant ignores SIGTERM', async (): Promise<void> => {
@@ -528,7 +529,7 @@ describe('App Server timeouts and shutdown', (): void => {
 
     expect(outcome.error?.category).toBe('turn_timeout')
     expect(grandchild).toBeGreaterThan(0)
-    expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
+    expect(processIsAlive(grandchild)).toBe(false)
   }, 40_000)
 
   it('reaps a descendant left behind when the App Server itself dies', async (): Promise<void> => {
@@ -539,7 +540,7 @@ describe('App Server timeouts and shutdown', (): void => {
     // and it ignores SIGTERM, so only a group-level escalation clears it.
     expect(outcome.error?.category).toBe('process_exited')
     expect(grandchild).toBeGreaterThan(0)
-    expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
+    expect(processIsAlive(grandchild)).toBe(false)
   }, 40_000)
 
   it('does not let parseable garbage keep a silent turn alive', async (): Promise<void> => {
@@ -593,6 +594,6 @@ describe('App Server timeouts and shutdown', (): void => {
     await Effect.runPromise(Fiber.interrupt(fiber))
 
     expect(grandchild).toBeGreaterThan(0)
-    expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
+    expect(processIsAlive(grandchild)).toBe(false)
   }, 30_000)
 })

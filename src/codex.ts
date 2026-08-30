@@ -26,6 +26,9 @@ export const makeCodexEnvironment = (
 /** The App Server framing limit for one protocol line. */
 export const codexMaxLineBytes = 10 * 1024 * 1024
 const shutdownGraceMs = 5_000
+/** After `SIGKILL`, how long to wait for the group to vanish, and how often to look. */
+const groupReapDeadlineMs = 2_000
+const groupReapPollMs = 25
 
 const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -511,10 +514,15 @@ class CodexConnection {
       // shutdown deadline is far longer, so holding the loop this long cannot hang the host.
       // Skipped when the group is empty by then, so a recycled leader PID is never signalled.
       const escalation = setTimeout(() => {
-        if (this.#processGroupIsAlive()) {
-          this.#terminate('SIGKILL')
+        if (!this.#processGroupIsAlive()) {
+          resolvePromise()
+          return
         }
-        resolvePromise()
+        this.#terminate('SIGKILL')
+        // Signal delivery is asynchronous. Resolving here would let the finalizer complete — and
+        // terminal reconciliation start removing the workspace — while a descendant is still
+        // running in it, so shutdown stays pending until the group is actually gone.
+        void this.#awaitGroupExit().then(resolvePromise)
       }, shutdownGraceMs)
       this.#process.once('exit', () => {
         if (this.#processGroupIsAlive()) {
@@ -524,6 +532,22 @@ class CodexConnection {
         resolvePromise()
       })
     })
+  }
+
+  /**
+   * Waits for the process group to actually disappear after `SIGKILL`. Bounded by a second
+   * deadline so a process that somehow survives an uncatchable signal still cannot hang shutdown.
+   */
+  async #awaitGroupExit(): Promise<void> {
+    const deadline = Date.now() + groupReapDeadlineMs
+    while (Date.now() < deadline) {
+      if (!this.#processGroupIsAlive()) {
+        return
+      }
+      await new Promise<void>((resolvePromise) => {
+        setTimeout(resolvePromise, groupReapPollMs)
+      })
+    }
   }
 
   /** Whether the App Server's process group still has a member. */
