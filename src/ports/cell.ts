@@ -14,6 +14,9 @@ export type AdapterCell<Value, Input, BuildError> = Readonly<{
   /**
    * Builds a replacement and installs it. The previous instance is not released here: work already
    * in flight may still hold it, so its release is handed back to the caller as `retirePrevious`.
+   *
+   * A rebuild that begins after the cell's scope has closed installs nothing and is interrupted:
+   * the run it belonged to is over.
    */
   rebuild: (input: Input) => Effect.Effect<AdapterRebuild<Value>, BuildError>
 }>
@@ -37,6 +40,8 @@ type Cell<Value> = Readonly<{
   current: Held<Value>
   /** Replaced instances whose release the caller has not yet run. */
   retired: readonly Held<Value>[]
+  /** Set once the cell's scope has closed, so a late rebuild cannot install an unreleasable one. */
+  closed: boolean
 }>
 
 const closeHeld = <Value>(held: Held<Value>): Effect.Effect<void> =>
@@ -64,15 +69,24 @@ export const makeAdapterCell = <Value, Input, BuildError>(
         return { value, scope }
       })
 
-    const cell = yield* Ref.make<Cell<Value>>({ current: yield* open(initial), retired: [] })
-    // One rebuild at a time: two concurrent swaps could otherwise drop an instance without ever
-    // releasing it.
+    const cell = yield* Ref.make<Cell<Value>>({
+      current: yield* open(initial),
+      retired: [],
+      closed: false,
+    })
+    /**
+     * One rebuild at a time: two concurrent swaps could otherwise drop an instance without ever
+     * releasing it. Shutdown takes the same permit, so it cannot snapshot the cell while a rebuild
+     * is mid-flight and leave that rebuild's instance unreleased.
+     */
     const gate = yield* Effect.makeSemaphore(1)
 
     yield* Effect.addFinalizer(() =>
-      Ref.get(cell).pipe(
-        Effect.flatMap((held) =>
-          Effect.forEach([held.current, ...held.retired], closeHeld, { discard: true }),
+      gate.withPermits(1)(
+        Ref.getAndUpdate(cell, (state) => ({ ...state, retired: [], closed: true })).pipe(
+          Effect.flatMap((state) =>
+            Effect.forEach([state.current, ...state.retired], closeHeld, { discard: true }),
+          ),
         ),
       ),
     )
@@ -83,21 +97,24 @@ export const makeAdapterCell = <Value, Input, BuildError>(
         { ...state, retired: state.retired.filter((candidate) => candidate !== held) },
       ]).pipe(Effect.flatMap((present) => (present ? closeHeld(held) : Effect.void)))
 
+    const install = (next: Held<Value>): Effect.Effect<AdapterRebuild<Value>> =>
+      Ref.modify(cell, (state) => [
+        state.current,
+        { ...state, current: next, retired: [...state.retired, state.current] },
+      ]).pipe(
+        Effect.map((previous) => ({
+          value: next.value,
+          retirePrevious: retire(previous),
+        })),
+      )
+
     return {
       get: Ref.get(cell).pipe(Effect.map((state) => state.current.value)),
       rebuild: (input) =>
         gate.withPermits(1)(
-          open(input).pipe(
-            Effect.flatMap((next) =>
-              Ref.modify(cell, (state) => [
-                state.current,
-                { current: next, retired: [...state.retired, state.current] },
-              ]).pipe(
-                Effect.map((previous) => ({
-                  value: next.value,
-                  retirePrevious: retire(previous),
-                })),
-              ),
+          Ref.get(cell).pipe(
+            Effect.flatMap((state) =>
+              state.closed ? Effect.interrupt : open(input).pipe(Effect.flatMap(install)),
             ),
           ),
         ),

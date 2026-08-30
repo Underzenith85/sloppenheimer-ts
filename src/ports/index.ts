@@ -3,7 +3,12 @@ import { Layer } from 'effect'
 import type { Workflow } from '../config/workflow.js'
 import type { TrackerError } from '../errors.js'
 import { AgentRunner } from './agent-runner.js'
-import { CodeReviewFactory, CurrentCodeReview, layerCurrentCodeReview } from './code-review.js'
+import {
+  CodeReviewFactory,
+  CurrentCodeReview,
+  layerCurrentCodeReview,
+  layerNoCodeReview,
+} from './code-review.js'
 import { CurrentTracker, layerCurrentTracker, TrackerFactory } from './tracker.js'
 import { WorkflowLoader, WorkflowWatcher } from './workflow.js'
 import {
@@ -27,6 +32,7 @@ export {
   CodeReviewFactory,
   CurrentCodeReview,
   layerCurrentCodeReview,
+  layerNoCodeReview,
   type CodeReviewCell,
   type CodeReviewFactoryPort,
   type CodeReviewPort,
@@ -61,10 +67,13 @@ export {
   type WorkspaceSettings,
 } from './workspace.js'
 
-/** What the adapters supply: the two singletons and the three factories the cells build from. */
+/**
+ * What every adapter set must supply: the two singletons and the two factories whose ports have no
+ * meaningful absence. Code review is deliberately not among them — it is optional, and a provider
+ * that has none supplies nothing rather than a factory that only says so.
+ */
 export type AdapterServices =
   | AgentRunner
-  | CodeReviewFactory
   | TrackerFactory
   | WorkflowLoader
   | WorkflowWatcher
@@ -73,6 +82,7 @@ export type AdapterServices =
 /** What the orchestrator consumes: the adapter services plus the rebuildable instances. */
 export type PortServices =
   | AdapterServices
+  | CodeReviewFactory
   | CurrentCodeReview
   | CurrentTracker
   | CurrentWorkspaceManager
@@ -92,13 +102,18 @@ export const portsConfiguration = (workflow: Workflow): PortsConfiguration => ({
  * The wiring shape: adapter layers supply the factories, the cells turn them into the instances in
  * force, and both halves are visible to the orchestrator. The adapter layers themselves belong to
  * the adapter issues that follow; nothing here selects a provider.
+ *
+ * `codeReview` defaults to the absence marker, so a tracker provider with no review capability
+ * composes without implementing any code-review wiring. It is merged beneath `adapters`, so an
+ * adapter set that supplies its own code-review factory keeps it.
  */
 export const layerPorts = (
   configuration: PortsConfiguration,
   adapters: Layer.Layer<AdapterServices>,
+  codeReview: Layer.Layer<CodeReviewFactory> = layerNoCodeReview,
 ): Layer.Layer<PortServices, TrackerError> =>
   Layer.mergeAll(
     layerCurrentTracker(configuration.tracker),
     layerCurrentCodeReview(configuration.tracker),
     layerCurrentWorkspaceManager(configuration.workspaces),
-  ).pipe(Layer.provideMerge(adapters))
+  ).pipe(Layer.provideMerge(Layer.merge(codeReview, adapters)))

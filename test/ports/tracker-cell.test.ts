@@ -1,4 +1,4 @@
-import { Effect, Layer, Scope } from 'effect'
+import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { GitHubProviderConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
@@ -6,6 +6,7 @@ import { TrackerError } from '../../src/errors.js'
 import {
   CurrentTracker,
   layerCurrentTracker,
+  makeAdapterCell,
   tracker,
   TrackerFactory,
   type TrackerPort,
@@ -155,5 +156,48 @@ describe('current tracker cell', (): void => {
     )
 
     expect(outcome._tag).toBe('Failure')
+  })
+  it('releases an instance built by a rebuild that races the cell shutdown', async (): Promise<void> => {
+    const built: string[] = []
+    const released: string[] = []
+    // The rebuild is held inside construction so that shutdown is forced to interleave with it.
+    const blocking = await Effect.runPromise(Deferred.make<void>())
+    const reached = await Effect.runPromise(Deferred.make<void>())
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const cell = yield* makeAdapterCell((token: string) => {
+          const acquire = Effect.acquireRelease(
+            Effect.sync(() => {
+              built.push(token)
+              return token
+            }),
+            () => Effect.sync(() => released.push(token)),
+          )
+          return token === 'first'
+            ? acquire
+            : Deferred.succeed(reached, undefined).pipe(
+                Effect.zipRight(Deferred.await(blocking)),
+                Effect.zipRight(acquire),
+              )
+        }, 'first' as string).pipe(Scope.extend(scope))
+
+        const rebuilding = yield* Effect.fork(cell.rebuild('second'))
+        yield* Deferred.await(reached)
+        const closing = yield* Effect.fork(Scope.close(scope, Exit.void))
+        yield* Deferred.succeed(blocking, undefined)
+        yield* Fiber.join(rebuilding)
+        yield* Fiber.join(closing)
+
+        // A rebuild that begins after shutdown installs nothing at all.
+        const late = yield* Effect.exit(cell.rebuild('third'))
+        expect(Exit.isInterrupted(late)).toBe(true)
+      }),
+    )
+
+    expect(built).toEqual(['first', 'second'])
+    // Neither instance leaks: the replacement installed during shutdown is released too.
+    expect([...released].sort()).toEqual(['first', 'second'])
   })
 })

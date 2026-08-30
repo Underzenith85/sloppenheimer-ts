@@ -53,8 +53,6 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
         secretEnvironmentNames: ['GITHUB_TOKEN'],
       }),
   }),
-  // A provider without code review: the capability is optional, and the gate lives elsewhere.
-  Layer.succeed(CodeReviewFactory, { make: () => Effect.succeed(null) }),
   Layer.succeed(WorkspaceManagerFactory, {
     make: (settings) =>
       Effect.succeed({
@@ -150,5 +148,35 @@ describe('port layer composition', (): void => {
     expect(resolved.workspacePath).toBe('/workspaces')
     expect(resolved.threadId).toBe('thread')
     expect(resolved.loadFailed).toBe(true)
+  })
+
+  it('keeps a supplied code-review factory in place of the absence marker', async (): Promise<void> => {
+    const reviewed = await Effect.runPromise(
+      Effect.scoped(
+        codeReview.pipe(
+          Effect.provide(
+            layerPorts(
+              { tracker: validated, workspaces: { root: '/workspaces', hooks } },
+              adapters,
+              Layer.succeed(CodeReviewFactory, {
+                make: () =>
+                  Effect.succeed({
+                    handoffCompletedWork: () =>
+                      Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
+                    findExistingHandoff: () =>
+                      Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
+                    inspectPullRequest: () => Effect.die('unused'),
+                    mergePullRequest: () => Effect.die('unused'),
+                    requestPullRequestReview: () => Effect.void,
+                    resolveReviewThreads: () => Effect.void,
+                  }),
+              }),
+            ),
+          ),
+        ),
+      ),
+    )
+
+    expect(reviewed).not.toBeNull()
   })
 })

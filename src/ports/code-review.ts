@@ -63,6 +63,17 @@ export class CodeReviewFactory extends Context.Tag('symphony/CodeReviewFactory')
   CodeReviewFactoryPort
 >() {}
 
+/**
+ * The absence marker: a provider that supplies no code review at all.
+ *
+ * A tracker without code-review concepts is a legitimate configuration, so this is what the
+ * composition root wires when no code-review adapter is supplied — such a provider is not asked to
+ * implement code-review wiring merely to say it has none.
+ */
+export const layerNoCodeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFactory, {
+  make: () => Effect.succeed(null),
+})
+
 export type CodeReviewCell = AdapterCell<
   CodeReviewPort | null,
   ValidatedTrackerProvider,
