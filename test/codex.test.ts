@@ -17,7 +17,7 @@ import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
   verifyWorkspaceForLaunch,
-} from '../src/workspace.js'
+} from '../src/adapters/node/workspace-identity.js'
 
 describe('Codex child environment', (): void => {
   it('removes custom tracker secrets and every GitHub authentication alias', (): void => {

@@ -24,7 +24,13 @@ const fixtures: Readonly<Record<string, string>> = {
   'src/domain/violates-adapters.ts': "import '../adapters/github/tracker.js'\n",
   'src/domain/violates-config.ts': "import '../config/workflow.js'\n",
   'src/domain/violates-operator.ts': "import '../operator/operator.js'\n",
+  'src/domain/violates-root.ts': "import '../telemetry.js'\n",
   'src/domain/permitted.ts': "import '../support/json.js'\n",
+  // The migration allow-list keeps the error vocabulary reachable from domain/.  #91 put the
+  // workspace containment rules here and they reject by constructing a `WorkspaceError`, so this
+  // entry admits a runtime import; the rest of the `src/` root stays denied above.
+  'src/domain/permitted-allow-list.ts':
+    "import { WorkspaceError } from '../errors.js'\n\nexport const reject = WorkspaceError\n",
 
   // ports/ may use domain/ and support/ and nothing else.
   'src/ports/violates-config.ts': "import '../config/cli-options.js'\n",
@@ -51,7 +57,7 @@ const fixtures: Readonly<Record<string, string>> = {
     "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps the modules #84 left at the `src/` root reachable from core/.
   'src/core/permitted-allow-list.ts':
-    "import '../codex.js'\nimport '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\nimport '../tracker.js'\nimport '../workspace.js'\n",
+    "import '../codex.js'\nimport '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\nimport '../tracker.js'\n",
 
   // adapters/ is restricted as an import target, never as a source, and the `src/` root is the
   // composition root that deliberately binds concrete adapters.

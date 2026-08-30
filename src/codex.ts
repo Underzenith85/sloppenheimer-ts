@@ -18,8 +18,8 @@ import {
 import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
-  type VerifiedWorkspace,
-} from './workspace.js'
+} from './adapters/node/workspace-identity.js'
+import type { VerifiedWorkspace } from './domain/workspace-containment.js'
 
 export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,

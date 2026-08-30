@@ -13,7 +13,7 @@ import {
 import type { AgentEventSemantics, AgentRunnerPort } from './ports/agent-runner.js'
 import type { WorkflowError } from './errors.js'
 import { makeGitHubCodeReview, makeGitHubTracker } from './tracker.js'
-import { makeWorkspaceManager } from './workspace.js'
+import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 
 export {
   issueIsRoutable,
