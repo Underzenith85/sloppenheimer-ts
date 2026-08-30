@@ -140,6 +140,7 @@ Do the work
       refresh: Effect.void,
       agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
       setIssuePaused,
+      awaitTermination: Effect.never,
     })
 
     await Effect.runPromise(backend.backlog)

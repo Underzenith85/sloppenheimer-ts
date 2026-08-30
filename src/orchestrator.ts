@@ -154,6 +154,8 @@ export type OrchestratorControl = Readonly<{
    * scheduler's mailbox: opening the panel can never delay polling.
    */
   agentDetail: (identifier: string) => Effect.Effect<AgentDetailLookup>
+  /** Completes only when the host event loop fails or is interrupted during shutdown. */
+  awaitTermination: Effect.Effect<never>
 }>
 
 type OrchestratorEvent =
@@ -1829,7 +1831,7 @@ export const startOrchestrator = (
       }
     })
 
-    yield* Effect.forkScoped(eventLoop)
+    const eventLoopFiber = yield* Effect.forkScoped(eventLoop)
     yield* requestTick('startup')
 
     return {
@@ -1842,10 +1844,17 @@ export const startOrchestrator = (
           yield* Queue.offer(mailbox, { _tag: 'SetIssuePaused', issueNumber, paused, reply })
           yield* Deferred.await(reply)
         }),
+      awaitTermination: Fiber.join(eventLoopFiber).pipe(
+        Effect.zipRight(Effect.dieMessage('orchestrator event loop exited unexpectedly')),
+      ),
     }
   })
 
 export const runOrchestrator = (
   selectedWorkflowPath = resolve(process.cwd(), 'WORKFLOW.md'),
 ): Effect.Effect<void, WorkflowError> =>
-  Effect.scoped(startOrchestrator(selectedWorkflowPath).pipe(Effect.zipRight(Effect.never)))
+  Effect.scoped(
+    startOrchestrator(selectedWorkflowPath).pipe(
+      Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
+    ),
+  )
