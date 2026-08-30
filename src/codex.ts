@@ -207,13 +207,26 @@ const notificationIdentity = (
 }
 
 /**
- * A permissions approval answers with a permissions grant, not the `decision` value the command
- * execution and file change approvals take, so it is declined explicitly rather than answered with
- * a body the server cannot decode. A declined request fails the turn with a readable reason; an
- * undecodable one leaves the server waiting until the turn times out.
+ * A permissions approval answers with a `GrantedPermissionProfile`, not the `decision` value the
+ * command execution and file change approvals take, so it needs its own response.
  */
 const isPermissionsApproval = (method: string): boolean =>
   method.endsWith('/permissions/requestApproval')
+
+/**
+ * What Symphony grants when Codex asks to widen its sandbox mid-turn: nothing, answered in the
+ * shape the server can decode.
+ *
+ * The request asks for additional filesystem paths or network access beyond the sandbox the thread
+ * was started with. Echoing it back would let the agent negotiate its own containment, which is
+ * exactly what verifying the workspace before launch exists to prevent. An operator widens the
+ * sandbox by declaring `codex.turn_sandbox_policy`, where the decision is reviewable, so the turn
+ * proceeds here under the sandbox it already has rather than one it asked for.
+ *
+ * `scope` is the schema's own default; an empty profile makes it immaterial, but stating the
+ * narrower of the two values keeps the grant unambiguous.
+ */
+const withheldPermissionsGrant: JsonObject = { permissions: {}, scope: 'turn' }
 
 const isApprovalRequest = (method: string): boolean =>
   /requestApproval$/u.test(method) && !isPermissionsApproval(method)
@@ -593,6 +606,11 @@ class CodexConnection {
     // request rather than from connection state, which is null on the first turn and names the
     // previous one afterwards.
     const identity = notificationIdentity(message)
+    if (isPermissionsApproval(method)) {
+      this.#write({ id, result: withheldPermissionsGrant })
+      this.#emit('permissions_grant_withheld', method, identity)
+      return
+    }
     if (isApprovalRequest(method)) {
       this.#write({ id, result: { decision: 'acceptForSession' } })
       this.#emit('approval_auto_approved', method, identity)

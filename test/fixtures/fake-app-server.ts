@@ -233,7 +233,13 @@ const handle = (message: JsonRecord): void => {
     completeTurn()
     return
   }
-  if (id === 9002 || id === 9003 || id === 9004 || id === 9006) {
+  if (id === 9004) {
+    // The permissions grant is a result, not an error: the turn proceeds once it is answered.
+    send({ method: 'permissions/observed', params: message })
+    completeTurn()
+    return
+  }
+  if (id === 9002 || id === 9003 || id === 9006) {
     send({ method: 'request/rejected', params: message })
   }
 }

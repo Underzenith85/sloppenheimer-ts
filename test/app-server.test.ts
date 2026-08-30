@@ -256,11 +256,17 @@ describe('App Server session lifecycle', (): void => {
     expect(outcome.error?.category).toBe('input_required')
   }, 30_000)
 
-  it('declines a permissions approval rather than answering with the decision shape', async (): Promise<void> => {
-    const outcome = await runScenario('permissions-approval', { turnTimeoutMs: 1_000 })
+  it('answers a permissions approval with a grant that widens nothing', async (): Promise<void> => {
+    const outcome = await runScenario('permissions-approval')
 
-    expect(outcome.events.map((event) => event.event)).toContain('unsupported_tool_call')
-    expect(outcome.events.map((event) => event.event)).not.toContain('approval_auto_approved')
+    // The turn proceeds because the response is one the server can decode, and it carries no
+    // additional filesystem or network permission: the sandbox stays the one the workflow declared.
+    expect(outcome.error).toBeNull()
+    expect(outcome.result?.turnCount).toBe(1)
+    const events = outcome.events.map((event) => event.event)
+    expect(events).toContain('permissions_grant_withheld')
+    expect(events).not.toContain('unsupported_tool_call')
+    expect(events).not.toContain('approval_auto_approved')
   }, 30_000)
 
   it('attributes a notification batched with the turn/start response to that turn', async (): Promise<void> => {
@@ -425,9 +431,21 @@ describe('installed Codex App Server schema', (): void => {
     // A schema that came back empty means the invocation produced nothing, not that it agreed.
     expect(schema.length).toBeGreaterThan(0)
 
-    for (const method of ['initialize', 'thread/start', 'turn/start']) {
+    for (const method of [
+      'initialize',
+      'thread/start',
+      'turn/start',
+      // Every server-initiated request this client answers, each with its own response shape.
+      'item/commandExecution/requestApproval',
+      'item/fileChange/requestApproval',
+      'item/permissions/requestApproval',
+      'item/tool/requestUserInput',
+    ]) {
       expect(schema).toContain(method)
     }
+    // The permissions grant this client sends must still be the shape the schema declares.
+    expect(schema).toContain('GrantedPermissionProfile')
+    expect(schema).toContain('PermissionGrantScope')
     // Every policy this client can send must be declared. A build that also offers values Symphony
     // never sends is still compatible, so the check is one-directional.
     for (const policy of codexApprovalPolicies) {
