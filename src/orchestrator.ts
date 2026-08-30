@@ -436,6 +436,7 @@ export const startOrchestrator = (
     let workflowReloadError: WorkflowReloadError | null = null
     const state = initialState()
     const pendingUsage = new Map<IssueId, NonNullable<AgentEvent['usage']>>()
+    const pendingLifecycle = new Map<IssueId, AgentEvent[]>()
     let pendingRateLimits: JsonObject | null = null
     const handoffStorePath = resolve(
       lastKnownGood.workflow.config.workspaceRoot,
@@ -721,6 +722,17 @@ export const startOrchestrator = (
                     if (update.rateLimits !== null) {
                       pendingRateLimits = update.rateLimits
                     }
+                    if (
+                      update.event === 'session_started' ||
+                      update.event === 'turn_started' ||
+                      update.event === 'turn/completed' ||
+                      update.event === 'turn/failed' ||
+                      update.event === 'turn/terminated'
+                    ) {
+                      const queued = pendingLifecycle.get(issue.id) ?? []
+                      queued.push(update)
+                      pendingLifecycle.set(issue.id, queued)
+                    }
                     offerFromCallback({ _tag: 'AgentUpdate', issueId: issue.id, update })
                   },
                 }),
@@ -927,6 +939,62 @@ export const startOrchestrator = (
       pendingUsage.delete(id)
     }
 
+    const applyLifecycleUpdate = (entry: RunningEntry, update: AgentEvent): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        entry.lastEvent = update.event
+        entry.lastEventAt = update.timestamp
+        if (update.message !== null) {
+          entry.lastMessage = update.message
+        }
+        entry.processId = update.processId
+        entry.threadId = update.threadId ?? entry.threadId
+        entry.turnId = update.turnId ?? entry.turnId
+        entry.sessionId = update.sessionId ?? entry.sessionId
+        entry.turnCount = Math.max(entry.turnCount, update.turnCount)
+        if (entry.sessionId !== null && update.event === 'session_started') {
+          yield* logInfo('action=session outcome=started', {
+            ...sessionLogContext(entry),
+            action: 'session',
+            outcome: 'started',
+            error: null,
+          })
+        }
+        if (entry.sessionId !== null && update.event === 'turn_started') {
+          entry.turnActive = true
+          yield* logInfo('action=turn outcome=started', {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome: 'started',
+            error: null,
+          })
+        }
+        if (
+          entry.sessionId !== null &&
+          (update.event === 'turn/completed' ||
+            update.event === 'turn/failed' ||
+            update.event === 'turn/terminated') &&
+          update.turnStatus !== null
+        ) {
+          const completed = update.turnStatus === 'completed'
+          entry.turnActive = false
+          yield* (completed ? logInfo : logError)(
+            completed ? 'action=turn outcome=completed' : 'action=turn outcome=failed',
+            {
+              ...sessionLogContext(entry),
+              action: 'turn',
+              outcome: completed ? 'completed' : 'failed',
+              error: completed ? null : `turn finished with status ${update.turnStatus}`,
+            },
+          )
+        }
+      })
+
+    const takePendingLifecycle = (id: IssueId): readonly AgentEvent[] => {
+      const updates = pendingLifecycle.get(id) ?? []
+      pendingLifecycle.delete(id)
+      return updates
+    }
+
     const cancelRunning = (
       id: IssueId,
       cleanupWorkspace: boolean,
@@ -937,6 +1005,13 @@ export const startOrchestrator = (
           return null
         }
         yield* Fiber.interrupt(entry.fiber)
+        yield* Effect.forEach(
+          takePendingLifecycle(id),
+          (update) => applyLifecycleUpdate(entry, update),
+          {
+            discard: true,
+          },
+        )
         if (entry.sessionId !== null && entry.turnId !== null && entry.turnActive) {
           yield* logInfo('action=turn outcome=cancelled', {
             ...sessionLogContext(entry),
@@ -1207,16 +1282,17 @@ export const startOrchestrator = (
           case 'AgentUpdate': {
             const entry = state.running.get(event.issueId)
             if (entry !== undefined) {
-              entry.lastEvent = event.update.event
-              entry.lastEventAt = event.update.timestamp
-              if (event.update.message !== null) {
-                entry.lastMessage = event.update.message
+              yield* applyLifecycleUpdate(entry, event.update)
+              const queued = pendingLifecycle.get(event.issueId)
+              if (queued !== undefined) {
+                const index = queued.indexOf(event.update)
+                if (index >= 0) {
+                  queued.splice(index, 1)
+                }
+                if (queued.length === 0) {
+                  pendingLifecycle.delete(event.issueId)
+                }
               }
-              entry.processId = event.update.processId
-              entry.threadId = event.update.threadId ?? entry.threadId
-              entry.turnId = event.update.turnId ?? entry.turnId
-              entry.sessionId = event.update.sessionId ?? entry.sessionId
-              entry.turnCount = Math.max(entry.turnCount, event.update.turnCount)
               if (event.update.usage !== null) {
                 entry.lastReportedTokens = event.update.usage
                 entry.tokens = {
@@ -1233,44 +1309,6 @@ export const startOrchestrator = (
                 if (pendingRateLimits === event.update.rateLimits) {
                   pendingRateLimits = null
                 }
-              }
-              if (entry.sessionId !== null && event.update.event === 'session_started') {
-                yield* logInfo('action=session outcome=started', {
-                  ...sessionLogContext(entry),
-                  action: 'session',
-                  outcome: 'started',
-                  error: null,
-                })
-              }
-              if (entry.sessionId !== null && event.update.event === 'turn_started') {
-                entry.turnActive = true
-                yield* logInfo('action=turn outcome=started', {
-                  ...sessionLogContext(entry),
-                  action: 'turn',
-                  outcome: 'started',
-                  error: null,
-                })
-              }
-              if (
-                entry.sessionId !== null &&
-                (event.update.event === 'turn/completed' ||
-                  event.update.event === 'turn/failed' ||
-                  event.update.event === 'turn/terminated') &&
-                event.update.turnStatus !== null
-              ) {
-                const completed = event.update.turnStatus === 'completed'
-                entry.turnActive = false
-                yield* (completed ? logInfo : logError)(
-                  completed ? 'action=turn outcome=completed' : 'action=turn outcome=failed',
-                  {
-                    ...sessionLogContext(entry),
-                    action: 'turn',
-                    outcome: completed ? 'completed' : 'failed',
-                    error: completed
-                      ? null
-                      : `turn finished with status ${event.update.turnStatus}`,
-                  },
-                )
               }
             }
             break
