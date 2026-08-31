@@ -1,4 +1,4 @@
-import { Effect } from 'effect'
+import { Effect, Option } from 'effect'
 
 import type { JsonObject } from './domain.js'
 import { WorkflowError } from '../errors.js'
@@ -53,10 +53,25 @@ export type TrackerProviderAdapter<Provider> = Readonly<{
   secretEnvironmentNames: (provider: Provider) => readonly string[]
 }>
 
-/** An adapter with its provider type erased, as the registry holds it. */
-export type RegisteredTrackerProvider = Readonly<{
+/**
+ * An adapter with its provider type erased, as the registry holds it.
+ *
+ * The factory type parameters let the composition root carry application capabilities on the same
+ * entry without making this domain module import the ports those capabilities construct. They are
+ * whole effectful factory functions, so adapters retain their error and scope requirements.
+ */
+export type RegisteredTrackerProvider<
+  TrackerFactory = unknown,
+  CodeReviewFactory = unknown,
+  IssueControlFactory = unknown,
+  SourceControlFactory = unknown,
+> = Readonly<{
   kind: string
   validate: (provider: JsonObject) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
+  tracker?: TrackerFactory
+  codeReview?: CodeReviewFactory
+  issueControl?: IssueControlFactory
+  sourceControl?: SourceControlFactory
 }>
 
 const validatedSelection = <Provider>(
@@ -83,7 +98,7 @@ const validatedSelection = <Provider>(
  */
 export const registerTrackerProvider = <Provider>(
   adapter: TrackerProviderAdapter<Provider>,
-): RegisteredTrackerProvider =>
+): RegisteredTrackerProvider<never, never, never, never> =>
   Object.freeze({
     kind: adapter.kind,
     validate: (provider: JsonObject): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
@@ -93,21 +108,28 @@ export const registerTrackerProvider = <Provider>(
   })
 
 /** The tracker kinds a build supports, and the validation each one owns. */
-export type TrackerProviderRegistry = Readonly<{
+export type TrackerProviderRegistry<
+  Entry extends RegisteredTrackerProvider<unknown, unknown, unknown, unknown> =
+    RegisteredTrackerProvider<unknown, unknown, unknown, unknown>,
+> = Readonly<{
   kinds: readonly string[]
+  get: (kind: string) => Option.Option<Entry>
   validate: (
     kind: string,
     provider: JsonObject,
   ) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
 }>
 
-export const makeTrackerProviderRegistry = (
-  adapters: readonly RegisteredTrackerProvider[],
-): TrackerProviderRegistry => {
+export const makeTrackerProviderRegistry = <
+  Entry extends RegisteredTrackerProvider<unknown, unknown, unknown, unknown>,
+>(
+  adapters: readonly Entry[],
+): TrackerProviderRegistry<Entry> => {
   const byKind = new Map(adapters.map((adapter) => [adapter.kind, adapter] as const))
   const kinds = Object.freeze([...byKind.keys()])
   return Object.freeze({
     kinds,
+    get: (kind: string): Option.Option<Entry> => Option.fromNullable(byKind.get(kind)),
     validate: (
       kind: string,
       provider: JsonObject,
