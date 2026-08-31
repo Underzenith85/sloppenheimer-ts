@@ -14,7 +14,7 @@ import {
   telemetryFrom,
   type AgentLaunch,
 } from '../../../src/adapters/codex/codex.js'
-import { runWithEnvironment } from '../../harness/environment.js'
+import { withEnvironment } from '../../harness/environment.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { issueId, issueIdentifier, type Issue, type Workspace } from '../../../src/domain/domain.js'
 import type { VerifiedWorkspace } from '../../../src/domain/workspace-containment.js'
@@ -96,35 +96,41 @@ describe('Codex session secret values', (): void => {
    * Read through the calling fiber's `ConfigProvider`, which is the host environment — deliberately
    * not the environment the subprocess is given, from which the tracker's own secret is stripped.
    */
-  it('reads the tracker secret, the GitHub aliases, and Codex authentication from the host', (): void => {
-    const values = runWithEnvironment(
-      sessionSecretValues(['CUSTOM_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
-      {
-        CUSTOM_GITHUB_TOKEN: 'custom-tracker-secret',
+  it.effect(
+    'reads the tracker secret, the GitHub aliases, and Codex authentication from the host',
+    () =>
+      Effect.gen(function* () {
+        const values = yield* withEnvironment(
+          sessionSecretValues(['CUSTOM_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
+          {
+            CUSTOM_GITHUB_TOKEN: 'custom-tracker-secret',
+            GITHUB_TOKEN: 'github-token',
+            GH_TOKEN: 'gh-token',
+            OPENAI_API_KEY: 'openai-key',
+            CODEX_ACCESS_TOKEN: 'codex-access-token',
+            SAFE_VALUE: 'visible',
+          },
+        )
+
+        expect([...values].sort()).toEqual([
+          'codex-access-token',
+          'custom-tracker-secret',
+          'gh-token',
+          'github-token',
+          'openai-key',
+        ])
+      }),
+  )
+
+  it.effect('skips a name the environment does not set', () =>
+    Effect.gen(function* () {
+      const values = yield* withEnvironment(sessionSecretValues(['CUSTOM_GITHUB_TOKEN']), {
         GITHUB_TOKEN: 'github-token',
-        GH_TOKEN: 'gh-token',
-        OPENAI_API_KEY: 'openai-key',
-        CODEX_ACCESS_TOKEN: 'codex-access-token',
-        SAFE_VALUE: 'visible',
-      },
-    )
+      })
 
-    expect([...values].sort()).toEqual([
-      'codex-access-token',
-      'custom-tracker-secret',
-      'gh-token',
-      'github-token',
-      'openai-key',
-    ])
-  })
-
-  it('skips a name the environment does not set', (): void => {
-    const values = runWithEnvironment(sessionSecretValues(['CUSTOM_GITHUB_TOKEN']), {
-      GITHUB_TOKEN: 'github-token',
-    })
-
-    expect(values).toEqual(['github-token'])
-  })
+      expect(values).toEqual(['github-token'])
+    }),
+  )
 })
 
 describe('Codex event message redaction', (): void => {

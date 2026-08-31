@@ -29,13 +29,19 @@ export const withEnvironment = <A, E, R>(
   variables: Readonly<Record<string, string>> = {},
 ): Effect.Effect<A, E, R> => Effect.withConfigProvider(effect, testEnvironment(variables))
 
-/** Runs a configuration effect to its value against {@link testEnvironment}. */
+/**
+ * Runs a configuration effect to its value against {@link testEnvironment}.
+ *
+ * For module-scope fixtures only — a `Workflow` constant every case in a suite is built from.
+ * A test body reads its configuration with {@link withEnvironment} inside its own fiber instead;
+ * this exists because a fixture constant has no fiber to read it in.
+ */
 export const runWithEnvironment = <A, E>(
   effect: Effect.Effect<A, E>,
   variables: Readonly<Record<string, string>> = {},
 ): A => Effect.runSync(withEnvironment(effect, variables))
 
-/** Runs a configuration effect that is expected to fail, and returns the failure. */
+/** The same, for a fixture whose construction is expected to fail. */
 export const runFailureWithEnvironment = <A, E>(
   effect: Effect.Effect<A, E>,
   variables: Readonly<Record<string, string>> = {},
