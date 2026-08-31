@@ -342,6 +342,30 @@ const expectedRepairHead = (
   )
 }
 
+/**
+ * Puts the target branch at the baseline with nothing carried over.
+ *
+ * Uninterruptible as a pair. `checkout -B` carries a tracked edit across when the file is identical
+ * in both commits, so an interruption between the two would leave the target branch checked out and
+ * still dirty — and the next preparation reads exactly that as unfinished agent work to preserve,
+ * publishing an edit no agent made. The two commands are local and bounded, so an interruption
+ * waits them out rather than settling halfway through.
+ */
+const resetToBaseline = (
+  settings: GitSourceControlSettings,
+  workspace: Workspace,
+  branchName: string,
+  baselineSha: string,
+): Effect.Effect<void, SourceControlError> =>
+  Effect.uninterruptible(
+    runGit(settings, 'prepare', workspace.path, ['checkout', '-B', branchName, baselineSha]).pipe(
+      Effect.zipRight(
+        runGit(settings, 'prepare', workspace.path, ['reset', '--hard', baselineSha]),
+      ),
+      Effect.asVoid,
+    ),
+  )
+
 const prepareRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
@@ -381,13 +405,7 @@ const prepareRepository = (
     const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
     const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
     if (!preserve) {
-      yield* runGit(settings, 'prepare', workspace.path, [
-        'checkout',
-        '-B',
-        target.branchName,
-        baselineSha,
-      ])
-      yield* runGit(settings, 'prepare', workspace.path, ['reset', '--hard', baselineSha])
+      yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
     }
     const prepared: PreparedRepository = {
       workspace,
