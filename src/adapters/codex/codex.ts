@@ -552,7 +552,9 @@ class CodexConnection {
   #turnState(turnId: string): Effect.Effect<TurnState, AgentError> {
     return Effect.gen(this, function* () {
       const settlement = yield* Deferred.make<void, AgentError>()
-      const activity = yield* Queue.unbounded<void>()
+      // Activity is an edge, not a count. Retaining a burst would replay stale progress and extend
+      // the next silence window once per notification rather than once for the burst.
+      const activity = yield* Queue.dropping<void>(1)
       const candidate: TurnState = { settlement, activity, timerStarted: false }
       const selected = yield* Ref.modify(
         this.#state,
@@ -650,7 +652,23 @@ class CodexConnection {
             ),
           )
         this.#fork(
-          Effect.raceFirst(Deferred.await(turn.settlement).pipe(Effect.ignore), awaitActivity()),
+          Effect.raceFirst(
+            Deferred.await(turn.settlement).pipe(Effect.ignore),
+            awaitActivity(),
+          ).pipe(
+            Effect.ensuring(
+              Ref.update(this.#state, (state) => {
+                const current = state.turns.get(turnId)
+                if (current?.activity !== turn.activity || !current.timerStarted) {
+                  return state
+                }
+                return {
+                  ...state,
+                  turns: new Map(state.turns).set(turnId, { ...current, timerStarted: false }),
+                }
+              }),
+            ),
+          ),
         )
         return Effect.void
       }),
@@ -671,7 +689,14 @@ class CodexConnection {
     return Ref.get(this.#state).pipe(
       Effect.flatMap((state) => {
         const turn = state.turns.get(turnId)
-        return turn?.timerStarted === true ? Queue.offer(turn.activity, undefined) : Effect.void
+        if (turn?.timerStarted !== true) {
+          return Effect.void
+        }
+        return Deferred.isDone(turn.settlement).pipe(
+          Effect.flatMap((done) =>
+            done ? Effect.void : Queue.offer(turn.activity, undefined).pipe(Effect.asVoid),
+          ),
+        )
       }),
       Effect.asVoid,
     )
