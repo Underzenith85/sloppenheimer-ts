@@ -75,7 +75,7 @@ const snapshot: OrchestratorSnapshot = {
 }
 
 const makeDetail = (identifier: string): AgentDetailSnapshot => {
-  const record = createAgentDetailRecord({
+  let record = createAgentDetailRecord({
     issueId: issueId('17'),
     identifier: issueIdentifier(identifier),
     title: 'Operator console',
@@ -86,7 +86,7 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     expectedBranch: 'symphony/issue-17',
     dispatchLabels: ['symphony'],
   })
-  recordAgentEvent(record, {
+  record = recordAgentEvent(record, {
     event: 'item/completed',
     timestamp: new Date('2026-08-29T11:59:30.000Z'),
     processId: 42,
