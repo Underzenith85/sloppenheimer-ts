@@ -4,10 +4,21 @@ import { join } from 'node:path'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { runAgent, type AgentEvent, type AgentResult } from '../../src/adapters/codex/codex.js'
+import {
+  runAgent,
+  type AgentEvent,
+  type AgentLaunch,
+  type AgentResult,
+} from '../../src/adapters/codex/codex.js'
+import type { AgentError } from '../../src/errors.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const issue: Issue = {
   id: issueId('fake-issue'),
@@ -54,7 +65,7 @@ const runScenario = async (
   }
   try {
     const result = await Effect.runPromise(
-      runAgent({
+      runAgentOnHost({
         issue,
         workspace: { path: workspacePath, key: 'fake', createdNow: true },
         workspaceRoot,

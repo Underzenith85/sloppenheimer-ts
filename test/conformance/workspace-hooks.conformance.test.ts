@@ -7,6 +7,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { issueIdentifier } from '../../src/domain/domain.js'
 import type { HooksConfig } from '../../src/config/workflow.js'
 import { makeWorkspaceManager } from '../../src/adapters/node/workspace-manager.js'
+import type { WorkspaceManagerPort } from '../../src/ports/workspace.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Built against the host filesystem, the way the composition root builds it. */
+const workspaceManager = (root: string, hooks: HooksConfig): WorkspaceManagerPort =>
+  Effect.runSync(makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem)))
 
 const directories: string[] = []
 const makeRoot = async (): Promise<string> => {
@@ -32,13 +38,13 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
   it('aborts an attempt when before_run fails or times out', async (): Promise<void> => {
     const root = await makeRoot()
     const identifier = issueIdentifier('owner/repository#19')
-    const failed = makeWorkspaceManager(root, hooks({ beforeRun: 'exit 7' }))
+    const failed = workspaceManager(root, hooks({ beforeRun: 'exit 7' }))
     const failedWorkspace = await Effect.runPromise(failed.create(identifier))
     await expect(Effect.runPromise(failed.beforeRun(failedWorkspace))).rejects.toThrow(
       'hook exited with 7',
     )
 
-    const timedOut = makeWorkspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
+    const timedOut = workspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
     const reused = await Effect.runPromise(timedOut.create(identifier))
     await expect(Effect.runPromise(timedOut.beforeRun(reused))).rejects.toThrow('hook timed out')
   })
@@ -46,10 +52,7 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
   it('ignores after_run and before_remove failures while completing lifecycle', async (): Promise<void> => {
     const root = await makeRoot()
     const identifier = issueIdentifier('owner/repository#20')
-    const manager = makeWorkspaceManager(
-      root,
-      hooks({ afterRun: 'exit 8', beforeRemove: 'exit 9' }),
-    )
+    const manager = workspaceManager(root, hooks({ afterRun: 'exit 8', beforeRemove: 'exit 9' }))
     const workspace = await Effect.runPromise(manager.create(identifier))
     await Effect.runPromise(manager.afterRun(workspace))
     await Effect.runPromise(manager.remove(identifier))
