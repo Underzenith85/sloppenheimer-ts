@@ -113,50 +113,37 @@ export const repairPermission = (
   return { _tag: 'Allowed', issue }
 }
 
-/** Fetch current issue records once per captured tracker, not once per pull request. */
+/**
+ * Refresh each eligible handoff independently.
+ *
+ * The tracker boundary is fail-fast even when it accepts several IDs, so batching unrelated
+ * handoffs would let one malformed or missing tracker record deny repairs for every pull request
+ * in that batch. Eligibility refreshes are deliberately isolated here: a provider failure can
+ * affect only the handoff whose policy decision depends on it.
+ */
 const refreshHandoffIssues = (
   handoffs: ReadonlyMap<IssueId, HandoffEntry>,
 ): Effect.Effect<ReadonlyMap<IssueId, IssueRefresh>, never> =>
   Effect.gen(function* () {
-    type TrackerGroup = Readonly<{
-      tracker: HandoffEntry['execution']['tracker']
-      ids: readonly IssueId[]
-    }>
-    const groups = new Map<HandoffEntry['execution']['tracker'], IssueId[]>()
-    for (const [id, handoff] of handoffs) {
-      const existing = Option.fromNullable(groups.get(handoff.execution.tracker))
-      if (Option.isSome(existing)) {
-        existing.value.push(id)
-      } else {
-        groups.set(handoff.execution.tracker, [id])
-      }
-    }
-    const fetched = yield* Effect.forEach(
-      [...groups].map<TrackerGroup>(([tracker, ids]) => ({ tracker, ids })),
-      (group) =>
-        group.tracker.fetchIssuesByIds(group.ids).pipe(
+    const fetched: readonly (readonly [IssueId, IssueRefresh])[] = yield* Effect.forEach(
+      handoffs,
+      ([id, handoff]) =>
+        handoff.execution.tracker.fetchIssuesByIds([id]).pipe(
           Effect.match({
-            onFailure: (error) => ({ group, error: Option.some(error.message), issues: [] }),
-            onSuccess: (issues) => ({ group, error: Option.none<string>(), issues }),
+            onFailure: (error) =>
+              [id, { _tag: 'Failed', reason: error.message } satisfies IssueRefresh] as const,
+            onSuccess: (issues) =>
+              [
+                id,
+                {
+                  _tag: 'Succeeded',
+                  issue: Option.fromNullable(issues.find((issue) => issue.id === id)),
+                } satisfies IssueRefresh,
+              ] as const,
           }),
         ),
     )
-    const refreshed = new Map<IssueId, IssueRefresh>()
-    for (const result of fetched) {
-      if (Option.isSome(result.error)) {
-        for (const id of result.group.ids) {
-          refreshed.set(id, { _tag: 'Failed', reason: result.error.value })
-        }
-        continue
-      }
-      for (const id of result.group.ids) {
-        refreshed.set(id, {
-          _tag: 'Succeeded',
-          issue: Option.fromNullable(result.issues.find((issue) => issue.id === id)),
-        })
-      }
-    }
-    return refreshed
+    return new Map(fetched)
   })
 
 /**
@@ -327,7 +314,12 @@ export const reconcileHandoffs = (
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(context.state)
-    const refreshedIssues = yield* refreshHandoffIssues(opening.handoffs)
+    const eligible = new Map(
+      [...opening.handoffs].filter(
+        ([id, handoff]) => !skipped(opening, id, handoff) && handoff.execution.codeReview !== null,
+      ),
+    )
+    const refreshedIssues = yield* refreshHandoffIssues(eligible)
     for (const id of opening.handoffs.keys()) {
       // Re-read: an earlier handoff in this pass may have taken the last agent slot, or dispatched
       // a repair for this very issue.

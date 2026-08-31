@@ -24,6 +24,7 @@ import {
   issueIdentifier,
   type BlockerRef,
   type Issue,
+  type IssueId,
   type JsonObject,
 } from '../src/domain/domain.js'
 import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
@@ -965,8 +966,20 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [issue])
     let inspections = 0
+    let issueRefreshes = 0
+    let refreshesAfterClose = 0
     const ports: TestPorts = {
       ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
+        return {
+          ...tracker,
+          fetchIssuesByIds: (ids, options) => {
+            issueRefreshes += 1
+            return tracker.fetchIssuesByIds(ids, options)
+          },
+        }
+      },
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
         inspectPullRequest: (pullRequestNumber) =>
@@ -994,6 +1007,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
+          refreshesAfterClose = issueRefreshes
           yield* control.refresh
           return yield* control.snapshot
         }),
@@ -1001,6 +1015,8 @@ describe('restored pull request handoffs', (): void => {
     )
 
     expect(inspections).toBe(1)
+    expect(refreshesAfterClose).toBeGreaterThan(0)
+    expect(issueRefreshes).toBe(refreshesAfterClose)
     expect(snapshot.running).toEqual([])
     // The handoff came back from the store and nothing ran for it in this process, so its detail
     // resource would report no session. The console reads this list to decide whether to offer an
@@ -1017,6 +1033,96 @@ describe('restored pull request handoffs', (): void => {
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
       expect.objectContaining({ state: 'closed_without_merge' }),
     ])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('isolates eligibility refresh failures between repair handoffs', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-isolated-handoff-refresh-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const failedIssue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const healthyIssue = {
+      ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
+      id: issueId('21'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    await Effect.runPromise(
+      saveHandoffs(
+        handoffStorePath,
+        [failedIssue, healthyIssue].map((issue, index) => ({
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: `https://github.test/example/symphony/pull/${65 + index}`,
+          branchName: `symphony/issue-${issue.id}`,
+          state: 'repair_needed' as const,
+          headSha: head,
+          reason: 'The pull request conflicts with protected main',
+          repairAttempts: 0,
+          repairHeadShas: [],
+          repairStartedHeadSha: null,
+          reviewRequestedHeadSha: head,
+          reviewCompletedHeadSha: head,
+          observedAt: new Date(0).toISOString(),
+        })),
+      ),
+    )
+    const harness = makeHarness(isolated, () => [failedIssue, healthyIssue])
+    const refreshedIds: IssueId[] = []
+    const launchedIds: IssueId[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
+        return {
+          ...tracker,
+          fetchIssuesByIds: (ids, options) => {
+            if (ids.length !== 1) {
+              return tracker.fetchIssuesByIds(ids, options)
+            }
+            refreshedIds.push(...ids)
+            if (ids.includes(failedIssue.id)) {
+              return Effect.fail(
+                new TrackerError({
+                  category: 'tracker_request',
+                  message: 'one issue is malformed',
+                  retryable: true,
+                }),
+              )
+            }
+            return Effect.succeed([healthyIssue])
+          },
+        }
+      },
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      runAgent: ({ issue }) =>
+        Effect.sync(() => {
+          launchedIds.push(issue.id)
+        }).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (launchedIds.length === 0) {
+            yield* Effect.yieldNow()
+          }
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+    expect(launchedIds).toEqual([healthyIssue.id])
+    expect(
+      snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
+    ).toContain('one issue is malformed')
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
