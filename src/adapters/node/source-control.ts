@@ -410,6 +410,11 @@ const leaseFailure = (
 /**
  * Returns the worktree to the head the rebase started from.
  *
+ * Uninterruptible, so the guarantee belongs to the cleanup itself rather than to the path that
+ * reaches it: an abort that were cancelled halfway would leave exactly the half-written rebase
+ * state it exists to clear, and the failure path runs it as an ordinary effect rather than as a
+ * finalizer. An interruption therefore waits out one bounded local git invocation.
+ *
  * The abort's own outcome is discarded: after a failure the original one is the useful diagnostic,
  * and a rebase that left no state behind needs no cleanup and says so by exiting non-zero.
  */
@@ -417,7 +422,9 @@ const abortRebase = (
   settings: GitSourceControlSettings,
   prepared: PreparedRepository,
 ): Effect.Effect<void> =>
-  Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort']))
+  Effect.uninterruptible(
+    Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort'])),
+  )
 
 const rebaseOntoBase = (
   settings: GitSourceControlSettings,
@@ -427,7 +434,7 @@ const rebaseOntoBase = (
     // An interruption terminates the git process group mid-rebase, which leaves `.git/rebase-merge`
     // and a detached head behind. `Effect.catchAll` does not see an interruption, and the next
     // publication's rebase refuses to start on the state this one left, so the abort is also
-    // attached as a finalizer — which the runtime runs uninterruptibly, so it completes.
+    // attached as a finalizer.
     Effect.onInterrupt(
       Effect.asVoid(
         runGit(
