@@ -95,7 +95,7 @@ export const sessionSecretValues = (
 
 type PendingRequest = Readonly<{
   method: string
-  turnCount: number | null
+  turnCount: Option.Option<number>
   reply: Deferred.Deferred<JsonValue, AgentError>
   claimed: boolean
 }>
@@ -125,7 +125,7 @@ type ConnectionState = Readonly<{
   turnUsage: ReadonlyMap<string, NonNullable<AgentEvent['usage']>>
   startedTurns: ReadonlySet<string>
   turnCounts: ReadonlyMap<string, number>
-  pendingRateLimits: JsonObject | null
+  pendingRateLimits: Option.Option<JsonObject>
   rateLimitsReady: boolean
   nextId: number
   closed: boolean
@@ -141,7 +141,7 @@ const initialConnectionState: ConnectionState = {
   turnUsage: new Map(),
   startedTurns: new Set(),
   turnCounts: new Map(),
-  pendingRateLimits: null,
+  pendingRateLimits: Option.none(),
   rateLimitsReady: false,
   nextId: 1,
   closed: false,
@@ -460,9 +460,9 @@ class CodexConnection {
       Ref.modify(this.#state, (state) => [
         mergeSparseObject(
           rateLimitsResult['rateLimits'] as JsonObject,
-          state.pendingRateLimits ?? {},
+          Option.getOrElse(state.pendingRateLimits, () => ({})),
         ),
-        { ...state, pendingRateLimits: null, rateLimitsReady: true },
+        { ...state, pendingRateLimits: Option.none(), rateLimitsReady: true },
       ]),
     )
     this.#onEvent({
@@ -526,7 +526,7 @@ class CodexConnection {
           networkAccess: true,
         },
       },
-      turnCount,
+      Option.some(turnCount),
     )
     if (
       !isJsonObject(result) ||
@@ -856,7 +856,7 @@ class CodexConnection {
   #request(
     method: string,
     params: JsonObject,
-    turnCount: number | null = null,
+    turnCount: Option.Option<number> = Option.none(),
   ): Promise<JsonValue> {
     return runAgentPromise(
       Effect.gen(this, function* () {
@@ -1034,13 +1034,13 @@ class CodexConnection {
                     })
                   : Effect.void
               const turnStarted =
-                request.method === 'turn/start' && turnCount !== null
+                request.method === 'turn/start' && Option.isSome(turnCount)
                   ? Option.match(identity.turnId, {
                       onNone: () => Effect.void,
                       onSome: (turnId) =>
                         this.#turnState(turnId).pipe(
                           Effect.zipRight(
-                            this.#ensureTurnStarted(turnId, turnCount, identity.threadId),
+                            this.#ensureTurnStarted(turnId, turnCount.value, identity.threadId),
                           ),
                         ),
                     })
@@ -1254,26 +1254,32 @@ class CodexConnection {
 
   #handleNotification(method: string, message: JsonObject): Effect.Effect<void, AgentError> {
     return Effect.gen(this, function* () {
-      const turn = this.#turnFrom(message)
+      const turn = Option.fromNullable(this.#turnFrom(message))
       const carried = notificationIdentity(message)
+      const carriedThreadId = Option.fromNullable(carried.threadId)
+      const carriedTurnId = Option.fromNullable(carried.turnId)
       const telemetry = telemetryFrom(method, message)
       const isTerminal = method === 'turn/completed' || method === 'turn/failed'
-      const terminalStatus =
-        isTerminal && turn !== null
-          ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
-          : null
+      const terminalStatus = isTerminal
+        ? Option.map(turn, (current) =>
+            Option.getOrElse(Option.fromNullable(current.status), () =>
+              method === 'turn/failed' ? 'failed' : 'unreported',
+            ),
+          )
+        : Option.none<string>()
 
-      let reportedTurn: TurnState | undefined
-      if (isTerminal && turn !== null) {
-        const candidate = yield* this.#turnState(turn.id)
-        if (!(yield* this.#claimTurn(turn.id, candidate))) {
+      let reportedTurn = Option.none<TurnState>()
+      if (isTerminal && Option.isSome(turn)) {
+        const candidate = yield* this.#turnState(turn.value.id)
+        if (!(yield* this.#claimTurn(turn.value.id, candidate))) {
           return
         }
-        reportedTurn = candidate
+        reportedTurn = Option.some(candidate)
       }
 
-      let rateLimits = telemetry.rateLimits
-      if (rateLimits !== null) {
+      let rateLimits = Option.fromNullable(telemetry.rateLimits)
+      if (Option.isSome(rateLimits)) {
+        const currentRateLimits = rateLimits.value
         const ready = yield* Ref.modify(this.#state, (state) => {
           if (state.rateLimitsReady) {
             return [true, state]
@@ -1282,91 +1288,107 @@ class CodexConnection {
             false,
             {
               ...state,
-              pendingRateLimits: mergeSparseObject(state.pendingRateLimits, rateLimits ?? {}),
+              pendingRateLimits: Option.some(
+                mergeSparseObject(
+                  Option.getOrElse(state.pendingRateLimits, () => ({})),
+                  currentRateLimits,
+                ),
+              ),
             },
           ]
         })
         if (!ready) {
-          rateLimits = null
+          rateLimits = Option.none()
         }
       }
 
       let state = yield* Ref.get(this.#state)
-      const threadId = carried.threadId ?? Option.getOrNull(state.threadId)
-      const turnId = carried.turnId ?? turn?.id ?? Option.getOrNull(state.turnId)
-      const pendingTurnStart = [...state.pending.values()].find(
-        (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
+      const threadId = carriedThreadId.pipe(Option.orElse(() => state.threadId))
+      const parsedTurnId = Option.map(turn, (current) => current.id)
+      const turnId = carriedTurnId.pipe(
+        Option.orElse(() => parsedTurnId),
+        Option.orElse(() => state.turnId),
       )
-      if (
-        turnId !== null &&
-        pendingTurnStart?.turnCount !== null &&
-        pendingTurnStart !== undefined
-      ) {
-        yield* this.#turnState(turnId)
-        yield* this.#ensureTurnStarted(
-          turnId,
-          pendingTurnStart.turnCount,
-          Option.fromNullable(threadId),
+      const pendingTurnCount = Option.fromNullable(
+        [...state.pending.values()].find(
+          (pending) => pending.method === 'turn/start' && Option.isSome(pending.turnCount),
+        ),
+      ).pipe(Option.flatMap((pending) => pending.turnCount))
+      if (Option.isSome(turnId) && Option.isSome(pendingTurnCount)) {
+        yield* this.#turnState(turnId.value)
+        yield* this.#ensureTurnStarted(turnId.value, pendingTurnCount.value, threadId)
+      }
+
+      let usage = Option.fromNullable(telemetry.usage)
+      if (method === 'turn/usage' && Option.isSome(usage) && Option.isSome(turnId)) {
+        const currentUsage = usage.value
+        const currentTurnId = turnId.value
+        usage = Option.some(
+          yield* Ref.modify(this.#state, (current) => {
+            const previous = current.turnUsage.get(currentTurnId)
+            const nextUsage = new Map(current.turnUsage).set(currentTurnId, {
+              inputTokens: Math.max(previous?.inputTokens ?? 0, currentUsage.inputTokens),
+              outputTokens: Math.max(previous?.outputTokens ?? 0, currentUsage.outputTokens),
+              totalTokens: Math.max(previous?.totalTokens ?? 0, currentUsage.totalTokens),
+            })
+            const total = [...nextUsage.values()].reduce(
+              (sum, entry) => ({
+                inputTokens: sum.inputTokens + entry.inputTokens,
+                outputTokens: sum.outputTokens + entry.outputTokens,
+                totalTokens: sum.totalTokens + entry.totalTokens,
+              }),
+              { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            )
+            return [total, { ...current, turnUsage: nextUsage }]
+          }),
         )
       }
 
-      let usage = telemetry.usage
-      if (method === 'turn/usage' && usage !== null && turnId !== null) {
-        usage = yield* Ref.modify(this.#state, (current) => {
-          const previous = current.turnUsage.get(turnId)
-          const nextUsage = new Map(current.turnUsage).set(turnId, {
-            inputTokens: Math.max(previous?.inputTokens ?? 0, usage?.inputTokens ?? 0),
-            outputTokens: Math.max(previous?.outputTokens ?? 0, usage?.outputTokens ?? 0),
-            totalTokens: Math.max(previous?.totalTokens ?? 0, usage?.totalTokens ?? 0),
-          })
-          const total = [...nextUsage.values()].reduce(
-            (sum, currentUsage) => ({
-              inputTokens: sum.inputTokens + currentUsage.inputTokens,
-              outputTokens: sum.outputTokens + currentUsage.outputTokens,
-              totalTokens: sum.totalTokens + currentUsage.totalTokens,
-            }),
-            { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-          )
-          return [total, { ...current, turnUsage: nextUsage }]
-        })
-      }
-
-      const attributed = carried.turnId ?? turn?.id ?? null
-      if (attributed !== null) {
-        yield* this.#noteActivity(attributed)
-      }
+      const attributed = carriedTurnId.pipe(Option.orElse(() => parsedTurnId))
+      yield* Option.match(attributed, {
+        onNone: () => Effect.void,
+        onSome: (id) => this.#noteActivity(id),
+      })
       state = yield* Ref.get(this.#state)
+      const eventThreadId = Option.getOrNull(threadId)
+      const eventTurnId = Option.getOrNull(turnId)
       this.#onEvent({
         event: method,
         timestamp: new Date(),
         processId: this.processId,
         message: messageFrom(message, this.#knownSecretValues),
-        usage,
-        rateLimits,
-        threadId,
-        turnId,
-        sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
-        turnCount:
-          turnId === null ? state.turnCount : (state.turnCounts.get(turnId) ?? state.turnCount),
-        turnStatus: terminalStatus,
+        usage: Option.getOrNull(usage),
+        rateLimits: Option.getOrNull(rateLimits),
+        threadId: eventThreadId,
+        turnId: eventTurnId,
+        sessionId: Option.match(threadId, {
+          onNone: () => null,
+          onSome: (id) => composeSessionId(id, eventTurnId),
+        }),
+        turnCount: Option.match(turnId, {
+          onNone: () => state.turnCount,
+          onSome: (id) => state.turnCounts.get(id) ?? state.turnCount,
+        }),
+        turnStatus: Option.getOrNull(terminalStatus),
         payload: normalizePayload(method, message['params'], this.#redact),
       })
-      if (!isTerminal || turn === null || reportedTurn === undefined) {
+      if (!isTerminal || Option.isNone(turn) || Option.isNone(reportedTurn)) {
         return
       }
-      if (turn.status === null && method === 'turn/completed') {
-        yield* this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
+      if (Option.isNone(Option.fromNullable(turn.value.status)) && method === 'turn/completed') {
+        yield* this.#emit('malformed', `${method} for turn ${turn.value.id} omitted status`)
       }
+      const status = Option.getOrElse(terminalStatus, () => 'unreported')
       const settlement: TurnSettlement =
-        terminalStatus === 'completed'
+        status === 'completed'
           ? { _tag: 'completed' }
           : {
               _tag: 'failed',
-              error: CodexConnection.#turnFailure(turn.id, terminalStatus ?? 'unreported'),
+              error: CodexConnection.#turnFailure(turn.value.id, status),
             }
       // The claim preceded every lifecycle side effect, so a concurrent session failure either
       // won before this notification or cannot overwrite it now.
-      yield* this.#completeTurn(reportedTurn, settlement)
+      yield* this.#completeTurn(reportedTurn.value, settlement)
     })
   }
 
@@ -1397,11 +1419,15 @@ class CodexConnection {
     },
     turnStatus: string | null = null,
   ): Effect.Effect<void> {
+    const carriedThreadId = Option.fromNullable(carried.threadId)
+    const carriedTurnId = Option.fromNullable(carried.turnId)
     return Ref.get(this.#state).pipe(
       Effect.tap((state) =>
         Effect.sync(() => {
-          const threadId = carried.threadId ?? Option.getOrNull(state.threadId)
-          const turnId = carried.turnId ?? Option.getOrNull(state.turnId)
+          const threadId = carriedThreadId.pipe(Option.orElse(() => state.threadId))
+          const turnId = carriedTurnId.pipe(Option.orElse(() => state.turnId))
+          const eventThreadId = Option.getOrNull(threadId)
+          const eventTurnId = Option.getOrNull(turnId)
           const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
           this.#onEvent({
             event,
@@ -1410,11 +1436,16 @@ class CodexConnection {
             message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
             usage: null,
             rateLimits: null,
-            threadId,
-            turnId,
-            sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
-            turnCount:
-              turnId === null ? state.turnCount : (state.turnCounts.get(turnId) ?? state.turnCount),
+            threadId: eventThreadId,
+            turnId: eventTurnId,
+            sessionId: Option.match(threadId, {
+              onNone: () => null,
+              onSome: (id) => composeSessionId(id, eventTurnId),
+            }),
+            turnCount: Option.match(turnId, {
+              onNone: () => state.turnCount,
+              onSome: (id) => state.turnCounts.get(id) ?? state.turnCount,
+            }),
             turnStatus,
             payload,
           })
