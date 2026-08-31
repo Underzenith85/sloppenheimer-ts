@@ -5,7 +5,7 @@ import * as HttpClient from '@effect/platform/HttpClient'
 import type * as HttpClientError from '@effect/platform/HttpClientError'
 import * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import type * as HttpMethod from '@effect/platform/HttpMethod'
-import { Effect, Layer, Option, Redacted } from 'effect'
+import { Clock, Effect, Layer, Option, Redacted } from 'effect'
 
 import type { JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
@@ -82,7 +82,7 @@ const parseRateLimitResetMs = (value: string | null, now: number): number | null
 export const rateLimitError = (
   headers: PlatformHeaders.Headers,
   status: number,
-  now = Date.now(),
+  now: number,
 ): TrackerError | null => {
   const retryAfterMs = parseRetryAfterMs(header(headers, 'retry-after'), now)
   const remaining = header(headers, 'x-ratelimit-remaining')
@@ -199,7 +199,13 @@ export const githubJson = (
       .execute(githubRequest(provider, url, init))
       .pipe(Effect.mapError((cause: HttpClientError.HttpClientError) => trackerRequestError(cause)))
     const linkHeader = header(response.headers, 'link')
-    const limited = rateLimitError(response.headers, response.status)
+    // The advertised delay is relative to when the response was read, so the instant comes from
+    // the same clock the retry schedule is measured against.
+    const limited = rateLimitError(
+      response.headers,
+      response.status,
+      yield* Clock.currentTimeMillis,
+    )
     if (limited !== null) {
       return yield* Effect.fail(limited)
     }
