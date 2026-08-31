@@ -312,15 +312,20 @@ const initialize = (
     Effect.asVoid,
   )
 
+/**
+ * The head a repair must start from, or `none` for normal work, which starts from the protected
+ * base instead. Absence here chooses the next branch rather than crossing a data boundary, so it is
+ * an `Option` and never leaves this module.
+ */
 const expectedRepairHead = (
   target: SourceControlTarget,
   observed: Option.Option<string>,
-): Effect.Effect<string | null, SourceControlError> => {
+): Effect.Effect<Option.Option<string>, SourceControlError> => {
   if (target._tag === 'Normal') {
-    return Effect.succeed(null)
+    return Effect.succeed(Option.none())
   }
   if (Option.contains(observed, target.expectedHeadSha)) {
-    return Effect.succeed(target.expectedHeadSha)
+    return Effect.succeed(Option.some(target.expectedHeadSha))
   }
   return Effect.fail(
     new SourceControlError({
@@ -355,7 +360,7 @@ const prepareRepository = (
     )
     const observedRemoteHead = yield* remoteHead(settings, 'prepare', workspace, target.branchName)
     const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
-    if (repairHead !== null) {
+    if (Option.isSome(repairHead)) {
       yield* runGit(settings, 'prepare', workspace.path, [
         'fetch',
         '--no-tags',
@@ -367,7 +372,7 @@ const prepareRepository = (
     const branch = yield* currentBranch(settings, 'prepare', workspace)
     const head = yield* currentHead(settings, 'prepare', workspace)
     const dirty = (yield* status(settings, 'prepare', workspace)).length > 0
-    const baselineSha = repairHead ?? baseSha
+    const baselineSha = Option.getOrElse(repairHead, () => baseSha)
     const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
     const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
     if (!preserve) {
