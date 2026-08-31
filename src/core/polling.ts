@@ -414,19 +414,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             Option.isSome(repair) && repair.value.inFlight
               ? { ...issue, description: repair.value.issue.description }
               : issue
-          if (!context.stateHasSlotValue(dispatchIssue, context.state, effective.workflow)) {
-            yield* context.scheduleRetryEffect(
-              dispatchIssue,
-              event.attempt + 1,
-              'no available orchestrator slots',
-              false,
-            )
-            break
-          }
           // Every repair retry re-inspects the pull request first: a refused dispatch may be
           // queued behind a manual push, and a worker that pushed before it failed leaves a head
           // that is its output and nobody else's. Both have to be settled before another repair
-          // starts, or the next head would stand in for two attempts.
+          // starts, or the next head would stand in for two attempts. This runs ahead of the
+          // capacity gate below, which would otherwise defer past the attribution entirely.
           if (handoff !== undefined && Option.isSome(repair) && repair.value.inFlight) {
             const codeReview = handoff.execution.codeReview
             if (codeReview === null) {
@@ -499,6 +491,17 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               handoff.repairObservedHeadShas.push(observedHeadSha)
             }
             yield* context.persistHandoffsEffect()
+          }
+          // Deferred with the refreshed repair identity, not the one this retry arrived with:
+          // waiting for a slot is not a reason to re-run the attribution on the next attempt.
+          if (!context.stateHasSlotValue(dispatchIssue, context.state, effective.workflow)) {
+            yield* context.scheduleRetryEffect(
+              dispatchIssue,
+              event.attempt + 1,
+              'no available orchestrator slots',
+              false,
+            )
+            break
           }
           // An ordinary worker continuation has no repair identity and establishes no baseline.
           const started = yield* dispatch(context, dispatchIssue, event.attempt)

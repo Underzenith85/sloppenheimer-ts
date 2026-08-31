@@ -2126,6 +2126,84 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('attributes a pushed head even when its retry defers for capacity', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const repaired = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const occupier = {
+      ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
+      id: issueId('21'),
+    }
+    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const intermediateHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    let currentHead = originalHead
+    let candidates: readonly Issue[] = [repaired]
+    await saveRepairHandoff(handoffStorePath, repaired, originalHead)
+    const harness = makeHarness(isolated, () => candidates)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+      }),
+      // The repair pushes a head and then fails; the issue that takes the freed slot holds it.
+      runAgent: ({ issue: launchedIssue }) =>
+        Effect.suspend(() => {
+          if (launchedIssue.id !== repaired.id) {
+            return Effect.never
+          }
+          currentHead = intermediateHead
+          return Effect.fail(
+            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+          )
+        }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The only agent slot is taken before the queued repair retry comes due.
+          candidates = [repaired, occupier]
+          while (current.running.length === 0) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('30 seconds')
+          while (current.handoffs[0]?.repairAttempts !== 1) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* control.setIssuePaused(21, true)
+          return current
+        }),
+      ),
+    )
+
+    // Capacity deferred the next attempt, but the head the failed one pushed is already counted.
+    expect(snapshot.retrying.map((entry) => entry.issueId)).toContain(repaired.id)
+    expect(snapshot.retrying.map((entry) => entry.error)).toContain(
+      'no available orchestrator slots',
+    )
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 1,
+      repairHeadShas: [intermediateHead],
+      repairObservedHeadShas: [originalHead, intermediateHead],
+      repairStartedHeadSha: intermediateHead,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('records that a refused repair dispatch never started a worker', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
