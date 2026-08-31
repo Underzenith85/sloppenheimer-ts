@@ -67,8 +67,19 @@ const groupReapPollMs = 25
 /** How long a stopping session waits for the diagnostic reader to drain and flush. */
 const diagnosticDrainDeadlineMs = 1_000
 
-/** Session identity remains stable for the lifetime of the App Server thread. */
-export const composeSessionId = (threadId: string, _turnId: string | null): string => threadId
+/**
+ * SPEC 4.1.6 and 4.2 compose a session identity from the coding-agent thread and turn as
+ * `<thread_id>-<turn_id>`, so each turn on a thread is its own session while the thread id stays
+ * the one the App Server issued. Continuation turns therefore reuse `thread_id` and produce a new
+ * `session_id`, which is what 10.2 asks for.
+ *
+ * Before the first turn exists there is no turn half to compose. A trailing separator would name a
+ * turn that never ran, so the thread id stands alone until a turn identity arrives — the only
+ * event that sees this is `session_started`, emitted between `thread/start` and the first
+ * `turn/start`.
+ */
+export const composeSessionId = (threadId: string, turnId: string | null): string =>
+  turnId === null ? threadId : `${threadId}-${turnId}`
 
 export const isCancelledTurnStatus = (status: string): boolean =>
   status === 'cancelled' || status === 'canceled' || status === 'interrupted'

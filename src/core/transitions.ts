@@ -3,7 +3,12 @@ import { Option, type Deferred } from 'effect'
 import type { Issue, IssueId, JsonObject } from '../domain/domain.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
 import { mergeSparseObject } from '../support/json.js'
-import { agentDetailPath, type AgentDetailRecord, type AgentDetailStatus } from '../telemetry.js'
+import {
+  agentDetailPath,
+  foldTurnIdentity,
+  type AgentDetailRecord,
+  type AgentDetailStatus,
+} from '../telemetry.js'
 import type { AgentEvent } from '../telemetry.js'
 import {
   rememberedIdentifiers,
@@ -193,10 +198,9 @@ export const applyRunEvent = (entry: RunningEntry, update: AgentEvent): RunningE
   lastMessage: update.message ?? entry.lastMessage,
   processId: update.processId,
   threadId: update.threadId ?? entry.threadId,
-  turnId:
-    update.turnId !== null && update.turnCount >= entry.turnCount ? update.turnId : entry.turnId,
-  sessionId: update.sessionId ?? entry.sessionId,
-  turnCount: Math.max(entry.turnCount, update.turnCount),
+  // Shared with the agent detail, so a late event from a superseded turn can never leave the two
+  // surfaces reporting different turns — or an older turn's session id beside a newer turn number.
+  ...foldTurnIdentity(entry, update),
 })
 
 /**
