@@ -1,5 +1,6 @@
+import { it } from '@effect/vitest'
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import type { ValidatedTrackerProvider } from '../../src/config/workflow.js'
 import { TrackerError } from '../../src/errors.js'
@@ -48,34 +49,32 @@ const failingFactory = Layer.succeed(TrackerFactory, {
 })
 
 describe('current tracker cell', (): void => {
-  it('serves the instance built from the initial provider', async (): Promise<void> => {
+  it.scoped('serves the instance built from the initial provider', () => {
     const built: string[] = []
     const released: string[] = []
 
-    const secrets = await Effect.runPromise(
-      Effect.scoped(
-        tracker.pipe(
-          Effect.map((current) => current.secretEnvironmentNames),
-          Effect.provide(
-            layerCurrentTracker(provider('first')).pipe(
-              Layer.provide(recordingFactory(built, released)),
-            ),
-          ),
+    return Effect.gen(function* () {
+      const secrets = yield* tracker.pipe(Effect.map((current) => current.secretEnvironmentNames))
+
+      expect(secrets).toEqual(['first'])
+      expect(built).toEqual(['first'])
+    }).pipe(
+      Effect.provide(
+        layerCurrentTracker(provider('first')).pipe(
+          Layer.provide(recordingFactory(built, released)),
         ),
       ),
     )
-
-    expect(secrets).toEqual(['first'])
-    expect(built).toEqual(['first'])
   })
 
-  it('rebuilds on a rotated provider and releases the replaced instance once retired', async (): Promise<void> => {
-    const built: string[] = []
-    const released: string[] = []
+  it.effect(
+    'rebuilds on a rotated provider and releases the replaced instance once retired',
+    () => {
+      const built: string[] = []
+      const released: string[] = []
 
-    const observed = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
+      return Effect.gen(function* () {
+        const observed = yield* Effect.gen(function* () {
           const cell = yield* CurrentTracker
           const before = yield* cell.get
           const rebuilt = yield* cell.rebuild(provider('second'))
@@ -93,102 +92,102 @@ describe('current tracker cell', (): void => {
             rebuilt: rebuilt.value.secretEnvironmentNames,
           }
         }).pipe(
+          Effect.scoped,
           Effect.provide(
             layerCurrentTracker(provider('first')).pipe(
               Layer.provide(recordingFactory(built, released)),
             ),
           ),
-        ),
-      ),
-    )
-
-    expect(observed.before).toEqual(['first'])
-    expect(observed.rebuilt).toEqual(['second'])
-    expect(observed.current).toEqual(['second'])
-    // The replaced instance survives the swap: in-flight work may still hold it.
-    expect(observed.afterSwap).toEqual([])
-    expect(observed.afterRetire).toEqual(['first'])
-    expect(built).toEqual(['first', 'second'])
-    // Closing the surrounding scope releases whatever instance was still in force.
-    expect(released).toEqual(['first', 'second'])
-  })
-
-  it('releases the instance in force when the cell scope closes', async (): Promise<void> => {
-    const built: string[] = []
-    const released: string[] = []
-
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const scope = yield* Scope.make()
-        yield* Layer.buildWithScope(
-          layerCurrentTracker(provider('first')).pipe(
-            Layer.provide(recordingFactory(built, released)),
-          ),
-          scope,
         )
-        expect(released).toEqual([])
-        yield* Scope.close(scope, yield* Effect.exit(Effect.void))
-      }),
-    )
 
-    expect(built).toEqual(['first'])
-    expect(released).toEqual(['first'])
-  })
+        expect(observed.before).toEqual(['first'])
+        expect(observed.rebuilt).toEqual(['second'])
+        expect(observed.current).toEqual(['second'])
+        // The replaced instance survives the swap: in-flight work may still hold it.
+        expect(observed.afterSwap).toEqual([])
+        expect(observed.afterRetire).toEqual(['first'])
+        expect(built).toEqual(['first', 'second'])
+        // Closing the surrounding scope releases whatever instance was still in force.
+        expect(released).toEqual(['first', 'second'])
+      })
+    },
+  )
 
-  it('surfaces a construction failure as a layer error', async (): Promise<void> => {
-    const outcome = await Effect.runPromiseExit(
-      Effect.scoped(
-        tracker.pipe(
-          Effect.provide(
-            layerCurrentTracker(provider('first')).pipe(Layer.provide(failingFactory)),
-          ),
-        ),
-      ),
-    )
-
-    expect(outcome._tag).toBe('Failure')
-  })
-  it('releases an instance built by a rebuild that races the cell shutdown', async (): Promise<void> => {
+  it.effect('releases the instance in force when the cell scope closes', () => {
     const built: string[] = []
     const released: string[] = []
-    // The rebuild is held inside construction so that shutdown is forced to interleave with it.
-    const blocking = await Effect.runPromise(Deferred.make<void>())
-    const reached = await Effect.runPromise(Deferred.make<void>())
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const scope = yield* Scope.make()
-        const cell = yield* makeAdapterCell((token: string) => {
-          const acquire = Effect.acquireRelease(
-            Effect.sync(() => {
-              built.push(token)
-              return token
-            }),
-            () => Effect.sync(() => released.push(token)),
-          )
-          return token === 'first'
-            ? acquire
-            : Deferred.succeed(reached, undefined).pipe(
-                Effect.zipRight(Deferred.await(blocking)),
-                Effect.zipRight(acquire),
-              )
-        }, 'first' as string).pipe(Scope.extend(scope))
+    return Effect.gen(function* () {
+      const scope = yield* Scope.make()
+      yield* Layer.buildWithScope(
+        layerCurrentTracker(provider('first')).pipe(
+          Layer.provide(recordingFactory(built, released)),
+        ),
+        scope,
+      )
+      expect(released).toEqual([])
+      yield* Scope.close(scope, yield* Effect.exit(Effect.void))
 
-        const rebuilding = yield* Effect.fork(cell.rebuild('second'))
-        yield* Deferred.await(reached)
-        const closing = yield* Effect.fork(Scope.close(scope, Exit.void))
-        yield* Deferred.succeed(blocking, undefined)
-        yield* Fiber.join(rebuilding)
-        yield* Fiber.join(closing)
+      expect(built).toEqual(['first'])
+      expect(released).toEqual(['first'])
+    })
+  })
 
-        // A rebuild that begins after shutdown installs nothing at all.
-        const late = yield* Effect.exit(cell.rebuild('third'))
-        expect(Exit.isInterrupted(late)).toBe(true)
-      }),
-    )
+  it.effect('surfaces a construction failure as a layer error', () =>
+    Effect.gen(function* () {
+      const outcome = yield* Effect.exit(
+        Effect.scoped(
+          tracker.pipe(
+            Effect.provide(
+              layerCurrentTracker(provider('first')).pipe(Layer.provide(failingFactory)),
+            ),
+          ),
+        ),
+      )
 
-    expect(built).toEqual(['first', 'second'])
-    // Neither instance leaks: the replacement installed during shutdown is released too.
-    expect([...released].sort()).toEqual(['first', 'second'])
+      expect(outcome._tag).toBe('Failure')
+    }),
+  )
+
+  it.effect('releases an instance built by a rebuild that races the cell shutdown', () => {
+    const built: string[] = []
+    const released: string[] = []
+
+    return Effect.gen(function* () {
+      // The rebuild is held inside construction so that shutdown is forced to interleave with it.
+      const blocking = yield* Deferred.make<void>()
+      const reached = yield* Deferred.make<void>()
+      const scope = yield* Scope.make()
+      const cell = yield* makeAdapterCell((token: string) => {
+        const acquire = Effect.acquireRelease(
+          Effect.sync(() => {
+            built.push(token)
+            return token
+          }),
+          () => Effect.sync(() => released.push(token)),
+        )
+        return token === 'first'
+          ? acquire
+          : Deferred.succeed(reached, undefined).pipe(
+              Effect.zipRight(Deferred.await(blocking)),
+              Effect.zipRight(acquire),
+            )
+      }, 'first' as string).pipe(Scope.extend(scope))
+
+      const rebuilding = yield* Effect.fork(cell.rebuild('second'))
+      yield* Deferred.await(reached)
+      const closing = yield* Effect.fork(Scope.close(scope, Exit.void))
+      yield* Deferred.succeed(blocking, undefined)
+      yield* Fiber.join(rebuilding)
+      yield* Fiber.join(closing)
+
+      // A rebuild that begins after shutdown installs nothing at all.
+      const late = yield* Effect.exit(cell.rebuild('third'))
+      expect(Exit.isInterrupted(late)).toBe(true)
+
+      expect(built).toEqual(['first', 'second'])
+      // Neither instance leaks: the replacement installed during shutdown is released too.
+      expect([...released].sort()).toEqual(['first', 'second'])
+    })
   })
 })

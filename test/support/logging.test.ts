@@ -1,5 +1,6 @@
+import { it } from '@effect/vitest'
 import { Effect, Logger } from 'effect'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, vi } from 'vitest'
 
 import { logInfo } from '../../src/support/logging.js'
 import { redactSecretsInString } from '../../src/support/redaction.js'
@@ -36,7 +37,7 @@ Authorization=[REDACTED]`,
     ).toBe('[REDACTED PEM PRIVATE KEY]')
   })
 
-  it('keeps orchestration effects alive when the configured sink throws', async (): Promise<void> => {
+  it.effect('keeps orchestration effects alive when the configured sink throws', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const failingLogger = Logger.replace(
       Logger.defaultLogger,
@@ -45,40 +46,49 @@ Authorization=[REDACTED]`,
       }),
     )
 
-    await expect(
-      Effect.runPromise(
-        logInfo('action=test outcome=completed').pipe(Effect.provide(failingLogger)),
+    return Effect.gen(function* () {
+      const logged = yield* logInfo('action=test outcome=completed').pipe(
+        Effect.provide(failingLogger),
+      )
+
+      expect(logged).toBeUndefined()
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('logging_sink_failed=true'))
+    }).pipe(
+      // Restored after the assertions read the spy, and on a failing assertion too, so the stub
+      // never leaks into the next test.
+      Effect.ensuring(
+        Effect.sync(() => {
+          stderr.mockRestore()
+        }),
       ),
-    ).resolves.toBeUndefined()
-    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('logging_sink_failed=true'))
-    stderr.mockRestore()
+    )
   })
 
-  it('does not expose objects beyond the structured-log depth limit', async (): Promise<void> => {
-    const entries: unknown[] = []
-    const collectingLogger = Logger.replace(
-      Logger.defaultLogger,
-      Logger.make((entry) => {
-        entries.push(entry)
-      }),
-    )
+  it.effect('does not expose objects beyond the structured-log depth limit', () =>
+    Effect.gen(function* () {
+      const entries: unknown[] = []
+      const collectingLogger = Logger.replace(
+        Logger.defaultLogger,
+        Logger.make((entry) => {
+          entries.push(entry)
+        }),
+      )
 
-    await Effect.runPromise(
-      logInfo('action=test outcome=completed', {
+      yield* logInfo('action=test outcome=completed', {
         a: { b: { c: { d: { e: { token: 'deep-secret' } } } } },
         proxyAuthorization: 'Basic structured-secret',
         session_id: 'structured-session-secret',
         requestCookie: 'structured-cookie-secret',
-      }).pipe(Effect.provide(collectingLogger)),
-    )
+      }).pipe(Effect.provide(collectingLogger))
 
-    expect(JSON.stringify(entries)).not.toContain('deep-secret')
-    expect(JSON.stringify(entries)).not.toContain('structured-secret')
-    expect(JSON.stringify(entries)).not.toContain('structured-session-secret')
-    expect(JSON.stringify(entries)).not.toContain('structured-cookie-secret')
-    expect(JSON.stringify(entries)).toContain('[TRUNCATED]')
-    expect(JSON.stringify(entries)).toContain('"action":"unspecified"')
-    expect(JSON.stringify(entries)).toContain('"outcome":"unknown"')
-    expect(JSON.stringify(entries)).toContain('"error":null')
-  })
+      expect(JSON.stringify(entries)).not.toContain('deep-secret')
+      expect(JSON.stringify(entries)).not.toContain('structured-secret')
+      expect(JSON.stringify(entries)).not.toContain('structured-session-secret')
+      expect(JSON.stringify(entries)).not.toContain('structured-cookie-secret')
+      expect(JSON.stringify(entries)).toContain('[TRUNCATED]')
+      expect(JSON.stringify(entries)).toContain('"action":"unspecified"')
+      expect(JSON.stringify(entries)).toContain('"outcome":"unknown"')
+      expect(JSON.stringify(entries)).toContain('"error":null')
+    }),
+  )
 })

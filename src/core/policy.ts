@@ -3,7 +3,6 @@ import { Option } from 'effect'
 import { normalizeState, type Issue, type IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, RuntimeState } from './state.js'
-export { retryDelayMs } from './retry.js'
 
 /**
  * The scheduler's decisions about a single issue, as pure functions of the issue, the workflow, and
