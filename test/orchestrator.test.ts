@@ -88,6 +88,17 @@ import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
 
 /**
+ * A temp directory the enclosing scope owns, for the runs that read and write a real handoff store.
+ * Released on failure, defect and interruption alike, which a `rm` trailing the assertions cannot
+ * promise: an assertion that throws aborts the test body before it runs.
+ */
+const isolatedWorkspaceRoot = (prefix: string): Effect.Effect<string, never, Scope.Scope> =>
+  Effect.acquireRelease(
+    Effect.promise(() => mkdtemp(join(tmpdir(), prefix))),
+    (root) => Effect.promise(() => rm(root, { force: true, recursive: true })),
+  )
+
+/**
  * The handoff store reads and writes through `FileSystem`. Every assertion below inspects the real
  * store the orchestrator wrote, so the host's is bound here the way the composition root binds it.
  */
@@ -717,11 +728,9 @@ describe('host-owned source-control dispatch', (): void => {
     }),
   )
 
-  it.effect('prepares and publishes a repair from the handoff exact head', () =>
+  it.scoped('prepares and publishes a repair from the handoff exact head', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-source-control-repair-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-source-control-repair-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
         ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
@@ -778,19 +787,16 @@ describe('host-owned source-control dispatch', (): void => {
         expectedHeadSha: head,
       })
       expect(publications).toEqual(['symphony/issue-20'])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 })
 
 describe('restored pull request handoffs', (): void => {
-  it.effect(
+  it.scoped(
     'rediscovers open pull requests for active issue branches when the store is missing',
     () =>
       Effect.gen(function* () {
-        const workspaceRoot = yield* Effect.promise(() =>
-          mkdtemp(join(tmpdir(), 'symphony-recovered-handoff-')),
-        )
+        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-recovered-handoff-')
         const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
         const issue = {
           ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
@@ -852,15 +858,12 @@ describe('restored pull request handoffs', (): void => {
         expect(yield* loadHandoffs(join(workspaceRoot, '.symphony', 'handoffs.json'))).toHaveLength(
           1,
         )
-        yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
       }),
   )
 
-  it.effect('skips non-dispatchable pull request records during recovery', () =>
+  it.scoped('skips non-dispatchable pull request records during recovery', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-nondispatchable-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-nondispatchable-handoff-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const pullRequestRecord = {
         ...makeIssue('example/symphony#117', 1, null, ['symphony', 'ready']),
@@ -892,15 +895,12 @@ describe('restored pull request handoffs', (): void => {
       expect(harness.agentRuns()).toEqual([])
       expect(snapshot.handoffs).toEqual([])
       expect(snapshot.handoffRecovery).toMatchObject({ recovered: 0, skipped: 1 })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('supplements a partial store without duplicating its persisted handoff', () =>
+  it.scoped('supplements a partial store without duplicating its persisted handoff', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-partial-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-partial-handoff-')
       const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const first = {
@@ -975,15 +975,12 @@ describe('restored pull request handoffs', (): void => {
       expect(snapshot.handoffs.map((handoff) => handoff.issueId).sort()).toEqual(['20', '75'])
       expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 1 })
       expect(yield* loadHandoffs(storePath)).toHaveLength(2)
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('reports a malformed store and does not replace it during recovery', () =>
+  it.scoped('reports a malformed store and does not replace it during recovery', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-malformed-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-malformed-handoff-')
       const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       yield* Effect.promise(() => mkdir(join(workspaceRoot, '.symphony')))
       yield* Effect.promise(() => writeFile(storePath, '{malformed'))
@@ -1004,15 +1001,12 @@ describe('restored pull request handoffs', (): void => {
         `Could not decode handoff store ${storePath}`,
       )
       expect(yield* Effect.promise(() => readFile(storePath, 'utf8'))).toBe('{malformed')
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('retains persisted entries through a transient GitHub hydration failure', () =>
+  it.scoped('retains persisted entries through a transient GitHub hydration failure', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-transient-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-transient-handoff-')
       const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -1086,15 +1080,12 @@ describe('restored pull request handoffs', (): void => {
       expect(snapshot.handoffs).toHaveLength(1)
       expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 0 })
       expect(yield* loadHandoffs(storePath)).toHaveLength(1)
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('removes a restored handoff after its pull request is confirmed merged', () =>
+  it.scoped('removes a restored handoff after its pull request is confirmed merged', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-restored-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-restored-handoff-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -1169,15 +1160,12 @@ describe('restored pull request handoffs', (): void => {
         finishedAt: '2026-08-20T09:00:00.000Z',
       })
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('retains a closed unmerged handoff without dispatching repair work', () =>
+  it.scoped('retains a closed unmerged handoff without dispatching repair work', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-closed-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-closed-handoff-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -1267,15 +1255,12 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ state: 'closed_without_merge' }),
       ])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('isolates eligibility refresh failures between repair handoffs', () =>
+  it.scoped('isolates eligibility refresh failures between repair handoffs', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-isolated-handoff-refresh-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-isolated-handoff-refresh-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const failedIssue = {
@@ -1357,15 +1342,12 @@ describe('restored pull request handoffs', (): void => {
       expect(
         snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
       ).toContain('one issue is malformed')
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('awaits Codex review of the initial head before merging', () =>
+  it.scoped('awaits Codex review of the initial head before merging', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-initial-review-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-initial-review-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -1467,15 +1449,12 @@ describe('restored pull request handoffs', (): void => {
           expect(snapshot.handoffs).toEqual([])
         }),
       )
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('requests and awaits Codex review of the repaired head before merging', () =>
+  it.scoped('requests and awaits Codex review of the repaired head before merging', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repaired-review-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repaired-review-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -1579,17 +1558,14 @@ describe('restored pull request handoffs', (): void => {
           expect(snapshot.handoffs).toEqual([])
         }),
       )
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect(
+  it.scoped(
     'migrates contaminated legacy counts and persists the repair baseline while running',
     () =>
       Effect.gen(function* () {
-        const workspaceRoot = yield* Effect.promise(() =>
-          mkdtemp(join(tmpdir(), 'symphony-running-repair-')),
-        )
+        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-running-repair-')
         const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
         const isolated: Workflow = {
           ...workflow,
@@ -1684,15 +1660,12 @@ describe('restored pull request handoffs', (): void => {
             repairStartedHeadSha: reviewedHead,
           }),
         ])
-        yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
       }),
   )
 
-  it.effect('counts a repair only after GitHub exposes a distinct pull request head', () =>
+  it.scoped('counts a repair only after GitHub exposes a distinct pull request head', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-progress-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-progress-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -1787,15 +1760,12 @@ describe('restored pull request handoffs', (): void => {
         repairHeadShas: [repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('stops a no-op repair without consuming the changed-head budget', () =>
+  it.scoped('stops a no-op repair without consuming the changed-head budget', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-no-progress-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-no-progress-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -1875,15 +1845,12 @@ describe('restored pull request handoffs', (): void => {
       expect(snapshot.handoffs[0]?.reason).toContain(
         'Repair agent completed without changing the pull request head',
       )
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('attributes a repair head pushed just before a restart', () =>
+  it.scoped('attributes a repair head pushed just before a restart', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-restart-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-restart-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -1958,15 +1925,12 @@ describe('restored pull request handoffs', (): void => {
         repairHeadShas: [repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('detects a repair cycle back to the pre-repair head', () =>
+  it.scoped('detects a repair cycle back to the pre-repair head', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-cycle-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-cycle-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2042,15 +2006,12 @@ describe('restored pull request handoffs', (): void => {
         repairAttempts: 1,
       })
       expect(snapshot.handoffs[0]?.reason).toContain('already observed repair head')
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('treats a repair interrupted by a restart as retryable, not a no-op', () =>
+  it.scoped('treats a repair interrupted by a restart as retryable, not a no-op', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-interrupted-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-interrupted-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2132,15 +2093,12 @@ describe('restored pull request handoffs', (): void => {
         repairHeadShas: [],
       })
       expect(snapshot.handoffs[0]?.state).not.toBe('intervention_required')
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('releases a running repair identity when the operator cancels it', () =>
+  it.scoped('releases a running repair identity when the operator cancels it', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-cancelled-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-cancelled-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2181,15 +2139,12 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ repairStartedHeadSha: null }),
       ])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('retains a stalled repair identity for its automatic retry', () =>
+  it.scoped('retains a stalled repair identity for its automatic retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-stalled-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-stalled-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -2245,15 +2200,12 @@ describe('restored pull request handoffs', (): void => {
           yield* control.setIssuePaused(20, true)
         }),
       )
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('refreshes and attributes a repair whose first dispatch was refused', () =>
+  it.scoped('refreshes and attributes a repair whose first dispatch was refused', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-refused-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -2323,15 +2275,12 @@ describe('restored pull request handoffs', (): void => {
         repairObservedHeadShas: [originalHead, queuedHead, repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('releases a refused repair identity when its queued retry is cancelled', () =>
+  it.scoped('releases a refused repair identity when its queued retry is cancelled', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-retry-cancelled-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-cancelled-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2370,15 +2319,12 @@ describe('restored pull request handoffs', (): void => {
 
       expect(snapshot.retrying).toEqual([])
       expect(snapshot.handoffs[0]?.repairStartedHeadSha).toBeNull()
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('attributes a repair head when its continuation becomes unroutable', () =>
+  it.scoped('attributes a repair head when its continuation becomes unroutable', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-unroutable-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-unroutable-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2433,15 +2379,12 @@ describe('restored pull request handoffs', (): void => {
         repairObservedHeadShas: [originalHead, repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('attributes a pushed head before dispatching a queued repair retry', () =>
+  it.scoped('attributes a pushed head before dispatching a queued repair retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-retry-attributed-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-attributed-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2516,15 +2459,12 @@ describe('restored pull request handoffs', (): void => {
         repairHeadShas: [intermediateHead],
         repairStartedHeadSha: intermediateHead,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('advances the execution attempt when a repair retry fails again', () =>
+  it.scoped('advances the execution attempt when a repair retry fails again', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-retry-attempt-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-attempt-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2571,15 +2511,12 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: true }),
       ])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('admits a repair retry against the workflow it will be dispatched under', () =>
+  it.scoped('admits a repair retry against the workflow it will be dispatched under', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-admission-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-admission-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -2649,15 +2586,12 @@ describe('restored pull request handoffs', (): void => {
       )
 
       expect(launches).toBe(2)
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('dispatches a repair retry against the tracker record it just refetched', () =>
+  it.scoped('dispatches a repair retry against the tracker record it just refetched', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-refetched-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refetched-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2717,15 +2651,12 @@ describe('restored pull request handoffs', (): void => {
       expect(launched[1]?.priority).toBe(5)
       expect(launched[1]?.description).toContain('new repair requirements from the tracker')
       expect(launched[1]?.description).toContain('## Pull request repair')
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('preserves a repair execution attempt across capacity deferral', () =>
+  it.scoped('preserves a repair execution attempt across capacity deferral', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-no-slot-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const repaired = {
@@ -2803,15 +2734,12 @@ describe('restored pull request handoffs', (): void => {
         repairAttempts: 0,
         repairStartedHeadSha: head,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('attributes a repair head when its issue leaves the active states mid-run', () =>
+  it.scoped('attributes a repair head when its issue leaves the active states mid-run', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-inactive-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-inactive-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -2863,15 +2791,12 @@ describe('restored pull request handoffs', (): void => {
         repairObservedHeadShas: [originalHead, repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('dispatches a repair retry through the workflow its handoff was captured under', () =>
+  it.scoped('dispatches a repair retry through the workflow its handoff was captured under', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-reload-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-reload-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -2940,18 +2865,13 @@ describe('restored pull request handoffs', (): void => {
       expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
       expect(launchedPrompts[0]).toContain('## Pull request repair')
       expect(launchedPrompts[0]).not.toContain('a reloaded template')
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('cleans up a terminal repair retry in the workspace its repair ran in', () =>
+  it.scoped('cleans up a terminal repair retry in the workspace its repair ran in', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-cleanup-')),
-      )
-      const reloadedRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-cleanup-reloaded-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-cleanup-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('symphony-repair-cleanup-reloaded-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
@@ -3020,16 +2940,12 @@ describe('restored pull request handoffs', (): void => {
       )
 
       expect(removedFrom[0]).toBe(workspaceRoot)
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
-      yield* Effect.promise(() => rm(reloadedRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('does not dispatch a fresh repair once a repair retry finds its issue terminal', () =>
+  it.scoped('does not dispatch a fresh repair once a repair retry finds its issue terminal', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-terminal-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-terminal-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3097,15 +3013,12 @@ describe('restored pull request handoffs', (): void => {
         repairStartedHeadSha: null,
         reason: 'Repair paused because the issue is terminal.',
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('does not dispatch repairs for an idle handoff whose issue is no longer eligible', () =>
+  it.scoped('does not dispatch repairs for an idle handoff whose issue is no longer eligible', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-ineligible-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-ineligible-handoff-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const handedOffIssue = {
@@ -3155,15 +3068,12 @@ describe('restored pull request handoffs', (): void => {
         repairStartedHeadSha: null,
         reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('does not dispatch a fresh repair once a running repair finds its issue terminal', () =>
+  it.scoped('does not dispatch a fresh repair once a running repair finds its issue terminal', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-terminal-run-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-terminal-run-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3217,15 +3127,12 @@ describe('restored pull request handoffs', (): void => {
         state: 'intervention_required',
         repairAttempts: 0,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('attributes a repair head when the tracker omits the issue mid-run', () =>
+  it.scoped('attributes a repair head when the tracker omits the issue mid-run', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-missing-run-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-missing-run-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3278,15 +3185,12 @@ describe('restored pull request handoffs', (): void => {
         repairObservedHeadShas: [originalHead, repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('attributes a repair head when the tracker omits the issue from a retry refresh', () =>
+  it.scoped('attributes a repair head when the tracker omits the issue from a retry refresh', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-missing-issue-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-missing-issue-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3347,15 +3251,12 @@ describe('restored pull request handoffs', (): void => {
         repairObservedHeadShas: [originalHead, repairedHead],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('records that a refused repair dispatch never started a worker', () =>
+  it.scoped('records that a refused repair dispatch never started a worker', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-record-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3395,15 +3296,12 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: false }),
       ])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('does not escalate a refused repair when its issue becomes terminal before retry', () =>
+  it.scoped('does not escalate a refused repair when its issue becomes terminal before retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-refused-terminal-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-terminal-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3452,15 +3350,12 @@ describe('restored pull request handoffs', (): void => {
         repairWorkerStarted: false,
         reason: 'Repair paused because the issue is terminal.',
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('settles a refused repair when tracker policy rejects its refresh retry', () =>
+  it.scoped('settles a refused repair when tracker policy rejects its refresh retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-refused-refresh-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-refresh-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3537,15 +3432,12 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
       ])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('settles a refused repair when tracker policy rejects its baseline inspection', () =>
+  it.scoped('settles a refused repair when tracker policy rejects its baseline inspection', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-refused-inspection-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-inspection-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3606,15 +3498,12 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
       ])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('does not attribute a manual head to a restored repair that never ran', () =>
+  it.scoped('does not attribute a manual head to a restored repair that never ran', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-repair-restored-refused-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-restored-refused-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3677,15 +3566,12 @@ describe('restored pull request handoffs', (): void => {
         repairHeadShas: [],
         repairStartedHeadSha: manualHead,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('keeps observing a handoff that needs intervention', () =>
+  it.scoped('keeps observing a handoff that needs intervention', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-intervention-observed-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-intervention-observed-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
@@ -3768,15 +3654,12 @@ describe('restored pull request handoffs', (): void => {
       // manual merge was seen and the handoff no longer holds the issue.
       expect(inspections).toBeGreaterThan(1)
       expect(snapshot.handoffs).toEqual([])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('does not turn a continuation retry into a pull request repair', () =>
+  it.scoped('does not turn a continuation retry into a pull request repair', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-retry-isolation-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-retry-isolation-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
         ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
@@ -3844,7 +3727,6 @@ describe('restored pull request handoffs', (): void => {
         repairHeadShas: [],
         repairStartedHeadSha: null,
       })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 })
@@ -4468,11 +4350,9 @@ describe('workflow hot reload', (): void => {
     }),
   )
 
-  it.effect('reconciles a repair handoff without dispatching it during a failed tick', () =>
+  it.scoped('reconciles a repair handoff without dispatching it during a failed tick', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-invalid-repair-tick-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-invalid-repair-tick-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const initial: Workflow = {
         ...changedWorkflow({ fingerprint: 'last-known-good' }),
@@ -4541,7 +4421,6 @@ describe('workflow hot reload', (): void => {
       expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
       expect(launches).toBe(1)
       expect(observed.recoveredSnapshot.running[0]?.issueId).toBe(issue.id)
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
@@ -4985,7 +4864,7 @@ describe('rebuilt port lifecycle', (): void => {
     }),
   )
 
-  it.effect("releases a run's superseded ports when it ends, even as its handoff lives on", () =>
+  it.scoped("releases a run's superseded ports when it ends, even as its handoff lives on", () =>
     Effect.gen(function* () {
       const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
       const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
@@ -4998,9 +4877,7 @@ describe('rebuilt port lifecycle', (): void => {
         finishWorker = resolve
       })
       // An isolated root: this run really does hand off, so it reads and writes a handoff store.
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-superseded-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-superseded-handoff-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const harness = makeHarness(isolated, () => [issue], undefined, environment)
       const ports: TestPorts = {
@@ -5062,7 +4939,6 @@ describe('rebuilt port lifecycle', (): void => {
       )
 
       expect(snapshot.handoffs[0]).toMatchObject({ state: 'awaiting_checks' })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
@@ -5495,12 +5371,10 @@ describe('live agent detail', (): void => {
     }),
   )
 
-  it.effect('records handoff progress and keeps the completed record readable', () =>
+  it.scoped('records handoff progress and keeps the completed record readable', () =>
     Effect.gen(function* () {
       // A handoff is persisted, so this run gets a workspace root of its own.
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-handoff-detail-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-handoff-detail-')
       const isolated: Workflow = {
         ...workflow,
         config: { ...workflow.config, workspaceRoot },
@@ -5574,15 +5448,12 @@ describe('live agent detail', (): void => {
         detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
       ).toEqual(['pending', 'observed', 'observed', 'not_performed'])
       expect(detail.activity.stallDeadline).toBeNull()
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
-  it.effect('publishes the handoff transition before waiting on the tracker', () =>
+  it.scoped('publishes the handoff transition before waiting on the tracker', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-handoff-timing-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-handoff-timing-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
         ...makeIssue('example/symphony#19', 1, null, ['symphony', 'ready']),
@@ -5635,7 +5506,6 @@ describe('live agent detail', (): void => {
         status: 'pending',
       })
       blockHandoff = false
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
@@ -5851,11 +5721,9 @@ describe('live agent detail', (): void => {
 })
 
 describe('aged-out agent detail', (): void => {
-  it.effect('keeps reporting an evicted session as completed on later publications', () =>
+  it.scoped('keeps reporting an evicted session as completed on later publications', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-aged-out-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-aged-out-')
       const total = retainedCompletedDetails + 1
       const issues = Array.from({ length: total }, (_unused, index) => ({
         ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
@@ -5909,7 +5777,6 @@ describe('aged-out agent detail', (): void => {
       )
 
       expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 })
@@ -6235,11 +6102,9 @@ describe('session telemetry accounting', (): void => {
       }),
   )
 
-  it.effect('preserves the persisted handoff store while handoff is disabled', () =>
+  it.scoped('preserves the persisted handoff store while handoff is disabled', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-disabled-handoff-')),
-      )
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-disabled-handoff-')
       const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
       const persisted = {
         issueId: issueId('75'),
@@ -6268,7 +6133,6 @@ describe('session telemetry accounting', (): void => {
 
       expect(snapshot.handoffs).toEqual([])
       expect(yield* loadHandoffs(storePath)).toEqual([persisted])
-      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
     }),
   )
 
