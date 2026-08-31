@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, type JsonObject } from '../src/domain/domain.js'
 import { makeGitHubTracker } from '../src/adapters/github/issues.js'
-import type { GitHubProviderConfig } from '../src/config/tracker-config.js'
+import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

@@ -1,6 +1,13 @@
-import type { JsonObject, JsonValue } from '../domain/domain.js'
-import { resolveSecretReference } from './env-reference.js'
-import { WorkflowError } from '../errors.js'
+import {
+  registerTrackerProvider,
+  trackerProviderOf,
+  type RegisteredTrackerProvider,
+  type TrackerProviderAdapter,
+  type ValidatedTrackerProvider,
+} from '../../domain/tracker-provider.js'
+import type { JsonObject, JsonValue } from '../../domain/domain.js'
+import { resolveSecretReference } from '../../config/env-reference.js'
+import { WorkflowError } from '../../errors.js'
 
 export type GitHubProviderConfig = Readonly<{
   owner: string
@@ -10,14 +17,6 @@ export type GitHubProviderConfig = Readonly<{
   apiBaseUrl: string
   baseBranch: string
 }>
-
-/** Result of handing `tracker.provider` to the adapter selected by `tracker.kind`. */
-export type ValidatedTrackerProvider = Readonly<{
-  kind: 'github'
-  provider: GitHubProviderConfig
-}>
-
-export const supportedTrackerKinds = ['github'] as const
 
 /**
  * GitHub authentication fallbacks. The host removes these from Codex subprocess environments
@@ -29,6 +28,15 @@ export const githubProviderDefaults = Object.freeze({
   apiBaseUrl: 'https://api.github.com',
   baseBranch: 'main',
 })
+
+const providerFields = [
+  'owner',
+  'repository',
+  'token',
+  'tokenEnvironmentName',
+  'apiBaseUrl',
+  'baseBranch',
+] as const
 
 const invalid = (message: string): WorkflowError =>
   new WorkflowError({ category: 'invalid_config', message })
@@ -95,28 +103,35 @@ export const validateGitHubProvider = (
   }
 }
 
-/** Structural equality for a validated selection, used to detect a rotated credential. */
-export const sameTrackerProvider = (
-  left: ValidatedTrackerProvider,
-  right: ValidatedTrackerProvider,
-): boolean =>
-  left.kind === right.kind &&
-  left.provider.owner === right.provider.owner &&
-  left.provider.repository === right.provider.repository &&
-  left.provider.token === right.provider.token &&
-  left.provider.tokenEnvironmentName === right.provider.tokenEnvironmentName &&
-  left.provider.apiBaseUrl === right.provider.apiBaseUrl &&
-  left.provider.baseBranch === right.provider.baseBranch
-
-export const validateTrackerProvider = (
-  kind: string,
-  provider: JsonObject,
-  environment: NodeJS.ProcessEnv,
-): ValidatedTrackerProvider => {
-  if (kind !== 'github') {
-    throw invalid(
-      `unsupported tracker.kind: ${kind} (supported: ${supportedTrackerKinds.join(', ')})`,
-    )
+const isGitHubProviderConfig = (value: unknown): value is GitHubProviderConfig => {
+  if (typeof value !== 'object' || value === null) {
+    return false
   }
-  return { kind: 'github', provider: validateGitHubProvider(provider, environment) }
+  const candidate = value as Record<string, unknown>
+  return providerFields.every((field) => typeof candidate[field] === 'string')
 }
+
+const sameGitHubProvider = (left: GitHubProviderConfig, right: GitHubProviderConfig): boolean =>
+  providerFields.every((field) => left[field] === right[field])
+
+/** The token's own variable name plus the fallbacks GitHub tooling reads without being told to. */
+export const githubSecretEnvironmentNames = (provider: GitHubProviderConfig): readonly string[] => [
+  ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
+]
+
+const githubTrackerProviderAdapter: TrackerProviderAdapter<GitHubProviderConfig> = {
+  kind: 'github',
+  validate: validateGitHubProvider,
+  isProvider: isGitHubProviderConfig,
+  same: sameGitHubProvider,
+  secretEnvironmentNames: githubSecretEnvironmentNames,
+}
+
+/** The registry entry: registering this is all it takes for a build to support `kind: github`. */
+export const githubTrackerProvider: RegisteredTrackerProvider = registerTrackerProvider(
+  githubTrackerProviderAdapter,
+)
+
+/** Reads the GitHub configuration back out of a validated selection. */
+export const githubProviderOf = (selection: ValidatedTrackerProvider): GitHubProviderConfig =>
+  trackerProviderOf(githubTrackerProviderAdapter, selection)

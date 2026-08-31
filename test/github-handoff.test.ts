@@ -6,7 +6,7 @@ import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
 import { classifyPullRequest } from '../src/domain/handoff.js'
 import { makeGitHubCodeReview } from '../src/adapters/github/code-review.js'
 import { issueBranchName } from '../src/domain/handoff.js'
-import type { GitHubProviderConfig } from '../src/config/workflow.js'
+import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

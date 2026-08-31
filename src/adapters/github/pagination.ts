@@ -2,7 +2,7 @@ import { Effect } from 'effect'
 
 import type { JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
-import type { GitHubProviderConfig } from '../../config/tracker-config.js'
+import type { GitHubProviderConfig } from './provider.js'
 import {
   githubJson,
   githubMaxPages,

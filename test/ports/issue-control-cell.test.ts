@@ -11,18 +11,9 @@ import {
   type IssueControlFactoryPort,
   type IssueControlPort,
 } from '../../src/ports/index.js'
+import { stubProvider, stubProviderToken } from '../harness/stub-tracker-provider.js'
 
-const provider = (token: string): ValidatedTrackerProvider => ({
-  kind: 'github',
-  provider: {
-    owner: 'example',
-    repository: 'symphony',
-    token,
-    tokenEnvironmentName: 'GITHUB_TOKEN',
-    apiBaseUrl: 'https://api.github.com',
-    baseBranch: 'main',
-  },
-})
+const provider = (token: string): ValidatedTrackerProvider => stubProvider(token)
 
 const stub: IssueControlPort = {
   listOpenIssues: () => Effect.succeed([]),
@@ -46,10 +37,10 @@ describe('issue-control cell', (): void => {
     const factory: IssueControlFactoryPort = {
       make: (candidate) =>
         Effect.sync((): IssueControlPort => {
-          tokens.push(candidate.provider.token)
+          tokens.push(stubProviderToken(candidate))
           return { ...stub }
         }),
-      serves: (left, right) => left.provider.token === right.provider.token,
+      serves: (left, right) => stubProviderToken(left) === stubProviderToken(right),
     }
 
     const instances = await withCell(
