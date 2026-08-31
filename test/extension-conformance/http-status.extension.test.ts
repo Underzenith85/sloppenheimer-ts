@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import { parseCliArguments } from '../../src/config/cli-options.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '../../src/orchestrator.js'
+import type { OrchestratorSnapshot } from '../../src/core/orchestrator.js'
 import { startOperatorServer } from '../../src/operator/server.js'
 
 const snapshot: OrchestratorSnapshot = {

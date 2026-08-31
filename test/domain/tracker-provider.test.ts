@@ -68,19 +68,18 @@ describe('tracker provider registry', (): void => {
   })
 
   it('revalidates through the adapter that produced the selection', (): void => {
-    const validated = stubTrackerProviders.validate(
-      'stub',
-      { token: 'STUB_TRACKER_TOKEN' },
-      { STUB_TRACKER_TOKEN: 'secret' },
-    )
+    const authored = { token: 'STUB_TRACKER_TOKEN' }
+    const validated = stubTrackerProviders.validate('stub', authored, {
+      STUB_TRACKER_TOKEN: 'secret',
+    })
 
-    const rotated = validated.revalidate({ STUB_TRACKER_TOKEN: 'rotated' })
+    const rotated = validated.revalidate(authored, { STUB_TRACKER_TOKEN: 'rotated' })
 
     expect(rotated.kind).toBe('stub')
     expect(stubProviderToken(rotated)).toBe('rotated')
     expect(sameTrackerProvider(rotated, validated)).toBe(false)
     expect(
-      sameTrackerProvider(rotated.revalidate({ STUB_TRACKER_TOKEN: 'rotated' }), rotated),
+      sameTrackerProvider(rotated.revalidate(authored, { STUB_TRACKER_TOKEN: 'rotated' }), rotated),
     ).toBe(true)
   })
 

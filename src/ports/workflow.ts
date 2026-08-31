@@ -1,11 +1,20 @@
 import { Context, Layer, type Effect, type Scope } from 'effect'
 
+import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
 import type { WorkflowError } from '../errors.js'
 
-/** Reads and validates the workflow definition at a path. */
+/**
+ * Reads and validates the workflow definition at a path, and re-validates a definition already in
+ * force against the host environment.
+ *
+ * `preflight` belongs here rather than in the orchestrator because it is the environment that makes
+ * a validated provider go stale: the composition root binds the environment the credentials are
+ * read from, and the orchestrator only reacts to a provider that came back different.
+ */
 export type WorkflowLoaderPort = Readonly<{
   load: (path: string) => Effect.Effect<Workflow, WorkflowError>
+  preflight: (workflow: Workflow) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
 }>
 
 export class WorkflowLoader extends Context.Tag('symphony/WorkflowLoader')<

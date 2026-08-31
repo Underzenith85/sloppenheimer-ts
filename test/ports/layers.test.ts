@@ -10,6 +10,7 @@ import {
   codeReview,
   CodeReviewFactory,
   layerAgentRunner,
+  layerCodeReviewPorts,
   layerPorts,
   layerWorkflowLoader,
   layerWorkflowWatcher,
@@ -56,12 +57,14 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   }),
   layerAgentRunner({
     run: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+    semantics: { turnOutcome: () => 'completed' },
   }),
   layerWorkflowLoader({
     load: (path) =>
       Effect.fail(
         new WorkflowError({ category: 'missing_workflow_file', message: `no workflow: ${path}` }),
       ),
+    preflight: () => Effect.succeed(validated),
   }),
   layerWorkflowWatcher({ watch: () => Effect.void }),
 )
@@ -72,7 +75,6 @@ describe('port layer composition', (): void => {
       Effect.scoped(
         Effect.gen(function* () {
           const currentTracker = yield* tracker
-          const currentCodeReview = yield* codeReview
           const currentWorkspaces = yield* workspaces
           const runner = yield* AgentRunner
           const loader = yield* WorkflowLoader
@@ -118,7 +120,6 @@ describe('port layer composition', (): void => {
           const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
           return {
             secretEnvironmentNames: currentTracker.secretEnvironmentNames,
-            codeReview: currentCodeReview,
             workspacePath: workspace.path,
             threadId: result.threadId,
             loadFailed,
@@ -135,10 +136,26 @@ describe('port layer composition', (): void => {
     )
 
     expect(resolved.secretEnvironmentNames).toEqual(['GITHUB_TOKEN'])
-    expect(resolved.codeReview).toBeNull()
     expect(resolved.workspacePath).toBe('/workspaces')
     expect(resolved.threadId).toBe('thread')
     expect(resolved.loadFailed).toBe(true)
+  })
+
+  it('reports the absence marker as a provider that supplies no code review', async (): Promise<void> => {
+    const absent = await Effect.runPromise(
+      Effect.scoped(
+        codeReview.pipe(
+          Effect.provide(
+            layerCodeReviewPorts({
+              tracker: validated,
+              workspaces: { root: '/workspaces', hooks },
+            }),
+          ),
+        ),
+      ),
+    )
+
+    expect(absent).toBeNull()
   })
 
   it('keeps a supplied code-review factory in place of the absence marker', async (): Promise<void> => {
@@ -146,9 +163,8 @@ describe('port layer composition', (): void => {
       Effect.scoped(
         codeReview.pipe(
           Effect.provide(
-            layerPorts(
+            layerCodeReviewPorts(
               { tracker: validated, workspaces: { root: '/workspaces', hooks } },
-              adapters,
               Layer.succeed(CodeReviewFactory, {
                 make: () =>
                   Effect.succeed({

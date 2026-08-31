@@ -20,11 +20,12 @@ export type ValidatedTrackerProvider = Readonly<{
    */
   sameAs: (other: ValidatedTrackerProvider) => boolean
   /**
-   * Re-runs the same adapter's validation over the same authored `tracker.provider`, against a
-   * fresh environment. The selection carries the adapter that produced it, so a revalidation
-   * cannot drift to a different registry than the one the workflow was loaded with.
+   * Re-validates `tracker.provider` as it stands now, against the environment as it stands now.
+   *
+   * The adapter comes from this selection rather than from a registry looked up again by kind, so
+   * a revalidation cannot drift to a different registry than the one the workflow was loaded with.
    */
-  revalidate: (environment: NodeJS.ProcessEnv) => ValidatedTrackerProvider
+  revalidate: (provider: JsonObject, environment: NodeJS.ProcessEnv) => ValidatedTrackerProvider
 }>
 
 /**
@@ -54,7 +55,6 @@ export type RegisteredTrackerProvider = Readonly<{
 
 const validatedSelection = <Provider>(
   adapter: TrackerProviderAdapter<Provider>,
-  authored: JsonObject,
   provider: Provider,
 ): ValidatedTrackerProvider =>
   Object.freeze({
@@ -65,8 +65,8 @@ const validatedSelection = <Provider>(
       other.kind === adapter.kind &&
       adapter.isProvider(other.provider) &&
       adapter.same(provider, other.provider),
-    revalidate: (environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
-      validatedSelection(adapter, authored, adapter.validate(authored, environment)),
+    revalidate: (authored: JsonObject, environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
+      validatedSelection(adapter, adapter.validate(authored, environment)),
   })
 
 /**
@@ -79,7 +79,7 @@ export const registerTrackerProvider = <Provider>(
   Object.freeze({
     kind: adapter.kind,
     validate: (provider: JsonObject, environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
-      validatedSelection(adapter, provider, adapter.validate(provider, environment)),
+      validatedSelection(adapter, adapter.validate(provider, environment)),
   })
 
 /** The tracker kinds a build supports, and the validation each one owns. */

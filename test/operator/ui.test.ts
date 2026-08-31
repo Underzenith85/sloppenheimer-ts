@@ -2,7 +2,7 @@ import { Window, type HTMLButtonElement, type HTMLInputElement } from 'happy-dom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
-import type { OrchestratorSnapshot } from '../../src/orchestrator.js'
+import type { OrchestratorSnapshot } from '../../src/core/orchestrator.js'
 import {
   buildAgentDetail,
   timelineCategories,

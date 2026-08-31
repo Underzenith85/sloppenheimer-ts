@@ -5,7 +5,7 @@ import {
   runOrchestratorRuntime,
   startOrchestratorRuntime,
   type OrchestratorControl,
-  type OrchestratorDependencies,
+  type OrchestratorServices,
 } from './runtime.js'
 
 export {
@@ -14,22 +14,21 @@ export {
   retryDelayMs,
   sortIssues,
   type AgentDetailLookup,
-  type OrchestratorControl,
   type OrchestratorContext,
-  type OrchestratorDependencies,
+  type OrchestratorControl,
+  type OrchestratorServices,
   type OrchestratorSnapshot,
   type RetrySnapshot,
   type RunningSnapshot,
-  type WorkflowWatcher,
+  type RuntimePorts,
 } from './runtime.js'
 
 export const startOrchestrator = (
   selectedWorkflowPath: string,
-  dependencies: OrchestratorDependencies,
-): Effect.Effect<OrchestratorControl, WorkflowError, Scope.Scope> =>
-  startOrchestratorRuntime(selectedWorkflowPath, dependencies)
+): Effect.Effect<OrchestratorControl, WorkflowError, OrchestratorServices | Scope.Scope> =>
+  startOrchestratorRuntime(selectedWorkflowPath)
 
 export const runOrchestrator = (
   selectedWorkflowPath: string,
-  dependencies: OrchestratorDependencies,
-): Effect.Effect<void, WorkflowError> => runOrchestratorRuntime(selectedWorkflowPath, dependencies)
+): Effect.Effect<void, WorkflowError, OrchestratorServices> =>
+  runOrchestratorRuntime(selectedWorkflowPath)

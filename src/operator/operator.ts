@@ -10,7 +10,7 @@ import type {
   AgentDetailLookup,
   OrchestratorControl,
   OrchestratorSnapshot,
-} from '../orchestrator.js'
+} from '../core/orchestrator.js'
 import { CurrentIssueControl, type IssueControlPort } from '../ports/issue-control.js'
 import { TrackerError, WorkflowError } from '../errors.js'
 import { loadWorkflow, type Workflow } from '../config/workflow.js'

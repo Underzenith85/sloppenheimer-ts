@@ -519,10 +519,11 @@ const splitWorkflow = (source: string): Readonly<{ config: unknown; prompt: stri
  * Re-runs the validation that must hold before every dispatch: an adapter-accepted
  * `tracker.provider` (including its secret indirection) and a usable `codex.command`.
  *
- * The selection revalidates itself rather than being looked up again by kind, so a workflow loaded
- * with a caller's own registry keeps revalidating through that registry's adapter. Routing this
- * through a default registry instead would report every kind the default does not carry as
- * unsupported, and the run would silently keep its superseded credential.
+ * The provider is re-read from the workflow, so an edit to `tracker.provider` takes effect; the
+ * adapter that validates it comes from the selection rather than from a registry looked up again by
+ * kind. A workflow loaded with a caller's own registry therefore keeps revalidating through that
+ * registry's adapter: routing this through a default registry instead would report every kind the
+ * default does not carry as unsupported, and the run would silently keep its superseded credential.
  */
 export const preflightWorkflow = (
   workflow: Workflow,
@@ -536,7 +537,7 @@ export const preflightWorkflow = (
           message: 'codex.command must be a non-empty string',
         })
       }
-      return workflow.tracker.revalidate(environment)
+      return workflow.tracker.revalidate(workflow.config.tracker.provider, environment)
     },
     catch: (cause: unknown) =>
       cause instanceof WorkflowError

@@ -10,10 +10,12 @@ import { dispatch } from './dispatch.js'
 import { hydrateRestoredHandoffs, reconcileHandoffs } from './handoff-reconciliation.js'
 import type { OrchestratorContext } from './runtime.js'
 import { publishDetails } from './snapshot.js'
-import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
+import { adoptPorts, drainRetirements, revalidateCredentials } from './workflow-reload.js'
 
 export const poll = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
+    // A worker that ended since the last pass may have been the last holder of a replaced instance.
+    yield* drainRetirements(context)
     const revalidated = yield* revalidateCredentials(context, context.lastKnownGood).pipe(
       Effect.match({
         onFailure: (error) => ({ _tag: 'Failed' as const, error }),
@@ -28,7 +30,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
     } else if (revalidated.value !== context.lastKnownGood) {
       const previous = context.lastKnownGood
       context.lastKnownGood = revalidated.value
-      adoptPorts(context, previous, revalidated.value)
+      yield* adoptPorts(context, previous, revalidated.value)
       yield* logInfo('tracker credential refreshed from the environment', {
         tracker_kind: revalidated.value.workflow.tracker.kind,
         secret_environment_names:
@@ -39,7 +41,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
     yield* context.recoverMissingHandoffsEffect()
     yield* reconcileHandoffs(context)
     yield* context.reconcileEffect()
-    const reloaded = yield* context.dependencies.loadWorkflow(context.selectedWorkflowPath).pipe(
+    const reloaded = yield* context.ports.workflowLoader.load(context.selectedWorkflowPath).pipe(
       Effect.matchEffect({
         onFailure: (error) => {
           context.workflowReloadError = { message: error.message, observedAt: new Date() }
@@ -72,7 +74,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         } else {
           const previous = context.lastKnownGood
           context.lastKnownGood = configured.value
-          adoptPorts(context, previous, configured.value)
+          yield* adoptPorts(context, previous, configured.value)
           yield* logInfo('workflow reloaded', {
             path: reloaded.path,
             fingerprint: reloaded.fingerprint,
