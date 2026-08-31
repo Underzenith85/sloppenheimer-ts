@@ -246,11 +246,9 @@ describe('operator server', (): void => {
       })
       expect(await detail.json()).toMatchObject({
         issue_identifier: 'example/symphony#17',
-        running: {
-          issue_identifier: 'example/symphony#17',
-          detail_url: '/api/v1/agents/example%2Fsymphony%2317',
-        },
-        retrying: null,
+        status: 'running',
+        detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+        retry: null,
       })
       const source = await script.text()
       expect(source).toContain("'graph-node state-' + statusClass(status)")
@@ -337,6 +335,77 @@ describe('operator server', (): void => {
         expect(longIdentifier.status).toBe(200)
         expect(wrongMethod.status).toBe(405)
       }),
+  )
+
+  it.live('serves the SPEC per-issue baseline for every issue in-memory state knows', () =>
+    withServer(makeBackend(), async (url) => {
+      const detailFor = (identifier: string): Promise<Response> =>
+        fetch(`${url}/api/v1/${encodeURIComponent(identifier)}`)
+      const running = await detailFor('example/symphony#17')
+      // The issue has left the agent for the pull-request lifecycle. It is as known to this host as
+      // a running one, and used to be reported as absent.
+      const handedOff = await detailFor('example/symphony#9')
+      const retrying = await detailFor('example/symphony#18')
+      const completed = await detailFor('example/symphony#19')
+      const starting = await detailFor('example/symphony#21')
+      const unknown = await detailFor('example/symphony#99')
+      const wrongMethod = await fetch(
+        `${url}/api/v1/${encodeURIComponent('example/symphony#17')}`,
+        { method: 'POST' },
+      )
+
+      expect(running.status).toBe(200)
+      expect(await running.json()).toMatchObject({
+        self: '/api/v1/example%2Fsymphony%2317',
+        issue_id: '17',
+        issue_identifier: 'example/symphony#17',
+        issue_url: 'https://github.com/example/symphony/issues/17',
+        title: 'Operator console',
+        status: 'running',
+        tracked: true,
+        workspace: { path: 'example_symphony_17' },
+        attempts: { restart_count: 0, current_retry_attempt: 0 },
+        running: {
+          started_at: '2026-08-29T11:59:00.000Z',
+          elapsed_ms: 60_000,
+          phase: 'running_command',
+          operation: 'Running pnpm',
+          session_id: 'thread-1:turn-1',
+          process_id: 42,
+          worker_host: 'local',
+          stalled: false,
+          tokens: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        },
+        retry: null,
+        logs: { retained: 1, dropped: 0, limit: 200, published: 1 },
+        recent_events: [{ sequence: 1, category: 'command', attempt: 0 }],
+        last_error: null,
+        detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+      })
+
+      expect(handedOff.status).toBe(200)
+      expect(await handedOff.json()).toMatchObject({
+        issue_identifier: 'example/symphony#9',
+        status: 'handoff',
+        tracked: true,
+        running: null,
+        workspace: { path: null },
+        logs: { retained: 0, dropped: 0, published: 0 },
+        recent_events: [],
+      })
+
+      expect(await retrying.json()).toMatchObject({ status: 'retrying', tracked: true })
+      // Retained history rather than live work: the session finished and aged out of retention.
+      expect(await completed.json()).toMatchObject({ status: 'completed', tracked: false })
+      expect(await starting.json()).toMatchObject({ status: 'starting', tracked: true })
+      expect(unknown.status).toBe(404)
+      expect(await unknown.json()).toMatchObject({
+        version: 'v1',
+        error: { code: 'issue_not_found' },
+      })
+      expect(wrongMethod.status).toBe(405)
+      expect(wrongMethod.headers.get('allow')).toBe('GET')
+    }),
   )
 
   it.live('acknowledges a refresh with what the request amounted to', () =>

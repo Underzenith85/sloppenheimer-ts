@@ -9,7 +9,7 @@ import { Cause, Effect, type Scope } from 'effect'
 
 import { ServerError } from '@symphony/core/domain/errors.js'
 import { logError } from '@symphony/core/support/logging.js'
-import { publishRefresh, publishRetrying, publishRunning, publishState } from './api.js'
+import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
 
@@ -84,6 +84,17 @@ const backendFailure = errorResponse(
 )
 
 const notFound = errorResponse(404, 'not_found', 'The requested endpoint does not exist')
+
+/**
+ * SPEC 13.7.2 reserves this for an issue unknown to the current in-memory state. Everything the
+ * runtime still knows resolves instead, including work that has moved on to the pull-request
+ * handoff lifecycle.
+ */
+const unknownIssue = errorResponse(
+  404,
+  'issue_not_found',
+  'That identifier is not known to this host',
+)
 
 const runBackend = <Value>(
   operation: Effect.Effect<Value, OperatorBackendError>,
@@ -247,23 +258,21 @@ const makeRouter = (
       '/api/v1/:identifier',
       withMethod(
         'GET',
-        Effect.flatMap(HttpRouter.params, (params) =>
-          Effect.flatMap(runBackend(backend.snapshot), (result) => {
+        Effect.flatMap(HttpRouter.params, (params) => {
+          const identifier = params['identifier'] ?? ''
+          if (!isIssueIdentifier(identifier)) {
+            return unknownIssue
+          }
+          return Effect.flatMap(runBackend(backend.snapshot), (result) => {
             if (HttpServerResponse.isServerResponse(result)) {
               return result
             }
-            const identifier = params['identifier'] ?? ''
-            const running = result.running.find((entry) => entry.identifier === identifier)
-            const retrying = result.retrying.find((entry) => entry.identifier === identifier)
-            return running === undefined && retrying === undefined
-              ? errorResponse(404, 'issue_not_found', 'No live work has that identifier')
-              : json(200, {
-                  issue_identifier: identifier,
-                  running: running === undefined ? null : publishRunning(running),
-                  retrying: retrying === undefined ? null : publishRetrying(retrying),
-                })
-          }),
-        ),
+            return Effect.map(backend.agentDetail(identifier), (lookup) => {
+              const detail = publishIssueDetail(identifier, result, lookup)
+              return detail === null ? unknownIssue : json(200, detail)
+            })
+          })
+        }),
       ),
     ),
   )

@@ -30,7 +30,19 @@ const snapshot: OrchestratorSnapshot = {
   saturatedStates: [],
   inspectableAgents: [],
   pausedIssueNumbers: [],
-  handoffs: [],
+  handoffs: [
+    {
+      issueId: '31',
+      identifier: 'example/symphony#31',
+      pullRequestUrl: 'https://example.test/pull/62',
+      branchName: 'symphony/issue-31',
+      state: 'awaiting_checks',
+      headSha: null,
+      reason: null,
+      repairAttempts: 0,
+      observedAt: '2026-08-29T00:00:00.000Z',
+    },
+  ],
   running: [
     {
       issueId: issueId('17'),
@@ -153,6 +165,48 @@ describe('Extension Conformance: HTTP status surface', (): void => {
       expect(payload['totals']).toBeUndefined()
       const [running] = payload['running'] as readonly Record<string, unknown>[]
       expect(Object.keys(running ?? {})).not.toContain('identifier')
+    }),
+  )
+
+  it.scopedLive('publishes the per-issue baseline for every issue in-memory state knows', () =>
+    Effect.gen(function* () {
+      const server = yield* startOperatorServer(0, backend)
+      const detailFor = (identifier: string): Promise<Response> =>
+        fetch(`${server.url}/api/v1/${encodeURIComponent(identifier)}`)
+
+      // Handed-off work has no agent session behind it, and is still known to this host.
+      const handedOff = yield* Effect.promise(() => detailFor('example/symphony#31'))
+      expect(handedOff.status).toBe(200)
+      expect(yield* Effect.promise(() => handedOff.json())).toMatchObject({
+        self: '/api/v1/example%2Fsymphony%2331',
+        issue_identifier: 'example/symphony#31',
+        issue_id: '31',
+        status: 'handoff',
+        tracked: true,
+        workspace: { path: null },
+        attempts: { restart_count: 0, current_retry_attempt: 0 },
+        running: null,
+        retry: null,
+        logs: { retained: 0, dropped: 0, limit: 200, published: 0 },
+        recent_events: [],
+        last_error: null,
+        detail_url: '/api/v1/agents/example%2Fsymphony%2331',
+      })
+
+      // The running row stands in where the actor has published no detail record.
+      const running = yield* Effect.promise(() => detailFor('example/symphony#17'))
+      expect(yield* Effect.promise(() => running.json())).toMatchObject({
+        status: 'running',
+        tracked: true,
+        running: { session_id: 'thread-1-turn-1', tokens: { total_tokens: 20 } },
+      })
+
+      const unknown = yield* Effect.promise(() => detailFor('example/symphony#404'))
+      expect(unknown.status).toBe(404)
+      expect(yield* Effect.promise(() => unknown.json())).toMatchObject({
+        version: 'v1',
+        error: { code: 'issue_not_found' },
+      })
     }),
   )
 
