@@ -1,15 +1,16 @@
+import { Either, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '../../src/domain/domain.js'
 import {
-  assertResolvedWithinRoot,
-  assertVerifiedDirectory,
-  assertVerifiedHandle,
-  assertVerifiedRoot,
   containedWorkspacePath,
   declaredWorkspacePath,
   isStrictDescendant,
+  resolvedWithinRootRejection,
   sameDirectoryIdentity,
+  verifiedDirectoryRejection,
+  verifiedHandleRejection,
+  verifiedRootRejection,
   workspaceKey,
   type VerifiedWorkspace,
 } from '../../src/domain/workspace-containment.js'
@@ -33,17 +34,30 @@ const verified: VerifiedWorkspace = {
   inode: 4242,
 }
 
-const rejection = (act: () => unknown): WorkspaceError => {
-  let caught: unknown
-  try {
-    act()
-  } catch (cause: unknown) {
-    caught = cause
-  }
-  expect(caught).toBeInstanceOf(WorkspaceError)
-  const error = caught as WorkspaceError
+/**
+ * Every rule returns its rejection rather than throwing it, so a rejection is read out of the
+ * value: the left of an `Either` for a rule that produces a path, and the `some` of an `Option`
+ * for a rule that only decides.
+ */
+const pathRejection = (result: Either.Either<unknown, WorkspaceError>): WorkspaceError => {
+  expect(Either.isLeft(result)).toBe(true)
+  const error = Option.getOrThrow(Either.getLeft(result))
+  expect(error).toBeInstanceOf(WorkspaceError)
   expect(error.category).toBe('invalid_path')
   return error
+}
+
+const rejection = (result: Option.Option<WorkspaceError>): WorkspaceError => {
+  expect(Option.isSome(result)).toBe(true)
+  const error = Option.getOrThrow(result)
+  expect(error).toBeInstanceOf(WorkspaceError)
+  expect(error.category).toBe('invalid_path')
+  return error
+}
+
+const accepted = <Value>(result: Either.Either<Value, WorkspaceError>): Value => {
+  expect(Either.isRight(result)).toBe(true)
+  return Either.getOrThrow(result)
 }
 
 describe('workspace keys', (): void => {
@@ -68,7 +82,7 @@ describe('workspace keys', (): void => {
 
   it('keeps a hostile identifier inside the root once it has been sanitized', (): void => {
     for (const identifier of ['../..', '/etc/passwd', '../../escape', '~/elsewhere', 'a/../..']) {
-      const path = containedWorkspacePath(root, workspaceKey(issueIdentifier(identifier)))
+      const path = accepted(containedWorkspacePath(root, workspaceKey(issueIdentifier(identifier))))
       expect(isStrictDescendant(root, path)).toBe(true)
     }
   })
@@ -79,28 +93,28 @@ describe('workspace keys', (): void => {
     expect(workspaceKey(issueIdentifier('..'))).toBe('..')
     expect(workspaceKey(issueIdentifier('.'))).toBe('.')
     for (const identifier of ['..', '.']) {
-      rejection(() => containedWorkspacePath(root, workspaceKey(issueIdentifier(identifier))))
+      pathRejection(containedWorkspacePath(root, workspaceKey(issueIdentifier(identifier))))
     }
   })
 })
 
 describe('workspace path containment', (): void => {
   it('accepts a key that resolves to a directory inside the root', (): void => {
-    expect(containedWorkspacePath(root, 'GH-7')).toBe(`${root}/GH-7`)
-    expect(containedWorkspacePath('/srv/symphony/../symphony/workspaces', 'GH-7')).toBe(
+    expect(accepted(containedWorkspacePath(root, 'GH-7'))).toBe(`${root}/GH-7`)
+    expect(accepted(containedWorkspacePath('/srv/symphony/../symphony/workspaces', 'GH-7'))).toBe(
       `${root}/GH-7`,
     )
   })
 
   it('rejects a key that escapes or equals the root', (): void => {
     for (const key of ['..', '.', '', './', '../sibling', 'nested/../..', '/etc/passwd']) {
-      const error = rejection(() => containedWorkspacePath(root, key))
+      const error = pathRejection(containedWorkspacePath(root, key))
       expect(error.message).toMatch(/^workspace path escapes or equals root: /u)
     }
   })
 
   it('treats a nested key as contained', (): void => {
-    expect(containedWorkspacePath(root, 'a/b')).toBe(`${root}/a/b`)
+    expect(accepted(containedWorkspacePath(root, 'a/b'))).toBe(`${root}/a/b`)
   })
 })
 
@@ -121,13 +135,15 @@ describe('strict descendancy', (): void => {
 describe('launch verification path reasoning', (): void => {
   it('normalizes the root and the declared path before any probe', (): void => {
     expect(
-      declaredWorkspacePath('/srv/symphony/../symphony/workspaces', workspaceAt(`${root}/GH-7`)),
+      accepted(
+        declaredWorkspacePath('/srv/symphony/../symphony/workspaces', workspaceAt(`${root}/GH-7`)),
+      ),
     ).toEqual({ normalizedRoot: root, declaredPath: `${root}/GH-7` })
   })
 
   it('rejects a declared path that is not a strict descendant of the root', (): void => {
     for (const path of [root, '/srv/symphony', '/elsewhere/GH-7', `${root}/../escape`]) {
-      const error = rejection(() => declaredWorkspacePath(root, workspaceAt(path)))
+      const error = pathRejection(declaredWorkspacePath(root, workspaceAt(path)))
       expect(error.message).toMatch(
         /^workspace path is not a strict descendant of the configured root: /u,
       )
@@ -135,12 +151,8 @@ describe('launch verification path reasoning', (): void => {
   })
 
   it('rejects a resolved path that leaves the canonical root', (): void => {
-    expect(() => {
-      assertResolvedWithinRoot(root, `${root}/GH-7`)
-    }).not.toThrow()
-    const error = rejection(() => {
-      assertResolvedWithinRoot(root, '/elsewhere/GH-7')
-    })
+    expect(resolvedWithinRootRejection(root, `${root}/GH-7`)).toStrictEqual(Option.none())
+    const error = rejection(resolvedWithinRootRejection(root, '/elsewhere/GH-7'))
     expect(error.message).toBe(
       'resolved workspace path escapes the configured root: /elsewhere/GH-7',
     )
@@ -149,23 +161,17 @@ describe('launch verification path reasoning', (): void => {
 
 describe('identity rebinding rules', (): void => {
   it('accepts the root and path captured at verification', (): void => {
-    expect(() => {
-      assertVerifiedRoot(verified, root)
-    }).not.toThrow()
+    expect(verifiedRootRejection(verified, root)).toStrictEqual(Option.none())
   })
 
   it('rejects a root that canonically resolves elsewhere now', (): void => {
-    const error = rejection(() => {
-      assertVerifiedRoot(verified, '/srv/symphony/moved')
-    })
+    const error = rejection(verifiedRootRejection(verified, '/srv/symphony/moved'))
     expect(error.message).toBe(`configured workspace root changed since verification: ${root}`)
   })
 
   it('rejects a verified path that no longer descends from the root', (): void => {
     const escaped: VerifiedWorkspace = { ...verified, path: '/elsewhere/issue-13', rootPath: root }
-    const error = rejection(() => {
-      assertVerifiedRoot(escaped, root)
-    })
+    const error = rejection(verifiedRootRejection(escaped, root))
     expect(error.message).toBe(
       'verified workspace path no longer descends from the root: /elsewhere/issue-13',
     )
@@ -173,18 +179,16 @@ describe('identity rebinding rules', (): void => {
 
   it('requires the path, device, and inode to all still match', (): void => {
     const identity = { deviceId: verified.deviceId, inode: verified.inode }
-    expect(() => {
-      assertVerifiedDirectory(verified, verified.path, identity)
-    }).not.toThrow()
+    expect(verifiedDirectoryRejection(verified, verified.path, identity)).toStrictEqual(
+      Option.none(),
+    )
 
     for (const [path, current] of [
       [`${root}/issue-13-renamed`, identity],
       [verified.path, { deviceId: 67, inode: verified.inode }],
       [verified.path, { deviceId: verified.deviceId, inode: 4243 }],
     ] as const) {
-      const error = rejection(() => {
-        assertVerifiedDirectory(verified, path, current)
-      })
+      const error = rejection(verifiedDirectoryRejection(verified, path, current))
       expect(error.message).toBe(
         `workspace directory identity changed since verification: ${verified.path}`,
       )
@@ -196,12 +200,10 @@ describe('identity rebinding rules', (): void => {
     expect(sameDirectoryIdentity(verified, { deviceId: 66, inode: 4243 })).toBe(false)
     expect(sameDirectoryIdentity(verified, { deviceId: 67, inode: 4242 })).toBe(false)
 
-    expect(() => {
-      assertVerifiedHandle(verified, { deviceId: 66, inode: 4242 })
-    }).not.toThrow()
-    const error = rejection(() => {
-      assertVerifiedHandle(verified, { deviceId: 66, inode: 4243 })
-    })
+    expect(verifiedHandleRejection(verified, { deviceId: 66, inode: 4242 })).toStrictEqual(
+      Option.none(),
+    )
+    const error = rejection(verifiedHandleRejection(verified, { deviceId: 66, inode: 4243 }))
     expect(error.message).toBe(
       `workspace handle does not refer to the verified directory: ${verified.path}`,
     )

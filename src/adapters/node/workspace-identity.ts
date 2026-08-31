@@ -4,12 +4,12 @@ import { Effect, Option, type Scope } from 'effect'
 
 import type { Workspace } from '../../domain/domain.js'
 import {
-  assertResolvedWithinRoot,
-  assertVerifiedDirectory,
-  assertVerifiedHandle,
-  assertVerifiedRoot,
   declaredWorkspacePath,
   rejectWorkspace,
+  resolvedWithinRootRejection,
+  verifiedDirectoryRejection,
+  verifiedHandleRejection,
+  verifiedRootRejection,
   type DirectoryIdentity,
   type VerifiedWorkspace,
 } from '../../domain/workspace-containment.js'
@@ -24,22 +24,27 @@ import { isSymbolicLink } from './filesystem.js'
 
 /**
  * Every rejection carries its own message, so a rule that rejected already says what is wrong and
- * travels unchanged. Anything else — a platform failure, or a defect from a rule that rejects by
- * throwing — becomes the one rejection the step is entitled to report.
+ * travels unchanged. Anything else — a platform failure — becomes the one rejection the step is
+ * entitled to report.
  */
 const rejectedAs =
   (message: string) =>
   <Value, Error, Requirements>(
     effect: Effect.Effect<Value, Error, Requirements>,
   ): Effect.Effect<Value, WorkspaceError, Requirements> =>
-    effect.pipe(
-      Effect.mapError((cause: unknown) =>
-        cause instanceof WorkspaceError ? cause : rejectWorkspace(message),
-      ),
-      Effect.catchAllDefect((defect: unknown) =>
-        Effect.fail(defect instanceof WorkspaceError ? defect : rejectWorkspace(message)),
-      ),
+    Effect.mapError(effect, (cause: unknown) =>
+      cause instanceof WorkspaceError ? cause : rejectWorkspace(message),
     )
+
+/**
+ * Fails with a rule's rejection when it produced one. The rules decide and return; sequencing that
+ * decision into the error channel is this module's half of the work.
+ */
+const rejecting = (rejection: Option.Option<WorkspaceError>): Effect.Effect<void, WorkspaceError> =>
+  Option.match(rejection, {
+    onNone: () => Effect.void,
+    onSome: (error) => Effect.fail(error),
+  })
 
 /**
  * The device and inode a rule compares. `File.Info` reports the inode optionally, because not every
@@ -97,11 +102,11 @@ export const verifyWorkspaceForLaunch = (
 ): Effect.Effect<VerifiedWorkspace, WorkspaceError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem
-    const { normalizedRoot, declaredPath } = declaredWorkspacePath(root, workspace)
+    const { normalizedRoot, declaredPath } = yield* declaredWorkspacePath(root, workspace)
     yield* directoryIdentity(declaredPath)
     const rootPath = yield* canonicalRoot(normalizedRoot)
     const realWorkspace = yield* fileSystem.realPath(declaredPath)
-    assertResolvedWithinRoot(rootPath, realWorkspace)
+    yield* rejecting(resolvedWithinRootRejection(rootPath, realWorkspace))
     const resolved = yield* directoryIdentity(realWorkspace)
     return {
       path: realWorkspace,
@@ -124,10 +129,10 @@ export const assertWorkspaceIdentity = (
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem
     const rootPath = yield* canonicalRoot(root)
-    assertVerifiedRoot(verified, rootPath)
+    yield* rejecting(verifiedRootRejection(verified, rootPath))
     const resolved = yield* directoryIdentity(verified.path)
     const current = yield* fileSystem.realPath(verified.path)
-    assertVerifiedDirectory(verified, current, resolved)
+    yield* rejecting(verifiedDirectoryRejection(verified, current, resolved))
   }).pipe(rejectedAs('workspace identity could not be confirmed'))
 
 /**
@@ -150,10 +155,8 @@ export const openVerifiedWorkspace = (
         Effect.flatMap((handle) =>
           handle.stat.pipe(
             Effect.flatMap((held) => directoryIdentityOf(verified.path, held)),
-            Effect.map((identity) => {
-              assertVerifiedHandle(verified, identity)
-              return verified
-            }),
+            Effect.flatMap((identity) => rejecting(verifiedHandleRejection(verified, identity))),
+            Effect.as(verified),
             rejectedAs(`workspace handle could not be confirmed: ${verified.path}`),
           ),
         ),

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { Either, Option } from 'effect'
 
 import { WorkspaceError } from '../errors.js'
 import type { IssueIdentifier, Workspace } from './domain.js'
@@ -12,6 +13,11 @@ import type { IssueIdentifier, Workspace } from './domain.js'
  * what a path resolves to, and what inode it holds, belongs to the adapter; comparing the answers
  * belongs here, so the rules that stop an issue identifier escaping the configured workspace root
  * can be exercised exhaustively without a filesystem.
+ *
+ * Every rule returns its rejection rather than throwing it. A rule that produces a path returns
+ * `Either`, and a rule that only decides returns `Option` of the rejection — `none` for a pass — so
+ * a caller inside `Effect.gen` puts the rejection in the error channel instead of recovering it
+ * from the defect channel, and the compiler requires it to be handled.
  */
 
 export const rejectWorkspace = (message: string): WorkspaceError =>
@@ -36,13 +42,16 @@ export const isStrictDescendant = (root: string, candidate: string): boolean => 
   )
 }
 
-export const containedWorkspacePath = (root: string, key: string): string => {
+export const containedWorkspacePath = (
+  root: string,
+  key: string,
+): Either.Either<string, WorkspaceError> => {
   const normalizedRoot = resolve(root)
   const candidate = resolve(normalizedRoot, key)
   if (!isStrictDescendant(normalizedRoot, candidate)) {
-    throw rejectWorkspace(`workspace path escapes or equals root: ${candidate}`)
+    return Either.left(rejectWorkspace(`workspace path escapes or equals root: ${candidate}`))
   }
-  return candidate
+  return Either.right(candidate)
 }
 
 /**
@@ -72,25 +81,33 @@ export type DirectoryIdentity = Readonly<{
 export const declaredWorkspacePath = (
   root: string,
   workspace: Workspace,
-): Readonly<{ normalizedRoot: string; declaredPath: string }> => {
+): Either.Either<Readonly<{ normalizedRoot: string; declaredPath: string }>, WorkspaceError> => {
   const normalizedRoot = resolve(root)
   const declaredPath = resolve(workspace.path)
   if (!isStrictDescendant(normalizedRoot, declaredPath)) {
-    throw rejectWorkspace(
-      `workspace path is not a strict descendant of the configured root: ${declaredPath}`,
+    return Either.left(
+      rejectWorkspace(
+        `workspace path is not a strict descendant of the configured root: ${declaredPath}`,
+      ),
     )
   }
-  return { normalizedRoot, declaredPath }
+  return Either.right({ normalizedRoot, declaredPath })
 }
 
 /**
  * The declared path being contained is not enough: the kernel follows links, so what the path
  * actually resolves to must descend from the canonical root as well.
  */
-export const assertResolvedWithinRoot = (rootPath: string, resolvedPath: string): void => {
+export const resolvedWithinRootRejection = (
+  rootPath: string,
+  resolvedPath: string,
+): Option.Option<WorkspaceError> => {
   if (!isStrictDescendant(rootPath, resolvedPath)) {
-    throw rejectWorkspace(`resolved workspace path escapes the configured root: ${resolvedPath}`)
+    return Option.some(
+      rejectWorkspace(`resolved workspace path escapes the configured root: ${resolvedPath}`),
+    )
   }
+  return Option.none()
 }
 
 /**
@@ -98,17 +115,21 @@ export const assertResolvedWithinRoot = (rootPath: string, resolvedPath: string)
  * root that moved, or a verified path that no longer descends from it, is rejected rather than
  * re-derived.
  */
-export const assertVerifiedRoot = (verified: VerifiedWorkspace, rootPath: string): void => {
+export const verifiedRootRejection = (
+  verified: VerifiedWorkspace,
+  rootPath: string,
+): Option.Option<WorkspaceError> => {
   if (rootPath !== verified.rootPath) {
-    throw rejectWorkspace(
-      `configured workspace root changed since verification: ${verified.rootPath}`,
+    return Option.some(
+      rejectWorkspace(`configured workspace root changed since verification: ${verified.rootPath}`),
     )
   }
   if (!isStrictDescendant(rootPath, verified.path)) {
-    throw rejectWorkspace(
-      `verified workspace path no longer descends from the root: ${verified.path}`,
+    return Option.some(
+      rejectWorkspace(`verified workspace path no longer descends from the root: ${verified.path}`),
     )
   }
+  return Option.none()
 }
 
 export const sameDirectoryIdentity = (
@@ -121,29 +142,33 @@ export const sameDirectoryIdentity = (
  * the device and inode captured at verification, so a directory renamed and replaced in between is
  * rejected instead of followed.
  */
-export const assertVerifiedDirectory = (
+export const verifiedDirectoryRejection = (
   verified: VerifiedWorkspace,
   resolvedPath: string,
   identity: DirectoryIdentity,
-): void => {
+): Option.Option<WorkspaceError> => {
   if (resolvedPath !== verified.path || !sameDirectoryIdentity(verified, identity)) {
-    throw rejectWorkspace(
-      `workspace directory identity changed since verification: ${verified.path}`,
+    return Option.some(
+      rejectWorkspace(`workspace directory identity changed since verification: ${verified.path}`),
     )
   }
+  return Option.none()
 }
 
 /**
  * Opening a directory resolves a path, so the handle itself is checked: only if it refers to the
  * verified inode does holding it actually keep that inode allocated.
  */
-export const assertVerifiedHandle = (
+export const verifiedHandleRejection = (
   verified: VerifiedWorkspace,
   identity: DirectoryIdentity,
-): void => {
+): Option.Option<WorkspaceError> => {
   if (!sameDirectoryIdentity(verified, identity)) {
-    throw rejectWorkspace(
-      `workspace handle does not refer to the verified directory: ${verified.path}`,
+    return Option.some(
+      rejectWorkspace(
+        `workspace handle does not refer to the verified directory: ${verified.path}`,
+      ),
     )
   }
+  return Option.none()
 }
