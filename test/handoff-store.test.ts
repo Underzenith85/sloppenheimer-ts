@@ -27,6 +27,11 @@ describe('handoff persistence', (): void => {
       headSha: 'abc',
       reason: null,
       repairAttempts: 0,
+      repairHeadShas: ['abc'],
+      repairObservedHeadShas: ['abc'],
+      repairStartedHeadSha: null,
+      reviewRequestedHeadSha: 'abc',
+      reviewCompletedHeadSha: null,
       observedAt: '2026-08-29T00:00:00.000Z',
     }
 
@@ -58,17 +63,26 @@ describe('handoff persistence', (): void => {
     }
   })
 
-  it('surfaces malformed state instead of silently replacing it', async (): Promise<void> => {
+  it.each([
+    ['unparseable JSON', '{'],
+    ['a wrong envelope', '{}'],
+    ['an unsupported version', '{"version":2,"handoffs":[]}'],
+    ['a malformed entry', '{"version":1,"handoffs":[null]}'],
+    [
+      'an invalid observation date',
+      '{"version":1,"handoffs":[{"issueId":"41","identifier":"example/symphony#41","pullRequestUrl":"https://github.com/example/symphony/pull/42","branchName":"symphony/issue-41","state":"awaiting_checks","headSha":null,"reason":null,"repairAttempts":0,"observedAt":"not-a-date"}]}',
+    ],
+  ])('surfaces %s as a decode failure', async (_case, contents): Promise<void> => {
     const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
     directories.push(directory)
     const path = join(directory, 'handoffs.json')
-    await writeFile(path, '{"version":1,"handoffs":[null]}')
+    await writeFile(path, contents)
 
     const result = await Effect.runPromise(Effect.either(loadHandoffs(path)))
     expect(result._tag).toBe('Left')
     if (result._tag === 'Left') {
       expect(result.left.operation).toBe('read')
-      expect(result.left.message).toContain(`Could not read handoff store ${path}`)
+      expect(result.left.message).toContain(`Could not decode handoff store ${path}`)
     }
   })
 })
