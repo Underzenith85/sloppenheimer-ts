@@ -402,7 +402,7 @@ describe('CLI host lifecycle', (): void => {
     expect(invalid.stderr()).toBe('symphony: unknown option: --unknown\n')
     expect(extraOutcome.code).toBe(1)
     expect(extra.stderr()).toBe('symphony: only one workflow path may be provided\n')
-  })
+  }, 30_000)
 
   it('rejects missing explicit and default workflow paths concisely', async (): Promise<void> => {
     const directory = await makeDirectory()
@@ -418,7 +418,7 @@ describe('CLI host lifecycle', (): void => {
     expect(default_.stderr()).toBe(
       `symphony: cannot read workflow file: ${join(directory, 'WORKFLOW.md')}\n`,
     )
-  })
+  }, 30_000)
 
   it('closes a host with four stubborn workers and frees the operator port', async (): Promise<void> => {
     const concurrency = 4

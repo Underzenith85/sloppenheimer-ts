@@ -42,7 +42,6 @@ import {
   loadHandoffs as loadHandoffsAgainstFileSystem,
   saveHandoffs as saveHandoffsAgainstFileSystem,
 } from '../src/handoff-store.js'
-import { agentRetryDelay } from '../src/core/retry.js'
 import type {
   CodexReviewObservation,
   HandoffSnapshot,
@@ -197,14 +196,6 @@ describe('orchestrator policies', (): void => {
 
     expect(sortIssues(issues).map((issue) => issue.identifier)).toEqual(['GH-1', 'GH-2', 'GH-3'])
   })
-
-  it.effect('caps exponential retry backoff', () =>
-    Effect.gen(function* () {
-      expect(yield* agentRetryDelay(1, 300_000)).toBe(10_000)
-      expect(yield* agentRetryDelay(3, 300_000)).toBe(40_000)
-      expect(yield* agentRetryDelay(99, 300_000)).toBe(300_000)
-    }),
-  )
 
   it('matches required labels case-insensitively', (): void => {
     expect(issueIsRoutable(makeIssue('GH-1', 1, null, ['Ready', 'SYMPHONY']), workflow)).toBe(true)

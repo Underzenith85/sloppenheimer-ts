@@ -6,7 +6,6 @@ import { issueBranchName } from '../domain/handoff.js'
 import { AgentError, type WorkspaceError } from '../errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../host-tools.js'
 import { currentInstant } from '../support/clock.js'
-import { toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
 import {
   captureExecutionSnapshot,
@@ -43,8 +42,7 @@ export const makeHostToolSession = (
     context: Object.freeze({
       issueId: issue.id,
       issueIdentifier: issue.identifier,
-      nativeRef:
-        issue.nativeRef === null ? null : toJsonObject(issue.nativeRef, 'session.issue.nativeRef'),
+      nativeRef: issue.nativeRef,
     }),
     execute: (name, argumentsValue, context) => {
       const ports = current()

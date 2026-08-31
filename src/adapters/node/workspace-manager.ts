@@ -58,7 +58,7 @@ const prepareWorkspace = (
 ): Effect.Effect<Workspace, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const key = workspaceKey(identifier)
-    const path = containedWorkspacePath(root, key)
+    const path = yield* containedWorkspacePath(root, key)
     yield* fileSystem.makeDirectory(root, { recursive: true })
     if (yield* workspaceDirectoryExists(fileSystem, path)) {
       return { path, key, createdNow: false }
@@ -73,24 +73,16 @@ const prepareWorkspace = (
  */
 const workspaceFailure =
   (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
-  (cause: unknown): WorkspaceError =>
+  (cause: WorkspaceError | PlatformError): WorkspaceError =>
     cause instanceof WorkspaceError ? cause : new WorkspaceError({ category, message, cause })
 
-/**
- * The containment rules reject by throwing, so an operation that resolves a path can fail as a
- * defect as well as through its error channel. Both reduce to the same rejection.
- */
+/** Applies that shape to an operation's error channel. */
 const reportedAs =
   (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
   <Value>(
     effect: Effect.Effect<Value, WorkspaceError | PlatformError>,
   ): Effect.Effect<Value, WorkspaceError> =>
-    effect.pipe(
-      Effect.mapError(workspaceFailure(category, message)),
-      Effect.catchAllDefect((defect: unknown) =>
-        Effect.fail(workspaceFailure(category, message)(defect)),
-      ),
-    )
+    Effect.mapError(effect, workspaceFailure(category, message))
 
 export const makeWorkspaceManager = (
   root: string,
@@ -110,12 +102,10 @@ export const makeWorkspaceManager = (
         ),
       ),
     exists: (identifier) =>
-      Effect.suspend(() =>
-        workspaceDirectoryExists(
-          fileSystem,
-          containedWorkspacePath(root, workspaceKey(identifier)),
-        ),
-      ).pipe(reportedAs('inspect_failed', 'failed to inspect workspace')),
+      Effect.gen(function* () {
+        const path = yield* containedWorkspacePath(root, workspaceKey(identifier))
+        return yield* workspaceDirectoryExists(fileSystem, path)
+      }).pipe(reportedAs('inspect_failed', 'failed to inspect workspace')),
     // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
     beforeRun: (workspace) =>
       hooks.beforeRun === null
@@ -130,32 +120,21 @@ export const makeWorkspaceManager = (
           ),
     // `before_remove` is best effort, runs only for a workspace that exists, and never blocks removal.
     remove: (identifier) =>
-      Effect.suspend(() => {
-        const path = containedWorkspacePath(root, workspaceKey(identifier))
-        return workspaceDirectoryExists(fileSystem, path).pipe(
+      Effect.gen(function* () {
+        const path = yield* containedWorkspacePath(root, workspaceKey(identifier))
+        const exists = yield* workspaceDirectoryExists(fileSystem, path).pipe(
           reportedAs('remove_failed', 'failed to inspect workspace'),
-          Effect.flatMap((exists) => {
-            if (!exists) {
-              return Effect.void
-            }
-            const beforeRemove =
-              hooks.beforeRemove === null
-                ? Effect.void
-                : runHook('before_remove', hooks.beforeRemove, path, hooks.timeoutMs).pipe(
-                    Effect.catchAll(() => Effect.void),
-                  )
-            return beforeRemove.pipe(
-              Effect.zipRight(
-                fileSystem
-                  .remove(path, { force: true, recursive: true })
-                  .pipe(reportedAs('remove_failed', 'failed to remove workspace')),
-              ),
-            )
-          }),
         )
-      }).pipe(
-        Effect.catchAllDefect((defect: unknown) =>
-          Effect.fail(workspaceFailure('remove_failed', 'failed to remove workspace')(defect)),
-        ),
-      ),
+        if (!exists) {
+          return
+        }
+        if (hooks.beforeRemove !== null) {
+          yield* runHook('before_remove', hooks.beforeRemove, path, hooks.timeoutMs).pipe(
+            Effect.catchAll(() => Effect.void),
+          )
+        }
+        yield* fileSystem
+          .remove(path, { force: true, recursive: true })
+          .pipe(reportedAs('remove_failed', 'failed to remove workspace'))
+      }),
   }))
