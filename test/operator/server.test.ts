@@ -647,6 +647,19 @@ describe('operator server', (): void => {
         expect(refreshed.status).toBe(202)
         expect(await refreshed.json()).toMatchObject({ queued: true })
 
+        // Two routes share that URI, so a method neither of them answers must name both rather than
+        // reporting the documented refresh method as unavailable.
+        const wrongOnShared = await fetch(`${url}/api/v1/refresh`, { method: 'PUT' })
+        expect(wrongOnShared.status).toBe(405)
+        expect(wrongOnShared.headers.get('allow')).toBe('GET, POST')
+        expect(await wrongOnShared.json()).toMatchObject({
+          error: { message: 'Use GET or POST for this endpoint' },
+        })
+        // A path the per-issue resource has to itself still names only its own method.
+        const wrongOnIssue = await fetch(`${url}/api/v1/agents`, { method: 'PUT' })
+        expect(wrongOnIssue.status).toBe(405)
+        expect(wrongOnIssue.headers.get('allow')).toBe('GET')
+
         // The other two words the router uses are not reserved either: those routes carry a further
         // segment, so the wildcard still answers for an issue identified by the bare word.
         for (const identifier of ['agents', 'issues', 'refresh']) {

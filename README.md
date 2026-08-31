@@ -396,7 +396,10 @@ tracker profile whose identifiers could collide is what would reopen this.
 registered for POST alone rather than for every method, so the method distinguishes it from the
 per-issue resource: `GET /api/v1/refresh` reads the issue identified that way, and `POST` refreshes.
 The consequence is that a GET of that path no longer reports `405`; it answers as the per-issue
-resource does, which for a host with no such issue is `404 issue_not_found`. `agents` and `issues`
+resource does, which for a host with no such issue is `404 issue_not_found`. A method neither route
+serves is `405` naming both — `Allow: GET, POST` — since `Allow` states what the URI serves rather
+than what one route does; the set is read from the registrations, so it stays true if another fixed
+route comes to share a path. `agents` and `issues`
 are addressable for a different reason — the routes that use those words carry a further segment.
 
 `test/operator/server.test.ts` pins both halves — what each shadowed identifier answers, and that

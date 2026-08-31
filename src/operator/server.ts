@@ -5,7 +5,7 @@ import * as HttpServerResponse from '@effect/platform/HttpServerResponse'
 import * as NodeHttpServer from '@effect/platform-node/NodeHttpServer'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
-import { Cause, Effect, type Scope } from 'effect'
+import { Cause, Chunk, Effect, Option, type Scope } from 'effect'
 
 import { ServerError } from '@symphony/core/domain/errors.js'
 import { logError } from '@symphony/core/support/logging.js'
@@ -89,9 +89,16 @@ const runBackend = <Value>(
 ): Effect.Effect<Value | HttpServerResponse.HttpServerResponse> =>
   operation.pipe(Effect.catchAll(() => Effect.succeed(backendFailure)))
 
-const methodNotAllowed = (allowed: string): HttpServerResponse.HttpServerResponse =>
-  errorResponse(405, 'method_not_allowed', `Use ${allowed} for this endpoint`).pipe(
-    HttpServerResponse.setHeader('Allow', allowed),
+/**
+ * `Allow` states what the URI serves, not what one route serves. Two routes can share a path when
+ * their methods differ, and a refusal that named only one of them would report the other as
+ * unavailable.
+ */
+const methodNotAllowed = (
+  allowed: readonly [string, ...string[]],
+): HttpServerResponse.HttpServerResponse =>
+  errorResponse(405, 'method_not_allowed', `Use ${allowed.join(' or ')} for this endpoint`).pipe(
+    HttpServerResponse.setHeader('Allow', allowed.join(', ')),
   )
 
 const withMethod = <Error, Requirements>(
@@ -99,7 +106,7 @@ const withMethod = <Error, Requirements>(
   handler: HttpApp.Default<Error, Requirements>,
 ): HttpApp.Default<Error, Requirements> =>
   Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
-    request.method === method ? handler : methodNotAllowed(method),
+    request.method === method ? handler : methodNotAllowed([method]),
   )
 
 const withCsrf = <Error, Requirements>(
@@ -148,7 +155,7 @@ export const makeRouter = (
       )
     })
 
-  return HttpRouter.empty.pipe(
+  const fixedRoutes = HttpRouter.empty.pipe(
     HttpRouter.get(
       '/',
       HttpServerResponse.text(appTemplate.replace('__CSRF_TOKEN__', csrfToken), {
@@ -199,6 +206,8 @@ export const makeRouter = (
     ),
     HttpRouter.all('/api/v1/issues/:issueNumber/start', issueAction(true)),
     HttpRouter.all('/api/v1/issues/:issueNumber/pause', issueAction(false)),
+    // Everything above is a fixed path; the per-issue resource below is the wildcard they sit in
+    // front of.
     HttpRouter.all(
       '/api/v1/agents/:identifier',
       withMethod(
@@ -246,6 +255,28 @@ export const makeRouter = (
         }),
       ),
     ),
+  )
+
+  /**
+   * The methods a fixed path answers on its own, read from the registrations above rather than
+   * restated beside them. A route registered for one method leaves the other methods of its path to
+   * the per-issue resource below, so the two share a URI and a refusal there has to name both. A
+   * route registered for every method (`HttpRouter.all`) never falls through and contributes
+   * nothing.
+   */
+  const methodsBesideIssueResource = new Map<string, readonly string[]>()
+  for (const route of Chunk.toReadonlyArray(fixedRoutes.routes)) {
+    if (route.method === '*') {
+      continue
+    }
+    const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
+    methodsBesideIssueResource.set(path, [
+      ...(methodsBesideIssueResource.get(path) ?? []),
+      route.method,
+    ])
+  }
+
+  return fixedRoutes.pipe(
     // The wildcard sits below the fixed routes above it, so the two GET names they spell —
     // `state` and `backlog` — are unaddressable as issue identifiers: a GET of either path cannot
     // be told apart from a GET of the resource below. SPEC 13.7.2 puts both resources in one
@@ -256,14 +287,21 @@ export const makeRouter = (
     // both what they answer and that the set has not grown.
     HttpRouter.all(
       '/api/v1/:identifier',
-      withMethod(
-        'GET',
-        // The identifier is not matched against a shape. `IssueIdentifier` is an unconstrained
-        // branded string, and a tracker is free to spell one `GH-7`; a syntactic guard here would
-        // decide on GitHub's behalf which providers may reach a SPEC resource. Existence is the
-        // only question, and in-memory state is what answers it.
-        Effect.flatMap(HttpRouter.params, (params) => {
-          const identifier = params['identifier'] ?? ''
+      // The identifier is not matched against a shape. `IssueIdentifier` is an unconstrained
+      // branded string, and a tracker is free to spell one `GH-7`; a syntactic guard here would
+      // decide on GitHub's behalf which providers may reach a SPEC resource. Existence is the only
+      // question, and in-memory state is what answers it.
+      Effect.flatMap(HttpRouter.params, (params) => {
+        const identifier = params['identifier'] ?? ''
+        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
+          if (request.method !== 'GET') {
+            // This resource answers GET, and a fixed route may answer another method at the same
+            // path — `POST /api/v1/refresh` does. Both belong in `Allow`.
+            return methodNotAllowed([
+              'GET',
+              ...(methodsBesideIssueResource.get(`/api/v1/${identifier}`) ?? []),
+            ])
+          }
           return Effect.flatMap(runBackend(backend.snapshot), (result) => {
             if (HttpServerResponse.isServerResponse(result)) {
               return result
@@ -273,8 +311,8 @@ export const makeRouter = (
               return detail === null ? unknownIssue : json(200, detail)
             })
           })
-        }),
-      ),
+        })
+      }),
     ),
   )
 }
