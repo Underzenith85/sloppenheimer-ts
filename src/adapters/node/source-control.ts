@@ -1,7 +1,8 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import { Effect, Option, Redacted, type Scope } from 'effect'
 
 import type { Issue, Workspace } from '../../domain/domain.js'
@@ -111,12 +112,26 @@ const runProcess = (
   environment: NodeJS.ProcessEnv,
 ): Effect.Effect<string, SourceControlError> =>
   Effect.async<string, SourceControlError>((resume) => {
-    const child = spawn('git', [...args], {
-      cwd,
-      env: environment,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-    })
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawn('git', [...args], {
+        cwd,
+        env: environment,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      })
+    } catch (cause: unknown) {
+      // `spawn` rejects an invalid argument — a NUL byte in a branch name or remote URL — by
+      // throwing here rather than emitting `error`. A throw out of this registration would be a
+      // defect, bypassing the failure channel this effect declares, so it is reported like any
+      // other way of failing to start git.
+      resume(
+        Effect.fail(
+          sourceControlFailure({ args, exitCode: null, stdout: '', stderr: '', cause }, operation),
+        ),
+      )
+      return
+    }
     let stdout = ''
     let stderr = ''
     let settled = false

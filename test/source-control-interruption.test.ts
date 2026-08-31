@@ -5,6 +5,7 @@ import { Effect, Fiber, Option, Redacted } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { makeGitSourceControl } from '../src/adapters/node/source-control.js'
+import { SourceControlError } from '../src/errors.js'
 import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
 import { commitFile, git, makeGitRepository } from './harness/git-repository.js'
 
@@ -41,6 +42,8 @@ const issue: Issue = {
 /** How long the remote hook blocks the push for, and how long the assertion outlives it. */
 const blockedPushSeconds = 3
 const outlivesBlockedPushMs = (blockedPushSeconds + 2) * 1_000
+/** A NUL byte, which `spawn` refuses by throwing rather than by emitting `error`. */
+const NUL = String.fromCharCode(0)
 /** How long the merge driver blocks the rebase for. */
 const blockedMergeSeconds = 60
 const pollIntervalMs = 10
@@ -169,4 +172,29 @@ describe('host Git source control interruption', (): void => {
       'symphony: example/symphony#185 Interruptible publication',
     )
   }, 30_000)
+
+  it('reports an invalid spawn argument in the error channel rather than as a defect', async (): Promise<void> => {
+    const fixture = await makeGitRepository()
+    roots.push(fixture.root)
+    // `spawn` rejects a NUL byte by throwing synchronously instead of emitting `error`, which is
+    // the one way of failing to start git that never reaches a listener.
+    const sourceControl = makeGitSourceControl({
+      remoteUrl: `${fixture.remote}${NUL}`,
+      baseBranch: 'main',
+      credential: Option.none(),
+    })
+
+    const failure = await Effect.runPromise(
+      Effect.flip(
+        sourceControl.prepare(
+          issue,
+          { path: fixture.workspace, key: 'issue-185', createdNow: true },
+          { _tag: 'Normal', branchName: 'symphony/issue-185' },
+        ),
+      ),
+    )
+
+    expect(failure).toBeInstanceOf(SourceControlError)
+    expect(failure).toMatchObject({ category: 'prepare_failed', retryable: true })
+  })
 })
