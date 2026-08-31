@@ -8,7 +8,7 @@ import {
   type JsonObject,
   type TokenTotals,
 } from '../domain/domain.js'
-import { WorkflowError } from '../errors.js'
+import { WorkflowError, type TrackerError } from '../errors.js'
 import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -38,10 +38,10 @@ import {
   captureExecutionSnapshot,
   issueIsActiveInSnapshot,
   logContext,
-  retryDelayMs,
   sessionLogContext,
   stateIsIn,
 } from './policy.js'
+import { agentRetryDelay, trackerRetryDelay } from './retry.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 import {
   initialState,
@@ -258,6 +258,7 @@ export type OrchestratorContext = Readonly<{
     attempt: number,
     error: string | null,
     continuation: boolean,
+    trackerError?: TrackerError,
   ) => Effect.Effect<void, never, Scope.Scope>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
@@ -904,12 +905,37 @@ export const startOrchestratorRuntime = (
       attempt: number,
       error: string | null,
       continuation: boolean,
+      trackerError?: TrackerError,
     ): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
         const current = yield* Ref.get(state)
-        const delay = continuation
-          ? 1_000
-          : retryDelayMs(attempt, current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs)
+        const maximumMs = current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs
+        const delayOption = continuation
+          ? Option.some(1_000)
+          : trackerError === undefined
+            ? Option.some(yield* agentRetryDelay(attempt, maximumMs))
+            : yield* trackerRetryDelay(trackerError, attempt, maximumMs)
+        if (Option.isNone(delayOption)) {
+          const cancelledAt = new Date()
+          const reason = error ?? 'the tracker rejected the retry'
+          yield* Ref.update(state, (pending) =>
+            Transitions.updateDetail(
+              Transitions.releaseClaim(pending, issue.id),
+              issue.id,
+              (record) => recordCancellation(record, cancelledAt, reason, true),
+            ),
+          )
+          yield* logWarning('action=retry outcome=not_retryable', {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            action: 'retry',
+            outcome: 'not_retryable',
+            attempt,
+            error,
+          })
+          return
+        }
+        const delay = delayOption.value
         const dueAt = Date.now() + delay
         const fiber = yield* Effect.forkScoped(
           Effect.sleep(delay).pipe(
