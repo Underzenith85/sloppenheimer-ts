@@ -1,14 +1,16 @@
 import { createServer, request } from 'node:http'
 import { it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Chunk, Effect, Option } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
 import type { ServerError } from '@symphony/core/domain/errors.js'
+import type { HandoffSnapshot } from '@symphony/core/domain/handoff.js'
 import { TrackerError } from '@symphony/core/domain/errors.js'
+import { issueDetailPath } from '../../src/operator/api.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '@symphony/core'
-import { startOperatorServer } from '../../src/operator/server.js'
+import { makeRouter, startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
@@ -574,6 +576,127 @@ describe('operator server', (): void => {
       })
     }),
   )
+
+  /*
+   * SPEC 13.7.2 puts the fixed routes and the per-issue resource in one namespace, so a GET of a
+   * path a fixed GET route already spells is answered by that route instead. #220 decided to
+   * document that as a known limit rather than move the resource under a prefix or escape the
+   * names, and this pins what each shadowed one answers — and that the shadowing is two names
+   * wide, since a route registered for another method leaves the GET below it reachable.
+   */
+  it.live('shadows an issue identifier spelled like a fixed v1 GET route, and only those', () =>
+    Effect.gen(function* () {
+      const handoff = (identifier: string): HandoffSnapshot => ({
+        issueId: identifier,
+        identifier,
+        pullRequestUrl: `https://example.test/pull/${identifier}`,
+        branchName: `symphony/${identifier}`,
+        state: 'awaiting_checks',
+        headSha: null,
+        reason: null,
+        repairAttempts: 0,
+        observedAt: '2026-08-29T12:00:00.000Z',
+      })
+      const colliding: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          running: [],
+          counts: { running: 0, retrying: 0, completed: 0 },
+          // Every one of these is an issue this host knows about, addressable or not.
+          handoffs: ['state', 'backlog', 'refresh', 'agents', 'issues'].map(handoff),
+        }),
+        agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
+      }
+
+      yield* withServer(colliding, async (url) => {
+        // This is the link such an issue would advertise as `self`, and it is the fixed route.
+        expect(issueDetailPath('state')).toBe('/api/v1/state')
+
+        const shadowedState = await fetch(`${url}/api/v1/state`)
+        expect(shadowedState.status).toBe(200)
+        const stateBody = (await shadowedState.json()) as Record<string, unknown>
+        // The runtime state document, not the issue whose identifier is spelled that way.
+        expect(stateBody).toMatchObject({ counts: { running: 0 } })
+        expect(stateBody['issue_identifier']).toBeUndefined()
+
+        const shadowedBacklog = await fetch(`${url}/api/v1/backlog`)
+        expect(shadowedBacklog.status).toBe(200)
+        const backlogBody = (await shadowedBacklog.json()) as Record<string, unknown>
+        // The backlog document, in the internal vocabulary its own consumer reads.
+        expect(backlogBody).toMatchObject({ controlLabel: 'symphony' })
+        expect(Array.isArray(backlogBody['nodes'])).toBe(true)
+        expect(backlogBody['issue_identifier']).toBeUndefined()
+
+        // The refresh route is POST, and the resource below it is GET, so the method tells them
+        // apart and this identifier is not reserved at all: a GET reads the issue, and the SPEC's
+        // own POST still refreshes.
+        const readRefresh = await fetch(`${url}/api/v1/refresh`)
+        expect(readRefresh.status).toBe(200)
+        expect(await readRefresh.json()).toMatchObject({
+          self: '/api/v1/refresh',
+          issue_identifier: 'refresh',
+          status: 'handoff',
+        })
+        const page = await (await fetch(url)).text()
+        const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
+        const refreshed = await fetch(`${url}/api/v1/refresh`, {
+          method: 'POST',
+          headers: { 'X-Symphony-CSRF': token },
+        })
+        expect(refreshed.status).toBe(202)
+        expect(await refreshed.json()).toMatchObject({ queued: true })
+
+        // Two routes share that URI, so a method neither of them answers must name both rather than
+        // reporting the documented refresh method as unavailable.
+        const wrongOnShared = await fetch(`${url}/api/v1/refresh`, { method: 'PUT' })
+        expect(wrongOnShared.status).toBe(405)
+        expect(wrongOnShared.headers.get('allow')).toBe('GET, POST')
+        expect(await wrongOnShared.json()).toMatchObject({
+          error: { message: 'Use GET or POST for this endpoint' },
+        })
+        // A path the per-issue resource has to itself still names only its own method.
+        const wrongOnIssue = await fetch(`${url}/api/v1/agents`, { method: 'PUT' })
+        expect(wrongOnIssue.status).toBe(405)
+        expect(wrongOnIssue.headers.get('allow')).toBe('GET')
+
+        // The other two words the router uses are not reserved either: those routes carry a further
+        // segment, so the wildcard still answers for an issue identified by the bare word.
+        for (const identifier of ['agents', 'issues', 'refresh']) {
+          const resolved = await fetch(`${url}/api/v1/${identifier}`)
+          expect(resolved.status).toBe(200)
+          expect(await resolved.json()).toMatchObject({
+            self: `/api/v1/${identifier}`,
+            issue_identifier: identifier,
+            status: 'handoff',
+          })
+        }
+      })
+    }),
+  )
+
+  /*
+   * The shadowed set is what the router's own registrations make it, so it is derived from them
+   * here rather than restated: a path assembled from a constant, a helper or a template literal, or
+   * contributed by a prefixed sub-router, shadows an identifier exactly as a literal does and would
+   * be invisible to a guard that read the source. A third shadowed name would arrive without
+   * anybody deciding to reserve one.
+   */
+  it('reserves no identifier beyond the two fixed v1 GET routes the router registers', (): void => {
+    const registered = Chunk.toReadonlyArray(makeRouter(makeBackend(), 'csrf').routes).flatMap(
+      (route) => {
+        const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
+        // Neither a parameter nor a further segment can collide: an identifier is one segment, and
+        // only a fixed one is spelled the same way twice. Nor can a route that answers some other
+        // method: the per-issue resource is a GET, so only a route reachable by GET hides it.
+        const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(path)?.[1]
+        const shadows = route.method === 'GET' || route.method === '*'
+        return reserved === undefined || !shadows ? [] : [reserved]
+      },
+    )
+
+    expect([...new Set(registered)].sort()).toEqual(['backlog', 'state'])
+  })
 
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {

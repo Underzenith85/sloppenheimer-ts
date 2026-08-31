@@ -368,6 +368,46 @@ many events this response carries — because Symphony retains a bounded, redact
 rather than raw agent logs. `tracked` says the orchestrator holds this issue as live work (starting,
 running, retrying, or handed off) rather than as retained history.
 
+### Two identifiers the versioned namespace cannot address
+
+SPEC 13.7.2 places `GET /api/v1/state`, `POST /api/v1/refresh` and `GET /api/v1/{identifier}` at the
+same level of one namespace, so an issue whose identifier is spelled exactly like a fixed **GET**
+route is shadowed by that route. `GET /api/v1/backlog` is Symphony's own route and shadows a second
+name the same way:
+
+| Identifier | What `GET /api/v1/<identifier>` answers |
+| ---------- | --------------------------------------- |
+| `state`    | the runtime state document              |
+| `backlog`  | the backlog document                    |
+
+For such an issue the published `self` names a URL that answers for something else, and the per-issue
+resource is unreachable. **The collision is documented as a known limit of the SPEC's namespace and
+left unhandled** ([#220](https://github.com/Underzenith85/symphony-ts/issues/220)). It is inherent to
+the URL design rather than to this host, and the two ways out both cost more than the collision does.
+Moving the resource under a prefix such as `/api/v1/issues/{identifier}` changes the URL of a SPEC
+route — the one thing a SPEC route may not do — and escaping the two names changes it for every
+identifier. Both would be spent on identifiers no tracker profile can currently spell:
+`IssueIdentifier` is an unconstrained branded string, but the only profile is GitHub, whose
+identifiers are `owner/repo#number` and can never equal a bare word. Moving `/api/v1/backlog` alone,
+the one route here Symphony owns, would resolve one of the two and not the one the SPEC forces. A
+tracker profile whose identifiers could collide is what would reopen this.
+
+`refresh` is not among them, though the same path is spelled by a fixed route. That route is
+registered for POST alone rather than for every method, so the method distinguishes it from the
+per-issue resource: `GET /api/v1/refresh` reads the issue identified that way, and `POST` refreshes.
+The consequence is that a GET of that path no longer reports `405`; it answers as the per-issue
+resource does, which for a host with no such issue is `404 issue_not_found`. A method neither route
+serves is `405` naming both — `Allow: GET, POST` — since `Allow` states what the URI serves rather
+than what one route does; the set is read from the registrations, so it stays true if another fixed
+route comes to share a path. `agents` and `issues`
+are addressable for a different reason — the routes that use those words carry a further segment.
+
+`test/operator/server.test.ts` pins both halves — what each shadowed identifier answers, and that
+the set has not silently grown. The second reads the router's own registrations rather than the
+source that spells them, taking each route's method as well as its path, since what reserves a name
+is a fixed one-segment path reachable by GET. A third such route cannot be added without this
+decision being taken again.
+
 ### Why a refresh needs the console's token
 
 `POST /api/v1/refresh` requires the `X-Symphony-CSRF` header, so the plain empty-body POST SPEC
