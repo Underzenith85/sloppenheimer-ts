@@ -1611,7 +1611,19 @@ const runVerifiedAgent = (
         }
       }
       return { threadId, turnId, turnCount }
-    }),
+    }).pipe(
+      Effect.catchAllDefect((cause: unknown) =>
+        Effect.fail(
+          cause instanceof AgentError
+            ? cause
+            : new AgentError({
+                category: 'protocol_error',
+                message: `Codex session failed for ${launch.issue.identifier}`,
+                cause,
+              }),
+        ),
+      ),
+    ),
   )
 }
 
