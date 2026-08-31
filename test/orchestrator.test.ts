@@ -15,7 +15,6 @@ import {
   Scope,
   Stream,
   TestClock,
-  TestContext,
 } from 'effect'
 import { describe, expect } from 'vitest'
 
@@ -604,10 +603,6 @@ const makeHarness = (
   }
 }
 
-const runWithTestClock = <Value>(
-  effect: Effect.Effect<Value, WorkflowError | TrackerError | SourceControlError>,
-): Promise<Value> => Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
-
 /** Models a validation race after the tick gate, without making the whole tick invalid. */
 const armFirstRepairDispatchRefusal = (harness: TestHarness): (() => void) => {
   let armed = false
@@ -646,274 +641,286 @@ const repairObservation = (number: number, headSha: string): PullRequestObservat
   codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
 })
 
-const saveRepairHandoff = (path: string, issue: Issue, headSha: string): Promise<void> =>
-  Effect.runPromise(
-    saveHandoffs(path, [
-      {
-        issueId: issue.id,
-        identifier: issue.identifier,
-        pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-        branchName: 'symphony/issue-20',
-        state: 'repair_needed',
-        headSha,
-        reason: 'The pull request conflicts with protected main',
-        repairAttempts: 0,
-        repairHeadShas: [],
-        repairStartedHeadSha: null,
-        reviewRequestedHeadSha: headSha,
-        reviewCompletedHeadSha: headSha,
-        observedAt: new Date(0).toISOString(),
-      },
-    ]),
-  )
+const saveRepairHandoff = (
+  path: string,
+  issue: Issue,
+  headSha: string,
+): Effect.Effect<void, HandoffStoreError> =>
+  saveHandoffs(path, [
+    {
+      issueId: issue.id,
+      identifier: issue.identifier,
+      pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+      branchName: 'symphony/issue-20',
+      state: 'repair_needed',
+      headSha,
+      reason: 'The pull request conflicts with protected main',
+      repairAttempts: 0,
+      repairHeadShas: [],
+      repairStartedHeadSha: null,
+      reviewRequestedHeadSha: headSha,
+      reviewCompletedHeadSha: headSha,
+      observedAt: new Date(0).toISOString(),
+    },
+  ])
 
 describe('host-owned source-control dispatch', (): void => {
-  it('publishes a normal run without exposing a credential to the agent launch', async (): Promise<void> => {
-    const issue = {
-      ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
-      id: issueId('165'),
-    }
-    const harness = makeHarness(workflow, () => [issue])
-    const targets: SourceControlTarget[] = []
-    const publications: string[] = []
-    let launchSecretNames: readonly string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        secretEnvironmentNames: ['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'],
-      }),
-      makeSourceControl: () => ({
-        prepare: (_candidate, workspace, target) => {
-          targets.push(target)
-          return Effect.succeed({
-            workspace,
-            target,
-            baseBranch: 'main',
-            baseSha: 'protected-main',
-            baselineSha: 'protected-main',
-            expectedRemoteHead: Option.none(),
-          })
+  it.effect('publishes a normal run without exposing a credential to the agent launch', () =>
+    Effect.gen(function* () {
+      const issue = {
+        ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
+        id: issueId('165'),
+      }
+      const harness = makeHarness(workflow, () => [issue])
+      const targets: SourceControlTarget[] = []
+      const publications: string[] = []
+      let launchSecretNames: readonly string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          secretEnvironmentNames: ['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'],
+        }),
+        makeSourceControl: () => ({
+          prepare: (_candidate, workspace, target) => {
+            targets.push(target)
+            return Effect.succeed({
+              workspace,
+              target,
+              baseBranch: 'main',
+              baseSha: 'protected-main',
+              baselineSha: 'protected-main',
+              expectedRemoteHead: Option.none(),
+            })
+          },
+          publish: (_candidate, prepared) => {
+            publications.push(prepared.target.branchName)
+            return Effect.succeed({
+              _tag: 'Published',
+              branchName: prepared.target.branchName,
+              headSha: 'published-head',
+              commitCreated: true,
+            })
+          },
+        }),
+        runAgent: (launch) => {
+          launchSecretNames = launch.secretEnvironmentNames
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
         },
-        publish: (_candidate, prepared) => {
-          publications.push(prepared.target.branchName)
-          return Effect.succeed({
-            _tag: 'Published',
-            branchName: prepared.target.branchName,
-            headSha: 'published-head',
-            commitCreated: true,
-          })
-        },
-      }),
-      runAgent: (launch) => {
-        launchSecretNames = launch.secretEnvironmentNames
-        return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-      },
-    }
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (publications.length === 0) {
             yield* Effect.yieldNow()
           }
         }),
-      ),
-    )
+      )
 
-    expect(targets).toEqual([{ _tag: 'Normal', branchName: 'symphony/issue-165' }])
-    expect(publications).toEqual(['symphony/issue-165'])
-    expect(launchSecretNames).toEqual(
-      expect.arrayContaining(['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
-    )
-  })
+      expect(targets).toEqual([{ _tag: 'Normal', branchName: 'symphony/issue-165' }])
+      expect(publications).toEqual(['symphony/issue-165'])
+      expect(launchSecretNames).toEqual(
+        expect.arrayContaining(['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
+      )
+    }),
+  )
 
-  it('prepares and publishes a repair from the handoff exact head', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-source-control-repair-'))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
-      id: issueId('165'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(join(workspaceRoot, '.symphony', 'handoffs.json'), issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const targets: SourceControlTarget[] = []
-    const publications: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      makeSourceControl: () => ({
-        prepare: (_candidate, workspace, target) => {
-          targets.push(target)
-          return Effect.succeed({
-            workspace,
-            target,
-            baseBranch: 'main',
-            baseSha: 'protected-main',
-            baselineSha: head,
-            expectedRemoteHead: Option.some(head),
-          })
-        },
-        publish: (_candidate, prepared) => {
-          publications.push(prepared.target.branchName)
-          return Effect.succeed({
-            _tag: 'Published',
-            branchName: prepared.target.branchName,
-            headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            commitCreated: true,
-          })
-        },
-      }),
-      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    }
+  it.effect('prepares and publishes a repair from the handoff exact head', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-source-control-repair-')),
+      )
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
+        id: issueId('165'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(join(workspaceRoot, '.symphony', 'handoffs.json'), issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const targets: SourceControlTarget[] = []
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () => ({
+          prepare: (_candidate, workspace, target) => {
+            targets.push(target)
+            return Effect.succeed({
+              workspace,
+              target,
+              baseBranch: 'main',
+              baseSha: 'protected-main',
+              baselineSha: head,
+              expectedRemoteHead: Option.some(head),
+            })
+          },
+          publish: (_candidate, prepared) => {
+            publications.push(prepared.target.branchName)
+            return Effect.succeed({
+              _tag: 'Published',
+              branchName: prepared.target.branchName,
+              headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+              commitCreated: true,
+            })
+          },
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (publications.length === 0) {
             yield* Effect.yieldNow()
           }
         }),
-      ),
-    )
+      )
 
-    expect(targets[0]).toEqual({
-      _tag: 'Repair',
-      branchName: 'symphony/issue-20',
-      expectedHeadSha: head,
-    })
-    expect(publications).toEqual(['symphony/issue-20'])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(targets[0]).toEqual({
+        _tag: 'Repair',
+        branchName: 'symphony/issue-20',
+        expectedHeadSha: head,
+      })
+      expect(publications).toEqual(['symphony/issue-20'])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 })
 
 describe('restored pull request handoffs', (): void => {
-  it('rediscovers open pull requests for active issue branches when the store is missing', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-recovered-handoff-'))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        findExistingHandoff: (candidate) =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: `symphony/issue-${candidate.id}`,
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
+  it.effect(
+    'rediscovers open pull requests for active issue branches when the store is missing',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), 'symphony-recovered-handoff-')),
+        )
+        const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+        const issue = {
+          ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+          id: issueId('20'),
+        }
+        const harness = makeHarness(isolated, () => [issue])
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeCodeReview: (provider) => ({
+            ...requireCodeReview(harness.ports, provider),
+            findExistingHandoff: (candidate) =>
+              Effect.succeed({
+                _tag: 'PullRequest' as const,
+                branchName: `symphony/issue-${candidate.id}`,
+                pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+                pullRequestNumber: 65,
+                created: false,
+              }),
+            inspectPullRequest: (number) =>
+              Effect.succeed({
+                number,
+                url: 'https://github.test/example/symphony/pull/65',
+                headSha: 'recovered-head',
+                merged: false as const,
+                state: 'open' as const,
+                mergeCommitSha: null,
+                mergeable: null,
+                mergeState: 'unknown',
+                checks: [],
+                reviewDecision: null,
+                reviewThreads: [],
+                codexReview: { headShaPrefix: 'recovered-head', status: 'pending' as const },
+              }),
           }),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: 'recovered-head',
-            merged: false as const,
-            state: 'open' as const,
-            mergeCommitSha: null,
-            mergeable: null,
-            mergeState: 'unknown',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: { headShaPrefix: 'recovered-head', status: 'pending' as const },
-          }),
-      }),
-    }
+        }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            yield* control.refresh
+            return yield* control.snapshot
+          }),
+        )
+
+        expect(snapshot.handoffs).toHaveLength(1)
+        expect(snapshot.handoffs[0]).toMatchObject({
+          issueId: issue.id,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          headSha: 'recovered-head',
+          state: 'awaiting_checks',
+        })
+        expect(snapshot.handoffRecovery).toMatchObject({
+          status: 'completed',
+          loaded: 0,
+          recovered: 1,
+          failed: 0,
+        })
+        expect(yield* loadHandoffs(join(workspaceRoot, '.symphony', 'handoffs.json'))).toHaveLength(
+          1,
+        )
+        yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+      }),
+  )
+
+  it.effect('skips non-dispatchable pull request records during recovery', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-nondispatchable-handoff-')),
+      )
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const pullRequestRecord = {
+        ...makeIssue('example/symphony#117', 1, null, ['symphony', 'ready']),
+        dispatchable: false,
+      }
+      const harness = makeHarness(isolated, () => [pullRequestRecord])
+      let discoveries = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          findExistingHandoff: () =>
+            Effect.sync(() => {
+              discoveries += 1
+              return { _tag: 'NoBranch' as const, branchName: 'symphony/issue-117' }
+            }),
+        }),
+      }
+
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs).toHaveLength(1)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      issueId: issue.id,
-      pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-      branchName: 'symphony/issue-20',
-      headSha: 'recovered-head',
-      state: 'awaiting_checks',
-    })
-    expect(snapshot.handoffRecovery).toMatchObject({
-      status: 'completed',
-      loaded: 0,
-      recovered: 1,
-      failed: 0,
-    })
-    await expect(
-      Effect.runPromise(loadHandoffs(join(workspaceRoot, '.symphony', 'handoffs.json'))),
-    ).resolves.toHaveLength(1)
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(discoveries).toBe(0)
+      expect(harness.agentRuns()).toEqual([])
+      expect(snapshot.handoffs).toEqual([])
+      expect(snapshot.handoffRecovery).toMatchObject({ recovered: 0, skipped: 1 })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('skips non-dispatchable pull request records during recovery', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-nondispatchable-handoff-'))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const pullRequestRecord = {
-      ...makeIssue('example/symphony#117', 1, null, ['symphony', 'ready']),
-      dispatchable: false,
-    }
-    const harness = makeHarness(isolated, () => [pullRequestRecord])
-    let discoveries = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        findExistingHandoff: () =>
-          Effect.sync(() => {
-            discoveries += 1
-            return { _tag: 'NoBranch' as const, branchName: 'symphony/issue-117' }
-          }),
-      }),
-    }
-
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          return yield* control.snapshot
-        }),
-      ),
-    )
-
-    expect(discoveries).toBe(0)
-    expect(harness.agentRuns()).toEqual([])
-    expect(snapshot.handoffs).toEqual([])
-    expect(snapshot.handoffRecovery).toMatchObject({ recovered: 0, skipped: 1 })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
-
-  it('supplements a partial store without duplicating its persisted handoff', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-partial-handoff-'))
-    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const first = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const second = {
-      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
-      id: issueId('75'),
-    }
-    await Effect.runPromise(
-      saveHandoffs(storePath, [
+  it.effect('supplements a partial store without duplicating its persisted handoff', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-partial-handoff-')),
+      )
+      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const first = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const second = {
+        ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+        id: issueId('75'),
+      }
+      yield* saveHandoffs(storePath, [
         {
           issueId: first.id,
           identifier: first.identifier,
@@ -925,101 +932,103 @@ describe('restored pull request handoffs', (): void => {
           repairAttempts: 0,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [first, second])
-    let discoveries = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        findExistingHandoff: (candidate) =>
-          Effect.sync(() => {
-            discoveries += 1
-            expect(candidate.id).toBe(second.id)
-            return {
-              _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-75',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/95',
-              pullRequestNumber: 95,
-              created: false,
-            }
-          }),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            url: `https://github.test/example/symphony/pull/${String(number)}`,
-            headSha: number === 65 ? 'first-head' : 'second-head',
-            merged: false as const,
-            state: 'open' as const,
-            mergeCommitSha: null,
-            mergeable: null,
-            mergeState: 'unknown',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: {
-              headShaPrefix: number === 65 ? 'first-head' : 'second-head',
-              status: 'pending' as const,
-            },
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [first, second])
+      let discoveries = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          findExistingHandoff: (candidate) =>
+            Effect.sync(() => {
+              discoveries += 1
+              expect(candidate.id).toBe(second.id)
+              return {
+                _tag: 'PullRequest' as const,
+                branchName: 'symphony/issue-75',
+                pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+                pullRequestNumber: 95,
+                created: false,
+              }
+            }),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              url: `https://github.test/example/symphony/pull/${String(number)}`,
+              headSha: number === 65 ? 'first-head' : 'second-head',
+              merged: false as const,
+              state: 'open' as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: {
+                headShaPrefix: number === 65 ? 'first-head' : 'second-head',
+                status: 'pending' as const,
+              },
+            }),
+        }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(discoveries).toBe(1)
-    expect(snapshot.handoffs.map((handoff) => handoff.issueId).sort()).toEqual(['20', '75'])
-    expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 1 })
-    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toHaveLength(2)
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(discoveries).toBe(1)
+      expect(snapshot.handoffs.map((handoff) => handoff.issueId).sort()).toEqual(['20', '75'])
+      expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 1 })
+      expect(yield* loadHandoffs(storePath)).toHaveLength(2)
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('reports a malformed store and does not replace it during recovery', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-malformed-handoff-'))
-    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    await mkdir(join(workspaceRoot, '.symphony'))
-    await writeFile(storePath, '{malformed')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const harness = makeHarness(isolated)
+  it.effect('reports a malformed store and does not replace it during recovery', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-malformed-handoff-')),
+      )
+      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      yield* Effect.promise(() => mkdir(join(workspaceRoot, '.symphony')))
+      yield* Effect.promise(() => writeFile(storePath, '{malformed'))
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const harness = makeHarness(isolated)
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffRecovery.status).toBe('degraded')
-    expect(snapshot.handoffRecovery.storeError).toMatchObject({ operation: 'read' })
-    expect(snapshot.handoffRecovery.storeError?.message).toContain(
-      `Could not decode handoff store ${storePath}`,
-    )
-    expect(await readFile(storePath, 'utf8')).toBe('{malformed')
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffRecovery.status).toBe('degraded')
+      expect(snapshot.handoffRecovery.storeError).toMatchObject({ operation: 'read' })
+      expect(snapshot.handoffRecovery.storeError?.message).toContain(
+        `Could not decode handoff store ${storePath}`,
+      )
+      expect(yield* Effect.promise(() => readFile(storePath, 'utf8'))).toBe('{malformed')
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('retains persisted entries through a transient GitHub hydration failure', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-transient-handoff-'))
-    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
-      id: issueId('75'),
-    }
-    await Effect.runPromise(
-      saveHandoffs(storePath, [
+  it.effect('retains persisted entries through a transient GitHub hydration failure', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-transient-handoff-')),
+      )
+      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+        id: issueId('75'),
+      }
+      yield* saveHandoffs(storePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1031,80 +1040,80 @@ describe('restored pull request handoffs', (): void => {
           repairAttempts: 0,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    let hydrationAttempts = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByIds: (ids, options) => {
-            hydrationAttempts += 1
-            return hydrationAttempts === 1
-              ? Effect.fail(
-                  new TrackerError({
-                    category: 'tracker_request',
-                    message: 'transient GitHub failure',
-                    retryable: true,
-                  }),
-                )
-              : tracker.fetchIssuesByIds(ids, options)
-          },
-        }
-      },
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            url: 'https://github.test/example/symphony/pull/95',
-            headSha: 'persisted-head',
-            merged: false as const,
-            state: 'open' as const,
-            mergeCommitSha: null,
-            mergeable: null,
-            mergeState: 'unknown',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let hydrationAttempts = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByIds: (ids, options) => {
+              hydrationAttempts += 1
+              return hydrationAttempts === 1
+                ? Effect.fail(
+                    new TrackerError({
+                      category: 'tracker_request',
+                      message: 'transient GitHub failure',
+                      retryable: true,
+                    }),
+                  )
+                : tracker.fetchIssuesByIds(ids, options)
+            },
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              url: 'https://github.test/example/symphony/pull/95',
+              headSha: 'persisted-head',
+              merged: false as const,
+              state: 'open' as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+            }),
+        }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(hydrationAttempts).toBeGreaterThanOrEqual(2)
-    expect(snapshot.handoffs).toHaveLength(1)
-    expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 0 })
-    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toHaveLength(1)
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(hydrationAttempts).toBeGreaterThanOrEqual(2)
+      expect(snapshot.handoffs).toHaveLength(1)
+      expect(snapshot.handoffRecovery).toMatchObject({ loaded: 1, recovered: 0 })
+      expect(yield* loadHandoffs(storePath)).toHaveLength(1)
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('removes a restored handoff after its pull request is confirmed merged', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-restored-handoff-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#63', 1, null, ['symphony', 'ready']),
-      id: issueId('63'),
-    }
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('removes a restored handoff after its pull request is confirmed merged', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-restored-handoff-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#63', 1, null, ['symphony', 'ready']),
+        id: issueId('63'),
+      }
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1116,78 +1125,78 @@ describe('restored pull request handoffs', (): void => {
           repairAttempts: 0,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    let inspections = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (pullRequestNumber) =>
-          Effect.sync(() => {
-            inspections += 1
-            return {
-              number: pullRequestNumber,
-              state: 'closed' as const,
-              url: null,
-              headSha: null,
-              merged: true as const,
-              mergeCommitSha: null,
-              // The merge happened long before this host came back up.
-              mergedAt: '2026-08-20T09:00:00.000Z',
-              mergeable: null,
-              mergeState: 'unknown',
-              checks: [],
-              reviewDecision: null,
-              reviewThreads: [],
-            }
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let inspections = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (pullRequestNumber) =>
+            Effect.sync(() => {
+              inspections += 1
+              return {
+                number: pullRequestNumber,
+                state: 'closed' as const,
+                url: null,
+                headSha: null,
+                merged: true as const,
+                mergeCommitSha: null,
+                // The merge happened long before this host came back up.
+                mergedAt: '2026-08-20T09:00:00.000Z',
+                mergeable: null,
+                mergeState: 'unknown',
+                checks: [],
+                reviewDecision: null,
+                reviewThreads: [],
+              }
+            }),
+        }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(inspections).toBe(1)
-    expect(snapshot.handoffs).toEqual([])
-    expect(snapshot.counts.completed).toBe(1)
-    // Finished work is published as described entries, not only as a count: the console scopes its
-    // Finished view to a time window and needs the instant each issue landed to do that.
-    expect(snapshot.completed).toHaveLength(1)
-    expect(snapshot.completed[0]).toMatchObject({
-      identifier: issue.identifier,
-      title: issue.title,
-      outcome: 'merged',
-      pullRequestUrl: 'https://github.test/example/symphony/pull/44',
-      // The provider's merge time, not the instant this host noticed it. Dating it now would put
-      // work merged days ago back into the console's recent-activity window.
-      finishedAt: '2026-08-20T09:00:00.000Z',
-    })
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(inspections).toBe(1)
+      expect(snapshot.handoffs).toEqual([])
+      expect(snapshot.counts.completed).toBe(1)
+      // Finished work is published as described entries, not only as a count: the console scopes its
+      // Finished view to a time window and needs the instant each issue landed to do that.
+      expect(snapshot.completed).toHaveLength(1)
+      expect(snapshot.completed[0]).toMatchObject({
+        identifier: issue.identifier,
+        title: issue.title,
+        outcome: 'merged',
+        pullRequestUrl: 'https://github.test/example/symphony/pull/44',
+        // The provider's merge time, not the instant this host noticed it. Dating it now would put
+        // work merged days ago back into the console's recent-activity window.
+        finishedAt: '2026-08-20T09:00:00.000Z',
+      })
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('retains a closed unmerged handoff without dispatching repair work', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-closed-handoff-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
-      id: issueId('75'),
-    }
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('retains a closed unmerged handoff without dispatching repair work', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-closed-handoff-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+        id: issueId('75'),
+      }
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1199,48 +1208,46 @@ describe('restored pull request handoffs', (): void => {
           repairAttempts: 0,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    let inspections = 0
-    let issueRefreshes = 0
-    let refreshesAfterClose = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByIds: (ids, options) => {
-            issueRefreshes += 1
-            return tracker.fetchIssuesByIds(ids, options)
-          },
-        }
-      },
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (pullRequestNumber) =>
-          Effect.sync(() => {
-            inspections += 1
-            return {
-              number: pullRequestNumber,
-              state: 'closed' as const,
-              url: 'https://github.test/example/symphony/pull/50',
-              headSha: 'closed-head',
-              merged: false as const,
-              mergeCommitSha: null,
-              mergeable: false,
-              mergeState: 'dirty',
-              checks: [],
-              reviewDecision: null,
-              reviewThreads: [],
-            }
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let inspections = 0
+      let issueRefreshes = 0
+      let refreshesAfterClose = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByIds: (ids, options) => {
+              issueRefreshes += 1
+              return tracker.fetchIssuesByIds(ids, options)
+            },
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (pullRequestNumber) =>
+            Effect.sync(() => {
+              inspections += 1
+              return {
+                number: pullRequestNumber,
+                state: 'closed' as const,
+                url: 'https://github.test/example/symphony/pull/50',
+                headSha: 'closed-head',
+                merged: false as const,
+                mergeCommitSha: null,
+                mergeable: false,
+                mergeState: 'dirty',
+                checks: [],
+                reviewDecision: null,
+                reviewThreads: [],
+              }
+            }),
+        }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
@@ -1248,46 +1255,48 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(inspections).toBe(1)
-    expect(refreshesAfterClose).toBeGreaterThan(0)
-    expect(issueRefreshes).toBe(refreshesAfterClose)
-    expect(snapshot.running).toEqual([])
-    // The handoff came back from the store and nothing ran for it in this process, so its detail
-    // resource would report no session. The console reads this list to decide whether to offer an
-    // inspection at all, rather than rendering one that refuses.
-    expect(snapshot.inspectableAgents).toEqual([])
-    expect(snapshot.handoffs).toEqual([
-      expect.objectContaining({
-        issueId: '75',
-        state: 'closed_without_merge',
-        reason: 'The pull request was closed without being merged',
-        repairAttempts: 0,
-      }),
-    ])
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({ state: 'closed_without_merge' }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(inspections).toBe(1)
+      expect(refreshesAfterClose).toBeGreaterThan(0)
+      expect(issueRefreshes).toBe(refreshesAfterClose)
+      expect(snapshot.running).toEqual([])
+      // The handoff came back from the store and nothing ran for it in this process, so its detail
+      // resource would report no session. The console reads this list to decide whether to offer an
+      // inspection at all, rather than rendering one that refuses.
+      expect(snapshot.inspectableAgents).toEqual([])
+      expect(snapshot.handoffs).toEqual([
+        expect.objectContaining({
+          issueId: '75',
+          state: 'closed_without_merge',
+          reason: 'The pull request was closed without being merged',
+          repairAttempts: 0,
+        }),
+      ])
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ state: 'closed_without_merge' }),
+      ])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('isolates eligibility refresh failures between repair handoffs', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-isolated-handoff-refresh-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const failedIssue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const healthyIssue = {
-      ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
-      id: issueId('21'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await Effect.runPromise(
-      saveHandoffs(
+  it.effect('isolates eligibility refresh failures between repair handoffs', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-isolated-handoff-refresh-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const failedIssue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const healthyIssue = {
+        ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
+        id: issueId('21'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveHandoffs(
         handoffStorePath,
         [failedIssue, healthyIssue].map((issue, index) => ({
           issueId: issue.id,
@@ -1304,47 +1313,45 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: head,
           observedAt: new Date(0).toISOString(),
         })),
-      ),
-    )
-    const harness = makeHarness(isolated, () => [failedIssue, healthyIssue])
-    const refreshedIds: IssueId[] = []
-    const launchedIds: IssueId[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByIds: (ids, options) => {
-            if (ids.length !== 1) {
-              return tracker.fetchIssuesByIds(ids, options)
-            }
-            refreshedIds.push(...ids)
-            if (ids.includes(failedIssue.id)) {
-              return Effect.fail(
-                new TrackerError({
-                  category: 'tracker_request',
-                  message: 'one issue is malformed',
-                  retryable: true,
-                }),
-              )
-            }
-            return Effect.succeed([healthyIssue])
-          },
-        }
-      },
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      runAgent: ({ issue }) =>
-        Effect.sync(() => {
-          launchedIds.push(issue.id)
-        }).pipe(Effect.zipRight(Effect.never)),
-    }
+      )
+      const harness = makeHarness(isolated, () => [failedIssue, healthyIssue])
+      const refreshedIds: IssueId[] = []
+      const launchedIds: IssueId[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByIds: (ids, options) => {
+              if (ids.length !== 1) {
+                return tracker.fetchIssuesByIds(ids, options)
+              }
+              refreshedIds.push(...ids)
+              if (ids.includes(failedIssue.id)) {
+                return Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_request',
+                    message: 'one issue is malformed',
+                    retryable: true,
+                  }),
+                )
+              }
+              return Effect.succeed([healthyIssue])
+            },
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        runAgent: ({ issue }) =>
+          Effect.sync(() => {
+            launchedIds.push(issue.id)
+          }).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (launchedIds.length === 0) {
@@ -1352,31 +1359,33 @@ describe('restored pull request handoffs', (): void => {
           }
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
-    expect(launchedIds).toEqual([healthyIssue.id])
-    expect(
-      snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
-    ).toContain('one issue is malformed')
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+      expect(launchedIds).toEqual([healthyIssue.id])
+      expect(
+        snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
+      ).toContain('one issue is malformed')
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('awaits Codex review of the initial head before merging', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-initial-review-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const initialHead = 'abcdef1234567890abcdef1234567890abcdef12'
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('awaits Codex review of the initial head before merging', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-initial-review-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const initialHead = 'abcdef1234567890abcdef1234567890abcdef12'
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1390,55 +1399,53 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: null,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    let codexReview: CodexReviewObservation = {
-      headShaPrefix: initialHead.slice(0, 7),
-      status: 'pending',
-    }
-    const requestedHeads: string[] = []
-    const mergedHeads: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: initialHead,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: 'clean',
-            checks: [
-              {
-                name: 'quality',
-                status: 'completed' as const,
-                conclusion: 'success',
-                url: null,
-              },
-            ],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview,
-          }),
-        requestPullRequestReview: (_number, expectedHeadSha) =>
-          Effect.sync(() => {
-            requestedHeads.push(expectedHeadSha)
-          }),
-        mergePullRequest: (_number, expectedHeadSha) =>
-          Effect.sync(() => {
-            mergedHeads.push(expectedHeadSha)
-            return 'merged-head'
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let codexReview: CodexReviewObservation = {
+        headShaPrefix: initialHead.slice(0, 7),
+        status: 'pending',
+      }
+      const requestedHeads: string[] = []
+      const mergedHeads: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: initialHead,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: true,
+              mergeState: 'clean',
+              checks: [
+                {
+                  name: 'quality',
+                  status: 'completed' as const,
+                  conclusion: 'success',
+                  url: null,
+                },
+              ],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview,
+            }),
+          requestPullRequestReview: (_number, expectedHeadSha) =>
+            Effect.sync(() => {
+              requestedHeads.push(expectedHeadSha)
+            }),
+          mergePullRequest: (_number, expectedHeadSha) =>
+            Effect.sync(() => {
+              mergedHeads.push(expectedHeadSha)
+              return 'merged-head'
+            }),
+        }),
+      }
 
-    await Effect.runPromise(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
@@ -1468,25 +1475,27 @@ describe('restored pull request handoffs', (): void => {
           expect(mergedHeads).toEqual([initialHead])
           expect(snapshot.handoffs).toEqual([])
         }),
-      ),
-    )
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      )
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('requests and awaits Codex review of the repaired head before merging', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repaired-review-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const repairedHead = 'abcdef1234567890abcdef1234567890abcdef12'
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('requests and awaits Codex review of the repaired head before merging', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repaired-review-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const repairedHead = 'abcdef1234567890abcdef1234567890abcdef12'
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1499,52 +1508,50 @@ describe('restored pull request handoffs', (): void => {
           reviewRequestedHeadSha: null,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    let codexReview: CodexReviewObservation | null = null
-    const requestedHeads: string[] = []
-    const mergedHeads: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: repairedHead,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: 'clean',
-            checks: [
-              {
-                name: 'quality',
-                status: 'completed' as const,
-                conclusion: 'success',
-                url: null,
-              },
-            ],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview,
-          }),
-        requestPullRequestReview: (_number, expectedHeadSha) =>
-          Effect.sync(() => {
-            requestedHeads.push(expectedHeadSha)
-          }),
-        mergePullRequest: (_number, expectedHeadSha) =>
-          Effect.sync(() => {
-            mergedHeads.push(expectedHeadSha)
-            return 'merged-head'
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let codexReview: CodexReviewObservation | null = null
+      const requestedHeads: string[] = []
+      const mergedHeads: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: repairedHead,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: true,
+              mergeState: 'clean',
+              checks: [
+                {
+                  name: 'quality',
+                  status: 'completed' as const,
+                  conclusion: 'success',
+                  url: null,
+                },
+              ],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview,
+            }),
+          requestPullRequestReview: (_number, expectedHeadSha) =>
+            Effect.sync(() => {
+              requestedHeads.push(expectedHeadSha)
+            }),
+          mergePullRequest: (_number, expectedHeadSha) =>
+            Effect.sync(() => {
+              mergedHeads.push(expectedHeadSha)
+              return 'merged-head'
+            }),
+        }),
+      }
 
-    await Effect.runPromise(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
@@ -1580,127 +1587,131 @@ describe('restored pull request handoffs', (): void => {
           expect(mergedHeads).toEqual([repairedHead])
           expect(snapshot.handoffs).toEqual([])
         }),
-      ),
-    )
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      )
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('migrates contaminated legacy counts and persists the repair baseline while running', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-running-repair-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const reviewedHead = 'abcdef1234567890abcdef1234567890abcdef12'
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
-        {
-          issueId: issue.id,
-          identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
-          state: 'intervention_required',
-          headSha: reviewedHead,
-          reason: 'Repair limit reached. Unresolved review feedback',
-          repairAttempts: 3,
-          reviewRequestedHeadSha: reviewedHead,
-          reviewCompletedHeadSha: reviewedHead,
-          observedAt: new Date(0).toISOString(),
-        },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
+  it.effect(
+    'migrates contaminated legacy counts and persists the repair baseline while running',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), 'symphony-running-repair-')),
+        )
+        const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+        const isolated: Workflow = {
+          ...workflow,
+          config: { ...workflow.config, workspaceRoot },
+        }
+        const issue = {
+          ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+          id: issueId('20'),
+        }
+        const reviewedHead = 'abcdef1234567890abcdef1234567890abcdef12'
+        yield* saveHandoffs(handoffStorePath, [
+          {
+            issueId: issue.id,
+            identifier: issue.identifier,
+            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+            branchName: 'symphony/issue-20',
+            state: 'intervention_required',
             headSha: reviewedHead,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: 'clean',
-            checks: [
-              {
-                name: 'quality',
-                status: 'completed' as const,
-                conclusion: 'success',
-                url: null,
-              },
-            ],
-            reviewDecision: null,
-            reviewThreads: [
-              {
-                id: 'thread-1',
-                resolved: false,
-                body: 'Fix this',
-                url: null,
-                commentHeadSha: reviewedHead,
-              },
-            ],
-            codexReview: {
-              headShaPrefix: reviewedHead.slice(0, 7),
-              status: 'completed' as const,
-            },
+            reason: 'Repair limit reached. Unresolved review feedback',
+            repairAttempts: 3,
+            reviewRequestedHeadSha: reviewedHead,
+            reviewCompletedHeadSha: reviewedHead,
+            observedAt: new Date(0).toISOString(),
+          },
+        ])
+        const harness = makeHarness(isolated, () => [issue])
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeCodeReview: (provider) => ({
+            ...requireCodeReview(harness.ports, provider),
+            inspectPullRequest: (number) =>
+              Effect.succeed({
+                number,
+                state: 'open' as const,
+                url: 'https://github.test/example/symphony/pull/65',
+                headSha: reviewedHead,
+                merged: false as const,
+                mergeCommitSha: null,
+                mergeable: true,
+                mergeState: 'clean',
+                checks: [
+                  {
+                    name: 'quality',
+                    status: 'completed' as const,
+                    conclusion: 'success',
+                    url: null,
+                  },
+                ],
+                reviewDecision: null,
+                reviewThreads: [
+                  {
+                    id: 'thread-1',
+                    resolved: false,
+                    body: 'Fix this',
+                    url: null,
+                    commentHeadSha: reviewedHead,
+                  },
+                ],
+                codexReview: {
+                  headShaPrefix: reviewedHead.slice(0, 7),
+                  status: 'completed' as const,
+                },
+              }),
           }),
-      }),
-    }
+        }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          return yield* control.snapshot
-        }),
-      ),
-    )
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            yield* control.refresh
+            return yield* control.snapshot
+          }),
+        )
 
-    expect(snapshot.running).toHaveLength(1)
-    expect(snapshot.handoffs).toEqual([
-      expect.objectContaining({
-        issueId: '20',
-        state: 'repair_needed',
-        repairAttempts: 0,
-        repairHeadShas: [],
-        repairStartedHeadSha: reviewedHead,
-        reviewRequestedHeadSha: reviewedHead,
-        reviewCompletedHeadSha: reviewedHead,
+        expect(snapshot.running).toHaveLength(1)
+        expect(snapshot.handoffs).toEqual([
+          expect.objectContaining({
+            issueId: '20',
+            state: 'repair_needed',
+            repairAttempts: 0,
+            repairHeadShas: [],
+            repairStartedHeadSha: reviewedHead,
+            reviewRequestedHeadSha: reviewedHead,
+            reviewCompletedHeadSha: reviewedHead,
+          }),
+        ])
+        expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+          expect.objectContaining({
+            issueId: '20',
+            repairAttempts: 0,
+            repairHeadShas: [],
+            repairStartedHeadSha: reviewedHead,
+          }),
+        ])
+        yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
       }),
-    ])
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({
-        issueId: '20',
-        repairAttempts: 0,
-        repairHeadShas: [],
-        repairStartedHeadSha: reviewedHead,
-      }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+  )
 
-  it('counts a repair only after GitHub exposes a distinct pull request head', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-progress-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentHead = originalHead
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('counts a repair only after GitHub exposes a distinct pull request head', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-progress-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let currentHead = originalHead
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1716,60 +1727,58 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: originalHead,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: currentHead,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: currentHead === originalHead ? 'clean' : 'unknown',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads:
-              currentHead === originalHead
-                ? [
-                    {
-                      id: 'thread-1',
-                      resolved: false,
-                      body: 'Fix this',
-                      url: null,
-                      commentHeadSha: originalHead,
-                    },
-                  ]
-                : [],
-            codexReview: {
-              headShaPrefix: currentHead.slice(0, 7),
-              status: 'completed' as const,
-            },
-          }),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-20',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
-          }),
-      }),
-      runAgent: () =>
-        Effect.sync(() => {
-          currentHead = repairedHead
-          return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: currentHead,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: true,
+              mergeState: currentHead === originalHead ? 'clean' : 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads:
+                currentHead === originalHead
+                  ? [
+                      {
+                        id: 'thread-1',
+                        resolved: false,
+                        body: 'Fix this',
+                        url: null,
+                        commentHeadSha: originalHead,
+                      },
+                    ]
+                  : [],
+              codexReview: {
+                headShaPrefix: currentHead.slice(0, 7),
+                status: 'completed' as const,
+              },
+            }),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-20',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
         }),
-    }
+        runAgent: () =>
+          Effect.sync(() => {
+            currentHead = repairedHead
+            return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+          }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -1780,28 +1789,30 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('stops a no-op repair without consuming the changed-head budget', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-no-progress-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('stops a no-op repair without consuming the changed-head budget', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-no-progress-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1817,42 +1828,40 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: head,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: head,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: false,
-            mergeState: 'dirty',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
-          }),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-20',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
-          }),
-      }),
-      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: head,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: false,
+              mergeState: 'dirty',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+            }),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-20',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -1863,35 +1872,37 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.running).toEqual([])
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'intervention_required',
-      repairAttempts: 0,
-      repairHeadShas: [],
-      repairStartedHeadSha: null,
-    })
-    expect(snapshot.handoffs[0]?.reason).toContain(
-      'Repair agent completed without changing the pull request head',
-    )
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.running).toEqual([])
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'intervention_required',
+        repairAttempts: 0,
+        repairHeadShas: [],
+        repairStartedHeadSha: null,
+      })
+      expect(snapshot.handoffs[0]?.reason).toContain(
+        'Repair agent completed without changing the pull request head',
+      )
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('attributes a repair head pushed just before a restart', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-restart-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    // The repair pushed repairedHead, then the process died before reconciliation observed it.
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('attributes a repair head pushed just before a restart', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-restart-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      // The repair pushed repairedHead, then the process died before reconciliation observed it.
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1907,75 +1918,75 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: originalHead,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: repairedHead,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: 'clean',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: {
-              headShaPrefix: repairedHead.slice(0, 7),
-              status: 'completed' as const,
-            },
-          }),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-20',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
-          }),
-      }),
-      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: repairedHead,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: true,
+              mergeState: 'clean',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: {
+                headShaPrefix: repairedHead.slice(0, 7),
+                status: 'completed' as const,
+              },
+            }),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-20',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('detects a repair cycle back to the pre-repair head', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-cycle-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const initialHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    // The first repair moved the branch off initialHead; the second put it back. initialHead was
-    // only ever a baseline, so it is the head the budget counter alone cannot remember.
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('detects a repair cycle back to the pre-repair head', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-cycle-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const initialHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      // The first repair moved the branch off initialHead; the second put it back. initialHead was
+      // only ever a baseline, so it is the head the budget counter alone cannot remember.
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -1992,73 +2003,73 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: repairedHead,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: initialHead,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: 'clean',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: { headShaPrefix: initialHead.slice(0, 7), status: 'completed' as const },
-          }),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-20',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
-          }),
-      }),
-      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: initialHead,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: true,
+              mergeState: 'clean',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: initialHead.slice(0, 7), status: 'completed' as const },
+            }),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-20',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    // Returning to an already observed head is a cycle, not progress: it must not buy another
-    // repair or another slot in the budget.
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'intervention_required',
-      repairAttempts: 1,
-    })
-    expect(snapshot.handoffs[0]?.reason).toContain('already observed repair head')
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // Returning to an already observed head is a cycle, not progress: it must not buy another
+      // repair or another slot in the budget.
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'intervention_required',
+        repairAttempts: 1,
+      })
+      expect(snapshot.handoffs[0]?.reason).toContain('already observed repair head')
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('treats a repair interrupted by a restart as retryable, not a no-op', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-interrupted-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    // The repair was dispatched and its baseline persisted, then the process died before the
-    // agent pushed anything. The head is therefore unchanged, but nothing was a no-op.
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('treats a repair interrupted by a restart as retryable, not a no-op', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-interrupted-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      // The repair was dispatched and its baseline persisted, then the process died before the
+      // agent pushed anything. The head is therefore unchanged, but nothing was a no-op.
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -2074,90 +2085,90 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: head,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: head,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: true,
-            mergeState: 'clean',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [
-              {
-                id: 'thread-1',
-                resolved: false,
-                body: 'Fix this',
-                url: null,
-                commentHeadSha: head,
-              },
-            ],
-            codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
-          }),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-20',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
-          }),
-      }),
-      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: head,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: true,
+              mergeState: 'clean',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [
+                {
+                  id: 'thread-1',
+                  resolved: false,
+                  body: 'Fix this',
+                  url: null,
+                  commentHeadSha: head,
+                },
+              ],
+              codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+            }),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-20',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    // The interrupted repair neither consumed the changed-head budget nor locked the handoff out
-    // of further automatic repairs.
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 0,
-      repairHeadShas: [],
-    })
-    expect(snapshot.handoffs[0]?.state).not.toBe('intervention_required')
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // The interrupted repair neither consumed the changed-head budget nor locked the handoff out
+      // of further automatic repairs.
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 0,
+        repairHeadShas: [],
+      })
+      expect(snapshot.handoffs[0]?.state).not.toBe('intervention_required')
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('releases a running repair identity when the operator cancels it', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-cancelled-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      runAgent: () => Effect.never,
-    }
+  it.effect('releases a running repair identity when the operator cancels it', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-cancelled-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        runAgent: () => Effect.never,
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2169,53 +2180,55 @@ describe('restored pull request handoffs', (): void => {
           yield* control.setIssuePaused(20, true)
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairAttempts: 0,
-      repairStartedHeadSha: null,
-    })
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({ repairStartedHeadSha: null }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+      })
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ repairStartedHeadSha: null }),
+      ])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('retains a stalled repair identity for its automatic retry', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-stalled-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        workspaceRoot,
-        codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
-      },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const launchedDescriptions: (string | null)[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      runAgent: ({ issue: launchedIssue }) =>
-        Effect.sync(() => {
-          launchedDescriptions.push(launchedIssue.description)
-        }).pipe(Effect.zipRight(Effect.never)),
-    }
+  it.effect('retains a stalled repair identity for its automatic retry', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-stalled-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+        },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const launchedDescriptions: (string | null)[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        runAgent: ({ issue: launchedIssue }) =>
+          Effect.sync(() => {
+            launchedDescriptions.push(launchedIssue.description)
+          }).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (launchedDescriptions.length === 0) {
@@ -2240,58 +2253,60 @@ describe('restored pull request handoffs', (): void => {
           expect(current.handoffs[0]?.repairStartedHeadSha).toBe(head)
           yield* control.setIssuePaused(20, true)
         }),
-      ),
-    )
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      )
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('refreshes and attributes a repair whose first dispatch was refused', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      promptTemplate: '{{ issue.description }}',
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const queuedHead = 'cccccccccccccccccccccccccccccccccccccccc'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentHead = originalHead
-    await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => [issue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, currentHead)
-          }),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-20',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: false,
-          }),
-      }),
-      runAgent: ({ issue: launchedIssue }) =>
-        Effect.sync(() => {
-          expect(launchedIssue.description).toContain(`Head: ${queuedHead}`)
-          currentHead = repairedHead
-          return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+  it.effect('refreshes and attributes a repair whose first dispatch was refused', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-refused-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        promptTemplate: '{{ issue.description }}',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const queuedHead = 'cccccccccccccccccccccccccccccccccccccccc'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let currentHead = originalHead
+      yield* saveRepairHandoff(handoffStorePath, issue, originalHead)
+      const harness = makeHarness(isolated, () => [issue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, currentHead)
+            }),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-20',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
         }),
-    }
+        runAgent: ({ issue: launchedIssue }) =>
+          Effect.sync(() => {
+            expect(launchedIssue.description).toContain(`Head: ${queuedHead}`)
+            currentHead = repairedHead
+            return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+          }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2309,44 +2324,46 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairObservedHeadShas: [originalHead, queuedHead, repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairObservedHeadShas: [originalHead, queuedHead, repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('releases a refused repair identity when its queued retry is cancelled', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-cancelled-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, head)
-          }),
-      }),
-    }
+  it.effect('releases a refused repair identity when its queued retry is cancelled', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-retry-cancelled-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, head)
+            }),
+        }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2358,48 +2375,50 @@ describe('restored pull request handoffs', (): void => {
           yield* control.setIssuePaused(20, true)
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.retrying).toEqual([])
-    expect(snapshot.handoffs[0]?.repairStartedHeadSha).toBeNull()
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.retrying).toEqual([])
+      expect(snapshot.handoffs[0]?.repairStartedHeadSha).toBeNull()
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('attributes a repair head when its continuation becomes unroutable', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-unroutable-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentIssue = issue
-    let currentHead = originalHead
-    await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
-      }),
-      runAgent: () =>
-        Effect.sync(() => {
-          currentHead = repairedHead
-        }).pipe(
-          Effect.zipRight(
-            Effect.fail(
-              new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+  it.effect('attributes a repair head when its continuation becomes unroutable', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-unroutable-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let currentIssue = issue
+      let currentHead = originalHead
+      yield* saveRepairHandoff(handoffStorePath, issue, originalHead)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+        }),
+        runAgent: () =>
+          Effect.sync(() => {
+            currentHead = repairedHead
+          }).pipe(
+            Effect.zipRight(
+              Effect.fail(
+                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+              ),
             ),
           ),
-        ),
-    }
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2415,55 +2434,57 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairObservedHeadShas: [originalHead, repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairObservedHeadShas: [originalHead, repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('attributes a pushed head before dispatching a queued repair retry', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-attributed-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const intermediateHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentHead = originalHead
-    await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => [issue])
-    const launchedDescriptions: (string | null)[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
-      }),
-      // The first repair pushes a head and then fails; the second is held open so the state it
-      // was dispatched with can be read.
-      runAgent: ({ issue: launchedIssue }) =>
-        Effect.suspend(() => {
-          launchedDescriptions.push(launchedIssue.description)
-          if (launchedDescriptions.length > 1) {
-            return Effect.never
-          }
-          currentHead = intermediateHead
-          return Effect.fail(
-            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-          )
+  it.effect('attributes a pushed head before dispatching a queued repair retry', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-retry-attributed-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const intermediateHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let currentHead = originalHead
+      yield* saveRepairHandoff(handoffStorePath, issue, originalHead)
+      const harness = makeHarness(isolated, () => [issue])
+      const launchedDescriptions: (string | null)[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
         }),
-    }
+        // The first repair pushes a head and then fails; the second is held open so the state it
+        // was dispatched with can be read.
+        runAgent: ({ issue: launchedIssue }) =>
+          Effect.suspend(() => {
+            launchedDescriptions.push(launchedIssue.description)
+            if (launchedDescriptions.length > 1) {
+              return Effect.never
+            }
+            currentHead = intermediateHead
+            return Effect.fail(
+              new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+            )
+          }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2495,44 +2516,46 @@ describe('restored pull request handoffs', (): void => {
           yield* control.setIssuePaused(20, true)
           return current
         }),
-      ),
-    )
+      )
 
-    expect(launchedDescriptions[1]).toContain('## Pull request repair')
-    expect(launchedDescriptions[1]).toContain(`Head: ${intermediateHead}`)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [intermediateHead],
-      repairStartedHeadSha: intermediateHead,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(launchedDescriptions[1]).toContain('## Pull request repair')
+      expect(launchedDescriptions[1]).toContain(`Head: ${intermediateHead}`)
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [intermediateHead],
+        repairStartedHeadSha: intermediateHead,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('advances the execution attempt when a repair retry fails again', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-attempt-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      runAgent: () =>
-        Effect.fail(
-          new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-        ),
-    }
+  it.effect('advances the execution attempt when a repair retry fails again', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-retry-attempt-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        runAgent: () =>
+          Effect.fail(
+            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+          ),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2547,67 +2570,69 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.retrying[0]).toMatchObject({ issueId: issue.id, attempt: 3 })
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 0,
-      repairStartedHeadSha: head,
-    })
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: true }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.retrying[0]).toMatchObject({ issueId: issue.id, attempt: 3 })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 0,
+        repairStartedHeadSha: head,
+      })
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: true }),
+      ])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('admits a repair retry against the workflow it will be dispatched under', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-admission-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      fingerprint: 'original',
-      config: { ...workflow.config, workspaceRoot },
-    }
-    // The reload admits nothing. The handoff captured the workflow above, which admits one, and
-    // that is the one the retry is dispatched under.
-    const reloaded: Workflow = {
-      ...isolated,
-      fingerprint: 'reloaded',
-      config: {
-        ...isolated.config,
-        agent: { ...isolated.config.agent, maxConcurrentAgents: 0 },
-        tracker: { ...isolated.config.tracker, requiredLabels: ['new-policy'] },
-      },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let launches = 0
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      // The first repair fails without pushing, queueing a retry; the second is held open.
-      runAgent: () =>
-        Effect.suspend(() => {
-          launches += 1
-          return launches > 1
-            ? Effect.never
-            : Effect.fail(
-                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-              )
+  it.effect('admits a repair retry against the workflow it will be dispatched under', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-admission-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      // The reload admits nothing. The handoff captured the workflow above, which admits one, and
+      // that is the one the retry is dispatched under.
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        config: {
+          ...isolated.config,
+          agent: { ...isolated.config.agent, maxConcurrentAgents: 0 },
+          tracker: { ...isolated.config.tracker, requiredLabels: ['new-policy'] },
+        },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let launches = 0
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
         }),
-    }
+        // The first repair fails without pushing, queueing a retry; the second is held open.
+        runAgent: () =>
+          Effect.suspend(() => {
+            launches += 1
+            return launches > 1
+              ? Effect.never
+              : Effect.fail(
+                  new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+                )
+          }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2630,46 +2655,48 @@ describe('restored pull request handoffs', (): void => {
           }
           yield* control.setIssuePaused(20, true)
         }),
-      ),
-    )
+      )
 
-    expect(launches).toBe(2)
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(launches).toBe(2)
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('dispatches a repair retry against the tracker record it just refetched', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refetched-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const launched: Issue[] = []
-    let currentIssue = issue
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      // The first repair fails without pushing, queueing a retry; the second is held open.
-      runAgent: ({ issue: launchedIssue }) =>
-        Effect.suspend(() => {
-          launched.push(launchedIssue)
-          return launched.length > 1
-            ? Effect.never
-            : Effect.fail(
-                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-              )
+  it.effect('dispatches a repair retry against the tracker record it just refetched', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-refetched-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const launched: Issue[] = []
+      let currentIssue = issue
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
         }),
-    }
+        // The first repair fails without pushing, queueing a retry; the second is held open.
+        runAgent: ({ issue: launchedIssue }) =>
+          Effect.suspend(() => {
+            launched.push(launchedIssue)
+            return launched.length > 1
+              ? Effect.never
+              : Effect.fail(
+                  new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+                )
+          }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2691,55 +2718,57 @@ describe('restored pull request handoffs', (): void => {
           }
           yield* control.setIssuePaused(20, true)
         }),
-      ),
-    )
+      )
 
-    // The retry carries the repair instructions on top of the record as it stands now, not the one
-    // the handoff captured before any of this.
-    expect(launched[1]?.title).toBe('renamed upstream')
-    expect(launched[1]?.priority).toBe(5)
-    expect(launched[1]?.description).toContain('new repair requirements from the tracker')
-    expect(launched[1]?.description).toContain('## Pull request repair')
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // The retry carries the repair instructions on top of the record as it stands now, not the one
+      // the handoff captured before any of this.
+      expect(launched[1]?.title).toBe('renamed upstream')
+      expect(launched[1]?.priority).toBe(5)
+      expect(launched[1]?.description).toContain('new repair requirements from the tracker')
+      expect(launched[1]?.description).toContain('## Pull request repair')
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('preserves a repair execution attempt across capacity deferral', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const repaired = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const occupier = {
-      ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
-      id: issueId('21'),
-    }
-    // Unchanged throughout, and already review-settled, so the review gate passes and the capacity
-    // gate is what the retry actually meets.
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let candidates: readonly Issue[] = [repaired]
-    await saveRepairHandoff(handoffStorePath, repaired, head)
-    const harness = makeHarness(isolated, () => candidates)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      // The repair fails without pushing; the issue that takes the freed slot holds it.
-      runAgent: ({ issue: launchedIssue }) =>
-        Effect.suspend(() =>
-          launchedIssue.id === repaired.id
-            ? Effect.fail(
-                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-              )
-            : Effect.never,
-        ),
-    }
+  it.effect('preserves a repair execution attempt across capacity deferral', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const repaired = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const occupier = {
+        ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
+        id: issueId('21'),
+      }
+      // Unchanged throughout, and already review-settled, so the review gate passes and the capacity
+      // gate is what the retry actually meets.
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let candidates: readonly Issue[] = [repaired]
+      yield* saveRepairHandoff(handoffStorePath, repaired, head)
+      const harness = makeHarness(isolated, () => candidates)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        // The repair fails without pushing; the issue that takes the freed slot holds it.
+        runAgent: ({ issue: launchedIssue }) =>
+          Effect.suspend(() =>
+            launchedIssue.id === repaired.id
+              ? Effect.fail(
+                  new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+                )
+              : Effect.never,
+          ),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2774,48 +2803,50 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    // Waiting for capacity does not turn execution attempt 2 back into repair-budget attempt 1.
-    // Once the slot opens, the failed worker advances the execution retry to attempt 3.
-    expect(snapshot.retrying[0]).toMatchObject({ issueId: repaired.id, attempt: 3 })
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 0,
-      repairStartedHeadSha: head,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // Waiting for capacity does not turn execution attempt 2 back into repair-budget attempt 1.
+      // Once the slot opens, the failed worker advances the execution retry to attempt 3.
+      expect(snapshot.retrying[0]).toMatchObject({ issueId: repaired.id, attempt: 3 })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 0,
+        repairStartedHeadSha: head,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('attributes a repair head when its issue leaves the active states mid-run', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-inactive-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentIssue = issue
-    let currentHead = originalHead
-    await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
-      }),
-      // The repair pushes and then stays open, so only the cancellation ends it.
-      runAgent: () =>
-        Effect.sync(() => {
-          currentHead = repairedHead
-        }).pipe(Effect.zipRight(Effect.never)),
-    }
+  it.effect('attributes a repair head when its issue leaves the active states mid-run', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-inactive-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let currentIssue = issue
+      let currentHead = originalHead
+      yield* saveRepairHandoff(handoffStorePath, issue, originalHead)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+        }),
+        // The repair pushes and then stays open, so only the cancellation ends it.
+        runAgent: () =>
+          Effect.sync(() => {
+            currentHead = repairedHead
+          }).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2832,62 +2863,64 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.running).toEqual([])
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairObservedHeadShas: [originalHead, repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.running).toEqual([])
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairObservedHeadShas: [originalHead, repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('dispatches a repair retry through the workflow its handoff was captured under', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-reload-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      fingerprint: 'original',
-      promptTemplate: '{{ issue.description }}',
-      config: { ...workflow.config, workspaceRoot },
-    }
-    // A reload that renders nothing of the issue would drop the repair instructions entirely.
-    const reloaded: Workflow = {
-      ...isolated,
-      fingerprint: 'reloaded',
-      promptTemplate: 'a reloaded template that says nothing about the pull request',
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const launchedPrompts: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, head)
-          }),
-      }),
-      runAgent: ({ prompt }) =>
-        Effect.suspend(() => {
-          launchedPrompts.push(prompt)
-          return Effect.never
+  it.effect('dispatches a repair retry through the workflow its handoff was captured under', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-reload-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        promptTemplate: '{{ issue.description }}',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      // A reload that renders nothing of the issue would drop the repair instructions entirely.
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        promptTemplate: 'a reloaded template that says nothing about the pull request',
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const launchedPrompts: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, head)
+            }),
         }),
-    }
+        runAgent: ({ prompt }) =>
+          Effect.suspend(() => {
+            launchedPrompts.push(prompt)
+            return Effect.never
+          }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2911,61 +2944,65 @@ describe('restored pull request handoffs', (): void => {
           yield* control.setIssuePaused(20, true)
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
-    expect(launchedPrompts[0]).toContain('## Pull request repair')
-    expect(launchedPrompts[0]).not.toContain('a reloaded template')
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
+      expect(launchedPrompts[0]).toContain('## Pull request repair')
+      expect(launchedPrompts[0]).not.toContain('a reloaded template')
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('cleans up a terminal repair retry in the workspace its repair ran in', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-cleanup-'))
-    const reloadedRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-cleanup-reloaded-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = {
-      ...workflow,
-      fingerprint: 'original',
-      config: { ...workflow.config, workspaceRoot },
-    }
-    // The reload moves the workspace root, so the two managers are told apart by where they clean.
-    const reloaded: Workflow = {
-      ...isolated,
-      fingerprint: 'reloaded',
-      config: { ...isolated.config, workspaceRoot: reloadedRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let currentIssue = issue
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const removedFrom: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, head)
-          }),
-      }),
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        remove: () =>
-          Effect.sync(() => {
-            removedFrom.push(settings.root)
-          }),
-      }),
-    }
+  it.effect('cleans up a terminal repair retry in the workspace its repair ran in', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-cleanup-')),
+      )
+      const reloadedRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-cleanup-reloaded-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      // The reload moves the workspace root, so the two managers are told apart by where they clean.
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        config: { ...isolated.config, workspaceRoot: reloadedRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let currentIssue = issue
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const removedFrom: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, head)
+            }),
+        }),
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: () =>
+            Effect.sync(() => {
+              removedFrom.push(settings.root)
+            }),
+        }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -2989,54 +3026,56 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
           }
         }),
-      ),
-    )
+      )
 
-    expect(removedFrom[0]).toBe(workspaceRoot)
-    await rm(workspaceRoot, { force: true, recursive: true })
-    await rm(reloadedRoot, { force: true, recursive: true })
-  })
+      expect(removedFrom[0]).toBe(workspaceRoot)
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+      yield* Effect.promise(() => rm(reloadedRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('does not dispatch a fresh repair once a repair retry finds its issue terminal', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-terminal-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let currentIssue = issue
-    let launches = 0
-    let workspacesCreated = 0
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        create: () =>
-          Effect.sync(() => {
-            workspacesCreated += 1
-            return { path: '/tmp/symphony-test', key: 'test', createdNow: true }
-          }),
-      }),
-      // The repair pushes nothing and fails, so a retry is queued behind it.
-      runAgent: () =>
-        Effect.suspend(() => {
-          launches += 1
-          return Effect.fail(
-            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-          )
+  it.effect('does not dispatch a fresh repair once a repair retry finds its issue terminal', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-terminal-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let currentIssue = issue
+      let launches = 0
+      let workspacesCreated = 0
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
         }),
-    }
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          create: () =>
+            Effect.sync(() => {
+              workspacesCreated += 1
+              return { path: '/tmp/symphony-test', key: 'test', createdNow: true }
+            }),
+        }),
+        // The repair pushes nothing and fails, so a retry is queued behind it.
+        runAgent: () =>
+          Effect.suspend(() => {
+            launches += 1
+            return Effect.fail(
+              new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+            )
+          }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3055,49 +3094,51 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    // Nothing ran after the issue became terminal, so the unchanged head is not reported as a
-    // no-op repair. The handoff remains observable, but new agent work is paused.
-    expect(launches).toBe(1)
-    expect(workspacesCreated).toBe(1)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairAttempts: 0,
-      repairStartedHeadSha: null,
-      reason: 'Repair paused because the issue is terminal.',
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // Nothing ran after the issue became terminal, so the unchanged head is not reported as a
+      // no-op repair. The handoff remains observable, but new agent work is paused.
+      expect(launches).toBe(1)
+      expect(workspacesCreated).toBe(1)
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+        reason: 'Repair paused because the issue is terminal.',
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('does not dispatch repairs for an idle handoff whose issue is no longer eligible', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-ineligible-handoff-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const handedOffIssue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const currentIssue = { ...handedOffIssue, labels: ['symphony'] }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let launches = 0
-    await saveRepairHandoff(handoffStorePath, handedOffIssue, head)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      runAgent: () =>
-        Effect.sync(() => {
-          launches += 1
-        }).pipe(Effect.zipRight(Effect.never)),
-    }
+  it.effect('does not dispatch repairs for an idle handoff whose issue is no longer eligible', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-ineligible-handoff-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const handedOffIssue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const currentIssue = { ...handedOffIssue, labels: ['symphony'] }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let launches = 0
+      yield* saveRepairHandoff(handoffStorePath, handedOffIssue, head)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        runAgent: () =>
+          Effect.sync(() => {
+            launches += 1
+          }).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3112,50 +3153,52 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(launches).toBe(0)
-    expect(snapshot.running).toEqual([])
-    expect(snapshot.retrying).toEqual([])
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairAttempts: 0,
-      repairStartedHeadSha: null,
-      reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(launches).toBe(0)
+      expect(snapshot.running).toEqual([])
+      expect(snapshot.retrying).toEqual([])
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+        reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('does not dispatch a fresh repair once a running repair finds its issue terminal', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-terminal-run-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let currentIssue = issue
-    let launches = 0
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-      }),
-      // The repair pushes nothing and stays open, so only the cancellation ends it.
-      runAgent: () =>
-        Effect.suspend(() => {
-          launches += 1
-          return Effect.never
+  it.effect('does not dispatch a fresh repair once a running repair finds its issue terminal', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-terminal-run-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let currentIssue = issue
+      let launches = 0
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
         }),
-    }
+        // The repair pushes nothing and stays open, so only the cancellation ends it.
+        runAgent: () =>
+          Effect.suspend(() => {
+            launches += 1
+            return Effect.never
+          }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3174,48 +3217,50 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    // The cancelled worker's baseline is left standing, so the next inspection reaches the verdict
-    // for a repair that changed nothing rather than starting another one.
-    expect(launches).toBe(1)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'intervention_required',
-      repairAttempts: 0,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // The cancelled worker's baseline is left standing, so the next inspection reaches the verdict
+      // for a repair that changed nothing rather than starting another one.
+      expect(launches).toBe(1)
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'intervention_required',
+        repairAttempts: 0,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('attributes a repair head when the tracker omits the issue mid-run', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-missing-run-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let candidates: readonly Issue[] = [issue]
-    let currentHead = originalHead
-    await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => candidates)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
-      }),
-      // The repair pushes and then stays open, so only the cancellation ends it.
-      runAgent: () =>
-        Effect.sync(() => {
-          currentHead = repairedHead
-        }).pipe(Effect.zipRight(Effect.never)),
-    }
+  it.effect('attributes a repair head when the tracker omits the issue mid-run', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-missing-run-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let candidates: readonly Issue[] = [issue]
+      let currentHead = originalHead
+      yield* saveRepairHandoff(handoffStorePath, issue, originalHead)
+      const harness = makeHarness(isolated, () => candidates)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+        }),
+        // The repair pushes and then stays open, so only the cancellation ends it.
+        runAgent: () =>
+          Effect.sync(() => {
+            currentHead = repairedHead
+          }).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3233,53 +3278,55 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.running).toEqual([])
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairObservedHeadShas: [originalHead, repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.running).toEqual([])
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairObservedHeadShas: [originalHead, repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('attributes a repair head when the tracker omits the issue from a retry refresh', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-missing-issue-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentHead = originalHead
-    let candidates: readonly Issue[] = [issue]
-    await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => candidates)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
-      }),
-      runAgent: () =>
-        Effect.sync(() => {
-          currentHead = repairedHead
-        }).pipe(
-          Effect.zipRight(
-            Effect.fail(
-              new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+  it.effect('attributes a repair head when the tracker omits the issue from a retry refresh', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-missing-issue-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      let currentHead = originalHead
+      let candidates: readonly Issue[] = [issue]
+      yield* saveRepairHandoff(handoffStorePath, issue, originalHead)
+      const harness = makeHarness(isolated, () => candidates)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+        }),
+        runAgent: () =>
+          Effect.sync(() => {
+            currentHead = repairedHead
+          }).pipe(
+            Effect.zipRight(
+              Effect.fail(
+                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+              ),
             ),
           ),
-        ),
-    }
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3301,44 +3348,46 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [repairedHead],
-      repairObservedHeadShas: [originalHead, repairedHead],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 1,
+        repairHeadShas: [repairedHead],
+        repairObservedHeadShas: [originalHead, repairedHead],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('records that a refused repair dispatch never started a worker', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, head)
-          }),
-      }),
-    }
+  it.effect('records that a refused repair dispatch never started a worker', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, head)
+            }),
+        }),
+      }
 
-    await Effect.runPromise(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3350,42 +3399,44 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           expect(current.handoffs[0]?.repairStartedHeadSha).toBe(head)
         }),
-      ),
-    )
+      )
 
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: false }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: false }),
+      ])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('does not escalate a refused repair when its issue becomes terminal before retry', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-terminal-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let currentIssue = issue
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [currentIssue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, head)
-          }),
-      }),
-    }
+  it.effect('does not escalate a refused repair when its issue becomes terminal before retry', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-refused-terminal-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let currentIssue = issue
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [currentIssue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, head)
+            }),
+        }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3401,62 +3452,64 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairAttempts: 0,
-      repairStartedHeadSha: null,
-      repairWorkerStarted: false,
-      reason: 'Repair paused because the issue is terminal.',
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+        repairWorkerStarted: false,
+        reason: 'Repair paused because the issue is terminal.',
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('settles a refused repair when tracker policy rejects its refresh retry', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-refresh-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let rejectRefresh = false
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByIds: (ids) =>
-            rejectRefresh
-              ? Effect.fail(
-                  new TrackerError({
-                    category: 'tracker_response',
-                    message: 'retry refresh was rejected',
-                    retryable: false,
-                  }),
-                )
-              : tracker.fetchIssuesByIds(ids),
-        }
-      },
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            refuseRepairDispatch()
-            return repairObservation(number, head)
-          }),
-      }),
-    }
+  it.effect('settles a refused repair when tracker policy rejects its refresh retry', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-refused-refresh-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let rejectRefresh = false
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByIds: (ids) =>
+              rejectRefresh
+                ? Effect.fail(
+                    new TrackerError({
+                      category: 'tracker_response',
+                      message: 'retry refresh was rejected',
+                      retryable: false,
+                    }),
+                  )
+                : tracker.fetchIssuesByIds(ids),
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              refuseRepairDispatch()
+              return repairObservation(number, head)
+            }),
+        }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3481,57 +3534,59 @@ describe('restored pull request handoffs', (): void => {
           current = yield* control.snapshot
           return current
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairAttempts: 0,
-      repairStartedHeadSha: null,
-      repairWorkerStarted: false,
-    })
-    expect(snapshot.retrying).toEqual([])
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+        repairWorkerStarted: false,
+      })
+      expect(snapshot.retrying).toEqual([])
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
+      ])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('settles a refused repair when tracker policy rejects its baseline inspection', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-inspection-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    let rejectInspection = false
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue])
-    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          rejectInspection
-            ? Effect.fail(
-                new TrackerError({
-                  category: 'tracker_response',
-                  message: 'baseline inspection was rejected',
-                  retryable: false,
+  it.effect('settles a refused repair when tracker policy rejects its baseline inspection', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-refused-inspection-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let rejectInspection = false
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            rejectInspection
+              ? Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_response',
+                    message: 'baseline inspection was rejected',
+                    retryable: false,
+                  }),
+                )
+              : Effect.sync(() => {
+                  refuseRepairDispatch()
+                  return repairObservation(number, head)
                 }),
-              )
-            : Effect.sync(() => {
-                refuseRepairDispatch()
-                return repairObservation(number, head)
-              }),
-      }),
-    }
+        }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3548,34 +3603,36 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairAttempts: 0,
-      repairStartedHeadSha: null,
-      repairWorkerStarted: false,
-    })
-    expect(snapshot.retrying).toEqual([])
-    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
-      expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
-    ])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+        repairWorkerStarted: false,
+      })
+      expect(snapshot.retrying).toEqual([])
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
+      ])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('does not attribute a manual head to a restored repair that never ran', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-restored-refused-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const manualHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('does not attribute a manual head to a restored repair that never ran', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-repair-restored-refused-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const manualHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -3593,25 +3650,23 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: manualHead,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    const launchedDescriptions: (string | null)[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, manualHead)),
-      }),
-      runAgent: ({ issue: launchedIssue }) =>
-        Effect.suspend(() => {
-          launchedDescriptions.push(launchedIssue.description)
-          return Effect.never
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const launchedDescriptions: (string | null)[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, manualHead)),
         }),
-    }
+        runAgent: ({ issue: launchedIssue }) =>
+          Effect.suspend(() => {
+            launchedDescriptions.push(launchedIssue.description)
+            return Effect.never
+          }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (launchedDescriptions.length === 0) {
@@ -3621,31 +3676,33 @@ describe('restored pull request handoffs', (): void => {
           yield* control.setIssuePaused(20, true)
           return current
         }),
-      ),
-    )
+      )
 
-    // The head moved while no worker was running, so it is a manual push rather than repair
-    // output: the budget is untouched and the fresh repair baselines on what is there now.
-    expect(launchedDescriptions[0]).toContain(`Head: ${manualHead}`)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 0,
-      repairHeadShas: [],
-      repairStartedHeadSha: manualHead,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // The head moved while no worker was running, so it is a manual push rather than repair
+      // output: the budget is untouched and the fresh repair baselines on what is there now.
+      expect(launchedDescriptions[0]).toContain(`Head: ${manualHead}`)
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 0,
+        repairHeadShas: [],
+        repairStartedHeadSha: manualHead,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('keeps observing a handoff that needs intervention', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-intervention-observed-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await Effect.runPromise(
-      saveHandoffs(handoffStorePath, [
+  it.effect('keeps observing a handoff that needs intervention', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-intervention-observed-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
@@ -3661,53 +3718,51 @@ describe('restored pull request handoffs', (): void => {
           reviewCompletedHeadSha: head,
           observedAt: new Date(0).toISOString(),
         },
-      ]),
-    )
-    const harness = makeHarness(isolated, () => [issue])
-    let inspections = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
-          Effect.sync(() => {
-            inspections += 1
-            // The operator merges the pull request by hand after the second observation.
-            return inspections < 2
-              ? ({
-                  number,
-                  state: 'open' as const,
-                  url: 'https://github.test/example/symphony/pull/65',
-                  headSha: head,
-                  merged: false as const,
-                  mergeCommitSha: null,
-                  mergeable: false,
-                  mergeState: 'dirty',
-                  checks: [],
-                  reviewDecision: null,
-                  reviewThreads: [],
-                  codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
-                } as const)
-              : ({
-                  number,
-                  state: 'closed' as const,
-                  url: 'https://github.test/example/symphony/pull/65',
-                  headSha: head,
-                  merged: true as const,
-                  mergeCommitSha: 'cccccccccccccccccccccccccccccccccccccccc',
-                  mergeable: null,
-                  mergeState: null,
-                  checks: [],
-                  reviewDecision: null,
-                  reviewThreads: [],
-                  codexReview: null,
-                } as const)
-          }),
-      }),
-    }
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let inspections = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              inspections += 1
+              // The operator merges the pull request by hand after the second observation.
+              return inspections < 2
+                ? ({
+                    number,
+                    state: 'open' as const,
+                    url: 'https://github.test/example/symphony/pull/65',
+                    headSha: head,
+                    merged: false as const,
+                    mergeCommitSha: null,
+                    mergeable: false,
+                    mergeState: 'dirty',
+                    checks: [],
+                    reviewDecision: null,
+                    reviewThreads: [],
+                    codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+                  } as const)
+                : ({
+                    number,
+                    state: 'closed' as const,
+                    url: 'https://github.test/example/symphony/pull/65',
+                    headSha: head,
+                    merged: true as const,
+                    mergeCommitSha: 'cccccccccccccccccccccccccccccccccccccccc',
+                    mergeable: null,
+                    mergeState: null,
+                    checks: [],
+                    reviewDecision: null,
+                    reviewThreads: [],
+                    codexReview: null,
+                  } as const)
+            }),
+        }),
+      }
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           // Two observations: the first finds it still open and unrepaired, the second finds the
@@ -3716,64 +3771,66 @@ describe('restored pull request handoffs', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    // The intervention state suppressed further repairs but never stopped observation, so the
-    // manual merge was seen and the handoff no longer holds the issue.
-    expect(inspections).toBeGreaterThan(1)
-    expect(snapshot.handoffs).toEqual([])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      // The intervention state suppressed further repairs but never stopped observation, so the
+      // manual merge was seen and the handoff no longer holds the issue.
+      expect(inspections).toBeGreaterThan(1)
+      expect(snapshot.handoffs).toEqual([])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('does not turn a continuation retry into a pull request repair', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-retry-isolation-'))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const harness = makeHarness(isolated, () => [issue])
-    let handoffCalls = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        handoffCompletedWork: () =>
-          Effect.sync(() => {
-            handoffCalls += 1
-            return handoffCalls === 1
-              ? ({ _tag: 'NoBranch', branchName: 'symphony/issue-20' } as const)
-              : ({
-                  _tag: 'PullRequest',
-                  branchName: 'symphony/issue-20',
-                  pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-                  pullRequestNumber: 65,
-                  created: true,
-                } as const)
-          }),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: head,
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: null,
-            mergeState: 'unknown',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-            codexReview: { headShaPrefix: head.slice(0, 7), status: 'pending' as const },
-          }),
-      }),
-      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    }
+  it.effect('does not turn a continuation retry into a pull request repair', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-retry-isolation-')),
+      )
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const harness = makeHarness(isolated, () => [issue])
+      let handoffCalls = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.sync(() => {
+              handoffCalls += 1
+              return handoffCalls === 1
+                ? ({ _tag: 'NoBranch', branchName: 'symphony/issue-20' } as const)
+                : ({
+                    _tag: 'PullRequest',
+                    branchName: 'symphony/issue-20',
+                    pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+                    pullRequestNumber: 65,
+                    created: true,
+                  } as const)
+            }),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: head,
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: head.slice(0, 7), status: 'pending' as const },
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
@@ -3788,304 +3845,315 @@ describe('restored pull request handoffs', (): void => {
           }
           return current
         }),
-      ),
-    )
+      )
 
-    expect(handoffCalls).toBe(2)
-    expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 0,
-      repairHeadShas: [],
-      repairStartedHeadSha: null,
-    })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(handoffCalls).toBe(2)
+      expect(snapshot.handoffs[0]).toMatchObject({
+        repairAttempts: 0,
+        repairHeadShas: [],
+        repairStartedHeadSha: null,
+      })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 })
 
 describe('startup terminal workspace cleanup', (): void => {
-  it('fetches every terminal state once, cleans every issue, and continues after a cleanup failure', async (): Promise<void> => {
-    const startupWorkflow: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        tracker: { ...workflow.config.tracker, terminalStates: ['closed', 'cancelled'] },
-      },
-    }
-    const terminalIssues = [
-      { ...makeIssue('GH-1', null, null), state: 'closed' },
-      { ...makeIssue('GH-2', null, null), state: 'cancelled' },
-      { ...makeIssue('GH-3', null, null), state: 'closed' },
-    ]
-    const harness = makeHarness(startupWorkflow)
-    const terminalFetches: Readonly<{
-      states: readonly string[]
-      labels: readonly string[] | null
-      hydrateDependencies: boolean | undefined
-    }>[] = []
-    const removed: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByStates: (states, labels, options) => {
-            if (!states.includes('open')) {
-              terminalFetches.push({
-                states,
-                labels,
-                hydrateDependencies: options?.hydrateDependencies,
-              })
-            }
-            return Effect.succeed(terminalIssues.filter((issue) => states.includes(issue.state)))
+  it.effect(
+    'fetches every terminal state once, cleans every issue, and continues after a cleanup failure',
+    () =>
+      Effect.gen(function* () {
+        const startupWorkflow: Workflow = {
+          ...workflow,
+          config: {
+            ...workflow.config,
+            tracker: { ...workflow.config.tracker, terminalStates: ['closed', 'cancelled'] },
           },
-          fetchIssuesByIds: (ids, options) => {
+        }
+        const terminalIssues = [
+          { ...makeIssue('GH-1', null, null), state: 'closed' },
+          { ...makeIssue('GH-2', null, null), state: 'cancelled' },
+          { ...makeIssue('GH-3', null, null), state: 'closed' },
+        ]
+        const harness = makeHarness(startupWorkflow)
+        const terminalFetches: Readonly<{
+          states: readonly string[]
+          labels: readonly string[] | null
+          hydrateDependencies: boolean | undefined
+        }>[] = []
+        const removed: string[] = []
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeTracker: (provider) => {
+            const tracker = harness.ports.makeTracker(provider)
+            return {
+              ...tracker,
+              fetchIssuesByStates: (states, labels, options) => {
+                if (!states.includes('open')) {
+                  terminalFetches.push({
+                    states,
+                    labels,
+                    hydrateDependencies: options?.hydrateDependencies,
+                  })
+                }
+                return Effect.succeed(
+                  terminalIssues.filter((issue) => states.includes(issue.state)),
+                )
+              },
+              fetchIssuesByIds: (ids, options) => {
+                expect(options?.hydrateDependencies).toBe(false)
+                return Effect.succeed(terminalIssues.filter((issue) => ids.includes(issue.id)))
+              },
+            }
+          },
+          makeWorkspaces: (settings) => {
+            const workspaces = harness.ports.makeWorkspaces(settings)
+            return {
+              ...workspaces,
+              remove: (identifier) =>
+                Effect.sync(() => {
+                  removed.push(identifier)
+                }).pipe(
+                  Effect.flatMap(() =>
+                    identifier === 'GH-1'
+                      ? Effect.fail(
+                          new WorkspaceError({
+                            category: 'remove_failed',
+                            message: 'permission denied',
+                          }),
+                        )
+                      : Effect.void,
+                  ),
+                ),
+            }
+          },
+        }
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            yield* control.snapshot
+            yield* control.refresh
+            yield* control.snapshot
+          }),
+        )
+
+        expect(terminalFetches).toEqual([
+          {
+            states: ['closed'],
+            labels: null,
+            hydrateDependencies: false,
+          },
+          {
+            states: ['cancelled'],
+            labels: null,
+            hydrateDependencies: false,
+          },
+        ])
+        expect(removed).toEqual(['GH-1', 'GH-3', 'GH-2'])
+      }),
+  )
+
+  it.effect('continues startup and dispatch when the terminal fetch fails', () =>
+    Effect.gen(function* () {
+      const activeIssue = makeIssue('GH-4', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [activeIssue])
+      let startupFetch = true
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByStates: (states, labels) => {
+              if (startupFetch) {
+                startupFetch = false
+                return Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_request',
+                    message: 'tracker unavailable',
+                    retryable: true,
+                  }),
+                )
+              }
+              return tracker.fetchIssuesByStates(states, labels)
+            },
+          }
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+        }),
+      )
+
+      expect(harness.agentRuns()).toHaveLength(1)
+    }),
+  )
+
+  it.effect('preserves successful cleanup results when another terminal state fetch fails', () =>
+    Effect.gen(function* () {
+      const startupWorkflow: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          tracker: { ...workflow.config.tracker, terminalStates: ['closed', 'cancelled'] },
+        },
+      }
+      const closedIssue = { ...makeIssue('GH-9', null, null), state: 'closed' }
+      const harness = makeHarness(startupWorkflow)
+      const removed: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: (states) =>
+            states.includes('cancelled')
+              ? Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_request',
+                    message: 'unsupported state',
+                    retryable: false,
+                  }),
+                )
+              : Effect.succeed([closedIssue]),
+          fetchIssuesByIds: () => Effect.succeed([closedIssue]),
+        }),
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+        }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.snapshot
+        }),
+      )
+
+      expect(removed).toEqual(['GH-9'])
+    }),
+  )
+
+  it.effect('does not dispatch until the startup sweep completes', () =>
+    Effect.gen(function* () {
+      const terminalIssue = { ...makeIssue('GH-5', null, null), state: 'closed' }
+      const activeIssue = makeIssue('GH-6', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [activeIssue])
+      let resolveCleanup = (): void => undefined
+      const cleanup = new Promise<void>((resolve) => {
+        resolveCleanup = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByStates: (states, labels) =>
+              states.includes('closed')
+                ? Effect.succeed([terminalIssue])
+                : tracker.fetchIssuesByStates(states, labels),
+            fetchIssuesByIds: () => Effect.succeed([terminalIssue]),
+          }
+        },
+        makeWorkspaces: (settings) => {
+          const workspaces = harness.ports.makeWorkspaces(settings)
+          return { ...workspaces, remove: () => Effect.promise(() => cleanup) }
+        },
+      }
+
+      // Forked, not awaited: the case asserts what has and has not happened while the run is
+      // still in flight, which is what the pending promise did before.
+      const running = yield* Effect.fork(
+        Effect.scoped(
+          Effect.gen(function* () {
+            yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            yield* harness.awaitAgentRun
+          }),
+        ),
+      )
+      yield* Effect.promise(
+        () =>
+          new Promise<void>((resolve) => {
+            setImmediate(resolve)
+          }),
+      )
+      expect(harness.agentRuns()).toEqual([])
+
+      resolveCleanup()
+      yield* Fiber.join(running)
+      expect(harness.agentRuns()).toHaveLength(1)
+    }),
+  )
+
+  it.effect('preserves the workspace when an issue reopens during startup cleanup', () =>
+    Effect.gen(function* () {
+      const terminalIssue = { ...makeIssue('GH-7', null, null), state: 'closed' }
+      const reopenedIssue = { ...terminalIssue, state: 'open' }
+      const harness = makeHarness(workflow)
+      const removed: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
+          fetchIssuesByIds: (_ids, options) => {
             expect(options?.hydrateDependencies).toBe(false)
-            return Effect.succeed(terminalIssues.filter((issue) => ids.includes(issue.id)))
+            return Effect.succeed([reopenedIssue])
           },
-        }
-      },
-      makeWorkspaces: (settings) => {
-        const workspaces = harness.ports.makeWorkspaces(settings)
-        return {
-          ...workspaces,
-          remove: (identifier) =>
-            Effect.sync(() => {
-              removed.push(identifier)
-            }).pipe(
-              Effect.flatMap(() =>
-                identifier === 'GH-1'
-                  ? Effect.fail(
-                      new WorkspaceError({
-                        category: 'remove_failed',
-                        message: 'permission denied',
-                      }),
-                    )
-                  : Effect.void,
-              ),
-            ),
-        }
-      },
-    }
+        }),
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+        }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.snapshot
-          yield* control.refresh
-          yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(terminalFetches).toEqual([
-      {
-        states: ['closed'],
-        labels: null,
-        hydrateDependencies: false,
-      },
-      {
-        states: ['cancelled'],
-        labels: null,
-        hydrateDependencies: false,
-      },
-    ])
-    expect(removed).toEqual(['GH-1', 'GH-3', 'GH-2'])
-  })
+      expect(removed).toEqual([])
+    }),
+  )
 
-  it('continues startup and dispatch when the terminal fetch fails', async (): Promise<void> => {
-    const activeIssue = makeIssue('GH-4', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [activeIssue])
-    let startupFetch = true
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByStates: (states, labels) => {
-            if (startupFetch) {
-              startupFetch = false
-              return Effect.fail(
-                new TrackerError({
-                  category: 'tracker_request',
-                  message: 'tracker unavailable',
-                  retryable: true,
-                }),
-              )
-            }
-            return tracker.fetchIssuesByStates(states, labels)
+  it.effect('does not refresh terminal issues without retained workspaces', () =>
+    Effect.gen(function* () {
+      const terminalIssue = { ...makeIssue('GH-8', null, null), state: 'closed' }
+      const harness = makeHarness(workflow)
+      let idFetches = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
+          fetchIssuesByIds: () => {
+            idFetches += 1
+            return Effect.succeed([terminalIssue])
           },
-        }
-      },
-    }
-
-    await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* harness.awaitAgentRun
         }),
-      ),
-    )
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          exists: () => Effect.succeed(false),
+        }),
+      }
 
-    expect(harness.agentRuns()).toHaveLength(1)
-  })
-
-  it('preserves successful cleanup results when another terminal state fetch fails', async (): Promise<void> => {
-    const startupWorkflow: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        tracker: { ...workflow.config.tracker, terminalStates: ['closed', 'cancelled'] },
-      },
-    }
-    const closedIssue = { ...makeIssue('GH-9', null, null), state: 'closed' }
-    const harness = makeHarness(startupWorkflow)
-    const removed: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByStates: (states) =>
-          states.includes('cancelled')
-            ? Effect.fail(
-                new TrackerError({
-                  category: 'tracker_request',
-                  message: 'unsupported state',
-                  retryable: false,
-                }),
-              )
-            : Effect.succeed([closedIssue]),
-        fetchIssuesByIds: () => Effect.succeed([closedIssue]),
-      }),
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
-      }),
-    }
-
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(removed).toEqual(['GH-9'])
-  })
-
-  it('does not dispatch until the startup sweep completes', async (): Promise<void> => {
-    const terminalIssue = { ...makeIssue('GH-5', null, null), state: 'closed' }
-    const activeIssue = makeIssue('GH-6', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [activeIssue])
-    let resolveCleanup = (): void => undefined
-    const cleanup = new Promise<void>((resolve) => {
-      resolveCleanup = resolve
-    })
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => {
-        const tracker = harness.ports.makeTracker(provider)
-        return {
-          ...tracker,
-          fetchIssuesByStates: (states, labels) =>
-            states.includes('closed')
-              ? Effect.succeed([terminalIssue])
-              : tracker.fetchIssuesByStates(states, labels),
-          fetchIssuesByIds: () => Effect.succeed([terminalIssue]),
-        }
-      },
-      makeWorkspaces: (settings) => {
-        const workspaces = harness.ports.makeWorkspaces(settings)
-        return { ...workspaces, remove: () => Effect.promise(() => cleanup) }
-      },
-    }
-
-    const running = runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* harness.awaitAgentRun
-        }),
-      ),
-    )
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve)
-    })
-    expect(harness.agentRuns()).toEqual([])
-
-    resolveCleanup()
-    await running
-    expect(harness.agentRuns()).toHaveLength(1)
-  })
-
-  it('preserves the workspace when an issue reopens during startup cleanup', async (): Promise<void> => {
-    const terminalIssue = { ...makeIssue('GH-7', null, null), state: 'closed' }
-    const reopenedIssue = { ...terminalIssue, state: 'open' }
-    const harness = makeHarness(workflow)
-    const removed: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
-        fetchIssuesByIds: (_ids, options) => {
-          expect(options?.hydrateDependencies).toBe(false)
-          return Effect.succeed([reopenedIssue])
-        },
-      }),
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
-      }),
-    }
-
-    await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.snapshot
-        }),
-      ),
-    )
-
-    expect(removed).toEqual([])
-  })
-
-  it('does not refresh terminal issues without retained workspaces', async (): Promise<void> => {
-    const terminalIssue = { ...makeIssue('GH-8', null, null), state: 'closed' }
-    const harness = makeHarness(workflow)
-    let idFetches = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByStates: () => Effect.succeed([terminalIssue]),
-        fetchIssuesByIds: () => {
-          idFetches += 1
-          return Effect.succeed([terminalIssue])
-        },
-      }),
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        exists: () => Effect.succeed(false),
-      }),
-    }
-
-    await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.snapshot
-        }),
-      ),
-    )
-
-    expect(idFetches).toBe(0)
-  })
+      expect(idFetches).toBe(0)
+    }),
+  )
 })
 
 const awaitLoads = (harness: TestHarness, expected: number): Effect.Effect<void> =>
@@ -4096,65 +4164,65 @@ const awaitLoads = (harness: TestHarness, expected: number): Effect.Effect<void>
   })
 
 describe('operator snapshots', (): void => {
-  it('start and remain responsive while the initial tracker poll is pending', async (): Promise<void> => {
-    let markPollStarted = (): void => undefined
-    const pollStarted = new Promise<void>((resolve) => {
-      markPollStarted = resolve
-    })
-    const harness = makeHarness(
-      workflow,
-      () => [],
-      (_effectiveWorkflow, states) => {
-        if (!states.includes('open')) {
-          return Effect.succeed([])
-        }
-        markPollStarted()
-        return Effect.never
-      },
-    )
+  it.effect('start and remain responsive while the initial tracker poll is pending', () =>
+    Effect.gen(function* () {
+      let markPollStarted = (): void => undefined
+      const pollStarted = new Promise<void>((resolve) => {
+        markPollStarted = resolve
+      })
+      const harness = makeHarness(
+        workflow,
+        () => [],
+        (_effectiveWorkflow, states) => {
+          if (!states.includes('open')) {
+            return Effect.succeed([])
+          }
+          markPollStarted()
+          return Effect.never
+        },
+      )
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* Effect.promise(() => pollStarted)
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.effectiveWorkflow.fingerprint).toBe('test')
-  })
+      expect(snapshot.effectiveWorkflow.fingerprint).toBe('test')
+    }),
+  )
 
-  it('runs one follow-up poll for a refresh received during a pending poll', async (): Promise<void> => {
-    let pollShouldBlock = false
-    let markPollStarted = (): void => undefined
-    let releasePoll = (): void => undefined
-    const pollStarted = new Promise<void>((resolve) => {
-      markPollStarted = resolve
-    })
-    const pollReleased = new Promise<void>((resolve) => {
-      releasePoll = resolve
-    })
-    const initial = changedWorkflow({ fingerprint: 'initial' })
-    const reloaded = changedWorkflow({ fingerprint: 'late-refresh' })
-    const harness = makeHarness(
-      initial,
-      () => [],
-      (_effectiveWorkflow, states) => {
-        if (!states.includes('open')) {
+  it.effect('runs one follow-up poll for a refresh received during a pending poll', () =>
+    Effect.gen(function* () {
+      let pollShouldBlock = false
+      let markPollStarted = (): void => undefined
+      let releasePoll = (): void => undefined
+      const pollStarted = new Promise<void>((resolve) => {
+        markPollStarted = resolve
+      })
+      const pollReleased = new Promise<void>((resolve) => {
+        releasePoll = resolve
+      })
+      const initial = changedWorkflow({ fingerprint: 'initial' })
+      const reloaded = changedWorkflow({ fingerprint: 'late-refresh' })
+      const harness = makeHarness(
+        initial,
+        () => [],
+        (_effectiveWorkflow, states) => {
+          if (!states.includes('open')) {
+            return Effect.succeed([])
+          }
+          if (pollShouldBlock) {
+            markPollStarted()
+            return Effect.promise(() => pollReleased).pipe(Effect.as([]))
+          }
           return Effect.succeed([])
-        }
-        if (pollShouldBlock) {
-          markPollStarted()
-          return Effect.promise(() => pollReleased).pipe(Effect.as([]))
-        }
-        return Effect.succeed([])
-      },
-    )
+        },
+      )
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4168,17 +4236,17 @@ describe('operator snapshots', (): void => {
           yield* Fiber.join(lateRefresh)
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.effectiveWorkflow.fingerprint).toBe('late-refresh')
-  })
+      expect(snapshot.effectiveWorkflow.fingerprint).toBe('late-refresh')
+    }),
+  )
 
-  it('preserves a refresh started while the previous refresh is settling', async (): Promise<void> => {
-    const harness = makeHarness(workflow)
+  it.effect('preserves a refresh started while the previous refresh is settling', () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(workflow)
 
-    await Effect.runPromise(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4189,23 +4257,23 @@ describe('operator snapshots', (): void => {
           yield* Fiber.join(consecutiveRefreshes)
           expect(harness.stateFetches()).toBe(before + 2)
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 })
 
 describe('workflow hot reload', (): void => {
-  it('replaces the last known good workflow after a valid defensive reload', async (): Promise<void> => {
-    const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
-    const reloaded = changedWorkflow({
-      fingerprint: 'reloaded',
-      pollingIntervalMs: 5_000,
-      maxConcurrentAgents: 4,
-    })
-    const harness = makeHarness(initial)
+  it.effect('replaces the last known good workflow after a valid defensive reload', () =>
+    Effect.gen(function* () {
+      const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
+      const reloaded = changedWorkflow({
+        fingerprint: 'reloaded',
+        pollingIntervalMs: 5_000,
+        maxConcurrentAgents: 4,
+      })
+      const harness = makeHarness(initial)
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4213,49 +4281,49 @@ describe('workflow hot reload', (): void => {
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
-    expect(snapshot.pollingIntervalMs).toBe(5_000)
-    expect(snapshot.maxConcurrentAgents).toBe(4)
-    expect(snapshot.workflowReloadError).toBeNull()
-  })
+      expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
+      expect(snapshot.pollingIntervalMs).toBe(5_000)
+      expect(snapshot.maxConcurrentAgents).toBe(4)
+      expect(snapshot.workflowReloadError).toBeNull()
+    }),
+  )
 
-  it('uses all reloaded settings for future operations', async (): Promise<void> => {
-    const initial = changedWorkflow({ fingerprint: 'initial' })
-    const reloaded: Workflow = {
-      ...changedWorkflow({
-        fingerprint: 'all-settings',
-        maxConcurrentAgents: 3,
-        promptTemplate: 'Reloaded {{ issue.identifier }}',
-      }),
-      config: {
-        ...workflow.config,
-        tracker: {
-          ...workflow.config.tracker,
-          provider: { ...workflow.config.tracker.provider, repository: 'reloaded-repository' },
-          activeStates: ['open', 'queued'],
-        },
-        pollingIntervalMs: 7_000,
-        workspaceRoot: '/tmp/reloaded-workspaces',
-        hooks: { ...workflow.config.hooks, beforeRun: 'echo reloaded' },
-        agent: {
-          ...workflow.config.agent,
+  it.effect('uses all reloaded settings for future operations', () =>
+    Effect.gen(function* () {
+      const initial = changedWorkflow({ fingerprint: 'initial' })
+      const reloaded: Workflow = {
+        ...changedWorkflow({
+          fingerprint: 'all-settings',
           maxConcurrentAgents: 3,
-          maxRetryBackoffMs: 12_000,
-          maxTurns: 9,
+          promptTemplate: 'Reloaded {{ issue.identifier }}',
+        }),
+        config: {
+          ...workflow.config,
+          tracker: {
+            ...workflow.config.tracker,
+            provider: { ...workflow.config.tracker.provider, repository: 'reloaded-repository' },
+            activeStates: ['open', 'queued'],
+          },
+          pollingIntervalMs: 7_000,
+          workspaceRoot: '/tmp/reloaded-workspaces',
+          hooks: { ...workflow.config.hooks, beforeRun: 'echo reloaded' },
+          agent: {
+            ...workflow.config.agent,
+            maxConcurrentAgents: 3,
+            maxRetryBackoffMs: 12_000,
+            maxTurns: 9,
+          },
+          codex: { ...workflow.config.codex, command: 'reloaded-codex app-server' },
         },
-        codex: { ...workflow.config.codex, command: 'reloaded-codex app-server' },
-      },
-    }
-    const issue = makeIssue('GH-9', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(initial, (effective) =>
-      effective.fingerprint === reloaded.fingerprint ? [issue] : [],
-    )
+      }
+      const issue = makeIssue('GH-9', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(initial, (effective) =>
+        effective.fingerprint === reloaded.fingerprint ? [issue] : [],
+      )
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4265,119 +4333,123 @@ describe('workflow hot reload', (): void => {
           yield* harness.awaitAgentRun
           return snapshot
         }),
-      ),
-    )
+      )
 
-    expect(harness.trackerProviders().map(githubProviderOf).at(-1)?.repository).toBe(
-      'reloaded-repository',
-    )
-    expect(harness.stateFetchStates().at(-1)).toEqual(['open', 'queued'])
-    expect(snapshot.pollingIntervalMs).toBe(7_000)
-    expect(snapshot.maxConcurrentAgents).toBe(3)
-    expect(harness.workspaceSettings().at(-1)?.root).toBe('/tmp/reloaded-workspaces')
-    expect(harness.workspaceSettings().at(-1)?.hooks.beforeRun).toBe('echo reloaded')
-    expect(harness.agentRuns()).toEqual([
-      {
-        command: 'reloaded-codex app-server',
-        prompt: 'Reloaded GH-9',
-        maxTurns: 9,
-      },
-    ])
-  })
+      expect(harness.trackerProviders().map(githubProviderOf).at(-1)?.repository).toBe(
+        'reloaded-repository',
+      )
+      expect(harness.stateFetchStates().at(-1)).toEqual(['open', 'queued'])
+      expect(snapshot.pollingIntervalMs).toBe(7_000)
+      expect(snapshot.maxConcurrentAgents).toBe(3)
+      expect(harness.workspaceSettings().at(-1)?.root).toBe('/tmp/reloaded-workspaces')
+      expect(harness.workspaceSettings().at(-1)?.hooks.beforeRun).toBe('echo reloaded')
+      expect(harness.agentRuns()).toEqual([
+        {
+          command: 'reloaded-codex app-server',
+          prompt: 'Reloaded GH-9',
+          maxTurns: 9,
+        },
+      ])
+    }),
+  )
 
-  it('keeps invalid reloads visible while reconciling without fetching dispatch candidates', async (): Promise<void> => {
-    const runningIssue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
-    const candidate = makeIssue('GH-2', 2, null, ['symphony', 'ready'])
-    let candidates: readonly Issue[] = [runningIssue]
-    const initial = changedWorkflow({ fingerprint: 'last-known-good' })
-    const harness = makeHarness(initial, () => candidates)
+  it.effect(
+    'keeps invalid reloads visible while reconciling without fetching dispatch candidates',
+    () =>
+      Effect.gen(function* () {
+        const runningIssue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+        const candidate = makeIssue('GH-2', 2, null, ['symphony', 'ready'])
+        let candidates: readonly Issue[] = [runningIssue]
+        const initial = changedWorkflow({ fingerprint: 'last-known-good' })
+        const harness = makeHarness(initial, () => candidates)
 
-    const observed = await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
-          yield* control.refresh
-          yield* harness.awaitAgentRun
-          const candidateFetches = harness.stateFetches()
-          const reconciliations = harness.idFetches()
-          candidates = [runningIssue, candidate]
-          harness.setWorkflow(
-            new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
-          )
-          yield* control.refresh
-          return {
-            snapshot: yield* control.snapshot,
-            candidateFetches,
-            reconciliations,
-          }
-        }),
-      ),
-    )
+        const observed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+            yield* control.refresh
+            yield* harness.awaitAgentRun
+            const candidateFetches = harness.stateFetches()
+            const reconciliations = harness.idFetches()
+            candidates = [runningIssue, candidate]
+            harness.setWorkflow(
+              new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
+            )
+            yield* control.refresh
+            return {
+              snapshot: yield* control.snapshot,
+              candidateFetches,
+              reconciliations,
+            }
+          }),
+        )
 
-    expect(observed.snapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
-    expect(observed.snapshot.workflowReloadError?.message).toBe('invalid reload')
-    expect(harness.idFetches()).toBeGreaterThan(observed.reconciliations)
-    expect(harness.stateFetches()).toBe(observed.candidateFetches)
-    expect(harness.agentRuns()).toHaveLength(1)
-    expect(observed.snapshot.running[0]?.issueId).toBe(runningIssue.id)
-    expect(observed.snapshot.retrying).toEqual([])
-  })
+        expect(observed.snapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
+        expect(observed.snapshot.workflowReloadError?.message).toBe('invalid reload')
+        expect(harness.idFetches()).toBeGreaterThan(observed.reconciliations)
+        expect(harness.stateFetches()).toBe(observed.candidateFetches)
+        expect(harness.agentRuns()).toHaveLength(1)
+        expect(observed.snapshot.running[0]?.issueId).toBe(runningIssue.id)
+        expect(observed.snapshot.retrying).toEqual([])
+      }),
+  )
 
-  it('publishes a credential validation failure without fetching or claiming candidates', async (): Promise<void> => {
-    const candidate = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    let candidates: readonly Issue[] = []
-    const initial = changedWorkflow({ fingerprint: 'last-known-good' })
-    const harness = makeHarness(initial, () => candidates, undefined, environment)
+  it.effect(
+    'publishes a credential validation failure without fetching or claiming candidates',
+    () =>
+      Effect.gen(function* () {
+        const candidate = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+        const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+        let candidates: readonly Issue[] = []
+        const initial = changedWorkflow({ fingerprint: 'last-known-good' })
+        const harness = makeHarness(initial, () => candidates, undefined, environment)
 
-    const observed = await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
-          yield* control.refresh
-          const candidateFetches = harness.stateFetches()
-          candidates = [candidate]
-          delete environment['SYMPHONY_TEST_TOKEN']
-          yield* control.refresh
-          const failedSnapshot = yield* control.snapshot
-          const agentRunsAfterFailure = harness.agentRuns().length
-          environment['SYMPHONY_TEST_TOKEN'] = 'restored'
-          yield* control.refresh
-          return {
-            failedSnapshot,
-            recoveredSnapshot: yield* control.snapshot,
-            candidateFetches,
-            agentRunsAfterFailure,
-          }
-        }),
-      ),
-    )
+        const observed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+            yield* control.refresh
+            const candidateFetches = harness.stateFetches()
+            candidates = [candidate]
+            delete environment['SYMPHONY_TEST_TOKEN']
+            yield* control.refresh
+            const failedSnapshot = yield* control.snapshot
+            const agentRunsAfterFailure = harness.agentRuns().length
+            environment['SYMPHONY_TEST_TOKEN'] = 'restored'
+            yield* control.refresh
+            return {
+              failedSnapshot,
+              recoveredSnapshot: yield* control.snapshot,
+              candidateFetches,
+              agentRunsAfterFailure,
+            }
+          }),
+        )
 
-    expect(observed.failedSnapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
-    expect(observed.failedSnapshot.workflowReloadError?.message).toContain(
-      'references a missing environment variable',
-    )
-    expect(observed.agentRunsAfterFailure).toBe(0)
-    expect(observed.failedSnapshot.running).toEqual([])
-    expect(observed.failedSnapshot.retrying).toEqual([])
-    expect(observed.recoveredSnapshot.workflowReloadError).toBeNull()
-    expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
-    expect(harness.agentRuns()).toHaveLength(1)
-  })
+        expect(observed.failedSnapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
+        expect(observed.failedSnapshot.workflowReloadError?.message).toContain(
+          'references a missing environment variable',
+        )
+        expect(observed.agentRunsAfterFailure).toBe(0)
+        expect(observed.failedSnapshot.running).toEqual([])
+        expect(observed.failedSnapshot.retrying).toEqual([])
+        expect(observed.recoveredSnapshot.workflowReloadError).toBeNull()
+        expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
+        expect(harness.agentRuns()).toHaveLength(1)
+      }),
+  )
 
-  it('defers stalled-worker retry creation until validation recovers', async (): Promise<void> => {
-    const issue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
-    const initial: Workflow = {
-      ...changedWorkflow({ fingerprint: 'last-known-good' }),
-      config: {
-        ...workflow.config,
-        codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
-      },
-    }
-    const harness = makeHarness(initial, () => [issue])
+  it.effect('defers stalled-worker retry creation until validation recovers', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'last-known-good' }),
+        config: {
+          ...workflow.config,
+          codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+        },
+      }
+      const harness = makeHarness(initial, () => [issue])
 
-    const observed = await runWithTestClock(
-      Effect.scoped(
+      const observed = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
@@ -4391,59 +4463,61 @@ describe('workflow hot reload', (): void => {
           yield* control.refresh
           return { failedSnapshot, recoveredSnapshot: yield* control.snapshot }
         }),
-      ),
-    )
+      )
 
-    expect(observed.failedSnapshot.workflowReloadError?.message).toBe('invalid reload')
-    expect(observed.failedSnapshot.running[0]?.issueId).toBe(issue.id)
-    expect(observed.failedSnapshot.retrying).toEqual([])
-    expect(observed.recoveredSnapshot.running).toEqual([])
-    expect(observed.recoveredSnapshot.retrying[0]).toMatchObject({
-      issueId: issue.id,
-      attempt: 1,
-      error: 'agent stalled',
-    })
-  })
+      expect(observed.failedSnapshot.workflowReloadError?.message).toBe('invalid reload')
+      expect(observed.failedSnapshot.running[0]?.issueId).toBe(issue.id)
+      expect(observed.failedSnapshot.retrying).toEqual([])
+      expect(observed.recoveredSnapshot.running).toEqual([])
+      expect(observed.recoveredSnapshot.retrying[0]).toMatchObject({
+        issueId: issue.id,
+        attempt: 1,
+        error: 'agent stalled',
+      })
+    }),
+  )
 
-  it('reconciles a repair handoff without dispatching it during a failed tick', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-invalid-repair-tick-'))
-    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const initial: Workflow = {
-      ...changedWorkflow({ fingerprint: 'last-known-good' }),
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
-      id: issueId('20'),
-    }
-    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    await saveRepairHandoff(handoffStorePath, issue, head)
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    const harness = makeHarness(initial, () => [issue], undefined, environment)
-    let repairReady = false
-    let inspections = 0
-    let launches = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) =>
+  it.effect('reconciles a repair handoff without dispatching it during a failed tick', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-invalid-repair-tick-')),
+      )
+      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'last-known-good' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const harness = makeHarness(initial, () => [issue], undefined, environment)
+      let repairReady = false
+      let inspections = 0
+      let launches = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              inspections += 1
+              const observation = repairObservation(number, head)
+              return repairReady
+                ? observation
+                : { ...observation, mergeable: null, mergeState: 'unknown' }
+            }),
+        }),
+        runAgent: () =>
           Effect.sync(() => {
-            inspections += 1
-            const observation = repairObservation(number, head)
-            return repairReady
-              ? observation
-              : { ...observation, mergeable: null, mergeState: 'unknown' }
-          }),
-      }),
-      runAgent: () =>
-        Effect.sync(() => {
-          launches += 1
-        }).pipe(Effect.zipRight(Effect.never)),
-    }
+            launches += 1
+          }).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    const observed = await runWithTestClock(
-      Effect.scoped(
+      const observed = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
@@ -4464,28 +4538,28 @@ describe('workflow hot reload', (): void => {
             launchesAfterFailure,
           }
         }),
-      ),
-    )
+      )
 
-    expect(inspections).toBeGreaterThan(observed.inspectionsBeforeFailure)
-    expect(observed.launchesAfterFailure).toBe(0)
-    expect(observed.failedSnapshot.retrying).toEqual([])
-    expect(observed.failedSnapshot.handoffs[0]).toMatchObject({
-      state: 'repair_needed',
-      repairStartedHeadSha: null,
-    })
-    expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
-    expect(launches).toBe(1)
-    expect(observed.recoveredSnapshot.running[0]?.issueId).toBe(issue.id)
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(inspections).toBeGreaterThan(observed.inspectionsBeforeFailure)
+      expect(observed.launchesAfterFailure).toBe(0)
+      expect(observed.failedSnapshot.retrying).toEqual([])
+      expect(observed.failedSnapshot.handoffs[0]).toMatchObject({
+        state: 'repair_needed',
+        repairStartedHeadSha: null,
+      })
+      expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
+      expect(launches).toBe(1)
+      expect(observed.recoveredSnapshot.running[0]?.issueId).toBe(issue.id)
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('defensively reloads after a missed watch event', async (): Promise<void> => {
-    const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
-    const harness = makeHarness(initial)
+  it.effect('defensively reloads after a missed watch event', () =>
+    Effect.gen(function* () {
+      const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
+      const harness = makeHarness(initial)
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4497,18 +4571,18 @@ describe('workflow hot reload', (): void => {
           yield* awaitLoads(harness, beforeTick + 1)
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.effectiveWorkflow.fingerprint).toBe('missed-event')
-  })
+      expect(snapshot.effectiveWorkflow.fingerprint).toBe('missed-event')
+    }),
+  )
 
-  it('re-arms future ticks with a changed polling interval', async (): Promise<void> => {
-    const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
-    const harness = makeHarness(initial)
+  it.effect('re-arms future ticks with a changed polling interval', () =>
+    Effect.gen(function* () {
+      const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
+      const harness = makeHarness(initial)
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4525,15 +4599,15 @@ describe('workflow hot reload', (): void => {
           yield* awaitLoads(harness, afterReload + 1)
           expect(harness.loads()).toBe(afterReload + 1)
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('coalesces watcher and defensive reload requests', async (): Promise<void> => {
-    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+  it.effect('coalesces watcher and defensive reload requests', () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4544,15 +4618,15 @@ describe('workflow hot reload', (): void => {
           yield* control.snapshot
           expect(harness.loads()).toBe(before + 1)
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('reloads the workflow when the watcher reports a change', async (): Promise<void> => {
-    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+  it.effect('reloads the workflow when the watcher reports a change', () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
 
-    const fingerprint = await runWithTestClock(
-      Effect.scoped(
+      const fingerprint = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
@@ -4567,70 +4641,70 @@ describe('workflow hot reload', (): void => {
           }
           return snapshot.effectiveWorkflow.fingerprint
         }),
-      ),
-    )
+      )
 
-    expect(fingerprint).toBe('watched')
-  })
+      expect(fingerprint).toBe('watched')
+    }),
+  )
 
-  it('installs the workflow watcher before startup returns', async (): Promise<void> => {
-    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
-    let watchedPath: string | null = null
-    const ports: TestPorts = {
-      ...harness.ports,
-      watchWorkflow: (path, onChange) => {
-        watchedPath = path
-        harness.ports.watchWorkflow(path, onChange)
-      },
-    }
+  it.effect('installs the workflow watcher before startup returns', () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+      let watchedPath: string | null = null
+      const ports: TestPorts = {
+        ...harness.ports,
+        watchWorkflow: (path, onChange) => {
+          watchedPath = path
+          harness.ports.watchWorkflow(path, onChange)
+        },
+      }
 
-    const observed = await runWithTestClock(
-      Effect.scoped(
+      const observed = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           // Read before yielding: an edit made the instant startup returns has to find the watcher
           // already in place, not a subscription still waiting on a fiber to be scheduled.
           return watchedPath
         }),
-      ),
-    )
+      )
 
-    expect(observed).toBe('/tmp/WORKFLOW.md')
-  })
+      expect(observed).toBe('/tmp/WORKFLOW.md')
+    }),
+  )
 
-  it('interrupts a watcher-triggered tick when the orchestrator shuts down', async (): Promise<void> => {
-    let pollShouldBlock = false
-    let pollBlocked = false
-    let pollInterrupted = false
-    let watchReleased = false
-    const harness = makeHarness(
-      changedWorkflow({ fingerprint: 'initial' }),
-      () => [],
-      (_effectiveWorkflow, states) => {
-        if (!states.includes('open') || !pollShouldBlock) {
-          return Effect.succeed([])
-        }
-        return Effect.sync(() => {
-          pollBlocked = true
-        }).pipe(
-          Effect.zipRight(Effect.never),
-          Effect.onInterrupt(() =>
-            Effect.sync(() => {
-              pollInterrupted = true
-            }),
-          ),
-        )
-      },
-    )
-    const ports: TestPorts = {
-      ...harness.ports,
-      onWatchReleased: () => {
-        watchReleased = true
-      },
-    }
+  it.effect('interrupts a watcher-triggered tick when the orchestrator shuts down', () =>
+    Effect.gen(function* () {
+      let pollShouldBlock = false
+      let pollBlocked = false
+      let pollInterrupted = false
+      let watchReleased = false
+      const harness = makeHarness(
+        changedWorkflow({ fingerprint: 'initial' }),
+        () => [],
+        (_effectiveWorkflow, states) => {
+          if (!states.includes('open') || !pollShouldBlock) {
+            return Effect.succeed([])
+          }
+          return Effect.sync(() => {
+            pollBlocked = true
+          }).pipe(
+            Effect.zipRight(Effect.never),
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                pollInterrupted = true
+              }),
+            ),
+          )
+        },
+      )
+      const ports: TestPorts = {
+        ...harness.ports,
+        onWatchReleased: () => {
+          watchReleased = true
+        },
+      }
 
-    const loads = await runWithTestClock(
-      Effect.gen(function* () {
+      const loads = yield* Effect.gen(function* () {
         const scope = yield* Scope.make()
         const control = yield* Scope.extend(startTestOrchestrator('/tmp/WORKFLOW.md', ports), scope)
         yield* control.refresh
@@ -4649,80 +4723,80 @@ describe('workflow hot reload', (): void => {
         harness.notifyChanged()
         yield* Effect.yieldNow()
         return { atShutdown, afterShutdown: harness.loads() }
-      }),
-    )
+      })
 
-    expect(pollInterrupted).toBe(true)
-    expect(watchReleased).toBe(true)
-    expect(loads.afterShutdown).toBe(loads.atShutdown)
-  })
+      expect(pollInterrupted).toBe(true)
+      expect(watchReleased).toBe(true)
+      expect(loads.afterShutdown).toBe(loads.atShutdown)
+    }),
+  )
 
-  it('uses the provider returned by dispatch preflight', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    const harness = makeHarness(
-      workflow,
-      () => [],
-      () => {
-        environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
-        return Effect.succeed([issue])
-      },
-      environment,
-    )
+  it.effect('uses the provider returned by dispatch preflight', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const harness = makeHarness(
+        workflow,
+        () => [],
+        () => {
+          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          return Effect.succeed([issue])
+        },
+        environment,
+      )
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
         }),
-      ),
-    )
+      )
 
-    const latest = harness.trackerProviders().map(githubProviderOf).at(-1)
-    expect(latest === undefined ? null : Redacted.value(latest.token)).toBe('rotated')
-  })
+      const latest = harness.trackerProviders().map(githubProviderOf).at(-1)
+      expect(latest === undefined ? null : Redacted.value(latest.token)).toBe('rotated')
+    }),
+  )
 
-  it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }), () => [issue])
+  it.effect('cancels a running worker when the operator explicitly pauses its issue', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }), () => [issue])
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
           yield* control.setIssuePaused(1, true)
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.counts.running).toBe(0)
-  })
+      expect(snapshot.counts.running).toBe(0)
+    }),
+  )
 })
 
 describe('tracker credential revalidation', (): void => {
-  it('updates the tracker used by an active worker issue refresh', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    const harness = makeHarness(workflow, () => [issue])
-    let refreshIssue: AgentLaunch['refreshIssue'] | null = null
-    const ports: TestPorts = {
-      ...harness.ports,
-      environment,
-      runAgent: (launch) => {
-        refreshIssue = launch.refreshIssue
-        return harness.ports.runAgent(launch)
-      },
-    }
-    const refreshActiveIssue = (): Effect.Effect<void> =>
-      refreshIssue === null
-        ? Effect.die('worker did not provide an issue refresh callback')
-        : refreshIssue().pipe(Effect.asVoid, Effect.orDie)
+  it.effect('updates the tracker used by an active worker issue refresh', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const harness = makeHarness(workflow, () => [issue])
+      let refreshIssue: AgentLaunch['refreshIssue'] | null = null
+      const ports: TestPorts = {
+        ...harness.ports,
+        environment,
+        runAgent: (launch) => {
+          refreshIssue = launch.refreshIssue
+          return harness.ports.runAgent(launch)
+        },
+      }
+      const refreshActiveIssue = (): Effect.Effect<void> =>
+        refreshIssue === null
+          ? Effect.die('worker did not provide an issue refresh callback')
+          : refreshIssue().pipe(Effect.asVoid, Effect.orDie)
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
@@ -4730,46 +4804,46 @@ describe('tracker credential revalidation', (): void => {
           yield* control.refresh
           yield* refreshActiveIssue()
         }),
-      ),
-    )
+      )
 
-    expect(harness.idFetchTokens().at(-1)).toBe('rotated')
-  })
+      expect(harness.idFetchTokens().at(-1)).toBe('rotated')
+    }),
+  )
 
-  it("routes a live session's host tool calls to the tracker a rotation installed", async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    const harness = makeHarness(workflow, () => [issue])
-    const executedTokens: string[] = []
-    let session: HostToolSession | null = null
-    const ports: TestPorts = {
-      ...harness.ports,
-      environment,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
-        executeTool: () => {
-          executedTokens.push(Redacted.value(githubProviderOf(provider).token))
-          return Promise.resolve({ success: true, data: null })
+  it.effect("routes a live session's host tool calls to the tracker a rotation installed", () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const harness = makeHarness(workflow, () => [issue])
+      const executedTokens: string[] = []
+      let session: HostToolSession | null = null
+      const ports: TestPorts = {
+        ...harness.ports,
+        environment,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
+          executeTool: () => {
+            executedTokens.push(Redacted.value(githubProviderOf(provider).token))
+            return Promise.resolve({ success: true, data: null })
+          },
+        }),
+        runAgent: (launch) => {
+          session = launch.hostTools ?? null
+          return harness.ports.runAgent(launch)
         },
-      }),
-      runAgent: (launch) => {
-        session = launch.hostTools ?? null
-        return harness.ports.runAgent(launch)
-      },
-    }
-    const callHostTool = (): Effect.Effect<void> => {
-      const current = session
-      if (current === null) {
-        return Effect.die('worker was launched without a host tool session')
       }
-      return Effect.promise(async () => {
-        await current.execute('symphony_issue_state', null, current.context)
-      })
-    }
+      const callHostTool = (): Effect.Effect<void> => {
+        const current = session
+        if (current === null) {
+          return Effect.die('worker was launched without a host tool session')
+        }
+        return Effect.promise(async () => {
+          await current.execute('symphony_issue_state', null, current.context)
+        })
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
@@ -4777,18 +4851,18 @@ describe('tracker credential revalidation', (): void => {
           yield* control.refresh
           yield* callHostTool()
         }),
-      ),
-    )
+      )
 
-    expect(executedTokens).toEqual(['rotated'])
-  })
+      expect(executedTokens).toEqual(['rotated'])
+    }),
+  )
 
-  it('rebuilds the tracker when the referenced secret is rotated in the environment', async (): Promise<void> => {
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
-    const harness = makeHarness(workflow)
+  it.effect('rebuilds the tracker when the referenced secret is rotated in the environment', () =>
+    Effect.gen(function* () {
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
+      const harness = makeHarness(workflow)
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -4798,22 +4872,22 @@ describe('tracker credential revalidation', (): void => {
           environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
         }),
-      ),
-    )
+      )
 
-    // Twice at startup: the layer builds the first instance from the workflow the composition root
-    // read, and the orchestrator replaces it with one built from the workflow it loaded itself.
-    expect(
-      harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
-    ).toEqual(['secret', 'secret', 'first', 'rotated'])
-  })
+      // Twice at startup: the layer builds the first instance from the workflow the composition root
+      // read, and the orchestrator replaces it with one built from the workflow it loaded itself.
+      expect(
+        harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
+      ).toEqual(['secret', 'secret', 'first', 'rotated'])
+    }),
+  )
 
-  it('retains the last known good tracker when the secret disappears', async (): Promise<void> => {
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
-    const harness = makeHarness(workflow)
+  it.effect('retains the last known good tracker when the secret disappears', () =>
+    Effect.gen(function* () {
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
+      const harness = makeHarness(workflow)
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -4823,39 +4897,39 @@ describe('tracker credential revalidation', (): void => {
           delete environment['SYMPHONY_TEST_TOKEN']
           yield* control.refresh
         }),
-      ),
-    )
+      )
 
-    expect(
-      harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
-    ).toEqual(['secret', 'secret', 'first'])
-  })
+      expect(
+        harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
+      ).toEqual(['secret', 'secret', 'first'])
+    }),
+  )
 })
 
 describe('rebuilt port lifecycle', (): void => {
-  it('keeps the tracker a rotation replaced until the run that used it ends', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    let markStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve
-    })
-    let finishWorker = (): void => undefined
-    const finished = new Promise<void>((resolve) => {
-      finishWorker = resolve
-    })
-    const harness = makeHarness(workflow, () => [issue], undefined, environment)
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: () =>
-        Effect.sync(markStarted).pipe(
-          Effect.zipRight(Effect.promise(() => finished)),
-          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-        ),
-    }
+  it.effect('keeps the tracker a rotation replaced until the run that used it ends', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      let markStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve
+      })
+      let finishWorker = (): void => undefined
+      const finished = new Promise<void>((resolve) => {
+        finishWorker = resolve
+      })
+      const harness = makeHarness(workflow, () => [issue], undefined, environment)
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: () =>
+          Effect.sync(markStarted).pipe(
+            Effect.zipRight(Effect.promise(() => finished)),
+            Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+          ),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -4878,24 +4952,24 @@ describe('rebuilt port lifecycle', (): void => {
             harness.releasedTrackers().map((each) => Redacted.value(githubProviderOf(each).token)),
           ).toEqual(['secret', 'secret'])
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('retires what a refused reload replaced before it refused', async (): Promise<void> => {
-    // The tracker cell installs a replacement, and only then does the code-review rebuild refuse.
-    // Every retry of the same invalid workflow displaces another instance, so the predecessors have
-    // to reach the drain even though the reload as a whole produced nothing.
-    let handoffAvailable = true
-    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) =>
-        handoffAvailable ? requireCodeReview(harness.ports, provider) : null,
-    }
+  it.effect('retires what a refused reload replaced before it refused', () =>
+    Effect.gen(function* () {
+      // The tracker cell installs a replacement, and only then does the code-review rebuild refuse.
+      // Every retry of the same invalid workflow displaces another instance, so the predecessors have
+      // to reach the drain even though the reload as a whole produced nothing.
+      let handoffAvailable = true
+      const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) =>
+          handoffAvailable ? requireCodeReview(harness.ports, provider) : null,
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
@@ -4916,62 +4990,64 @@ describe('rebuilt port lifecycle', (): void => {
           expect(harness.stateFetches()).toBe(candidateFetchesBeforeReload)
           expect(harness.releasedTrackers().length).toBeGreaterThan(beforeReload)
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it("releases a run's superseded ports when it ends, even as its handoff lives on", async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
-    let markStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve
-    })
-    let finishWorker = (): void => undefined
-    const finished = new Promise<void>((resolve) => {
-      finishWorker = resolve
-    })
-    // An isolated root: this run really does hand off, so it reads and writes a handoff store.
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-superseded-handoff-'))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const harness = makeHarness(isolated, () => [issue], undefined, environment)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest' as const,
-            branchName: 'symphony/issue-1',
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            pullRequestNumber: 65,
-            created: true,
-          }),
-        inspectPullRequest: (number) =>
-          Effect.succeed({
-            number,
-            state: 'open' as const,
-            url: 'https://github.test/example/symphony/pull/65',
-            headSha: 'handoff-head',
-            merged: false as const,
-            mergeCommitSha: null,
-            mergeable: null,
-            mergeState: 'unknown',
-            checks: [],
-            reviewDecision: null,
-            reviewThreads: [],
-          }),
-        requestPullRequestReview: () => Effect.void,
-      }),
-      runAgent: () =>
-        Effect.sync(markStarted).pipe(
-          Effect.zipRight(Effect.promise(() => finished)),
-          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-        ),
-    }
+  it.effect("releases a run's superseded ports when it ends, even as its handoff lives on", () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      let markStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve
+      })
+      let finishWorker = (): void => undefined
+      const finished = new Promise<void>((resolve) => {
+        finishWorker = resolve
+      })
+      // An isolated root: this run really does hand off, so it reads and writes a handoff store.
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-superseded-handoff-')),
+      )
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const harness = makeHarness(isolated, () => [issue], undefined, environment)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-1',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              pullRequestNumber: 65,
+              created: true,
+            }),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              state: 'open' as const,
+              url: 'https://github.test/example/symphony/pull/65',
+              headSha: 'handoff-head',
+              merged: false as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+            }),
+          requestPullRequestReview: () => Effect.void,
+        }),
+        runAgent: () =>
+          Effect.sync(markStarted).pipe(
+            Effect.zipRight(Effect.promise(() => finished)),
+            Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+          ),
+      }
 
-    const snapshot = await runWithTestClock(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -4992,44 +5068,44 @@ describe('rebuilt port lifecycle', (): void => {
           ).toEqual(['secret', 'secret'])
           return snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs[0]).toMatchObject({ state: 'awaiting_checks' })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs[0]).toMatchObject({ state: 'awaiting_checks' })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('keeps the workspace manager a reload replaced until the worker holding it ends', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const initial = changedWorkflow({ fingerprint: 'initial' })
-    const reloaded: Workflow = {
-      ...changedWorkflow({ fingerprint: 'reloaded' }),
-      config: { ...initial.config, workspaceRoot: '/tmp/symphony-reloaded' },
-    }
-    let markStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve
-    })
-    let finishWorker = (): void => undefined
-    const finished = new Promise<void>((resolve) => {
-      finishWorker = resolve
-    })
-    const harness = makeHarness(initial, () => [issue])
-    // Handoff disabled: the finished worker schedules a continuation retry, which holds no
-    // execution snapshot, so the only remaining holder is the run that has just ended.
-    const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
-    void omittedCodeReview
-    const ports: TestPorts = {
-      ...trackerOnlyPorts,
-      runAgent: () =>
-        Effect.sync(markStarted).pipe(
-          Effect.zipRight(Effect.promise(() => finished)),
-          Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-        ),
-    }
+  it.effect('keeps the workspace manager a reload replaced until the worker holding it ends', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const initial = changedWorkflow({ fingerprint: 'initial' })
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: '/tmp/symphony-reloaded' },
+      }
+      let markStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve
+      })
+      let finishWorker = (): void => undefined
+      const finished = new Promise<void>((resolve) => {
+        finishWorker = resolve
+      })
+      const harness = makeHarness(initial, () => [issue])
+      // Handoff disabled: the finished worker schedules a continuation retry, which holds no
+      // execution snapshot, so the only remaining holder is the run that has just ended.
+      const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
+      void omittedCodeReview
+      const ports: TestPorts = {
+        ...trackerOnlyPorts,
+        runAgent: () =>
+          Effect.sync(markStarted).pipe(
+            Effect.zipRight(Effect.promise(() => finished)),
+            Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+          ),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -5051,71 +5127,71 @@ describe('rebuilt port lifecycle', (): void => {
 
           expect(harness.releasedWorkspaces()).toHaveLength(2)
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 })
 
 describe('scheduler dependency hydration', (): void => {
-  it('requests hydration for every candidate when no labels are required', async (): Promise<void> => {
-    const unlabeled: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        tracker: { ...workflow.config.tracker, requiredLabels: [] },
-      },
-    }
-    const requested: (readonly string[] | null)[] = []
-    const harness = makeHarness(unlabeled)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByStates: (_states, dependencyLabels) => {
-          requested.push(dependencyLabels)
-          return Effect.succeed([])
+  it.effect('requests hydration for every candidate when no labels are required', () =>
+    Effect.gen(function* () {
+      const unlabeled: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          tracker: { ...workflow.config.tracker, requiredLabels: [] },
         },
-      }),
-    }
+      }
+      const requested: (readonly string[] | null)[] = []
+      const harness = makeHarness(unlabeled)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: (_states, dependencyLabels) => {
+            requested.push(dependencyLabels)
+            return Effect.succeed([])
+          },
+        }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
         }),
-      ),
-    )
+      )
 
-    expect(requested).toContain(null)
-    expect(requested).not.toContainEqual([])
-  })
+      expect(requested).toContain(null)
+      expect(requested).not.toContainEqual([])
+    }),
+  )
 
-  it('passes the configured labels through when some are required', async (): Promise<void> => {
-    const requested: (readonly string[] | null)[] = []
-    const harness = makeHarness(workflow)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByStates: (_states, dependencyLabels) => {
-          requested.push(dependencyLabels)
-          return Effect.succeed([])
-        },
-      }),
-    }
+  it.effect('passes the configured labels through when some are required', () =>
+    Effect.gen(function* () {
+      const requested: (readonly string[] | null)[] = []
+      const harness = makeHarness(workflow)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: (_states, dependencyLabels) => {
+            requested.push(dependencyLabels)
+            return Effect.succeed([])
+          },
+        }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
         }),
-      ),
-    )
+      )
 
-    expect(requested).toContainEqual(['symphony', 'ready'])
-  })
+      expect(requested).toContainEqual(['symphony', 'ready'])
+    }),
+  )
 })
 
 type FakeAgent = Readonly<{
@@ -5189,6 +5265,13 @@ const waitUntil = async <Value>(produce: () => Value | null, what: string): Prom
 const awaitAgent = (agents: Map<string, FakeAgent>, identifier: string): Promise<FakeAgent> =>
   waitUntil(() => agents.get(identifier) ?? null, `agent ${identifier}`)
 
+/**
+ * The one runner left in this suite, and deliberately so: `agentDetail` reads a `Ref` and the
+ * clock and nothing else, and every caller here is a synchronous predicate handed to `waitUntil`,
+ * which polls the host in real time because the worker it waits on runs on the host rather than
+ * on the test clock. Making it an effect would mean an effectful predicate the polling loop
+ * cannot take.
+ */
 const readDetail = (control: OrchestratorControl, identifier: string): AgentDetailLookup =>
   Effect.runSync(control.agentDetail(identifier))
 
@@ -5204,13 +5287,13 @@ const awaitDetail = (
   }, what)
 
 describe('live agent detail', (): void => {
-  it('publishes an ordered, redacted, bounded timeline for a running agent', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#7', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    const factory = makeAgentFactory()
+  it.effect('publishes an ordered, redacted, bounded timeline for a running agent', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#7', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const factory = makeAgentFactory()
 
-    const observed = await Effect.runPromise(
-      Effect.scoped(
+      const observed = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5251,50 +5334,50 @@ describe('live agent detail', (): void => {
           const snapshot = yield* control.snapshot
           return { detail, snapshot }
         }),
-      ),
-    )
+      )
 
-    const detail = observed.detail
-    expect(detail.status).toBe('running')
-    expect(detail.self).toBe('/api/v1/agents/example%2Fsymphony%237')
-    expect(observed.snapshot.running[0]?.detailUrl).toBe(detail.self)
-    expect(detail.timeline.events.map((event) => event.category)).toEqual([
-      'message',
-      'command',
-      'file',
-      'usage',
-      'usage',
-    ])
-    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5])
-    expect(JSON.stringify(detail)).toContain('[REDACTED]')
-    expect(JSON.stringify(detail)).not.toContain('s3cret-token-value')
-    expect(detail.identity).toMatchObject({
-      threadId: 'thread-1',
-      turnId: 'turn-1',
-      // Session identity is the thread, stable for the session's whole lifetime.
-      sessionId: 'thread-1',
-      processId: 4242,
-      turnNumber: 1,
-      workerHost: 'local',
-    })
-    expect(detail.usage.totalTokens).toBe(18)
-    expect(detail.rateLimits).toEqual([
-      { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
-    ])
-    expect(detail.workspace).toMatchObject({ dirtyFileCount: 1, addedLines: 9, deletedLines: 1 })
-    expect(detail.activity.stallTimeoutMs).toBe(30_000)
-    // The runtime snapshot keeps the client's own merged rate-limit object; the per-agent detail
-    // is the typed view of the same reading.
-    expect(observed.snapshot.rateLimits).toMatchObject({ primary: { usedPercent: 40 } })
-  })
+      const detail = observed.detail
+      expect(detail.status).toBe('running')
+      expect(detail.self).toBe('/api/v1/agents/example%2Fsymphony%237')
+      expect(observed.snapshot.running[0]?.detailUrl).toBe(detail.self)
+      expect(detail.timeline.events.map((event) => event.category)).toEqual([
+        'message',
+        'command',
+        'file',
+        'usage',
+        'usage',
+      ])
+      expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5])
+      expect(JSON.stringify(detail)).toContain('[REDACTED]')
+      expect(JSON.stringify(detail)).not.toContain('s3cret-token-value')
+      expect(detail.identity).toMatchObject({
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        // Session identity is the thread, stable for the session's whole lifetime.
+        sessionId: 'thread-1',
+        processId: 4242,
+        turnNumber: 1,
+        workerHost: 'local',
+      })
+      expect(detail.usage.totalTokens).toBe(18)
+      expect(detail.rateLimits).toEqual([
+        { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
+      ])
+      expect(detail.workspace).toMatchObject({ dirtyFileCount: 1, addedLines: 9, deletedLines: 1 })
+      expect(detail.activity.stallTimeoutMs).toBe(30_000)
+      // The runtime snapshot keeps the client's own merged rate-limit object; the per-agent detail
+      // is the typed view of the same reading.
+      expect(observed.snapshot.rateLimits).toMatchObject({ primary: { usedPercent: 40 } })
+    }),
+  )
 
-  it('separates attempts across a retry while keeping one rising sequence', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#8', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    const factory = makeAgentFactory()
+  it.effect('separates attempts across a retry while keeping one rising sequence', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#8', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const factory = makeAgentFactory()
 
-    const detail = await Effect.runPromise(
-      Effect.scoped(
+      const detail = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5343,36 +5426,36 @@ describe('live agent detail', (): void => {
             ),
           )
         }),
-      ).pipe(Effect.provide(TestContext.TestContext)),
-    )
+      )
 
-    expect(detail.timeline.events.map((event) => [event.attempt, event.category])).toEqual([
-      [0, 'reasoning'],
-      [0, 'retry'],
-      [1, 'session'],
-      [1, 'command'],
-    ])
-    expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4])
-    expect(detail.attempt.attempts.map((attempt) => attempt.outcome)).toEqual([
-      'retrying',
-      'running',
-    ])
-    expect(detail.attempt.retries).toBe(1)
-  })
+      expect(detail.timeline.events.map((event) => [event.attempt, event.category])).toEqual([
+        [0, 'reasoning'],
+        [0, 'retry'],
+        [1, 'session'],
+        [1, 'command'],
+      ])
+      expect(detail.timeline.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4])
+      expect(detail.attempt.attempts.map((attempt) => attempt.outcome)).toEqual([
+        'retrying',
+        'running',
+      ])
+      expect(detail.attempt.retries).toBe(1)
+    }),
+  )
 
-  it('keeps concurrent agents in separate records', async (): Promise<void> => {
-    const issues = [
-      makeIssue('example/symphony#11', 1, null, ['symphony', 'ready']),
-      makeIssue('example/symphony#12', 1, null, ['symphony', 'ready']),
-    ]
-    const harness = makeHarness(
-      changedWorkflow({ fingerprint: 'test', maxConcurrentAgents: 2 }),
-      () => issues,
-    )
-    const factory = makeAgentFactory()
+  it.effect('keeps concurrent agents in separate records', () =>
+    Effect.gen(function* () {
+      const issues = [
+        makeIssue('example/symphony#11', 1, null, ['symphony', 'ready']),
+        makeIssue('example/symphony#12', 1, null, ['symphony', 'ready']),
+      ]
+      const harness = makeHarness(
+        changedWorkflow({ fingerprint: 'test', maxConcurrentAgents: 2 }),
+        () => issues,
+      )
+      const factory = makeAgentFactory()
 
-    const details = await Effect.runPromise(
-      Effect.scoped(
+      const details = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5409,49 +5492,51 @@ describe('live agent detail', (): void => {
           )
           return { left, right }
         }),
-      ),
-    )
+      )
 
-    expect(details.left.timeline.events.map((event) => event.category)).toEqual(['reasoning'])
-    expect(details.right.timeline.events.map((event) => event.category)).toEqual([
-      'command',
-      'file',
-    ])
-    expect(details.left.workspace.dirtyFileCount).toBe(0)
-    expect(details.right.workspace.dirtyFileCount).toBe(1)
-  })
+      expect(details.left.timeline.events.map((event) => event.category)).toEqual(['reasoning'])
+      expect(details.right.timeline.events.map((event) => event.category)).toEqual([
+        'command',
+        'file',
+      ])
+      expect(details.left.workspace.dirtyFileCount).toBe(0)
+      expect(details.right.workspace.dirtyFileCount).toBe(1)
+    }),
+  )
 
-  it('records handoff progress and keeps the completed record readable', async (): Promise<void> => {
-    // A handoff is persisted, so this run gets a workspace root of its own.
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-handoff-detail-'))
-    const isolated: Workflow = {
-      ...workflow,
-      config: { ...workflow.config, workspaceRoot },
-    }
-    const issue = {
-      ...makeIssue('example/symphony#13', 1, null, ['symphony', 'ready']),
-      id: issueId('13'),
-    }
-    const harness = makeHarness(isolated, () => [issue])
-    const factory = makeAgentFactory()
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: factory.runAgent,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        handoffCompletedWork: () =>
-          Effect.succeed({
-            _tag: 'PullRequest',
-            branchName: 'symphony/issue-13',
-            pullRequestUrl: 'https://example.test/pull/61',
-            pullRequestNumber: 61,
-            created: true,
-          }),
-      }),
-    }
+  it.effect('records handoff progress and keeps the completed record readable', () =>
+    Effect.gen(function* () {
+      // A handoff is persisted, so this run gets a workspace root of its own.
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-handoff-detail-')),
+      )
+      const isolated: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const issue = {
+        ...makeIssue('example/symphony#13', 1, null, ['symphony', 'ready']),
+        id: issueId('13'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      const factory = makeAgentFactory()
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: factory.runAgent,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest',
+              branchName: 'symphony/issue-13',
+              pullRequestUrl: 'https://example.test/pull/61',
+              pullRequestNumber: 61,
+              created: true,
+            }),
+        }),
+      }
 
-    const detail = await Effect.runPromise(
-      Effect.scoped(
+      const detail = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           const agent = yield* Effect.promise(() =>
@@ -5472,64 +5557,66 @@ describe('live agent detail', (): void => {
             ),
           )
         }),
-      ),
-    )
+      )
 
-    expect(detail.handoff).toMatchObject({
-      expectedBranch: 'symphony/issue-13',
-      remoteBranch: { status: 'observed', name: 'symphony/issue-13' },
-      pullRequest: {
-        status: 'created',
-        number: 61,
-        url: 'https://example.test/pull/61',
-        state: 'awaiting_checks',
-      },
-      dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
-      outcome: 'pull_request_open',
-    })
-    // Four steps: the transition published before the tracker was asked, then the branch, the
-    // pull request, and the dispatch-label step it does not perform.
-    expect(detail.timeline.events.map((event) => event.category)).toEqual([
-      'handoff',
-      'handoff',
-      'handoff',
-      'handoff',
-    ])
-    expect(
-      detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
-    ).toEqual(['pending', 'observed', 'observed', 'not_performed'])
-    expect(detail.activity.stallDeadline).toBeNull()
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(detail.handoff).toMatchObject({
+        expectedBranch: 'symphony/issue-13',
+        remoteBranch: { status: 'observed', name: 'symphony/issue-13' },
+        pullRequest: {
+          status: 'created',
+          number: 61,
+          url: 'https://example.test/pull/61',
+          state: 'awaiting_checks',
+        },
+        dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
+        outcome: 'pull_request_open',
+      })
+      // Four steps: the transition published before the tracker was asked, then the branch, the
+      // pull request, and the dispatch-label step it does not perform.
+      expect(detail.timeline.events.map((event) => event.category)).toEqual([
+        'handoff',
+        'handoff',
+        'handoff',
+        'handoff',
+      ])
+      expect(
+        detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
+      ).toEqual(['pending', 'observed', 'observed', 'not_performed'])
+      expect(detail.activity.stallDeadline).toBeNull()
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('publishes the handoff transition before waiting on the tracker', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-handoff-timing-'))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const issue = {
-      ...makeIssue('example/symphony#19', 1, null, ['symphony', 'ready']),
-      id: issueId('19'),
-    }
-    const harness = makeHarness(isolated, () => [issue])
-    const factory = makeAgentFactory()
-    let releaseHandoff = (): void => undefined
-    const handoffReached = new Promise<void>((resolve) => {
-      releaseHandoff = resolve
-    })
-    let blockHandoff = true
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: factory.runAgent,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        handoffCompletedWork: () =>
-          blockHandoff
-            ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
-            : Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-19' }),
-      }),
-    }
+  it.effect('publishes the handoff transition before waiting on the tracker', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-handoff-timing-')),
+      )
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#19', 1, null, ['symphony', 'ready']),
+        id: issueId('19'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      const factory = makeAgentFactory()
+      let releaseHandoff = (): void => undefined
+      const handoffReached = new Promise<void>((resolve) => {
+        releaseHandoff = resolve
+      })
+      let blockHandoff = true
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: factory.runAgent,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            blockHandoff
+              ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
+              : Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-19' }),
+        }),
+      }
 
-    const detail = await Effect.runPromise(
-      Effect.scoped(
+      const detail = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           const agent = yield* Effect.promise(() =>
@@ -5548,23 +5635,26 @@ describe('live agent detail', (): void => {
             ),
           )
         }),
-      ),
-    )
+      )
 
-    expect(detail.status).toBe('completed')
-    expect(detail.activity.stallDeadline).toBeNull()
-    expect(detail.timeline.events.at(-1)).toMatchObject({ category: 'handoff', status: 'pending' })
-    blockHandoff = false
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(detail.status).toBe('completed')
+      expect(detail.activity.stallDeadline).toBeNull()
+      expect(detail.timeline.events.at(-1)).toMatchObject({
+        category: 'handoff',
+        status: 'pending',
+      })
+      blockHandoff = false
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('applies an agent update reported in the same turn the worker settles', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    const factory = makeAgentFactory()
+  it.effect('applies an agent update reported in the same turn the worker settles', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const factory = makeAgentFactory()
 
-    const detail = await Effect.runPromise(
-      Effect.scoped(
+      const detail = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5587,21 +5677,21 @@ describe('live agent detail', (): void => {
             ),
           )
         }),
-      ),
-    )
+      )
 
-    // First in the timeline, ahead of everything the worker's exit records: the update was applied
-    // to the live run rather than dropped after it ended.
-    expect(detail.timeline.events[0]).toMatchObject({ category: 'reasoning', sequence: 1 })
-  })
+      // First in the timeline, ahead of everything the worker's exit records: the update was applied
+      // to the live run rather than dropped after it ended.
+      expect(detail.timeline.events[0]).toMatchObject({ category: 'reasoning', sequence: 1 })
+    }),
+  )
 
-  it('answers unknown, sessionless, and starting identifiers distinctly', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#14', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    const factory = makeAgentFactory()
+  it.effect('answers unknown, sessionless, and starting identifiers distinctly', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#14', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const factory = makeAgentFactory()
 
-    const lookups = await Effect.runPromise(
-      Effect.scoped(
+      const lookups = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5616,27 +5706,27 @@ describe('live agent detail', (): void => {
             running: readDetail(control, 'example/symphony#14'),
           }
         }),
-      ),
-    )
+      )
 
-    expect(lookups.unknown._tag).toBe('Unknown')
-    expect(lookups.running._tag).toBe('Found')
-  })
+      expect(lookups.unknown._tag).toBe('Unknown')
+      expect(lookups.running._tag).toBe('Found')
+    }),
+  )
 
-  it('keeps a retry scheduled before the session starts inspectable', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
-    // Prompt rendering fails after the tick-wide validation gate admits the candidate, so the
-    // retry is scheduled before any agent session exists — and its published link still has to
-    // resolve.
-    const invalidPrompt = changedWorkflow({
-      fingerprint: 'invalid-prompt',
-      promptTemplate: '{{ missing }}',
-    })
-    const harness = makeHarness(invalidPrompt, () => [issue])
-    const factory = makeAgentFactory()
+  it.effect('keeps a retry scheduled before the session starts inspectable', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+      // Prompt rendering fails after the tick-wide validation gate admits the candidate, so the
+      // retry is scheduled before any agent session exists — and its published link still has to
+      // resolve.
+      const invalidPrompt = changedWorkflow({
+        fingerprint: 'invalid-prompt',
+        promptTemplate: '{{ missing }}',
+      })
+      const harness = makeHarness(invalidPrompt, () => [issue])
+      const factory = makeAgentFactory()
 
-    const lookup = await Effect.runPromise(
-      Effect.scoped(
+      const lookup = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5649,31 +5739,31 @@ describe('live agent detail', (): void => {
             }, 'the pre-launch retry to be inspectable'),
           )
         }),
-      ),
-    )
+      )
 
-    expect(lookup._tag).toBe('Found')
-    if (lookup._tag === 'Found') {
-      expect(lookup.detail.retry?.attempt).toBe(1)
-      expect(lookup.detail.retry?.reason).toContain('failed to render workflow prompt')
-      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual(['retry'])
-      expect(factory.agents.size).toBe(0)
-    }
-  })
+      expect(lookup._tag).toBe('Found')
+      if (lookup._tag === 'Found') {
+        expect(lookup.detail.retry?.attempt).toBe(1)
+        expect(lookup.detail.retry?.reason).toContain('failed to render workflow prompt')
+        expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual(['retry'])
+        expect(factory.agents.size).toBe(0)
+      }
+    }),
+  )
 
-  it('closes the detail of a queued retry an operator pauses away', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
-    // The same prompt-rendering failure as above, so the issue is waiting to retry with no session
-    // behind it when the pause drops the queued retry.
-    const invalidPrompt = changedWorkflow({
-      fingerprint: 'invalid-prompt',
-      promptTemplate: '{{ missing }}',
-    })
-    const harness = makeHarness(invalidPrompt, () => [issue])
-    const factory = makeAgentFactory()
+  it.effect('closes the detail of a queued retry an operator pauses away', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+      // The same prompt-rendering failure as above, so the issue is waiting to retry with no session
+      // behind it when the pause drops the queued retry.
+      const invalidPrompt = changedWorkflow({
+        fingerprint: 'invalid-prompt',
+        promptTemplate: '{{ missing }}',
+      })
+      const harness = makeHarness(invalidPrompt, () => [issue])
+      const factory = makeAgentFactory()
 
-    const lookup = await Effect.runPromise(
-      Effect.scoped(
+      const lookup = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
             ...harness.ports,
@@ -5690,119 +5780,123 @@ describe('live agent detail', (): void => {
 
           return readDetail(control, 'example/symphony#17')
         }),
-      ),
-    )
+      )
 
-    expect(lookup._tag).toBe('Found')
-    if (lookup._tag === 'Found') {
-      // The retry will never run, so nothing may still describe the agent as waiting for it.
-      expect(lookup.detail.status).toBe('completed')
-      expect(lookup.detail.retry).toBeNull()
-      expect(lookup.detail.phase.phase).toBe('cancelled')
-      expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
-        outcome: 'cancelled',
-        reason: 'the operator paused the issue',
-      })
-      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual([
-        'retry',
-        'cancellation',
-      ])
-    }
-  })
+      expect(lookup._tag).toBe('Found')
+      if (lookup._tag === 'Found') {
+        // The retry will never run, so nothing may still describe the agent as waiting for it.
+        expect(lookup.detail.status).toBe('completed')
+        expect(lookup.detail.retry).toBeNull()
+        expect(lookup.detail.phase.phase).toBe('cancelled')
+        expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
+          outcome: 'cancelled',
+          reason: 'the operator paused the issue',
+        })
+        expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual([
+          'retry',
+          'cancellation',
+        ])
+      }
+    }),
+  )
 
-  it('serves detail while a tracker poll is blocked, and hands out immutable snapshots', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
-    let blockPolling = false
-    const harness = makeHarness(
-      workflow,
-      () => [issue],
-      (_effectiveWorkflow, states) => {
-        if (!states.includes('open')) {
-          return Effect.succeed([])
+  it.effect(
+    'serves detail while a tracker poll is blocked, and hands out immutable snapshots',
+    () =>
+      Effect.gen(function* () {
+        const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
+        let blockPolling = false
+        const harness = makeHarness(
+          workflow,
+          () => [issue],
+          (_effectiveWorkflow, states) => {
+            if (!states.includes('open')) {
+              return Effect.succeed([])
+            }
+            return blockPolling ? Effect.never : Effect.succeed([issue])
+          },
+        )
+        const factory = makeAgentFactory()
+
+        const observed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+              ...harness.ports,
+              runAgent: factory.runAgent,
+            })
+            const agent = yield* Effect.promise(() =>
+              awaitAgent(factory.agents, 'example/symphony#15'),
+            )
+            agent.notify('item/completed', { item: { type: 'reasoning' } })
+            const before = yield* Effect.promise(() =>
+              awaitDetail(
+                control,
+                'example/symphony#15',
+                (candidate) => candidate.timeline.events.length === 1,
+                'the first event',
+              ),
+            )
+            // The scheduler is now parked inside a poll. A detail read must still answer, and must
+            // not be able to change anything the scheduler owns.
+            blockPolling = true
+            yield* Effect.forkScoped(control.refresh)
+            yield* Effect.promise(settle)
+            const during = readDetail(control, 'example/symphony#15')
+            expect(during._tag).toBe('Found')
+            const events = before.timeline.events as unknown as { push: (value: unknown) => number }
+            expect(() => events.push('tampered')).toThrow()
+            const after = readDetail(control, 'example/symphony#15')
+            return { during, after }
+          }),
+        )
+
+        expect(observed.after._tag).toBe('Found')
+        if (observed.after._tag === 'Found') {
+          expect(observed.after.detail.timeline.events).toHaveLength(1)
+          expect(observed.after.detail.activity.elapsedMs).toBeGreaterThanOrEqual(0)
         }
-        return blockPolling ? Effect.never : Effect.succeed([issue])
-      },
-    )
-    const factory = makeAgentFactory()
-
-    const observed = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
-            ...harness.ports,
-            runAgent: factory.runAgent,
-          })
-          const agent = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#15'),
-          )
-          agent.notify('item/completed', { item: { type: 'reasoning' } })
-          const before = yield* Effect.promise(() =>
-            awaitDetail(
-              control,
-              'example/symphony#15',
-              (candidate) => candidate.timeline.events.length === 1,
-              'the first event',
-            ),
-          )
-          // The scheduler is now parked inside a poll. A detail read must still answer, and must
-          // not be able to change anything the scheduler owns.
-          blockPolling = true
-          yield* Effect.forkScoped(control.refresh)
-          yield* Effect.promise(settle)
-          const during = readDetail(control, 'example/symphony#15')
-          expect(during._tag).toBe('Found')
-          const events = before.timeline.events as unknown as { push: (value: unknown) => number }
-          expect(() => events.push('tampered')).toThrow()
-          const after = readDetail(control, 'example/symphony#15')
-          return { during, after }
-        }),
-      ),
-    )
-
-    expect(observed.after._tag).toBe('Found')
-    if (observed.after._tag === 'Found') {
-      expect(observed.after.detail.timeline.events).toHaveLength(1)
-      expect(observed.after.detail.activity.elapsedMs).toBeGreaterThanOrEqual(0)
-    }
-  })
+      }),
+  )
 })
 
 describe('aged-out agent detail', (): void => {
-  it('keeps reporting an evicted session as completed on later publications', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-aged-out-'))
-    const total = retainedCompletedDetails + 1
-    const issues = Array.from({ length: total }, (_unused, index) => ({
-      ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
-      id: issueId(String(index + 20)),
-    }))
-    const isolated: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        workspaceRoot,
-        agent: { ...workflow.config.agent, maxConcurrentAgents: total },
-      },
-    }
-    const harness = makeHarness(isolated, () => issues)
-    const factory = makeAgentFactory()
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: factory.runAgent,
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        handoffCompletedWork: (issue) =>
-          Effect.succeed({
-            _tag: 'PullRequest',
-            branchName: `symphony/issue-${issue.id}`,
-            pullRequestUrl: `https://example.test/pull/${issue.id}`,
-            pullRequestNumber: Number(issue.id),
-            created: true,
-          }),
-      }),
-    }
+  it.effect('keeps reporting an evicted session as completed on later publications', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-aged-out-')),
+      )
+      const total = retainedCompletedDetails + 1
+      const issues = Array.from({ length: total }, (_unused, index) => ({
+        ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
+        id: issueId(String(index + 20)),
+      }))
+      const isolated: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          agent: { ...workflow.config.agent, maxConcurrentAgents: total },
+        },
+      }
+      const harness = makeHarness(isolated, () => issues)
+      const factory = makeAgentFactory()
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: factory.runAgent,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: (issue) =>
+            Effect.succeed({
+              _tag: 'PullRequest',
+              branchName: `symphony/issue-${issue.id}`,
+              pullRequestUrl: `https://example.test/pull/${issue.id}`,
+              pullRequestNumber: Number(issue.id),
+              created: true,
+            }),
+        }),
+      }
 
-    const observed = await Effect.runPromise(
-      Effect.scoped(
+      const observed = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           for (const issue of issues) {
@@ -5821,12 +5915,12 @@ describe('aged-out agent detail', (): void => {
           yield* control.setIssuePaused(9_999, true)
           return { evicted, after: readDetail(control, evicted) }
         }),
-      ),
-    )
+      )
 
-    expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 })
 
 const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
@@ -5846,144 +5940,150 @@ const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
 })
 
 describe('session telemetry accounting', (): void => {
-  it('tracks metadata and rate limits without double-counting repeated absolute totals', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
+  it.effect(
+    'tracks metadata and rate limits without double-counting repeated absolute totals',
+    () =>
+      Effect.gen(function* () {
+        const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+        const harness = makeHarness(workflow, () => [issue])
 
-    await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
-          yield* harness.awaitAgentRun
-          harness.emitAgentEvent(makeAgentEvent({ event: 'session_started', usage: null }))
-          harness.emitAgentEvent(makeAgentEvent())
-          harness.emitAgentEvent(makeAgentEvent())
-          harness.emitAgentEvent(
-            makeAgentEvent({
-              usage: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
-              rateLimits: {
-                limitId: 'codex',
-                credits: { hasCredits: true, balance: '20' },
-                primary: { usedPercent: 25, windowDurationMins: 300 },
-              },
-            }),
-          )
-          harness.emitAgentEvent(
-            makeAgentEvent({ event: 'item/completed', message: 'meaningful update', usage: null }),
-          )
-          harness.emitAgentEvent(
-            makeAgentEvent({
-              event: 'account/rateLimits/updated',
-              message: null,
-              usage: null,
-              rateLimits: {
-                secondary: { usedPercent: 5, windowDurationMins: 1_440 },
-              },
-            }),
-          )
-          harness.emitAgentEvent(
-            makeAgentEvent({
-              event: 'account/rateLimits/updated',
-              message: null,
-              usage: null,
-              rateLimits: { credits: { balance: null } },
-            }),
-          )
-          harness.emitAgentEvent(
-            makeAgentEvent({
-              event: 'turn_started',
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+            yield* harness.awaitAgentRun
+            harness.emitAgentEvent(makeAgentEvent({ event: 'session_started', usage: null }))
+            harness.emitAgentEvent(makeAgentEvent())
+            harness.emitAgentEvent(makeAgentEvent())
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                usage: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
+                rateLimits: {
+                  limitId: 'codex',
+                  credits: { hasCredits: true, balance: '20' },
+                  primary: { usedPercent: 25, windowDurationMins: 300 },
+                },
+              }),
+            )
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: 'item/completed',
+                message: 'meaningful update',
+                usage: null,
+              }),
+            )
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: 'account/rateLimits/updated',
+                message: null,
+                usage: null,
+                rateLimits: {
+                  secondary: { usedPercent: 5, windowDurationMins: 1_440 },
+                },
+              }),
+            )
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: 'account/rateLimits/updated',
+                message: null,
+                usage: null,
+                rateLimits: { credits: { balance: null } },
+              }),
+            )
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: 'turn_started',
+                turnId: 'turn-2',
+                turnCount: 2,
+                message: null,
+                usage: null,
+              }),
+            )
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: 'turn/usage',
+                turnId: 'turn-1',
+                turnCount: 1,
+                message: null,
+                usage: null,
+              }),
+            )
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: 'turn/terminated',
+                turnId: 'turn-2',
+                turnCount: 2,
+                message: null,
+                turnStatus: 'timed_out',
+                usage: null,
+              }),
+            )
+            yield* Effect.yieldNow()
+            yield* Effect.yieldNow()
+
+            const live = yield* control.snapshot
+            expect(live.running[0]).toMatchObject({
+              threadId: 'thread-1',
               turnId: 'turn-2',
+              sessionId: 'thread-1',
               turnCount: 2,
-              message: null,
-              usage: null,
-            }),
-          )
-          harness.emitAgentEvent(
-            makeAgentEvent({
-              event: 'turn/usage',
-              turnId: 'turn-1',
-              turnCount: 1,
-              message: null,
-              usage: null,
-            }),
-          )
-          harness.emitAgentEvent(
-            makeAgentEvent({
-              event: 'turn/terminated',
-              turnId: 'turn-2',
-              turnCount: 2,
-              message: null,
-              turnStatus: 'timed_out',
-              usage: null,
-            }),
-          )
-          yield* Effect.yieldNow()
-          yield* Effect.yieldNow()
+              processId: 123,
+              lastMessage: 'meaningful update',
+              tokens: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
+            })
+            expect(live.totals).toMatchObject({ inputTokens: 14, outputTokens: 7, totalTokens: 21 })
+            expect(live.rateLimits).toMatchObject({
+              limitId: 'codex',
+              credits: { hasCredits: true, balance: null },
+              primary: { usedPercent: 25, windowDurationMins: 300 },
+              secondary: { usedPercent: 5, windowDurationMins: 1_440 },
+            })
 
-          const live = yield* control.snapshot
-          expect(live.running[0]).toMatchObject({
-            threadId: 'thread-1',
-            turnId: 'turn-2',
-            sessionId: 'thread-1',
-            turnCount: 2,
-            processId: 123,
-            lastMessage: 'meaningful update',
-            tokens: { inputTokens: 14, outputTokens: 7, totalTokens: 21 },
-          })
-          expect(live.totals).toMatchObject({ inputTokens: 14, outputTokens: 7, totalTokens: 21 })
-          expect(live.rateLimits).toMatchObject({
-            limitId: 'codex',
-            credits: { hasCredits: true, balance: null },
-            primary: { usedPercent: 25, windowDurationMins: 300 },
-            secondary: { usedPercent: 5, windowDurationMins: 1_440 },
-          })
+            yield* control.setIssuePaused(16, true)
+            const cancelled = yield* control.snapshot
+            expect(cancelled.running).toEqual([])
+            expect(cancelled.totals).toMatchObject({
+              inputTokens: 14,
+              outputTokens: 7,
+              totalTokens: 21,
+            })
+          }),
+        )
+      }),
+  )
 
-          yield* control.setIssuePaused(16, true)
-          const cancelled = yield* control.snapshot
-          expect(cancelled.running).toEqual([])
-          expect(cancelled.totals).toMatchObject({
-            inputTokens: 14,
-            outputTokens: 7,
-            totalTokens: 21,
-          })
-        }),
-      ),
-    )
-  })
-
-  it('cancels a stalled worker and schedules its first retry', async (): Promise<void> => {
-    const stalledWorkflow: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
-      },
-    }
-    const issue = makeIssue('example/symphony#19', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(stalledWorkflow, () => [issue])
-    let resolveStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve
-    })
-    let interrupted = false
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: ({ onEvent }) =>
-        Effect.sync(() => {
-          onEvent(makeAgentEvent({ timestamp: new Date(0), message: 'last progress' }))
-          resolveStarted()
-        }).pipe(
-          Effect.zipRight(Effect.never),
-          Effect.onInterrupt(() =>
-            Effect.sync(() => {
-              interrupted = true
-            }),
+  it.effect('cancels a stalled worker and schedules its first retry', () =>
+    Effect.gen(function* () {
+      const stalledWorkflow: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+        },
+      }
+      const issue = makeIssue('example/symphony#19', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(stalledWorkflow, () => [issue])
+      let resolveStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve
+      })
+      let interrupted = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: ({ onEvent }) =>
+          Effect.sync(() => {
+            onEvent(makeAgentEvent({ timestamp: new Date(0), message: 'last progress' }))
+            resolveStarted()
+          }).pipe(
+            Effect.zipRight(Effect.never),
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                interrupted = true
+              }),
+            ),
           ),
-        ),
-    }
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -6007,37 +6107,37 @@ describe('session telemetry accounting', (): void => {
           })
           expect(Date.parse(snapshot.retrying[0]?.dueAt ?? '')).not.toBeNaN()
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('does not launch the agent when beforeRun fails', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#24', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    let agentLaunches = 0
-    let afterRunCount = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        beforeRun: () =>
-          Effect.fail(
-            new WorkspaceError({ category: 'hook_failed', message: 'before_run rejected' }),
-          ),
-        afterRun: () =>
-          Effect.sync(() => {
-            afterRunCount += 1
-          }),
-      }),
-      runAgent: () =>
-        Effect.sync(() => {
-          agentLaunches += 1
-          return { threadId: 'unexpected', turnId: 'unexpected', turnCount: 1 }
+  it.effect('does not launch the agent when beforeRun fails', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#24', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      let agentLaunches = 0
+      let afterRunCount = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          beforeRun: () =>
+            Effect.fail(
+              new WorkspaceError({ category: 'hook_failed', message: 'before_run rejected' }),
+            ),
+          afterRun: () =>
+            Effect.sync(() => {
+              afterRunCount += 1
+            }),
         }),
-    }
+        runAgent: () =>
+          Effect.sync(() => {
+            agentLaunches += 1
+            return { threadId: 'unexpected', turnId: 'unexpected', turnCount: 1 }
+          }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
@@ -6055,38 +6155,38 @@ describe('session telemetry accounting', (): void => {
             error: 'before_run rejected',
           })
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('schedules continuation attempt one after a normal exit without a branch', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#23', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    let handoffCount = 0
-    let afterRunCount = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        afterRun: () =>
-          Effect.sync(() => {
-            afterRunCount += 1
-          }),
-      }),
-      makeCodeReview: (provider) => ({
-        ...requireCodeReview(harness.ports, provider),
-        handoffCompletedWork: () =>
-          Effect.sync(() => {
-            handoffCount += 1
-            return { _tag: 'NoBranch' as const, branchName: 'symphony/test' }
-          }),
-      }),
-      runAgent: () =>
-        Effect.succeed({ threadId: 'thread-normal', turnId: 'turn-normal', turnCount: 1 }),
-    }
+  it.effect('schedules continuation attempt one after a normal exit without a branch', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#23', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      let handoffCount = 0
+      let afterRunCount = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          afterRun: () =>
+            Effect.sync(() => {
+              afterRunCount += 1
+            }),
+        }),
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.sync(() => {
+              handoffCount += 1
+              return { _tag: 'NoBranch' as const, branchName: 'symphony/test' }
+            }),
+        }),
+        runAgent: () =>
+          Effect.succeed({ threadId: 'thread-normal', turnId: 'turn-normal', turnCount: 1 }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
@@ -6105,149 +6205,157 @@ describe('session telemetry accounting', (): void => {
             error: null,
           })
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('uses continuation turns when the tracker has no CodeReviewPort and handoff is disabled', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#139', 1, null, ['symphony', 'ready'])
-    const secondKindWorkflow: Workflow = { ...workflow, tracker: stubProvider('secret') }
-    const harness = makeHarness(secondKindWorkflow, () => [issue])
-    const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
-    void omittedCodeReview
-    const ports: TestPorts = {
-      ...trackerOnlyPorts,
-      runAgent: () =>
-        Effect.succeed({ threadId: 'thread-neutral', turnId: 'turn-neutral', turnCount: 1 }),
-    }
+  it.effect(
+    'uses continuation turns when the tracker has no CodeReviewPort and handoff is disabled',
+    () =>
+      Effect.gen(function* () {
+        const issue = makeIssue('example/symphony#139', 1, null, ['symphony', 'ready'])
+        const secondKindWorkflow: Workflow = { ...workflow, tracker: stubProvider('secret') }
+        const harness = makeHarness(secondKindWorkflow, () => [issue])
+        const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
+        void omittedCodeReview
+        const ports: TestPorts = {
+          ...trackerOnlyPorts,
+          runAgent: () =>
+            Effect.succeed({ threadId: 'thread-neutral', turnId: 'turn-neutral', turnCount: 1 }),
+        }
 
-    await runWithTestClock(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let snapshot = yield* control.snapshot
-          while (snapshot.retrying.length === 0) {
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            let snapshot = yield* control.snapshot
+            while (snapshot.retrying.length === 0) {
+              yield* Effect.yieldNow()
+              snapshot = yield* control.snapshot
+            }
 
-          expect(snapshot.handoffs).toEqual([])
-          expect(snapshot.retrying[0]).toMatchObject({
-            issueId: issue.id,
-            attempt: 1,
-            error: null,
-          })
-        }),
-      ),
-    )
-  })
+            expect(snapshot.handoffs).toEqual([])
+            expect(snapshot.retrying[0]).toMatchObject({
+              issueId: issue.id,
+              attempt: 1,
+              error: null,
+            })
+          }),
+        )
+      }),
+  )
 
-  it('preserves the persisted handoff store while handoff is disabled', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-disabled-handoff-'))
-    const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-    const persisted = {
-      issueId: issueId('75'),
-      identifier: issueIdentifier('example/symphony#75'),
-      pullRequestUrl: 'https://github.test/example/symphony/pull/95',
-      branchName: 'symphony/issue-75',
-      state: 'awaiting_checks' as const,
-      headSha: 'persisted-head',
-      reason: null,
-      repairAttempts: 0,
-      observedAt: new Date(0).toISOString(),
-    }
-    await Effect.runPromise(saveHandoffs(storePath, [persisted]))
-    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-    const harness = makeHarness(isolated)
-    const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
-    void omittedCodeReview
+  it.effect('preserves the persisted handoff store while handoff is disabled', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-disabled-handoff-')),
+      )
+      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const persisted = {
+        issueId: issueId('75'),
+        identifier: issueIdentifier('example/symphony#75'),
+        pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+        branchName: 'symphony/issue-75',
+        state: 'awaiting_checks' as const,
+        headSha: 'persisted-head',
+        reason: null,
+        repairAttempts: 0,
+        observedAt: new Date(0).toISOString(),
+      }
+      yield* saveHandoffs(storePath, [persisted])
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const harness = makeHarness(isolated)
+      const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
+      void omittedCodeReview
 
-    const snapshot = await Effect.runPromise(
-      Effect.scoped(
+      const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', trackerOnlyPorts)
           yield* control.refresh
           return yield* control.snapshot
         }),
-      ),
-    )
+      )
 
-    expect(snapshot.handoffs).toEqual([])
-    await expect(Effect.runPromise(loadHandoffs(storePath))).resolves.toEqual([persisted])
-    await rm(workspaceRoot, { force: true, recursive: true })
-  })
+      expect(snapshot.handoffs).toEqual([])
+      expect(yield* loadHandoffs(storePath)).toEqual([persisted])
+      yield* Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true }))
+    }),
+  )
 
-  it('rejects enabled handoff when the provider does not supply CodeReviewPort', async (): Promise<void> => {
-    const secondKindWorkflow: Workflow = { ...workflow, tracker: stubProvider('secret') }
-    const harness = makeHarness(secondKindWorkflow)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeCodeReview: () => null,
-    }
+  it.effect('rejects enabled handoff when the provider does not supply CodeReviewPort', () =>
+    Effect.gen(function* () {
+      const secondKindWorkflow: Workflow = { ...workflow, tracker: stubProvider('secret') }
+      const harness = makeHarness(secondKindWorkflow)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: () => null,
+      }
 
-    const result = await Effect.runPromise(
-      Effect.either(Effect.scoped(startTestOrchestrator('/tmp/WORKFLOW.md', ports))),
-    )
+      const result = yield* Effect.either(
+        Effect.scoped(startTestOrchestrator('/tmp/WORKFLOW.md', ports)),
+      )
 
-    expect(result).toMatchObject({
-      _tag: 'Left',
-      left: {
-        category: 'invalid_config',
-        message:
-          'pull-request handoff is enabled, but tracker provider stub does not supply CodeReviewPort',
-      },
-    })
-  })
+      expect(result).toMatchObject({
+        _tag: 'Left',
+        left: {
+          category: 'invalid_config',
+          message:
+            'pull-request handoff is enabled, but tracker provider stub does not supply CodeReviewPort',
+        },
+      })
+    }),
+  )
 
-  it('rejects enabled handoff when the provider does not supply SourceControlPort', async (): Promise<void> => {
-    const harness = makeHarness(workflow)
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeSourceControl: () => null,
-    }
+  it.effect('rejects enabled handoff when the provider does not supply SourceControlPort', () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(workflow)
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () => null,
+      }
 
-    const result = await Effect.runPromise(
-      Effect.either(Effect.scoped(startTestOrchestrator('/tmp/WORKFLOW.md', ports))),
-    )
+      const result = yield* Effect.either(
+        Effect.scoped(startTestOrchestrator('/tmp/WORKFLOW.md', ports)),
+      )
 
-    expect(result).toMatchObject({
-      _tag: 'Left',
-      left: {
-        category: 'invalid_config',
-        message:
-          'pull-request handoff is enabled, but tracker provider github does not supply SourceControlPort',
-      },
-    })
-  })
+      expect(result).toMatchObject({
+        _tag: 'Left',
+        left: {
+          category: 'invalid_config',
+          message:
+            'pull-request handoff is enabled, but tracker provider github does not supply SourceControlPort',
+        },
+      })
+    }),
+  )
 
-  it('interrupts a non-active refreshed issue without removing its workspace', async (): Promise<void> => {
-    let currentIssue = makeIssue('example/symphony#20', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [currentIssue])
-    let resolveStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve
-    })
-    let interrupted = false
-    const removed: string[] = []
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeWorkspaces: (settings) => ({
-        ...harness.ports.makeWorkspaces(settings),
-        remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
-      }),
-      runAgent: () =>
-        Effect.sync(resolveStarted).pipe(
-          Effect.zipRight(Effect.never),
-          Effect.onInterrupt(() =>
-            Effect.sync(() => {
-              interrupted = true
-            }),
+  it.effect('interrupts a non-active refreshed issue without removing its workspace', () =>
+    Effect.gen(function* () {
+      let currentIssue = makeIssue('example/symphony#20', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [currentIssue])
+      let resolveStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve
+      })
+      let interrupted = false
+      const removed: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+        }),
+        runAgent: () =>
+          Effect.sync(resolveStarted).pipe(
+            Effect.zipRight(Effect.never),
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                interrupted = true
+              }),
+            ),
           ),
-        ),
-    }
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -6261,40 +6369,40 @@ describe('session telemetry accounting', (): void => {
           expect(snapshot.retrying).toEqual([])
           expect(removed).toEqual([])
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('keeps a running worker when only blocker metadata changes', async (): Promise<void> => {
-    let currentIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [currentIssue])
-    let resolveStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve
-    })
-    let interrupted = false
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: () =>
-        Effect.sync(resolveStarted).pipe(
-          Effect.zipRight(Effect.never),
-          Effect.onInterrupt(() =>
-            Effect.sync(() => {
-              interrupted = true
-            }),
+  it.effect('keeps a running worker when only blocker metadata changes', () =>
+    Effect.gen(function* () {
+      let currentIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [currentIssue])
+      let resolveStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve
+      })
+      let interrupted = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: () =>
+          Effect.sync(resolveStarted).pipe(
+            Effect.zipRight(Effect.never),
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                interrupted = true
+              }),
+            ),
           ),
-        ),
-    }
-    const blocker: BlockerRef = {
-      id: '20',
-      identifier: issueIdentifier('example/symphony#20'),
-      title: 'Prerequisite',
-      state: 'open',
-      url: 'https://github.com/example/symphony/issues/20',
-    }
+      }
+      const blocker: BlockerRef = {
+        id: '20',
+        identifier: issueIdentifier('example/symphony#20'),
+        title: 'Prerequisite',
+        state: 'open',
+        url: 'https://github.com/example/symphony/issues/20',
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -6306,38 +6414,38 @@ describe('session telemetry accounting', (): void => {
           expect(interrupted).toBe(false)
           expect(snapshot.running.map((entry) => entry.issueId)).toEqual(['example/symphony#21'])
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('publishes the saturated issue states and the agents whose detail will answer', async (): Promise<void> => {
-    const perStateWorkflow: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        agent: {
-          ...workflow.config.agent,
-          maxConcurrentAgents: 4,
-          // Open issues get a narrower cap than the host as a whole, so the state saturates while
-          // there is still global capacity — the case a console reading only the global limit
-          // would report as a free slot.
-          maxConcurrentAgentsByState: new Map([['open', 1]]),
+  it.effect('publishes the saturated issue states and the agents whose detail will answer', () =>
+    Effect.gen(function* () {
+      const perStateWorkflow: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          agent: {
+            ...workflow.config.agent,
+            maxConcurrentAgents: 4,
+            // Open issues get a narrower cap than the host as a whole, so the state saturates while
+            // there is still global capacity — the case a console reading only the global limit
+            // would report as a free slot.
+            maxConcurrentAgentsByState: new Map([['open', 1]]),
+          },
         },
-      },
-    }
-    const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(perStateWorkflow, () => [issue])
-    let resolveStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve
-    })
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
-    }
+      }
+      const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(perStateWorkflow, () => [issue])
+      let resolveStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -6349,48 +6457,48 @@ describe('session telemetry accounting', (): void => {
           // The running agent's detail resource will answer, so the console may offer to inspect it.
           expect(snapshot.inspectableAgents).toEqual([issue.identifier])
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('reports no saturated state when the workflow sets no per-state limit', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    let resolveStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve
-    })
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
-    }
+  it.effect('reports no saturated state when the workflow sets no per-state limit', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      let resolveStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
 
           expect((yield* control.snapshot).saturatedStates).toEqual([])
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('updates running snapshot metadata when an active issue refreshes', async (): Promise<void> => {
-    let currentIssue = makeIssue('example/symphony#25', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [currentIssue])
-    let resolveStarted = (): void => undefined
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve
-    })
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
-    }
+  it.effect('updates running snapshot metadata when an active issue refreshes', () =>
+    Effect.gen(function* () {
+      let currentIssue = makeIssue('example/symphony#25', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [currentIssue])
+      let resolveStarted = (): void => undefined
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
@@ -6414,38 +6522,38 @@ describe('session telemetry accounting', (): void => {
             ).getTime() + workflow.config.codex.stallTimeoutMs,
           )
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('applies a configured retry cap to an actual failed worker', async (): Promise<void> => {
-    const cappedWorkflow: Workflow = {
-      ...workflow,
-      config: {
-        ...workflow.config,
-        agent: { ...workflow.config.agent, maxRetryBackoffMs: 250 },
-      },
-    }
-    const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(cappedWorkflow, () => [issue])
-    let failureAt = 0
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: () =>
-        Clock.currentTimeMillis.pipe(
-          Effect.tap((now) =>
-            Effect.sync(() => {
-              failureAt = now
-            }),
+  it.effect('applies a configured retry cap to an actual failed worker', () =>
+    Effect.gen(function* () {
+      const cappedWorkflow: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          agent: { ...workflow.config.agent, maxRetryBackoffMs: 250 },
+        },
+      }
+      const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(cappedWorkflow, () => [issue])
+      let failureAt = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: () =>
+          Clock.currentTimeMillis.pipe(
+            Effect.tap((now) =>
+              Effect.sync(() => {
+                failureAt = now
+              }),
+            ),
+            Effect.zipRight(
+              Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
+            ),
           ),
-          Effect.zipRight(
-            Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
-          ),
-        ),
-    }
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
@@ -6459,38 +6567,40 @@ describe('session telemetry accounting', (): void => {
           expect(scheduledDelay).toBeGreaterThanOrEqual(250)
           expect(scheduledDelay).toBeLessThan(1_000)
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('requeues a due retry when another worker occupies the only slot', async (): Promise<void> => {
-    const retryingIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
-    const occupyingIssue = makeIssue('example/symphony#22', 1, null, ['symphony', 'ready'])
-    let candidates: readonly Issue[] = [retryingIssue]
-    const harness = makeHarness(workflow, () => candidates)
-    let resolveOccupyingStarted = (): void => undefined
-    const occupyingStarted = new Promise<void>((resolve) => {
-      resolveOccupyingStarted = resolve
-    })
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByIds: (ids) =>
-          Effect.succeed([retryingIssue, occupyingIssue].filter((issue) => ids.includes(issue.id))),
-      }),
-      runAgent: ({ issue }) => {
-        if (issue.id === retryingIssue.id) {
-          return Effect.fail(
-            new AgentError({ category: 'process_exited', message: 'retrying worker failed' }),
-          )
-        }
-        return Effect.sync(resolveOccupyingStarted).pipe(Effect.zipRight(Effect.never))
-      },
-    }
+  it.effect('requeues a due retry when another worker occupies the only slot', () =>
+    Effect.gen(function* () {
+      const retryingIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+      const occupyingIssue = makeIssue('example/symphony#22', 1, null, ['symphony', 'ready'])
+      let candidates: readonly Issue[] = [retryingIssue]
+      const harness = makeHarness(workflow, () => candidates)
+      let resolveOccupyingStarted = (): void => undefined
+      const occupyingStarted = new Promise<void>((resolve) => {
+        resolveOccupyingStarted = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByIds: (ids) =>
+            Effect.succeed(
+              [retryingIssue, occupyingIssue].filter((issue) => ids.includes(issue.id)),
+            ),
+        }),
+        runAgent: ({ issue }) => {
+          if (issue.id === retryingIssue.id) {
+            return Effect.fail(
+              new AgentError({ category: 'process_exited', message: 'retrying worker failed' }),
+            )
+          }
+          return Effect.sync(resolveOccupyingStarted).pipe(Effect.zipRight(Effect.never))
+        },
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while ((yield* control.snapshot).retrying.length === 0) {
@@ -6513,32 +6623,32 @@ describe('session telemetry accounting', (): void => {
             error: 'no available orchestrator slots',
           })
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 
-  it('finalizes a queued retry rejected by the tracker policy', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    const ports: TestPorts = {
-      ...harness.ports,
-      makeTracker: (provider) => ({
-        ...harness.ports.makeTracker(provider),
-        fetchIssuesByIds: () =>
-          Effect.fail(
-            new TrackerError({
-              category: 'tracker_response',
-              message: 'retry refresh was rejected',
-              retryable: false,
-            }),
-          ),
-      }),
-      runAgent: () =>
-        Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
-    }
+  it.effect('finalizes a queued retry rejected by the tracker policy', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByIds: () =>
+            Effect.fail(
+              new TrackerError({
+                category: 'tracker_response',
+                message: 'retry refresh was rejected',
+                retryable: false,
+              }),
+            ),
+        }),
+        runAgent: () =>
+          Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
+      }
 
-    const lookup = await runWithTestClock(
-      Effect.scoped(
+      const lookup = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while ((yield* control.snapshot).retrying.length === 0) {
@@ -6550,57 +6660,59 @@ describe('session telemetry accounting', (): void => {
 
           return readDetail(control, issue.identifier)
         }),
-      ),
-    )
+      )
 
-    expect(lookup._tag).toBe('Found')
-    if (lookup._tag === 'Found') {
-      expect(lookup.detail.status).toBe('completed')
-      expect(lookup.detail.retry).toBeNull()
-      expect(lookup.detail.phase.phase).toBe('cancelled')
-      expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
-        outcome: 'cancelled',
-        reason: 'retry refresh failed: retry refresh was rejected',
+      expect(lookup._tag).toBe('Found')
+      if (lookup._tag === 'Found') {
+        expect(lookup.detail.status).toBe('completed')
+        expect(lookup.detail.retry).toBeNull()
+        expect(lookup.detail.phase.phase).toBe('cancelled')
+        expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
+          outcome: 'cancelled',
+          reason: 'retry refresh failed: retry refresh was rejected',
+        })
+        expect(lookup.detail.timeline.events.map((entry) => entry.category)).toContain(
+          'cancellation',
+        )
+      }
+    }),
+  )
+
+  it.effect('retains ended usage while a retry starts a fresh absolute counter', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      let runCount = 0
+      let resolveSecondRun = (): void => undefined
+      const secondRun = new Promise<void>((resolve) => {
+        resolveSecondRun = resolve
       })
-      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toContain('cancellation')
-    }
-  })
-
-  it('retains ended usage while a retry starts a fresh absolute counter', async (): Promise<void> => {
-    const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
-    const harness = makeHarness(workflow, () => [issue])
-    let runCount = 0
-    let resolveSecondRun = (): void => undefined
-    const secondRun = new Promise<void>((resolve) => {
-      resolveSecondRun = resolve
-    })
-    const ports: TestPorts = {
-      ...harness.ports,
-      runAgent: ({ onEvent }) =>
-        Effect.suspend(() => {
-          runCount += 1
-          onEvent(
-            makeAgentEvent({
-              threadId: `thread-${String(runCount)}`,
-              sessionId: `thread-${String(runCount)}`,
-              usage:
-                runCount === 1
-                  ? { inputTokens: 8, outputTokens: 2, totalTokens: 10 }
-                  : { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
-            }),
-          )
-          if (runCount === 1) {
-            return Effect.fail(
-              new AgentError({ category: 'process_exited', message: 'test process exited' }),
+      const ports: TestPorts = {
+        ...harness.ports,
+        runAgent: ({ onEvent }) =>
+          Effect.suspend(() => {
+            runCount += 1
+            onEvent(
+              makeAgentEvent({
+                threadId: `thread-${String(runCount)}`,
+                sessionId: `thread-${String(runCount)}`,
+                usage:
+                  runCount === 1
+                    ? { inputTokens: 8, outputTokens: 2, totalTokens: 10 }
+                    : { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+              }),
             )
-          }
-          resolveSecondRun()
-          return Effect.never
-        }),
-    }
+            if (runCount === 1) {
+              return Effect.fail(
+                new AgentError({ category: 'process_exited', message: 'test process exited' }),
+              )
+            }
+            resolveSecondRun()
+            return Effect.never
+          }),
+      }
 
-    await runWithTestClock(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           while (runCount < 1) {
@@ -6625,7 +6737,7 @@ describe('session telemetry accounting', (): void => {
             totalTokens: 15,
           })
         }),
-      ),
-    )
-  })
+      )
+    }),
+  )
 })
