@@ -130,6 +130,7 @@ export type PublishedRefresh = Readonly<{
   queued: boolean
   coalesced: boolean
   requested_at: string
+  /** The stages the pass that answered the request reached — not the stages a pass could reach. */
   operations: readonly string[]
 }>
 

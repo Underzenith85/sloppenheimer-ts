@@ -62,6 +62,7 @@ import {
   initialState,
   type EffectiveWorkflow,
   type HandoffEntry,
+  type RefreshOperation,
   type RepairDisposition,
   type RunningEntry,
   type RuntimePorts,
@@ -87,6 +88,7 @@ export {
   type HandoffStoreError,
   type PendingRetirement,
   type PublishedDetail,
+  type RefreshOperation,
   type RetryEntry,
   type RunningEntry,
   type RuntimePorts,
@@ -208,34 +210,18 @@ export type OrchestratorSnapshot = Readonly<{
   rateLimits: JsonObject | null
 }>
 
-/**
- * What one refresh pass does, in the order the poll in `polling.ts` does it. A caller that asks for
- * a refresh is told what it asked for rather than only that the request was accepted, and the list
- * is stated here — beside the loop that performs it — rather than restated by the HTTP layer.
- *
- * Every pass runs the first five; dispatch is skipped for a pass whose workflow or credential
- * validation failed, which the snapshot reports as `workflowReloadError`.
- */
-export const refreshOperations: readonly string[] = [
-  'credential_revalidation',
-  'handoff_recovery',
-  'workflow_reload',
-  'handoff_reconciliation',
-  'issue_reconciliation',
-  'dispatch',
-]
-
 /** What an accepted refresh request amounted to. */
 export type RefreshOutcome = Readonly<{
   /**
-   * Whether the request joined a pass that was already queued or running instead of scheduling one
-   * of its own. Concurrent requests therefore cost one poll rather than one each.
+   * Whether the request joined a pass somebody else had already arranged, rather than bringing one
+   * into being. A burst of refreshes therefore costs one poll rather than one each, and the caller
+   * whose request created the pass is the one told so.
    */
   coalesced: boolean
   /** When the host accepted the request. */
   requestedAt: string
-  /** The operations the pass the request joined performs. */
-  operations: readonly string[]
+  /** The stages the pass that answered this request actually reached, in order. */
+  operations: readonly RefreshOperation[]
 }>
 
 export type OrchestratorControl = Readonly<{
@@ -967,8 +953,8 @@ export const startOrchestratorRuntime = (
       Ref.modify(state, (current) => Transitions.requestTick(current, source)).pipe(
         Effect.flatMap((decision) =>
           decision.enqueue
-            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.as(true))
-            : Effect.succeed(false),
+            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.as(decision.scheduled))
+            : Effect.succeed(decision.scheduled),
         ),
       )
 
@@ -976,16 +962,14 @@ export const startOrchestratorRuntime = (
       Effect.asVoid(offerTick(source))
 
     const requestRefresh = Effect.gen(function* () {
-      const reply = yield* Deferred.make<void>()
+      const reply = yield* Deferred.make<readonly RefreshOperation[]>()
       const requestedAt = yield* currentInstant
       yield* Ref.update(state, (current) => Transitions.awaitRefresh(current, reply))
       const scheduled = yield* offerTick('change')
-      yield* Deferred.await(reply)
-      return {
-        coalesced: !scheduled,
-        requestedAt: requestedAt.toISOString(),
-        operations: refreshOperations,
-      }
+      // The pass answers with the stages it reached, so a validation failure that stopped it before
+      // dispatch is not acknowledged as a dispatch.
+      const operations = yield* Deferred.await(reply)
+      return { coalesced: !scheduled, requestedAt: requestedAt.toISOString(), operations }
     })
 
     const scheduleNextTick: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {

@@ -4110,12 +4110,19 @@ describe('operator snapshots', (): void => {
           yield* Effect.promise(() => pollStarted)
           harness.setWorkflow(reloaded)
           const lateRefresh = yield* Effect.forkScoped(control.refresh)
+          // Let the request register against the running poll before the second one arrives, so
+          // the two are asserted in the order they were made rather than in a scheduling order.
+          yield* Effect.yieldNow()
+          const laterRefresh = yield* Effect.forkScoped(control.refresh)
+          yield* Effect.yieldNow()
           pollShouldBlock = false
           releasePoll()
           const outcome = yield* Fiber.join(lateRefresh)
-          // The late request joined the follow-up pass rather than scheduling one of its own, and
-          // says so: that is what the acknowledgement's `coalesced` reports to an API caller.
-          expect(outcome.coalesced).toBe(true)
+          const later = yield* Fiber.join(laterRefresh)
+          // The first request is what asked the running poll for a follow-up pass, so it created
+          // work; the second only joined the pass the first had already arranged.
+          expect(outcome.coalesced).toBe(false)
+          expect(later.coalesced).toBe(true)
           expect(outcome.operations).toContain('dispatch')
           expect(Number.isNaN(Date.parse(outcome.requestedAt))).toBe(false)
           return yield* control.snapshot
@@ -4260,11 +4267,12 @@ describe('workflow hot reload', (): void => {
             harness.setWorkflow(
               new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
             )
-            yield* control.refresh
+            const refreshed = yield* control.refresh
             return {
               snapshot: yield* control.snapshot,
               candidateFetches,
               reconciliations,
+              refreshed,
             }
           }),
         )
@@ -4276,6 +4284,15 @@ describe('workflow hot reload', (): void => {
         expect(harness.agentRuns()).toHaveLength(1)
         expect(observed.snapshot.running[0]?.issueId).toBe(runningIssue.id)
         expect(observed.snapshot.retrying).toEqual([])
+        // The pass stopped before dispatch, and the refresh acknowledgement says so rather than
+        // reporting the stages a healthy pass would have reached.
+        expect(observed.refreshed.operations).toEqual([
+          'credential_revalidation',
+          'handoff_recovery',
+          'workflow_reload',
+          'handoff_reconciliation',
+          'issue_reconciliation',
+        ])
       }),
   )
 

@@ -315,11 +315,13 @@ agent reported it: its keys belong to that protocol, not to this API.
 }
 ```
 
-`operations` is what the pass performs, stated by the runtime rather than restated by the HTTP
-layer. `coalesced` is `true` when the request joined a pass that was already queued or running
-instead of scheduling one of its own, so a burst of refreshes costs one poll rather than one each.
-Symphony holds the response until that pass has finished — stronger than the `202` the SPEC
-suggests — so a caller that reads `/api/v1/state` next sees the state the refresh produced.
+`operations` is what the pass that answered this request actually reached, reported by the pass
+itself rather than restated by the HTTP layer: a pass whose credential or workflow validation failed
+stops before `dispatch`, and its acknowledgement stops there too. `coalesced` is `true` when the
+request joined a pass somebody else had already arranged, rather than bringing one into being, so a
+burst of refreshes costs one poll rather than one each and the request that caused the poll is the
+one told so. Symphony holds the response until that pass has finished — stronger than the `202` the
+SPEC suggests — so a caller that reads `/api/v1/state` next sees the state the refresh produced.
 
 `GET /api/v1/backlog` is the console's own endpoint rather than a SPEC route, and stays in the
 internal vocabulary its consumer is written against.
