@@ -916,7 +916,15 @@ export const startOrchestratorRuntime = (
             ? Option.some(yield* agentRetryDelay(attempt, maximumMs))
             : yield* trackerRetryDelay(trackerError, attempt, maximumMs)
         if (Option.isNone(delayOption)) {
-          yield* Ref.update(state, (pending) => Transitions.releaseClaim(pending, issue.id))
+          const cancelledAt = new Date()
+          const reason = error ?? 'the tracker rejected the retry'
+          yield* Ref.update(state, (pending) =>
+            Transitions.updateDetail(
+              Transitions.releaseClaim(pending, issue.id),
+              issue.id,
+              (record) => recordCancellation(record, cancelledAt, reason, true),
+            ),
+          )
           yield* logWarning('action=retry outcome=not_retryable', {
             issue_id: issue.id,
             issue_identifier: issue.identifier,

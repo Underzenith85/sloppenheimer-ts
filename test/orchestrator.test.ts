@@ -4384,6 +4384,55 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('finalizes a queued retry rejected by the tracker policy', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
+        fetchIssuesByIds: () =>
+          Effect.fail(
+            new TrackerError({
+              category: 'tracker_response',
+              message: 'retry refresh was rejected',
+              retryable: false,
+            }),
+          ),
+      }),
+      runAgent: () =>
+        Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
+    }
+
+    const lookup = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while ((yield* control.snapshot).retrying.length === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          yield* TestClock.adjust(10_000)
+          yield* Effect.yieldNow()
+
+          return readDetail(control, issue.identifier)
+        }),
+      ),
+    )
+
+    expect(lookup._tag).toBe('Found')
+    if (lookup._tag === 'Found') {
+      expect(lookup.detail.status).toBe('completed')
+      expect(lookup.detail.retry).toBeNull()
+      expect(lookup.detail.phase.phase).toBe('cancelled')
+      expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
+        outcome: 'cancelled',
+        reason: 'retry refresh failed: retry refresh was rejected',
+      })
+      expect(lookup.detail.timeline.events.map((entry) => entry.category)).toContain('cancellation')
+    }
+  })
+
   it('retains ended usage while a retry starts a fresh absolute counter', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [issue])
