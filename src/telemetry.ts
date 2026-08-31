@@ -1095,10 +1095,15 @@ export const recordAgentEvent = (
         ...base,
         operation: next.operation,
         category: 'session',
-        threadId: next.threadId,
-        turnId: next.turnId,
-        sessionId: next.sessionId,
-        turnNumber: next.turnCount,
+        // The timeline is a log of what arrived, so an entry names the turn its own event belongs
+        // to. Only the record's current identity is folded forward: a superseded turn reporting
+        // late is still recorded here against the turn that produced it, rather than being
+        // relabelled as the turn running now. An event that carries no identity of its own — the
+        // client's own session-level notices — takes the record's.
+        threadId: event.threadId ?? next.threadId,
+        turnId: event.turnId ?? next.turnId,
+        sessionId: event.sessionId ?? next.sessionId,
+        turnNumber: event.turnId === null ? next.turnCount : event.turnCount,
         processId: next.processId,
       })
     }

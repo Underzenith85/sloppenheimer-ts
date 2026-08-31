@@ -327,6 +327,28 @@ describe('turn identity', (): void => {
     expect(detail.sessions.at(-1)?.endedAt).toBeNull()
   })
 
+  it('records a superseded turn on the timeline against the turn that produced it', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const running = recordAgentEvent(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      agentEvent('turn-2', 'thread-1-turn-2', 2),
+    )
+
+    const detail = recordAgentEvent(running, turnCompleted('turn-1', 'thread-1-turn-1', 1))
+
+    // The record has moved on, but the timeline is a log of what arrived: turn one's completion is
+    // turn one's, not a `turn/completed` attributed to the turn still running.
+    const last = detail.events.at(-1)
+    expect(last).toMatchObject({
+      event: 'turn/completed',
+      turnId: 'turn-1',
+      sessionId: 'thread-1-turn-1',
+      turnNumber: 1,
+    })
+    expect(detail.turnId).toBe('turn-2')
+    expect(detail.sessionId).toBe('thread-1-turn-2')
+  })
+
   it('keeps one summary for a turn that reports activity after it completed', (): void => {
     const issue = makeIssue('example/symphony#1')
     const completed = recordAgentEvent(
