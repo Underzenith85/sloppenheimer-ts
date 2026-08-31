@@ -97,6 +97,7 @@ type PendingRequest = Readonly<{
   method: string
   turnCount: number | null
   reply: Deferred.Deferred<JsonValue, AgentError>
+  claimed: boolean
 }>
 
 type TurnState = Readonly<{
@@ -123,9 +124,9 @@ type ConnectionState = Readonly<{
   rateLimitsReady: boolean
   nextId: number
   closed: boolean
-  terminalError: AgentError | null
-  threadId: string | null
-  turnId: string | null
+  terminalError: Option.Option<AgentError>
+  threadId: Option.Option<string>
+  turnId: Option.Option<string>
   turnCount: number
 }>
 
@@ -139,9 +140,9 @@ const initialConnectionState: ConnectionState = {
   rateLimitsReady: false,
   nextId: 1,
   closed: false,
-  terminalError: null,
-  threadId: null,
-  turnId: null,
+  terminalError: Option.none(),
+  threadId: Option.none(),
+  turnId: Option.none(),
   turnCount: 0,
 }
 
@@ -490,7 +491,9 @@ class CodexConnection {
       })
     }
     const threadId = result['thread']['id']
-    await Effect.runPromise(Ref.update(this.#state, (state) => ({ ...state, threadId })))
+    await Effect.runPromise(
+      Ref.update(this.#state, (state) => ({ ...state, threadId: Option.some(threadId) })),
+    )
     return threadId
   }
 
@@ -563,8 +566,8 @@ class CodexConnection {
           if (existing !== undefined) {
             return [{ _tag: 'turn' as const, turn: existing }, state]
           }
-          if (state.terminalError !== null) {
-            return [{ _tag: 'error' as const, error: state.terminalError }, state]
+          if (Option.isSome(state.terminalError)) {
+            return [{ _tag: 'error' as const, error: state.terminalError.value }, state]
           }
           return [
             { _tag: 'turn' as const, turn: candidate },
@@ -613,7 +616,7 @@ class CodexConnection {
   #failCurrentTurn(error: AgentError, turnId: string | null): Effect.Effect<void> {
     return Ref.get(this.#state).pipe(
       Effect.flatMap((state) => {
-        const target = turnId ?? state.turnId
+        const target = turnId ?? Option.getOrNull(state.turnId)
         return target === null
           ? this.#fail(error)
           : this.#settle(target, { _tag: 'failed', error }).pipe(Effect.asVoid)
@@ -831,8 +834,8 @@ class CodexConnection {
         const registered = yield* Ref.modify(
           this.#state,
           (state): readonly [RequestRegistration, ConnectionState] => {
-            if (state.terminalError !== null) {
-              return [{ _tag: 'error', error: state.terminalError }, state]
+            if (Option.isSome(state.terminalError)) {
+              return [{ _tag: 'error', error: state.terminalError.value }, state]
             }
             const id = state.nextId
             return [
@@ -840,7 +843,12 @@ class CodexConnection {
               {
                 ...state,
                 nextId: id + 1,
-                pending: new Map(state.pending).set(id, { method, turnCount, reply }),
+                pending: new Map(state.pending).set(id, {
+                  method,
+                  turnCount,
+                  reply,
+                  claimed: false,
+                }),
               },
             ]
           },
@@ -850,24 +858,44 @@ class CodexConnection {
         }
         const id = registered.id
         yield* this.#write({ id, method, params })
-        return yield* Deferred.await(reply).pipe(
-          Effect.timeoutFail({
-            duration: this.#readTimeoutMs,
-            onTimeout: () =>
-              new AgentError({ category: 'read_timeout', message: `${method} response timed out` }),
-          }),
-          Effect.ensuring(
-            Ref.update(this.#state, (state) => {
-              if (state.pending.get(id)?.reply !== reply) {
-                return state
-              }
-              const pending = new Map(state.pending)
-              pending.delete(id)
-              return { ...state, pending }
-            }),
-          ),
+        const response = yield* Deferred.await(reply).pipe(
+          Effect.timeoutOption(this.#readTimeoutMs),
         )
+        return yield* Option.match(response, {
+          onNone: () =>
+            this.#expirePending(
+              id,
+              reply,
+              new AgentError({
+                category: 'read_timeout',
+                message: `${method} response timed out`,
+              }),
+            ),
+          onSome: Effect.succeed,
+        })
       }),
+    )
+  }
+
+  #expirePending(
+    id: number,
+    reply: Deferred.Deferred<JsonValue, AgentError>,
+    error: AgentError,
+  ): Effect.Effect<JsonValue, AgentError> {
+    return Ref.modify(this.#state, (state) => {
+      const request = state.pending.get(id)
+      if (request?.reply !== reply || request.claimed) {
+        return [false, state]
+      }
+      const pending = new Map(state.pending)
+      pending.delete(id)
+      return [true, { ...state, pending }]
+    }).pipe(
+      Effect.flatMap((expired) =>
+        expired
+          ? Deferred.fail(reply, error).pipe(Effect.zipRight(Deferred.await(reply)))
+          : Deferred.await(reply),
+      ),
     )
   }
 
@@ -927,9 +955,15 @@ class CodexConnection {
   }
 
   #settleResponse(id: number, parsed: JsonObject): Effect.Effect<void, AgentError> {
-    return Ref.get(this.#state).pipe(
-      Effect.flatMap((state) => {
-        const request = state.pending.get(id)
+    return Ref.modify(this.#state, (state) => {
+      const request = state.pending.get(id)
+      if (request === undefined || request.claimed) {
+        return [undefined, state]
+      }
+      const claimed = { ...request, claimed: true }
+      return [claimed, { ...state, pending: new Map(state.pending).set(id, claimed) }]
+    }).pipe(
+      Effect.flatMap((request) => {
         if (request === undefined) {
           // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
           // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
@@ -1012,19 +1046,30 @@ class CodexConnection {
   ): Effect.Effect<Readonly<{ threadId: string | null; turnId: string | null }>> {
     if (!isJsonObject(result)) {
       return Ref.get(this.#state).pipe(
-        Effect.map((state) => ({ threadId: state.threadId, turnId: state.turnId })),
+        Effect.map((state) => ({
+          threadId: Option.getOrNull(state.threadId),
+          turnId: Option.getOrNull(state.turnId),
+        })),
       )
     }
     const thread = result['thread']
     const turn = result['turn']
     return Ref.modify(this.#state, (state) => {
       const threadId =
-        isJsonObject(thread) && typeof thread['id'] === 'string' ? thread['id'] : state.threadId
+        isJsonObject(thread) && typeof thread['id'] === 'string'
+          ? thread['id']
+          : Option.getOrNull(state.threadId)
       const turnId =
-        isJsonObject(turn) && typeof turn['id'] === 'string' ? turn['id'] : state.turnId
+        isJsonObject(turn) && typeof turn['id'] === 'string'
+          ? turn['id']
+          : Option.getOrNull(state.turnId)
       return [
         { threadId, turnId },
-        { ...state, threadId, turnId },
+        {
+          ...state,
+          threadId: Option.fromNullable(threadId),
+          turnId: Option.fromNullable(turnId),
+        },
       ]
     })
   }
@@ -1044,7 +1089,7 @@ class CodexConnection {
           ...state,
           startedTurns: new Set(state.startedTurns).add(turnId),
           turnCounts: new Map(state.turnCounts).set(turnId, turnCount),
-          turnId,
+          turnId: Option.some(turnId),
           turnCount,
         },
       ]
@@ -1208,8 +1253,8 @@ class CodexConnection {
       }
 
       let state = yield* Ref.get(this.#state)
-      const threadId = carried.threadId ?? state.threadId
-      const turnId = carried.turnId ?? turn?.id ?? state.turnId
+      const threadId = carried.threadId ?? Option.getOrNull(state.threadId)
+      const turnId = carried.turnId ?? turn?.id ?? Option.getOrNull(state.turnId)
       const pendingTurnStart = [...state.pending.values()].find(
         (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
       )
@@ -1312,8 +1357,8 @@ class CodexConnection {
     return Ref.get(this.#state).pipe(
       Effect.tap((state) =>
         Effect.sync(() => {
-          const threadId = carried.threadId ?? state.threadId
-          const turnId = carried.turnId ?? state.turnId
+          const threadId = carried.threadId ?? Option.getOrNull(state.threadId)
+          const turnId = carried.turnId ?? Option.getOrNull(state.turnId)
           const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
           this.#onEvent({
             event,
@@ -1348,10 +1393,10 @@ class CodexConnection {
       const candidate: TurnState = { settlement, activity, timerStarted: false }
       const outstanding = yield* Ref.modify(this.#state, (state) => {
         const turns = new Map(state.turns)
-        if (state.turnId !== null && !turns.has(state.turnId)) {
+        if (Option.isSome(state.turnId) && !turns.has(state.turnId.value)) {
           // Publish the current turn's Deferred in the same transition as the terminal error. A
           // turn/start response racing this failure can then find and await the recorded failure.
-          turns.set(state.turnId, candidate)
+          turns.set(state.turnId.value, candidate)
         }
         return [
           {
@@ -1362,7 +1407,10 @@ class CodexConnection {
             ...state,
             pending: new Map(),
             turns,
-            terminalError: remember && state.terminalError === null ? error : state.terminalError,
+            terminalError:
+              remember && Option.isNone(state.terminalError)
+                ? Option.some(error)
+                : state.terminalError,
           },
         ]
       })
