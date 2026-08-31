@@ -176,7 +176,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           // Only a live run contributes to the timeline: output from a worker the orchestrator
           // has already ended belongs to no attempt.
           if (entry !== undefined && record !== undefined) {
-            recordAgentEvent(record, event.update)
+            context.state.details.set(event.issueId, recordAgentEvent(record, event.update))
           }
           break
         }
@@ -212,11 +212,14 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             // snapshot as running — and count it down to stalled — for as long as the handoff
             // request takes.
             if (record !== undefined) {
-              recordHandoff(record, new Date(), {
-                step: 'remote_branch',
-                status: 'pending',
-                message: 'Looking for a pushed branch to hand off',
-              })
+              context.state.details.set(
+                event.issueId,
+                recordHandoff(record, new Date(), {
+                  step: 'remote_branch',
+                  status: 'pending',
+                  message: 'Looking for a pushed branch to hand off',
+                }),
+              )
             }
             publishDetails(context)
             const handoff = yield* codeReview.handoffCompletedWork(entry.issue).pipe(
@@ -226,13 +229,17 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               }),
             )
             if (handoff._tag === 'Failed') {
-              if (record !== undefined) {
-                recordHandoff(record, new Date(), {
-                  step: 'remote_branch',
-                  status: 'failed',
-                  message: handoff.error.message,
-                  outcome: 'failed',
-                })
+              const failing = context.state.details.get(event.issueId)
+              if (failing !== undefined) {
+                context.state.details.set(
+                  event.issueId,
+                  recordHandoff(failing, new Date(), {
+                    step: 'remote_branch',
+                    status: 'failed',
+                    message: handoff.error.message,
+                    outcome: 'failed',
+                  }),
+                )
               }
               yield* context.scheduleRetryEffect(
                 entry.issue,
@@ -243,27 +250,32 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               break
             }
             if (handoff.result._tag === 'NoBranch') {
-              if (record !== undefined) {
-                recordHandoff(record, new Date(), {
-                  step: 'remote_branch',
-                  status: 'absent',
-                  message: `No remote branch ${handoff.result.branchName} exists yet; continuing the session`,
-                  remoteBranch: handoff.result.branchName,
-                  outcome: 'no_branch',
-                })
+              const absent = context.state.details.get(event.issueId)
+              if (absent !== undefined) {
+                context.state.details.set(
+                  event.issueId,
+                  recordHandoff(absent, new Date(), {
+                    step: 'remote_branch',
+                    status: 'absent',
+                    message: `No remote branch ${handoff.result.branchName} exists yet; continuing the session`,
+                    remoteBranch: handoff.result.branchName,
+                    outcome: 'no_branch',
+                  }),
+                )
               }
               yield* context.scheduleRetryEffect(entry.issue, 1, null, true)
               break
             }
-            if (record !== undefined) {
+            const handedOff = context.state.details.get(event.issueId)
+            if (handedOff !== undefined) {
               const observedAt = new Date()
-              recordHandoff(record, observedAt, {
+              const branchObserved = recordHandoff(handedOff, observedAt, {
                 step: 'remote_branch',
                 status: 'observed',
                 message: `Remote branch ${handoff.result.branchName} is present`,
                 remoteBranch: handoff.result.branchName,
               })
-              recordHandoff(record, observedAt, {
+              const opened = recordHandoff(branchObserved, observedAt, {
                 step: 'pull_request',
                 status: 'observed',
                 message: handoff.result.created
@@ -277,11 +289,14 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 },
                 outcome: 'pull_request_open',
               })
-              recordHandoff(record, observedAt, {
-                step: 'dispatch_label',
-                status: record.handoff.dispatchLabels.status,
-                message: record.handoff.dispatchLabels.reason,
-              })
+              context.state.details.set(
+                event.issueId,
+                recordHandoff(opened, observedAt, {
+                  step: 'dispatch_label',
+                  status: opened.handoff.dispatchLabels.status,
+                  message: opened.handoff.dispatchLabels.reason,
+                }),
+              )
             }
             // Carried over, not reset: the worker attempt number is not a repair count, and an
             // existing handoff already holds the heads that were actually observed.
@@ -409,7 +424,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 // to retry, and the retry it pointed at would never arrive.
                 const record = context.state.details.get(id)
                 if (record !== undefined) {
-                  recordCancellation(record, new Date(), 'the operator paused the issue', true)
+                  context.state.details.set(
+                    id,
+                    recordCancellation(record, new Date(), 'the operator paused the issue', true),
+                  )
                 }
               }
             }

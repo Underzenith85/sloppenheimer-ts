@@ -112,7 +112,7 @@ const backlog = {
 const populated = (withHandoff: boolean): AgentDetailRecord => {
   // Fixtures are anchored to the moment the test runs, so live countdowns are meaningful.
   const base = Date.now() - 60_000
-  const record = createAgentDetailRecord({
+  let record = createAgentDetailRecord({
     issueId: issueId('17'),
     identifier: issueIdentifier(runningIdentifier),
     title: 'Operator console',
@@ -123,7 +123,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     expectedBranch: 'symphony/issue-17',
     dispatchLabels: ['symphony'],
   })
-  recordAgentEvent(record, {
+  record = recordAgentEvent(record, {
     event: 'item/completed',
     timestamp: new Date(base + 10_000),
     processId: 42,
@@ -142,7 +142,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
       truncated: false,
     },
   })
-  recordAgentEvent(record, {
+  record = recordAgentEvent(record, {
     event: 'item/started',
     timestamp: new Date(base + 20_000),
     processId: 42,
@@ -167,7 +167,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
   if (!withHandoff) {
     return record
   }
-  recordHandoff(record, new Date(base + 30_000), {
+  record = recordHandoff(record, new Date(base + 30_000), {
     step: 'pull_request',
     status: 'observed',
     message: 'Opened a pull request for the completed work',
@@ -195,7 +195,7 @@ const runningDetail = (withHandoff = true, stallTimeoutMs = 300_000): AgentDetai
 
 const retryingDetail = (): AgentDetailSnapshot => {
   const at = new Date()
-  const record = createAgentDetailRecord({
+  let record = createAgentDetailRecord({
     issueId: issueId('18'),
     identifier: issueIdentifier(retryingIdentifier),
     title: 'Flaky dependency',
@@ -207,7 +207,7 @@ const retryingDetail = (): AgentDetailSnapshot => {
     dispatchLabels: ['symphony'],
   })
   const dueAt = new Date(at.getTime() + 15_000)
-  recordRetryScheduled(record, at, 1, dueAt, 'turn failed')
+  record = recordRetryScheduled(record, at, 1, dueAt, 'turn failed')
   return buildAgentDetail(record, {
     self: '/api/v1/agents/example%2Fsymphony%2318',
     now: at,
