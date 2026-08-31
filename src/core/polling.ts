@@ -9,6 +9,7 @@ import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetr
 import { dispatch } from './dispatch.js'
 import {
   afterRepairDispatched,
+  attributeRepairHead,
   releaseRepair,
   repairIssue,
   repairLimit,
@@ -142,24 +143,19 @@ const prepareRepairRetry = (
       return Option.none()
     }
     const observedHeadSha = inspected.observation.headSha
-    // The attempt that queued this retry pushed and then failed. That head spends the repair
-    // budget and joins cycle detection here, where reconciliation cannot see it.
+    // The attempt that queued this retry pushed and then failed, so that head is its output and
+    // spends the budget here, where reconciliation cannot see it: a handoff whose retry is queued
+    // is skipped by every pass. What the head costs is `attributeRepairHead`'s to say.
     const produced = repair.workerStarted && observedHeadSha !== repair.startedHeadSha
-    if (produced && handoff.repairObservedHeadShas.includes(observedHeadSha)) {
-      yield* writeHandoff(context, id, {
-        ...releaseRepair(handoff),
-        state: 'intervention_required',
-        headSha: observedHeadSha,
-        reason: 'Repair agent returned the pull request to an already observed repair head.',
-      })
+    const attribution = produced
+      ? Option.some(attributeRepairHead(handoff, observedHeadSha))
+      : Option.none()
+    if (Option.isSome(attribution) && attribution.value._tag === 'Cycled') {
+      yield* writeHandoff(context, id, attribution.value.handoff)
       return Option.none()
     }
-    const attributed: HandoffEntry = produced
-      ? {
-          ...handoff,
-          repairHeadShas: [...handoff.repairHeadShas, observedHeadSha],
-          repairObservedHeadShas: [...handoff.repairObservedHeadShas, observedHeadSha],
-        }
+    const attributed: HandoffEntry = Option.isSome(attribution)
+      ? attribution.value.handoff
       : handoff
     const disposition = classifyPullRequest(inspected.observation)
     if (disposition.state !== 'repair_needed') {

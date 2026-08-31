@@ -10,6 +10,7 @@ import type {
 import {
   afterMerge,
   afterRepairDispatched,
+  attributeRepairHead,
   afterReviewRequested,
   afterThreadsResolved,
   observeHandoff,
@@ -325,6 +326,42 @@ describe('repair attribution', (): void => {
     expect(decision.handoff.repairHeadShas).toEqual([])
     expect(Option.isNone(decision.handoff.repair)).toBe(true)
     expect(decision.action).toMatchObject({ _tag: 'Repair', attempt: 1 })
+  })
+
+  it('spends one of the budget for a head a repair produced', (): void => {
+    const before = handoff({
+      repair: repairing('head-0'),
+      repairHeadShas: [],
+      repairObservedHeadShas: ['head-0'],
+    })
+
+    const attribution = attributeRepairHead(before, 'head-1')
+
+    expect(attribution._tag).toBe('Attributed')
+    expect(attribution.handoff.repairHeadShas).toEqual(['head-1'])
+    expect(attribution.handoff.repairObservedHeadShas).toEqual(['head-0', 'head-1'])
+    // The head is accounted for, so the repair that produced it is over.
+    expect(Option.isNone(attribution.handoff.repair)).toBe(true)
+  })
+
+  it('escalates rather than spending the budget when a head has been seen before', (): void => {
+    const before = handoff({
+      repair: repairing('head-0'),
+      repairHeadShas: [],
+      repairObservedHeadShas: ['head-0', 'head-1'],
+    })
+
+    const attribution = attributeRepairHead(before, 'head-1')
+
+    expect(attribution._tag).toBe('Cycled')
+    expect(attribution.handoff.state).toBe('intervention_required')
+    expect(attribution.handoff.headSha).toBe('head-1')
+    expect(attribution.handoff.reason).toBe(
+      'Repair agent returned the pull request to an already observed repair head.',
+    )
+    // No further repair can improve on a head already seen, so nothing is spent on this one.
+    expect(attribution.handoff.repairHeadShas).toEqual([])
+    expect(Option.isNone(attribution.handoff.repair)).toBe(true)
   })
 
   it('keeps the baseline for a refused dispatch, without spending the budget', (): void => {
