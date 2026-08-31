@@ -397,8 +397,10 @@ collide is what would reopen this.
 The three are exactly the fixed single-segment routes registered above the wildcard, and no others:
 `agents` and `issues` are addressable as identifiers, because the routes that use those words carry
 a further segment. `test/operator/server.test.ts` pins both halves — what each shadowed identifier
-answers, and that the set has not silently grown — so a fourth fixed route under `/api/v1/` cannot
-be added without this decision being taken again.
+answers, and that the set has not silently grown. The second reads the router's own registrations
+rather than the source that spells them, since what reserves a name is the path a route ends up
+at, so a fourth fixed route under `/api/v1/` cannot be added without this decision being taken
+again.
 
 ### Why a refresh needs the console's token
 

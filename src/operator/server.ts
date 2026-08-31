@@ -112,7 +112,13 @@ const withCsrf = <Error, Requirements>(
       : errorResponse(403, 'invalid_csrf_token', 'The request token is missing or invalid'),
   )
 
-const makeRouter = (
+/**
+ * Exported so the reserved-identifier guard in `test/operator/server.test.ts` can read the
+ * registrations themselves rather than the source that spells them. What shadows an issue
+ * identifier is the path a route ends up registered at, however it was written, so the router value
+ * is the only honest source for the set of names the namespace reserves.
+ */
+export const makeRouter = (
   backend: OperatorBackend,
   csrfToken: string,
 ): HttpRouter.HttpRouter<never, never> => {

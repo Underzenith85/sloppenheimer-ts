@@ -1,8 +1,6 @@
-import { readFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
-import { resolve } from 'node:path'
 import { it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Chunk, Effect, Option } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
@@ -12,7 +10,7 @@ import { TrackerError } from '@symphony/core/domain/errors.js'
 import { issueDetailPath } from '../../src/operator/api.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '@symphony/core'
-import { startOperatorServer } from '../../src/operator/server.js'
+import { makeRouter, startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
@@ -651,16 +649,20 @@ describe('operator server', (): void => {
 
   /*
    * The shadowed set is exactly the fixed single-segment routes registered above the wildcard, so a
-   * fourth one would reserve a fourth identifier without anybody deciding to. The registrations are
-   * read rather than trusted, because the collision is invisible at every other layer.
+   * fourth one would reserve a fourth identifier without anybody deciding to. The router's own
+   * registrations are what decide that, and they are what is read here: a path assembled from a
+   * constant, a helper or a template literal, or contributed by a prefixed sub-router, shadows an
+   * identifier exactly as a literal does, and would be invisible to a guard that read the source.
    */
-  it('registers no fixed v1 route name beyond the three that are documented', (): void => {
-    const source = readFileSync(
-      resolve(import.meta.dirname, '../../src/operator/server.ts'),
-      'utf8',
-    )
-    const registered = [...source.matchAll(/'\/api\/v1\/([^'/:]+)'/gu)].map(
-      (match) => match[1] ?? '',
+  it('reserves no identifier beyond the three fixed v1 routes the router registers', (): void => {
+    const registered = Chunk.toReadonlyArray(makeRouter(makeBackend(), 'csrf').routes).flatMap(
+      (route) => {
+        const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
+        // Neither a parameter nor a further segment can collide: an identifier is one segment, and
+        // only a fixed one is spelled the same way twice.
+        const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(path)?.[1]
+        return reserved === undefined ? [] : [reserved]
+      },
     )
 
     expect([...new Set(registered)].sort()).toEqual(['backlog', 'refresh', 'state'])
