@@ -117,9 +117,12 @@ removes the Symphony label.
 ## Codex App Server client
 
 The client speaks the App Server protocol over the subprocess's stdio: stdout carries protocol
-framing only and stderr is diagnostic only, never parsed. Lines are split by a reader that enforces
-the 10 MB framing limit on the _pending_ buffer, so an unterminated line is rejected before it can
-grow without bound.
+framing only and stderr is diagnostic only, never parsed. Each is read as a stream that frames on
+newlines and enforces the 10 MB framing limit on the _pending_ buffer, so an unterminated line is
+rejected as a protocol error before it can grow without bound. The diagnostic stream assembles a
+whole record before redaction — a multiline private key is swallowed until its end marker arrives —
+so a credential split across a chunk boundary can never escape the redactor as an unkeyed fragment,
+and a record still open when stderr closes is flushed rather than lost.
 
 Ordering is not assumed. A pending request is registered before its line is written, so a response
 can never arrive unowned. How a turn ended is one record per turn: whatever observes the end — a
@@ -313,7 +316,13 @@ profile is GitHub Issues; the orchestration interfaces keep tracker and workspac
 so additional profiles can be implemented without weakening the domain types.
 
 Unknown front-matter keys are preserved verbatim on `config.extensions` and otherwise ignored, so a
-newer workflow file stays loadable on an older host without weakening required-field validation.
+newer workflow file stays loadable on an older host without weakening required-field validation. A
+value that cannot round-trip through JSON is the one thing such a key is rejected for, and it is
+reported against the key that carried it.
+
+The front matter is declared as a schema, so a rejected document is reported as one `invalid_config`
+failure naming the key as the file spells it — `polling.interval_ms must be a positive integer` —
+rather than as the first exception a decoder happened to throw.
 
 ### Defaults
 
@@ -371,6 +380,13 @@ relative values against the workflow file's directory. Each tracker adapter decl
 fields; for GitHub that is `tracker.provider.token`, which must be a `$VAR` reference. Every other
 string — including `codex.command` and hook scripts — is used literally, so a `$VAR` inside a hook
 is expanded by the hook shell rather than by the loader.
+
+Every one of these reads goes through Effect's `Config`, resolved against the `ConfigProvider` the
+running fiber carries: the composition root supplies the process environment, and a test supplies
+exactly the variables its case is about. A declared secret is read with `Config.redacted`, so the
+resolved credential is wrapped from the moment it leaves the environment and is unwrapped only
+where it is used — for GitHub, the `Authorization` header. A reference that resolves to nothing, or
+to an empty value, is rejected as a missing environment variable.
 
 ### Adapter-owned provider configuration
 

@@ -1,4 +1,5 @@
 import { homedir } from 'node:os'
+import { Config, Effect, Redacted } from 'effect'
 
 import { WorkflowError } from '../errors.js'
 
@@ -18,20 +19,25 @@ export const environmentReferenceName = (value: string): string | null => {
   return match?.[1] ?? null
 }
 
-const readEnvironment = (
-  environmentName: string,
-  name: string,
-  environment: NodeJS.ProcessEnv,
-): string => {
-  const resolved = environment[environmentName]
-  if (resolved === undefined || resolved.length === 0) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} references a missing environment variable`,
-    })
-  }
-  return resolved
-}
+/**
+ * One environment variable, described as a `Config` and therefore read through whatever
+ * `ConfigProvider` the calling fiber carries: the process environment in production, a test
+ * provider under test. A declared reference that resolves to an empty value is as unusable as one
+ * that resolves to nothing, so emptiness fails here rather than reaching a caller as a credential.
+ */
+const presentValue = (environmentName: string): Config.Config<string> =>
+  Config.string(environmentName).pipe(
+    Config.validate({
+      message: `${environmentName} is empty`,
+      validation: (value: string): boolean => value.length > 0,
+    }),
+  )
+
+const missingReference = (name: string): WorkflowError =>
+  new WorkflowError({
+    category: 'invalid_config',
+    message: `${name} references a missing environment variable`,
+  })
 
 /**
  * Resolves `$VAR` indirection for a declared path field. Values that are not a bare reference are
@@ -40,14 +46,23 @@ const readEnvironment = (
 export const resolvePathReference = (
   value: string,
   name: string,
-  environment: NodeJS.ProcessEnv,
-): string => {
+): Effect.Effect<string, WorkflowError> => {
   const environmentName = environmentReferenceName(value)
   if (environmentName === null) {
-    return value
+    return Effect.succeed(value)
   }
-  return readEnvironment(environmentName, name, environment)
+  return presentValue(environmentName).pipe(Effect.mapError(() => missingReference(name)))
 }
+
+/**
+ * A resolved secret reference: the value the adapter must authenticate with, and the variable name
+ * it came from. The value is `Redacted` so that neither a log line, a serialized configuration
+ * record, nor a stack trace can echo it by simply printing the object that carries it.
+ */
+export type ResolvedSecretReference = Readonly<{
+  value: Redacted.Redacted<string>
+  environmentName: string
+}>
 
 /**
  * Resolves `$VAR` indirection for a declared secret field. Literal credentials are rejected so
@@ -56,22 +71,33 @@ export const resolvePathReference = (
 export const resolveSecretReference = (
   value: string,
   name: string,
-  environment: NodeJS.ProcessEnv,
-): Readonly<{ value: string; environmentName: string }> => {
+): Effect.Effect<ResolvedSecretReference, WorkflowError> => {
   const environmentName = environmentReferenceName(value)
   if (environmentName === null) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
-    })
+    return Effect.fail(
+      new WorkflowError({
+        category: 'invalid_config',
+        message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
+      }),
+    )
   }
   if (codexAuthenticationEnvironmentNames.has(environmentName)) {
-    throw new WorkflowError({
-      category: 'invalid_config',
-      message: `${name} must not use Codex authentication environment variable ${environmentName}`,
-    })
+    return Effect.fail(
+      new WorkflowError({
+        category: 'invalid_config',
+        message: `${name} must not use Codex authentication environment variable ${environmentName}`,
+      }),
+    )
   }
-  return { value: readEnvironment(environmentName, name, environment), environmentName }
+  return Config.redacted(presentValue(environmentName)).pipe(
+    Effect.mapBoth({
+      onFailure: () => missingReference(name),
+      onSuccess: (secret: Redacted.Redacted<string>): ResolvedSecretReference => ({
+        value: secret,
+        environmentName,
+      }),
+    }),
+  )
 }
 
 /** Expands a leading `~` for a declared path field. */

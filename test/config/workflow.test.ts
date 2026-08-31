@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect } from 'effect'
+import { Effect, Redacted } from 'effect'
 
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { githubProviderOf } from '../../src/adapters/github/index.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { sameTrackerProvider } from '../../src/domain/tracker-provider.js'
+import { withEnvironment } from '../harness/environment.js'
 import { stubProviderToken, stubTrackerProviders } from '../harness/stub-tracker-provider.js'
 import { JsonConversionError, toJsonValue } from '../../src/support/json.js'
 import {
@@ -72,7 +73,7 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
     )
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
     const prompt = await Effect.runPromise(renderPrompt(workflow, issue, 3))
 
@@ -81,7 +82,7 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
       repository: 'symphony',
       token: '$TEST_TRACKER_TOKEN',
     })
-    expect(githubProviderOf(workflow.tracker).token).toBe('secret')
+    expect(Redacted.value(githubProviderOf(workflow.tracker).token)).toBe('secret')
     expect(githubProviderOf(workflow.tracker).tokenEnvironmentName).toBe('TEST_TRACKER_TOKEN')
     expect(workflow.config.tracker.requiredLabels).toEqual(['symphony'])
     expect(githubProviderOf(workflow.tracker).baseBranch).toBe('main')
@@ -89,6 +90,50 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
     expect(workflow.config.agent.maxConcurrentAgents).toBe(2)
     expect(workflow.config.codex.threadSandbox).toBe('workspace-write')
     expect(prompt).toBe('Work on GH-42: Keep types exact (attempt 3)')
+  })
+
+  it('rejects an environment indirection that resolves to an empty value', async (): Promise<void> => {
+    const directory = await makeTemporaryDirectory()
+    const path = join(directory, 'WORKFLOW.md')
+    await writeFile(
+      path,
+      `---
+tracker:
+  kind: github
+  provider:
+    owner: example
+    repository: symphony
+    token: $EMPTY_TRACKER_TOKEN
+---
+Do the work
+`,
+    )
+
+    const error = await Effect.runPromise(
+      Effect.flip(
+        withEnvironment(loadWorkflow(path, trackerProviders), { EMPTY_TRACKER_TOKEN: '' }),
+      ),
+    )
+
+    expect(error.category).toBe('invalid_config')
+    expect(error.message).toContain('missing environment variable')
+  })
+
+  /*
+   * `Config.redacted` is what keeps the resolved credential out of anything that prints the
+   * provider it belongs to; the value itself is reachable only by asking for it explicitly.
+   */
+  it('keeps the resolved credential out of a serialized provider', async (): Promise<void> => {
+    const path = await writeWorkflow(minimalTracker)
+    const workflow = await Effect.runPromise(
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret-value' }),
+    )
+
+    const provider = githubProviderOf(workflow.tracker)
+
+    expect(JSON.stringify(provider)).not.toContain('secret-value')
+    expect(JSON.stringify(provider.token)).toBe('"<redacted>"')
+    expect(Redacted.value(provider.token)).toBe('secret-value')
   })
 
   it('rejects a missing environment indirection', async (): Promise<void> => {
@@ -108,7 +153,9 @@ Do the work
 `,
     )
 
-    const error = await Effect.runPromise(Effect.flip(loadWorkflow(path, {}, trackerProviders)))
+    const error = await Effect.runPromise(
+      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+    )
 
     expect(error.category).toBe('invalid_config')
   })
@@ -133,7 +180,7 @@ Do the work
     )
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.serverPort).toBe(0)
@@ -157,7 +204,9 @@ Do the work
 `,
     )
 
-    const error = await Effect.runPromise(Effect.flip(loadWorkflow(path, {}, trackerProviders)))
+    const error = await Effect.runPromise(
+      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+    )
 
     expect(error.category).toBe('invalid_config')
     expect(error.message).toContain('literal credentials are not allowed')
@@ -186,7 +235,9 @@ Do the work
       )
 
       const error = await Effect.runPromise(
-        Effect.flip(loadWorkflow(path, { [environmentName]: secret }, trackerProviders)),
+        Effect.flip(
+          withEnvironment(loadWorkflow(path, trackerProviders), { [environmentName]: secret }),
+        ),
       )
 
       expect(error.category).toBe('invalid_config')
@@ -216,7 +267,7 @@ describe('workflow defaults and extension keys', (): void => {
     const path = await writeWorkflow(minimalTracker)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.pollingIntervalMs).toBe(workflowDefaults.pollingIntervalMs)
@@ -257,7 +308,7 @@ workers:
 experimental: true`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.extensions).toEqual({
@@ -276,7 +327,9 @@ future_section:
   anything: 1`)
 
     const error = await Effect.runPromise(
-      Effect.flip(loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders)),
+      Effect.flip(
+        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      ),
     )
 
     expect(error.category).toBe('invalid_config')
@@ -294,7 +347,7 @@ future_section:
       nested: [1, 2]`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.tracker.provider).toEqual({
@@ -314,7 +367,7 @@ workspace:
   root: ~/symphony-root`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.workspaceRoot).toBe(join(homedir(), 'symphony-root'))
@@ -326,11 +379,10 @@ workspace:
   root: $TEST_WORKSPACE_ROOT`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(
-        path,
-        { TEST_TRACKER_TOKEN: 'secret', TEST_WORKSPACE_ROOT: '/srv/symphony' },
-        trackerProviders,
-      ),
+      withEnvironment(loadWorkflow(path, trackerProviders), {
+        TEST_TRACKER_TOKEN: 'secret',
+        TEST_WORKSPACE_ROOT: '/srv/symphony',
+      }),
     )
 
     expect(workflow.config.workspaceRoot).toBe('/srv/symphony')
@@ -344,15 +396,267 @@ codex:
   command: $CODEX_COMMAND`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(
-        path,
-        { TEST_TRACKER_TOKEN: 'secret', CODEX_COMMAND: 'not-substituted' },
-        trackerProviders,
-      ),
+      withEnvironment(loadWorkflow(path, trackerProviders), {
+        TEST_TRACKER_TOKEN: 'secret',
+        CODEX_COMMAND: 'not-substituted',
+      }),
     )
 
     expect(workflow.config.codex.command).toBe('$CODEX_COMMAND')
     expect(workflow.config.hooks.beforeRun).toBe('echo $HOME')
+  })
+})
+
+/*
+ * The message a rejected document produces is the contract this loader has with whoever authored
+ * it, so each one is pinned here rather than asserted by substring. Every message below is the one
+ * the imperative decoders produced before the front matter was declared as a schema; the two
+ * JSON-safety messages for extension keys are the deliberate exception, and are noted where they
+ * appear.
+ */
+describe('front-matter decoding messages', (): void => {
+  const rejects = async (frontMatter: string): Promise<string> => {
+    const path = await writeWorkflow(frontMatter)
+    const error = await Effect.runPromise(
+      Effect.flip(
+        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      ),
+    )
+    expect(error.category).toBe('invalid_config')
+    return error.message
+  }
+
+  it.each([
+    ['polling:\n  interval_ms: 10', 'tracker must be a map'],
+    ['tracker: 5', 'tracker must be a map'],
+    ['tracker:\n  - a', 'tracker must be a map'],
+    ['tracker: {}', 'tracker.kind must be a non-empty string'],
+    ['tracker:\n  kind: 5\n  provider:\n    a: 1', 'tracker.kind must be a non-empty string'],
+    ['tracker:\n  kind: ""\n  provider:\n    a: 1', 'tracker.kind must be a non-empty string'],
+    ['tracker:\n  kind: github', 'tracker.provider must be a map'],
+    ['tracker:\n  kind: github\n  provider: nope', 'tracker.provider must be a map'],
+    ['tracker:\n  kind: github\n  provider: [1]', 'tracker.provider must be a map'],
+    [
+      'tracker:\n  kind: github\n  provider:\n    ratio: .inf',
+      'tracker.provider.ratio must be a JSON-safe value',
+    ],
+    [
+      `${minimalTracker}\n  required_labels: nope`,
+      'tracker.required_labels must be a list of strings',
+    ],
+    [
+      `${minimalTracker}\n  required_labels: [ok, 5]`,
+      'tracker.required_labels must be a list of strings',
+    ],
+    [`${minimalTracker}\n  active_states: 5`, 'tracker.active_states must be a list of strings'],
+    [
+      `${minimalTracker}\n  terminal_states: 5`,
+      'tracker.terminal_states must be a list of strings',
+    ],
+    [`${minimalTracker}\npolling: 5`, 'polling must be a map'],
+    [`${minimalTracker}\npolling:`, 'polling must be a map'],
+    [`${minimalTracker}\npolling:\n  interval_ms: nope`, 'polling.interval_ms must be an integer'],
+    [`${minimalTracker}\npolling:\n  interval_ms: 1.5`, 'polling.interval_ms must be an integer'],
+    [
+      `${minimalTracker}\npolling:\n  interval_ms: 0`,
+      'polling.interval_ms must be a positive integer',
+    ],
+    [
+      `${minimalTracker}\npolling:\n  interval_ms: -3`,
+      'polling.interval_ms must be a positive integer',
+    ],
+    [`${minimalTracker}\nworkspace:\n  root: ""`, 'workspace.root must be a non-empty string'],
+    [`${minimalTracker}\nworkspace:\n  root: 5`, 'workspace.root must be a non-empty string'],
+    [`${minimalTracker}\nhooks: 5`, 'hooks must be a map'],
+    [`${minimalTracker}\nhooks:\n  before_run: 5`, 'hooks.before_run must be a non-empty string'],
+    [`${minimalTracker}\nhooks:\n  after_run: ""`, 'hooks.after_run must be a non-empty string'],
+    [`${minimalTracker}\nhooks:\n  timeout_ms: 0`, 'hooks.timeout_ms must be a positive integer'],
+    [`${minimalTracker}\nagent: 5`, 'agent must be a map'],
+    [
+      `${minimalTracker}\nagent:\n  max_concurrent_agents: 0`,
+      'agent.max_concurrent_agents must be a positive integer',
+    ],
+    [`${minimalTracker}\nagent:\n  max_turns: nope`, 'agent.max_turns must be an integer'],
+    [
+      `${minimalTracker}\nagent:\n  max_retry_backoff_ms: -1`,
+      'agent.max_retry_backoff_ms must be a positive integer',
+    ],
+    [
+      `${minimalTracker}\nagent:\n  max_concurrent_agents_by_state: 5`,
+      'agent.max_concurrent_agents_by_state must be a map',
+    ],
+    [`${minimalTracker}\ncodex: 5`, 'codex must be a map'],
+    [`${minimalTracker}\ncodex:\n  command: ""`, 'codex.command must be a non-empty string'],
+    [`${minimalTracker}\ncodex:\n  command: "   "`, 'codex.command must be a non-empty string'],
+    [`${minimalTracker}\ncodex:\n  command: 5`, 'codex.command must be a non-empty string'],
+    [
+      `${minimalTracker}\ncodex:\n  approval_policy: 5`,
+      'codex.approval_policy must be a non-empty string',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  approval_policy: sometimes`,
+      'codex.approval_policy must be one of: untrusted, on-request, never',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  thread_sandbox: everything`,
+      'codex.thread_sandbox must be one of: read-only, workspace-write, danger-full-access',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  turn_sandbox_policy: 5`,
+      'codex.turn_sandbox_policy must be a map',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  turn_sandbox_policy:\n    ratio: .inf`,
+      'codex.turn_sandbox_policy.ratio must be a JSON-safe value',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  turn_timeout_ms: 0`,
+      'codex.turn_timeout_ms must be a positive integer',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  read_timeout_ms: nope`,
+      'codex.read_timeout_ms must be an integer',
+    ],
+    [
+      `${minimalTracker}\ncodex:\n  stall_timeout_ms: -1`,
+      'codex.stall_timeout_ms must not be negative',
+    ],
+    [`${minimalTracker}\nserver: 5`, 'server must be a map'],
+    [`${minimalTracker}\nserver:\n  port: 70000`, 'server.port must be between 0 and 65535'],
+    [`${minimalTracker}\nserver:\n  port: -1`, 'server.port must be between 0 and 65535'],
+    // An extension key is passed through rather than decoded, so the only thing it can be wrong
+    // about is carrying a value JSON cannot. This message replaces the "failed to load workflow"
+    // the imperative path reported, and matches how tracker.provider already reports the same.
+    [`${minimalTracker}\nextra: .inf`, 'extra must be a JSON-safe value'],
+    [`${minimalTracker}\nextra:\n  ratio: .inf`, 'extra.ratio must be a JSON-safe value'],
+  ])('rejects %s', async (frontMatter, expected): Promise<void> => {
+    expect(await rejects(frontMatter)).toBe(expected)
+  })
+
+  it('reports the section before the field when both are wrong', async (): Promise<void> => {
+    // Sections are read in the order the document declares them, so the first failure a reader is
+    // told about is the first one they wrote.
+    expect(await rejects(`${minimalTracker}\npolling: 5\nserver:\n  port: 70000`)).toBe(
+      'polling must be a map',
+    )
+  })
+
+  it('keeps every value a valid document declared', async (): Promise<void> => {
+    const path = await writeWorkflow(`${minimalTracker}
+  required_labels: [Symphony, Ready]
+  active_states: [open, in_progress]
+  terminal_states: [closed, done]
+polling:
+  interval_ms: 15000
+hooks:
+  after_create: echo created
+  before_run: echo before
+  after_run: echo after
+  before_remove: echo removed
+  timeout_ms: 1000
+agent:
+  max_concurrent_agents: 3
+  max_turns: 5
+  max_retry_backoff_ms: 60000
+codex:
+  command: codex app-server --flag
+  approval_policy: on-request
+  thread_sandbox: read-only
+  turn_timeout_ms: 1000
+  read_timeout_ms: 500
+  stall_timeout_ms: 0
+server:
+  port: 8080`)
+
+    const workflow = await Effect.runPromise(
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+    )
+
+    expect(workflow.config.tracker.requiredLabels).toEqual(['symphony', 'ready'])
+    expect(workflow.config.tracker.activeStates).toEqual(['open', 'in_progress'])
+    expect(workflow.config.tracker.terminalStates).toEqual(['closed', 'done'])
+    expect(workflow.config.pollingIntervalMs).toBe(15_000)
+    expect(workflow.config.hooks).toEqual({
+      afterCreate: 'echo created',
+      beforeRun: 'echo before',
+      afterRun: 'echo after',
+      beforeRemove: 'echo removed',
+      timeoutMs: 1_000,
+    })
+    expect(workflow.config.agent.maxConcurrentAgents).toBe(3)
+    expect(workflow.config.agent.maxTurns).toBe(5)
+    expect(workflow.config.agent.maxRetryBackoffMs).toBe(60_000)
+    expect(workflow.config.codex).toEqual({
+      command: 'codex app-server --flag',
+      approvalPolicy: 'on-request',
+      threadSandbox: 'read-only',
+      turnSandboxPolicy: null,
+      turnTimeoutMs: 1_000,
+      readTimeoutMs: 500,
+      stallTimeoutMs: 0,
+    })
+    expect(workflow.config.serverPort).toBe(8_080)
+  })
+})
+
+describe('workflow source errors', (): void => {
+  const writeSource = async (source: string): Promise<string> => {
+    const directory = await makeTemporaryDirectory()
+    const path = join(directory, 'WORKFLOW.md')
+    await writeFile(path, source)
+    return path
+  }
+
+  it.each([
+    [
+      '---\ntracker: {}\nno closing fence',
+      'workflow_parse_error',
+      'YAML front matter is not closed',
+    ],
+    [
+      '---\ntracker: [unterminated\n---\nprompt',
+      'workflow_parse_error',
+      'invalid YAML front matter',
+    ],
+    [
+      '---\n- a\n- b\n---\nprompt',
+      'workflow_front_matter_not_a_map',
+      'workflow front matter must be a map',
+    ],
+    [
+      '---\n42\n---\nprompt',
+      'workflow_front_matter_not_a_map',
+      'workflow front matter must be a map',
+    ],
+    [
+      '---\n\n---\nprompt',
+      'workflow_front_matter_not_a_map',
+      'workflow front matter must be a map',
+    ],
+    // A document with no fence is all prompt, so the front matter is an empty map rather than a
+    // malformed one, and it fails on the section it did not declare.
+    ['no front matter at all', 'invalid_config', 'tracker must be a map'],
+  ])('reports %s', async (source, category, message): Promise<void> => {
+    const path = await writeSource(source)
+
+    const error = await Effect.runPromise(
+      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+    )
+
+    expect(error.category).toBe(category)
+    expect(error.message).toBe(message)
+  })
+
+  it('reports a workflow file that is not there', async (): Promise<void> => {
+    const directory = await makeTemporaryDirectory()
+    const path = join(directory, 'absent.md')
+
+    const error = await Effect.runPromise(
+      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+    )
+
+    expect(error.category).toBe('missing_workflow_file')
+    expect(error.message).toBe(`cannot read workflow file: ${path}`)
   })
 })
 
@@ -364,7 +668,9 @@ describe('adapter-owned validation', (): void => {
     api_key: $TEST_TRACKER_TOKEN`)
 
     const error = await Effect.runPromise(
-      Effect.flip(loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders)),
+      Effect.flip(
+        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      ),
     )
 
     expect(error.category).toBe('invalid_config')
@@ -381,7 +687,9 @@ describe('adapter-owned validation', (): void => {
     api_base_url: /repos`)
 
     const error = await Effect.runPromise(
-      Effect.flip(loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders)),
+      Effect.flip(
+        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      ),
     )
 
     expect(error.category).toBe('invalid_config')
@@ -398,7 +706,7 @@ describe('adapter-owned validation', (): void => {
     api_base_url: https://github.example.test/api/v3/`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://github.example.test/api/v3')
@@ -415,7 +723,9 @@ describe('adapter-owned validation', (): void => {
     const path = await writeWorkflow(`${minimalTracker}\n${section}`)
 
     const error = await Effect.runPromise(
-      Effect.flip(loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders)),
+      Effect.flip(
+        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      ),
     )
 
     expect(error.category).toBe('invalid_config')
@@ -431,7 +741,7 @@ codex:
     networkAccess: false`)
 
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.codex.turnSandboxPolicy).toEqual({
@@ -444,15 +754,15 @@ codex:
   it('revalidates the adapter secret on every dispatch preflight', async (): Promise<void> => {
     const path = await writeWorkflow(minimalTracker)
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { TEST_TRACKER_TOKEN: 'secret' }, trackerProviders),
+      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     const validated = await Effect.runPromise(
-      preflightWorkflow(workflow, { TEST_TRACKER_TOKEN: 'rotated' }),
+      withEnvironment(preflightWorkflow(workflow), { TEST_TRACKER_TOKEN: 'rotated' }),
     )
-    const error = await Effect.runPromise(Effect.flip(preflightWorkflow(workflow, {})))
+    const error = await Effect.runPromise(Effect.flip(withEnvironment(preflightWorkflow(workflow))))
 
-    expect(githubProviderOf(validated).token).toBe('rotated')
+    expect(Redacted.value(githubProviderOf(validated).token)).toBe('rotated')
     expect(error.category).toBe('invalid_config')
     expect(error.message).toContain('missing environment variable')
   })
@@ -468,11 +778,11 @@ codex:
   provider:
     token: STUB_TRACKER_TOKEN`)
     const workflow = await Effect.runPromise(
-      loadWorkflow(path, { STUB_TRACKER_TOKEN: 'secret' }, stubTrackerProviders),
+      withEnvironment(loadWorkflow(path, stubTrackerProviders), { STUB_TRACKER_TOKEN: 'secret' }),
     )
 
     const validated = await Effect.runPromise(
-      preflightWorkflow(workflow, { STUB_TRACKER_TOKEN: 'rotated' }),
+      withEnvironment(preflightWorkflow(workflow), { STUB_TRACKER_TOKEN: 'rotated' }),
     )
 
     expect(stubProviderToken(workflow.tracker)).toBe('secret')

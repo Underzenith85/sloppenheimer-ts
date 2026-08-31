@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect } from 'effect'
+import { Effect, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent } from '../../src/adapters/codex/codex.js'
@@ -69,7 +69,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       const tracker = makeGitHubTracker({
         owner,
         repository: repositoryName,
-        token,
+        token: Redacted.make(token),
         tokenEnvironmentName: 'GITHUB_TOKEN',
         apiBaseUrl: githubProviderDefaults.apiBaseUrl,
         baseBranch: githubProviderDefaults.baseBranch,

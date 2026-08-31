@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { Deferred, Effect, Fiber, Option, Queue, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, Runtime, Stream, type Scope } from 'effect'
 
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
@@ -1004,8 +1004,18 @@ export const startOrchestratorRuntime = (
     const currentRefreshWaiters: Deferred.Deferred<void>[] = []
     const nextRefreshWaiters: Deferred.Deferred<void>[] = []
 
+    /**
+     * The one bridge left from a plain callback into the runtime: an agent runner reports progress
+     * synchronously, and the update has to reach the mailbox from there. The runtime is captured
+     * once here rather than re-derived per call, and the fork is attached to the orchestrator's
+     * scope, so an offer in flight is interrupted with the orchestrator instead of outliving it.
+     * Running the offer synchronously from the callback instead would discard this fiber's
+     * context, and would throw outright if offering ever became asynchronous.
+     */
+    const runtime = yield* Effect.runtime<never>()
+    const orchestratorScope = yield* Effect.scope
     const offerFromCallback = (event: OrchestratorEvent): void => {
-      Effect.runSync(Queue.offer(mailbox, event))
+      Runtime.runFork(runtime)(Queue.offer(mailbox, event), { scope: orchestratorScope })
     }
 
     const requestTick = (source: 'startup' | 'timer' | 'change'): Effect.Effect<void> =>
@@ -1033,11 +1043,12 @@ export const startOrchestratorRuntime = (
       }),
     )
 
-    yield* Effect.flatMap(WorkflowWatcher, (watcher) =>
-      watcher.watch(selectedWorkflowPath, () => {
-        Effect.runFork(requestTick('change'))
-      }),
-    )
+    // The watcher is installed before startup continues; only its consumption is forked, into the
+    // orchestrator's scope, so the tick a change requests is interrupted on shutdown rather than
+    // left running against a stopped orchestrator.
+    const workflowWatcher = yield* WorkflowWatcher
+    const workflowChanges = yield* workflowWatcher.changes(selectedWorkflowPath)
+    yield* Effect.forkScoped(Stream.runForEach(workflowChanges, () => requestTick('change')))
 
     const scheduleNextTick = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {

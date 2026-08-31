@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Layer } from 'effect'
+import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -34,7 +34,7 @@ const temporaryDirectories: string[] = []
 const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
-  token: 'secret',
+  token: Redacted.make('secret'),
   tokenEnvironmentName: 'TEST_OPERATOR_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
@@ -146,7 +146,7 @@ const gitHubIssueControl = layerCurrentIssueControl.pipe(Layer.provide(layerGitH
 
 /** The console reads the workflow through the loader the composition root binds. */
 const workflowLoader = layerWorkflowLoader({
-  load: (path) => loadWorkflow(path, process.env, trackerProviders),
+  load: (path) => loadWorkflow(path, trackerProviders),
   preflight: (workflow) => preflightWorkflow(workflow),
 })
 
@@ -364,10 +364,12 @@ describe('operator dependency graph', (): void => {
     const factory = layerIssueControlFactory({
       make: (provider) =>
         Effect.sync((): IssueControlPort => {
-          built.push(githubProviderOf(provider).token)
+          built.push(Redacted.value(githubProviderOf(provider).token))
           return { listOpenIssues: () => Effect.succeed([]), addLabel: () => Effect.void }
         }),
-      serves: (left, right) => githubProviderOf(left).token === githubProviderOf(right).token,
+      serves: (left, right) =>
+        Redacted.value(githubProviderOf(left).token) ===
+        Redacted.value(githubProviderOf(right).token),
     })
 
     await runBackend(
