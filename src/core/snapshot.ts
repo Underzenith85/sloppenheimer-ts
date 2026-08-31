@@ -1,20 +1,24 @@
-import { Effect } from 'effect'
+import { Effect, Ref } from 'effect'
 
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
 import type { AgentDetailLookup, OrchestratorContext, OrchestratorSnapshot } from './runtime.js'
+import type { RuntimeState } from './state.js'
+import { handoffSnapshots } from './transitions.js'
 
-export const publishDetails = (context: OrchestratorContext): void => {
-  context.publishDetailsValue()
-}
-
-export const createSnapshot = (context: OrchestratorContext): OrchestratorSnapshot => {
+/**
+ * The operator's view of one instant. Pure in the state it is given: the value was read from the
+ * cell in a single step, so nothing here has to defend against a container being edited underneath
+ * it, and no copying is needed to hand it on.
+ */
+export const createSnapshot = (state: RuntimeState, workflowPath: string): OrchestratorSnapshot => {
   const now = Date.now()
-  const effective = context.lastKnownGood
-  const activeSeconds = [...context.state.running.values()].reduce(
+  const effective = state.lastKnownGood
+  const running = [...state.running.values()]
+  const activeSeconds = running.reduce(
     (total, entry) => total + (now - entry.startedAt.getTime()) / 1_000,
     0,
   )
-  const activeTokens = [...context.state.running.values()].reduce(
+  const activeTokens = running.reduce(
     (totals, entry) => ({
       inputTokens: totals.inputTokens + entry.tokens.inputTokens,
       outputTokens: totals.outputTokens + entry.tokens.outputTokens,
@@ -24,47 +28,47 @@ export const createSnapshot = (context: OrchestratorContext): OrchestratorSnapsh
   )
   return {
     generatedAt: new Date(now).toISOString(),
-    workflowPath: context.selectedWorkflowPath,
+    workflowPath,
     effectiveWorkflow: {
       fingerprint: effective.workflow.fingerprint,
       loadedAt: effective.loadedAt.toISOString(),
     },
     workflowReloadError:
-      context.workflowReloadError === null
+      state.workflowReloadError === null
         ? null
         : {
-            message: context.workflowReloadError.message,
-            observedAt: context.workflowReloadError.observedAt.toISOString(),
+            message: state.workflowReloadError.message,
+            observedAt: state.workflowReloadError.observedAt.toISOString(),
           },
     handoffRecovery: {
-      status: context.startupRecoveryFinished
-        ? context.storeReadFailed || context.handoffStoreError !== null
+      status: state.startupRecoveryFinished
+        ? state.storeReadFailed || state.handoffStoreError !== null
           ? 'degraded'
           : 'completed'
         : 'recovering',
-      loaded: context.recoveryCounts.loaded,
-      recovered: context.recoveryCounts.recovered,
-      skipped: context.recoveryCounts.skipped,
-      failed: context.recoveryCounts.failed,
+      loaded: state.recoveryCounts.loaded,
+      recovered: state.recoveryCounts.recovered,
+      skipped: state.recoveryCounts.skipped,
+      failed: state.recoveryCounts.failed,
       storeError:
-        context.handoffStoreError === null
+        state.handoffStoreError === null
           ? null
           : {
-              operation: context.handoffStoreError.operation,
-              message: context.handoffStoreError.message,
-              observedAt: context.handoffStoreError.observedAt.toISOString(),
+              operation: state.handoffStoreError.operation,
+              message: state.handoffStoreError.message,
+              observedAt: state.handoffStoreError.observedAt.toISOString(),
             },
     },
     pollingIntervalMs: effective.workflow.config.pollingIntervalMs,
     maxConcurrentAgents: effective.workflow.config.agent.maxConcurrentAgents,
     counts: {
-      running: context.state.running.size,
-      retrying: context.state.retries.size,
-      completed: context.state.completed.size,
+      running: state.running.size,
+      retrying: state.retries.size,
+      completed: state.completed.size,
     },
-    pausedIssueNumbers: [...context.state.pausedIssueNumbers].sort((left, right) => left - right),
-    handoffs: context.handoffSnapshotsValue(),
-    running: [...context.state.running.values()].map((entry) => ({
+    pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
+    handoffs: handoffSnapshots(state),
+    running: running.map((entry) => ({
       issueId: entry.issue.id,
       identifier: entry.issue.identifier,
       title: entry.issue.title,
@@ -84,7 +88,7 @@ export const createSnapshot = (context: OrchestratorContext): OrchestratorSnapsh
       workerHost: 'local',
       detailUrl: agentDetailPath(entry.issue.identifier),
     })),
-    retrying: [...context.state.retries.values()].map((entry) => ({
+    retrying: [...state.retries.values()].map((entry) => ({
       issueId: entry.issue.id,
       identifier: entry.issue.identifier,
       title: entry.issue.title,
@@ -96,12 +100,12 @@ export const createSnapshot = (context: OrchestratorContext): OrchestratorSnapsh
       detailUrl: agentDetailPath(entry.issue.identifier),
     })),
     totals: {
-      inputTokens: context.state.totals.inputTokens + activeTokens.inputTokens,
-      outputTokens: context.state.totals.outputTokens + activeTokens.outputTokens,
-      totalTokens: context.state.totals.totalTokens + activeTokens.totalTokens,
-      secondsRunning: context.state.totals.secondsRunning + activeSeconds,
+      inputTokens: state.totals.inputTokens + activeTokens.inputTokens,
+      outputTokens: state.totals.outputTokens + activeTokens.outputTokens,
+      totalTokens: state.totals.totalTokens + activeTokens.totalTokens,
+      secondsRunning: state.totals.secondsRunning + activeSeconds,
     },
-    rateLimits: context.state.rateLimits,
+    rateLimits: state.rateLimits,
   }
 }
 
@@ -109,26 +113,28 @@ export const agentDetail = (
   context: OrchestratorContext,
   identifier: string,
 ): Effect.Effect<AgentDetailLookup> =>
-  Effect.sync(() => {
-    const published = context.publishedDetails.get(identifier)
-    if (published === undefined) {
-      return { _tag: 'Unknown', identifier }
-    }
-    switch (published._tag) {
-      case 'Found': {
-        return {
-          _tag: 'Found',
-          detail: buildAgentDetail(published.record, { ...published.context, now: new Date() }),
+  Ref.get(context.state).pipe(
+    Effect.map((state): AgentDetailLookup => {
+      const published = state.publishedDetails.get(identifier)
+      if (published === undefined) {
+        return { _tag: 'Unknown', identifier }
+      }
+      switch (published._tag) {
+        case 'Found': {
+          return {
+            _tag: 'Found',
+            detail: buildAgentDetail(published.record, { ...published.context, now: new Date() }),
+          }
+        }
+        case 'Completed': {
+          return { _tag: 'Completed', identifier }
+        }
+        case 'Unavailable': {
+          return { _tag: 'Unavailable', identifier, reason: published.reason }
+        }
+        case 'NoSession': {
+          return { _tag: 'NoSession', identifier }
         }
       }
-      case 'Completed': {
-        return { _tag: 'Completed', identifier }
-      }
-      case 'Unavailable': {
-        return { _tag: 'Unavailable', identifier, reason: published.reason }
-      }
-      case 'NoSession': {
-        return { _tag: 'NoSession', identifier }
-      }
-    }
-  })
+    }),
+  )

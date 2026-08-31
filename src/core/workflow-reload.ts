@@ -1,16 +1,28 @@
-import { Effect, Option } from 'effect'
+import { Effect, MutableRef, Option, Ref } from 'effect'
 
 import { sameTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
 import { WorkflowError } from '../errors.js'
 import { portsConfiguration, type AdapterCell, type CodeReviewPort } from '../ports/index.js'
+import type { OrchestratorContext } from './runtime.js'
 import type {
   EffectiveWorkflow,
   ExecutionSnapshot,
-  OrchestratorContext,
   PendingRetirement,
   RuntimePorts,
-} from './runtime.js'
+  RuntimeState,
+} from './state.js'
+import * as Transitions from './transitions.js'
+
+/**
+ * A rebuild's result: the ports it produced, and the instances it replaced. The retirements are
+ * handed back rather than written anywhere, so rebuilding stays a function of its inputs and the
+ * caller decides when they enter the state.
+ */
+export type RebuiltWorkflow = Readonly<{
+  value: EffectiveWorkflow
+  retirements: readonly PendingRetirement[]
+}>
 
 const portConfigurationError = (cause: unknown): WorkflowError =>
   cause instanceof WorkflowError
@@ -35,11 +47,17 @@ const requireCapability = (
   port === null ? Effect.fail(handoffCapabilityMissing(workflow)) : Effect.succeed(port)
 
 /**
+ * Collects what one rebuild replaced. Local to the call that fills it: what leaves is a readonly
+ * list the caller folds into the state.
+ */
+type Replaced = PendingRetirement[]
+
+/**
  * Records an instance a rebuild replaced, so it is released once the last live holder lets go.
  * An instance that never existed has no holder to wait for.
  */
 const noteReplaced = (
-  pending: PendingRetirement[],
+  replaced: Replaced,
   kind: PendingRetirement['kind'],
   instance: unknown,
   retire: Effect.Effect<void>,
@@ -47,7 +65,7 @@ const noteReplaced = (
   instance === null
     ? retire
     : Effect.sync(() => {
-        pending.push({ kind, instance, retire })
+        replaced.push({ kind, instance, retire })
       })
 
 /**
@@ -61,13 +79,13 @@ const noteReplaced = (
 const rebuildCell = <Value, Input, BuildError>(
   cell: AdapterCell<Value, Input, BuildError>,
   kind: PendingRetirement['kind'],
-  pending: PendingRetirement[],
+  replaced: Replaced,
   input: Input,
 ): Effect.Effect<Value, BuildError> =>
   cell.get.pipe(
-    Effect.flatMap((replaced) =>
+    Effect.flatMap((previous) =>
       cell.rebuild(input).pipe(
-        Effect.tap((rebuilt) => noteReplaced(pending, kind, replaced, rebuilt.retirePrevious)),
+        Effect.tap((rebuilt) => noteReplaced(replaced, kind, previous, rebuilt.retirePrevious)),
         Effect.map((rebuilt) => rebuilt.value),
       ),
     ),
@@ -75,13 +93,13 @@ const rebuildCell = <Value, Input, BuildError>(
 
 const rebuildCodeReview = (
   ports: RuntimePorts,
-  pending: PendingRetirement[],
+  replaced: Replaced,
   workflow: Workflow,
 ): Effect.Effect<CodeReviewPort | null, WorkflowError> =>
   Option.match(ports.codeReviewCell, {
     onNone: () => Effect.succeed<CodeReviewPort | null>(null),
     onSome: (cell) =>
-      rebuildCell(cell, 'codeReview', pending, workflow.tracker).pipe(
+      rebuildCell(cell, 'codeReview', replaced, workflow.tracker).pipe(
         Effect.mapError(portConfigurationError),
         Effect.flatMap((port) => requireCapability(workflow, port)),
       ),
@@ -94,24 +112,27 @@ const rebuildCodeReview = (
  */
 export const rebuildEffectiveWorkflow = (
   ports: RuntimePorts,
-  pending: PendingRetirement[],
   workflow: Workflow,
-): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
+): Effect.Effect<RebuiltWorkflow, WorkflowError> =>
   Effect.gen(function* () {
+    const replaced: Replaced = []
     const tracker = yield* rebuildCell(
       ports.trackerCell,
       'tracker',
-      pending,
+      replaced,
       workflow.tracker,
     ).pipe(Effect.mapError(portConfigurationError))
-    const codeReview = yield* rebuildCodeReview(ports, pending, workflow)
+    const codeReview = yield* rebuildCodeReview(ports, replaced, workflow)
     const workspaces = yield* rebuildCell(
       ports.workspaceCell,
       'workspaces',
-      pending,
+      replaced,
       portsConfiguration(workflow).workspaces,
     )
-    return { workflow, tracker, codeReview, workspaces, loadedAt: new Date() }
+    return {
+      value: { workflow, tracker, codeReview, workspaces, loadedAt: new Date() },
+      retirements: replaced,
+    }
   })
 
 /**
@@ -130,16 +151,16 @@ export const revalidateCredentials = (
       }
       const workflow: Workflow = { ...effective.workflow, tracker: validated }
       return Effect.gen(function* () {
+        const replaced: Replaced = []
         const tracker = yield* rebuildCell(
           context.ports.trackerCell,
           'tracker',
-          context.pendingRetirements,
+          replaced,
           validated,
         ).pipe(Effect.mapError(portConfigurationError))
-        const codeReview = yield* rebuildCodeReview(
-          context.ports,
-          context.pendingRetirements,
-          workflow,
+        const codeReview = yield* rebuildCodeReview(context.ports, replaced, workflow)
+        yield* Ref.update(context.state, (current) =>
+          Transitions.holdRetirements(current, replaced),
         )
         return { ...effective, workflow, tracker, codeReview }
       })
@@ -147,11 +168,11 @@ export const revalidateCredentials = (
   )
 
 const heldInstances = (
-  context: OrchestratorContext,
+  state: RuntimeState,
   select: (execution: ExecutionSnapshot) => unknown,
 ): readonly unknown[] => [
-  ...[...context.state.running.values()].map((entry) => select(entry.execution)),
-  ...[...context.state.handoffs.values()].map((entry) => select(entry.execution)),
+  ...[...state.running.values()].map((entry) => select(entry.execution)),
+  ...[...state.handoffs.values()].map((entry) => select(entry.execution)),
 ]
 
 /**
@@ -163,30 +184,30 @@ const heldInstances = (
  * Only a run needs this. Everything a handoff calls its ports from runs on the event loop, which is
  * the fiber that drains, so no handoff call can be in flight across a drain.
  */
-const supersededByLiveRun = (context: OrchestratorContext, instance: unknown): boolean =>
-  [...context.supersededPorts.values()].some((ports) => ports.includes(instance))
+const supersededByLiveRun = (state: RuntimeState, instance: unknown): boolean =>
+  [...state.supersededPorts.values()].some((ports) => ports.includes(instance))
 
-const stillHeld = (context: OrchestratorContext, retirement: PendingRetirement): boolean => {
-  if (supersededByLiveRun(context, retirement.instance)) {
+const stillHeld = (state: RuntimeState, retirement: PendingRetirement): boolean => {
+  if (supersededByLiveRun(state, retirement.instance)) {
     return true
   }
   switch (retirement.kind) {
     case 'tracker': {
       return (
-        context.lastKnownGood.tracker === retirement.instance ||
-        heldInstances(context, (execution) => execution.tracker).includes(retirement.instance)
+        state.lastKnownGood.tracker === retirement.instance ||
+        heldInstances(state, (execution) => execution.tracker).includes(retirement.instance)
       )
     }
     case 'codeReview': {
       return (
-        context.lastKnownGood.codeReview === retirement.instance ||
-        heldInstances(context, (execution) => execution.codeReview).includes(retirement.instance)
+        state.lastKnownGood.codeReview === retirement.instance ||
+        heldInstances(state, (execution) => execution.codeReview).includes(retirement.instance)
       )
     }
     case 'workspaces': {
       return (
-        context.lastKnownGood.workspaces === retirement.instance ||
-        heldInstances(context, (execution) => execution.workspaces).includes(retirement.instance)
+        state.lastKnownGood.workspaces === retirement.instance ||
+        heldInstances(state, (execution) => execution.workspaces).includes(retirement.instance)
       )
     }
   }
@@ -198,22 +219,33 @@ const stillHeld = (context: OrchestratorContext, retirement: PendingRetirement):
  * anything never retired is released when the cell's scope closes.
  */
 export const drainRetirements = (context: OrchestratorContext): Effect.Effect<void> =>
-  Effect.suspend(() => {
-    const live = new Set([...context.state.running.values()].map((entry) => entry.runId))
-    for (const runId of [...context.supersededPorts.keys()]) {
-      if (!live.has(runId)) {
-        context.supersededPorts.delete(runId)
-      }
-    }
-    const pending = context.pendingRetirements.splice(0)
-    const held = pending.filter((retirement) => stillHeld(context, retirement))
-    context.pendingRetirements.push(...held)
-    return Effect.forEach(
+  Ref.modify(context.state, (current) => {
+    const pruned = Transitions.pruneSupersededPorts(current)
+    const [pending, drained] = Transitions.takeRetirements(pruned)
+    const held = pending.filter((retirement) => stillHeld(drained, retirement))
+    return [
       pending.filter((retirement) => !held.includes(retirement)),
-      (retirement) => retirement.retire,
-      { discard: true },
-    )
-  })
+      Transitions.holdRetirements(drained, held),
+    ] as const
+  }).pipe(
+    Effect.flatMap((releasable) =>
+      Effect.forEach(releasable, (retirement) => retirement.retire, { discard: true }),
+    ),
+  )
+
+/**
+ * Puts a rebuilt workflow in force: it becomes the last known good, and everything already in
+ * flight moves onto its ports. The two belong together — a workflow installed without adoption
+ * would leave live work calling instances the orchestrator has stopped tracking.
+ */
+export const installEffectiveWorkflow = (
+  context: OrchestratorContext,
+  previous: EffectiveWorkflow,
+  next: EffectiveWorkflow,
+): Effect.Effect<void> =>
+  Ref.update(context.state, (current) => Transitions.adoptWorkflow(current, next)).pipe(
+    Effect.zipRight(adoptPorts(context, previous, next)),
+  )
 
 /**
  * Moves live work onto the replacements. A running worker and an in-flight handoff each hold the
@@ -225,33 +257,21 @@ export const adoptPorts = (
   previous: EffectiveWorkflow,
   next: EffectiveWorkflow,
 ): Effect.Effect<void> =>
-  Effect.suspend(() => {
-    const adopted = (execution: ExecutionSnapshot): ExecutionSnapshot =>
-      Object.freeze({
-        ...execution,
-        tracker: next.tracker,
-        codeReview:
-          execution.codeReview === previous.codeReview ? next.codeReview : execution.codeReview,
-        secretEnvironmentNames: Object.freeze([...next.tracker.secretEnvironmentNames]),
-      })
-    for (const entry of context.state.running.values()) {
-      if (entry.execution.tracker !== previous.tracker) {
-        continue
-      }
-      // Recorded before the swap: this run's own fibers may still be awaiting a call that read
-      // these, and nothing else will remember they were ever in use.
-      context.supersededPorts.set(entry.runId, [
-        ...(context.supersededPorts.get(entry.runId) ?? []),
-        ...[entry.execution.tracker, entry.execution.codeReview].filter(
-          (instance) => instance !== null,
-        ),
-      ])
-      entry.execution = adopted(entry.execution)
-    }
-    for (const entry of context.state.handoffs.values()) {
-      if (entry.execution.tracker === previous.tracker) {
-        entry.execution = adopted(entry.execution)
-      }
-    }
-    return drainRetirements(context)
-  })
+  Ref.modify(context.state, (current) => {
+    const adopted = Transitions.adoptExecutions(current, previous, next)
+    return [adopted.running, adopted] as const
+  }).pipe(
+    // Each run's own cell is written from the entry the transition produced, so what a host tool
+    // reads and what the state holds cannot drift apart.
+    Effect.flatMap((running) =>
+      Effect.sync(() => {
+        for (const entry of running.values()) {
+          MutableRef.set(entry.sessionPorts, {
+            tracker: entry.execution.tracker,
+            codeReview: entry.execution.codeReview,
+          })
+        }
+      }),
+    ),
+    Effect.zipRight(drainRetirements(context)),
+  )

@@ -1,241 +1,135 @@
-import { Effect, type Scope } from 'effect'
+import { Effect, Ref, type Scope } from 'effect'
 
-import type { Issue } from '../domain/domain.js'
-import { classifyPullRequest } from '../domain/handoff.js'
+import type { IssueId } from '../domain/domain.js'
 import { logInfo } from '../support/logging.js'
 import { dispatch } from './dispatch.js'
-import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import {
+  afterInspectionFailed,
+  afterMerge,
+  afterRepairDispatched,
+  afterReviewRequested,
+  afterThreadsResolved,
+  awaitingSlot,
+  observeHandoff,
+  repairIssue,
+  type HandoffAction,
+} from './handoff-decision.js'
+import { hasSlot, identifierIssueNumber, logContext } from './policy.js'
+import type { OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
+import * as Transitions from './transitions.js'
 
-export const hydrateRestoredHandoffs = (context: OrchestratorContext): Effect.Effect<void> =>
-  context.hydrateRestoredHandoffsEffect()
+/** Whether this handoff is the orchestrator's to act on at all in this pass. */
+const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boolean => {
+  if (state.running.has(id) || state.retries.has(id)) {
+    return true
+  }
+  if (handoff.state === 'closed_without_merge') {
+    return true
+  }
+  const issueNumber = identifierIssueNumber(handoff.issue.identifier)
+  return issueNumber !== null && state.pausedIssueNumbers.has(issueNumber)
+}
 
-export const reconcileHandoffs = (
+const writeHandoff = (
   context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+): Effect.Effect<void> =>
+  Ref.update(context.state, (current) => Transitions.putHandoff(current, id, handoff))
+
+/**
+ * Carries out the one call an observation asked for and folds its result back into the handoff.
+ * Every branch ends with the handoff written, so the state after a pass reflects what actually
+ * happened rather than what was proposed.
+ */
+const perform = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+  action: HandoffAction,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
-    for (const [id, handoff] of context.state.handoffs) {
-      if (context.state.running.has(id) || context.state.retries.has(id)) {
-        continue
+    const codeReview = handoff.execution.codeReview
+    if (codeReview === null) {
+      yield* writeHandoff(context, id, handoff)
+      return
+    }
+    switch (action._tag) {
+      case 'None': {
+        yield* writeHandoff(context, id, handoff)
+        return
       }
-      if (handoff.state === 'closed_without_merge') {
-        continue
-      }
-      const interventionRequired = handoff.state === 'intervention_required'
-      const handoffIssueNumber = context.identifierIssueNumberValue(handoff.issue.identifier)
-      if (handoffIssueNumber !== null && context.state.pausedIssueNumbers.has(handoffIssueNumber)) {
-        continue
-      }
-      const codeReview = handoff.execution.codeReview
-      if (codeReview === null) {
-        continue
-      }
-      const inspected = yield* codeReview.inspectPullRequest(handoff.pullRequestNumber).pipe(
-        Effect.match({
-          onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-          onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-        }),
-      )
-      handoff.observedAt = new Date()
-      if (inspected._tag === 'Failed') {
-        handoff.reason = inspected.error.message
-        continue
-      }
-      // Intervention was requested, so no further repair is dispatched -- but the pull request is
-      // still inspected every poll. An unchanged open head keeps the state and reason as they are;
-      // a corrected head, a manual merge, or a close falls through and is acted on normally.
-      if (
-        interventionRequired &&
-        inspected.observation.state === 'open' &&
-        inspected.observation.headSha === handoff.headSha
-      ) {
-        continue
-      }
-      // A repair agent has finished: attribute the head it produced before anything else reads it.
-      if (inspected.observation.state === 'open' && handoff.repairStartedHeadSha !== null) {
-        const repairedHeadSha = inspected.observation.headSha
-        if (repairedHeadSha !== handoff.repairStartedHeadSha) {
-          if (handoff.repairObservedHeadShas.includes(repairedHeadSha)) {
-            handoff.repairStartedHeadSha = null
-            handoff.repairBaselineRestored = false
-            handoff.state = 'intervention_required'
-            handoff.headSha = repairedHeadSha
-            handoff.reason =
-              'Repair agent returned the pull request to an already observed repair head.'
-            continue
-          }
-          handoff.repairHeadShas.push(repairedHeadSha)
-          handoff.repairObservedHeadShas.push(repairedHeadSha)
-          handoff.repairStartedHeadSha = null
-          handoff.repairBaselineRestored = false
-        } else if (handoff.repairBaselineRestored) {
-          // The baseline outlived the process that dispatched the repair, so an unchanged head is
-          // an interrupted repair, not a completed no-op. Drop the baseline and let the normal
-          // repair path retry; no head was observed, so the budget is untouched.
-          handoff.repairStartedHeadSha = null
-          handoff.repairBaselineRestored = false
-        } else {
-          const unchangedDisposition = classifyPullRequest(inspected.observation)
-          handoff.repairStartedHeadSha = null
-          if (unchangedDisposition.state === 'repair_needed') {
-            handoff.state = 'intervention_required'
-            handoff.headSha = repairedHeadSha
-            handoff.reason = `Repair agent completed without changing the pull request head. ${unchangedDisposition.reason}`
-            continue
-          }
-        }
-      }
-      if (inspected.observation.state === 'open') {
-        const observedHeadSha = inspected.observation.headSha
-        const codexReview = inspected.observation.codexReview
-        if (handoff.reviewRequestedHeadSha !== observedHeadSha) {
-          handoff.reviewCompletedHeadSha = null
-          if (
-            codexReview !== null &&
-            codexReview !== undefined &&
-            observedHeadSha.startsWith(codexReview.headShaPrefix)
-          ) {
-            handoff.reviewRequestedHeadSha = observedHeadSha
-            handoff.state = 'awaiting_checks'
-            if (codexReview.status === 'completed') {
-              handoff.reviewCompletedHeadSha = observedHeadSha
-              handoff.reason =
-                'Codex review completed for the current head; waiting for review state to settle'
-            } else {
-              handoff.reason = 'Waiting for Codex review of the current head to complete'
-            }
-            continue
-          }
-          const requested = yield* codeReview
-            .requestPullRequestReview(handoff.pullRequestNumber, observedHeadSha)
-            .pipe(
-              Effect.match({
-                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-                onSuccess: () => ({ _tag: 'Succeeded' as const }),
-              }),
-            )
-          handoff.state = 'awaiting_checks'
-          if (requested._tag === 'Failed') {
-            handoff.reason = `Could not request Codex review for the current head: ${requested.error.message}`
-            continue
-          }
-          handoff.reviewRequestedHeadSha = observedHeadSha
-          handoff.reason = 'Codex review requested for the current head'
+      case 'RequestReview': {
+        const requested = yield* codeReview
+          .requestPullRequestReview(handoff.pullRequestNumber, action.headSha)
+          .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
+        yield* writeHandoff(context, id, afterReviewRequested(handoff, action.headSha, requested))
+        if (requested === null) {
           yield* logInfo('Codex review requested for pull request head', {
-            ...context.logContextValue(handoff.issue),
+            ...logContext(handoff.issue),
             action: 'pull_request_review_request',
             outcome: 'completed',
             error: null,
             pull_request_url: handoff.pullRequestUrl,
-            head_sha: observedHeadSha,
+            head_sha: action.headSha,
           })
-          continue
         }
-        if (
-          codexReview?.status !== 'completed' ||
-          !observedHeadSha.startsWith(codexReview.headShaPrefix)
-        ) {
-          handoff.reviewCompletedHeadSha = null
-          handoff.state = 'awaiting_checks'
-          handoff.reason = 'Waiting for Codex review of the current head to complete'
-          continue
-        }
-        if (handoff.reviewCompletedHeadSha !== observedHeadSha) {
-          handoff.reviewCompletedHeadSha = observedHeadSha
-          handoff.state = 'awaiting_checks'
-          handoff.reason =
-            'Codex review completed for the current head; waiting for review state to settle'
-          continue
-        }
+        return
       }
-      const unresolvedThreadIds = inspected.observation.reviewThreads
-        .filter(
-          (thread) => !thread.resolved && thread.commentHeadSha !== inspected.observation.headSha,
-        )
-        .map((thread) => thread.id)
-      const repairedHeadIsVerified =
-        handoff.repairHeadShas.length > 0 &&
-        inspected.observation.mergeable === true &&
-        inspected.observation.mergeState !== 'dirty' &&
-        inspected.observation.mergeState !== 'behind' &&
-        inspected.observation.checks.every(
-          (check) =>
-            check.status === 'completed' &&
-            check.conclusion !== null &&
-            ['success', 'neutral', 'skipped'].includes(check.conclusion),
-        )
-      if (unresolvedThreadIds.length > 0 && repairedHeadIsVerified) {
-        const resolved = yield* codeReview.resolveReviewThreads(unresolvedThreadIds).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: () => ({ _tag: 'Succeeded' as const }),
-          }),
-        )
-        handoff.state = 'awaiting_checks'
-        handoff.reason =
-          resolved._tag === 'Failed'
-            ? resolved.error.message
-            : 'Verified repair head; waiting for resolved review state'
-        continue
+      case 'ResolveThreads': {
+        const resolved = yield* codeReview
+          .resolveReviewThreads(action.threadIds)
+          .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
+        yield* writeHandoff(context, id, afterThreadsResolved(handoff, resolved))
+        return
       }
-      const disposition = classifyPullRequest(inspected.observation)
-      handoff.state = disposition.state
-      handoff.headSha = inspected.observation.headSha
-      handoff.reason = 'reason' in disposition ? disposition.reason : null
-      if (disposition.state === 'merged') {
-        context.noteHandoffOutcomeValue(id, handoff, 'merged')
-        context.state.handoffs.delete(id)
-        context.state.completed.add(id)
-        context.state.claimed.delete(id)
-        continue
+      case 'Complete': {
+        yield* writeHandoff(context, id, handoff)
+        yield* context.noteHandoffOutcome(id, handoff, 'merged')
+        yield* Ref.update(context.state, (current) => Transitions.completeHandoff(current, id))
+        return
       }
-      if (disposition.state === 'closed_without_merge') {
-        context.noteHandoffOutcomeValue(id, handoff, 'intervention_required')
-        continue
+      case 'NoteClosed': {
+        yield* writeHandoff(context, id, handoff)
+        yield* context.noteHandoffOutcome(id, handoff, 'intervention_required')
+        return
       }
-      if (disposition.state === 'ready_to_merge') {
-        handoff.state = 'merging'
+      case 'Merge': {
+        yield* writeHandoff(context, id, handoff)
         const merged = yield* codeReview
-          .mergePullRequest(handoff.pullRequestNumber, disposition.headSha)
+          .mergePullRequest(handoff.pullRequestNumber, action.headSha)
           .pipe(
             Effect.match({
               onFailure: (error) => ({ _tag: 'Failed' as const, error }),
               onSuccess: (sha) => ({ _tag: 'Succeeded' as const, sha }),
             }),
           )
+        const settled = afterMerge(handoff, merged._tag === 'Failed' ? merged.error.message : null)
+        yield* writeHandoff(context, id, settled)
         if (merged._tag === 'Failed') {
-          handoff.state = 'awaiting_checks'
-          handoff.reason = merged.error.message
-          continue
+          return
         }
-        handoff.state = 'merged'
-        context.noteHandoffOutcomeValue(id, handoff, 'merged')
-        context.state.handoffs.delete(id)
-        context.state.completed.add(id)
-        context.state.claimed.delete(id)
+        yield* context.noteHandoffOutcome(id, settled, 'merged')
+        yield* Ref.update(context.state, (current) => Transitions.completeHandoff(current, id))
         yield* logInfo('pull request merged', {
-          ...context.logContextValue(handoff.issue),
+          ...logContext(handoff.issue),
           action: 'pull_request_merge',
           outcome: 'completed',
           error: null,
           pull_request_url: handoff.pullRequestUrl,
           merge_commit_sha: merged.sha,
         })
-        continue
+        return
       }
-      if (disposition.state === 'repair_needed') {
-        if (handoff.repairHeadShas.length >= 3) {
-          handoff.state = 'intervention_required'
-          handoff.reason = `Repair limit reached. ${disposition.reason}`
-          continue
+      case 'Repair': {
+        const issue = repairIssue(handoff, action.headSha, action.reason)
+        const current = yield* Ref.get(context.state)
+        if (!hasSlot(current, issue, handoff.execution.workflow)) {
+          yield* writeHandoff(context, id, awaitingSlot(handoff, action.reason))
+          return
         }
-        const repairIssue: Issue = {
-          ...handoff.issue,
-          description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${inspected.observation.headSha}\n\n${disposition.reason}`,
-        }
-        if (!context.stateHasSlotValue(repairIssue, context.state, handoff.execution.workflow)) {
-          handoff.reason = `Waiting for an agent slot. ${disposition.reason}`
-          continue
-        }
+        yield* writeHandoff(context, id, handoff)
         const effective: EffectiveWorkflow = {
           workflow: handoff.execution.workflow,
           tracker: handoff.execution.tracker,
@@ -243,38 +137,63 @@ export const reconcileHandoffs = (
           workspaces: handoff.execution.workspaces,
           loadedAt: handoff.observedAt,
         }
-        // The budget is spent by an observed head, not by dispatching: record the baseline only
-        // once a session really started, so a refused dispatch costs nothing.
-        const started = yield* dispatch(
+        const started = yield* dispatch(context, issue, action.attempt, effective)
+        yield* writeHandoff(
           context,
-          repairIssue,
-          handoff.repairHeadShas.length + 1,
-          effective,
+          id,
+          afterRepairDispatched(handoff, started, action.headSha, action.reason),
         )
-        if (started) {
-          const baselineHeadSha = inspected.observation.headSha
-          handoff.repairStartedHeadSha = baselineHeadSha
-          if (
-            baselineHeadSha !== null &&
-            !handoff.repairObservedHeadShas.includes(baselineHeadSha)
-          ) {
-            handoff.repairObservedHeadShas.push(baselineHeadSha)
-          }
-          handoff.repairBaselineRestored = false
-          handoff.reason = `Repair agent running. ${disposition.reason}`
-        }
+        return
       }
+    }
+  })
+
+export const reconcileHandoffs = (
+  context: OrchestratorContext,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const opening = yield* Ref.get(context.state)
+    for (const id of opening.handoffs.keys()) {
+      // Re-read: an earlier handoff in this pass may have taken the last agent slot, or dispatched
+      // a repair for this very issue.
+      const current = yield* Ref.get(context.state)
+      const live = current.handoffs.get(id)
+      if (live === undefined || skipped(current, id, live)) {
+        continue
+      }
+      const codeReview = live.execution.codeReview
+      if (codeReview === null) {
+        continue
+      }
+      const observedAt = new Date()
+      const inspected = yield* codeReview.inspectPullRequest(live.pullRequestNumber).pipe(
+        Effect.match({
+          onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+          onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+        }),
+      )
+      if (inspected._tag === 'Failed') {
+        yield* writeHandoff(
+          context,
+          id,
+          afterInspectionFailed(live, observedAt, inspected.error.message),
+        )
+        continue
+      }
+      const decision = observeHandoff(live, inspected.observation, observedAt)
+      yield* perform(context, id, decision.handoff, decision.action)
     }
     // One timeline entry per observed transition, not one per poll: an unchanged disposition is
     // not news, and the timeline is a bounded resource.
-    for (const [id, handoff] of context.state.handoffs) {
-      if (context.state.details.get(id)?.handoff.pullRequest.state !== handoff.state) {
-        context.noteHandoffOutcomeValue(
+    const closing = yield* Ref.get(context.state)
+    for (const [id, handoff] of closing.handoffs) {
+      if (closing.details.get(id)?.handoff.pullRequest.state !== handoff.state) {
+        yield* context.noteHandoffOutcome(
           id,
           handoff,
           handoff.state === 'intervention_required' ? 'intervention_required' : 'pull_request_open',
         )
       }
     }
-    yield* context.persistHandoffsEffect()
+    yield* context.persistHandoffs
   })
