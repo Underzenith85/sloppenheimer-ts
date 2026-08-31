@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
+import { runFailureWithEnvironment, runWithEnvironment } from '../harness/environment.js'
+
 import { githubTrackerProvider } from '../../src/adapters/github/index.js'
 import {
   makeTrackerProviderRegistry,
   sameTrackerProvider,
   trackerProviderOf,
+  type ValidatedTrackerProvider,
 } from '../../src/domain/tracker-provider.js'
 import { WorkflowError } from '../../src/errors.js'
 import {
@@ -17,15 +20,15 @@ import {
 
 const authored = { owner: 'example', repository: 'symphony', token: '$TRACKER_TOKEN' }
 
-const github = (token: string): ReturnType<typeof githubTrackerProvider.validate> =>
-  githubTrackerProvider.validate(authored, { TRACKER_TOKEN: token })
+const github = (token: string): ValidatedTrackerProvider =>
+  runWithEnvironment(githubTrackerProvider.validate(authored), { TRACKER_TOKEN: token })
 
 describe('tracker provider registry', (): void => {
   it('derives the supported kinds from the registered adapters', (): void => {
     const registry = makeTrackerProviderRegistry([githubTrackerProvider])
 
     expect(registry.kinds).toEqual(['github'])
-    expect(() => registry.validate('linear', {}, {})).toThrow(
+    expect(runFailureWithEnvironment(registry.validate('linear', {})).message).toBe(
       'unsupported tracker.kind: linear (supported: github)',
     )
   })
@@ -37,9 +40,8 @@ describe('tracker provider registry', (): void => {
   it('supports a kind registered outside the configuration and core layers', (): void => {
     const registry = makeTrackerProviderRegistry([githubTrackerProvider, stubTrackerProviderEntry])
 
-    const validated = registry.validate(
-      'stub',
-      { token: 'STUB_TRACKER_TOKEN' },
+    const validated = runWithEnvironment(
+      registry.validate('stub', { token: 'STUB_TRACKER_TOKEN' }),
       {
         STUB_TRACKER_TOKEN: 'secret',
       },
@@ -49,7 +51,7 @@ describe('tracker provider registry', (): void => {
     expect(validated.kind).toBe('stub')
     expect(stubProviderToken(validated)).toBe('secret')
     expect(validated.secretEnvironmentNames).toEqual(['STUB_TRACKER_TOKEN'])
-    expect(() => registry.validate('linear', {}, {})).toThrow(
+    expect(runFailureWithEnvironment(registry.validate('linear', {})).message).toBe(
       'unsupported tracker.kind: linear (supported: github, stub)',
     )
   })
@@ -69,17 +71,22 @@ describe('tracker provider registry', (): void => {
 
   it('revalidates through the adapter that produced the selection', (): void => {
     const authored = { token: 'STUB_TRACKER_TOKEN' }
-    const validated = stubTrackerProviders.validate('stub', authored, {
+    const validated = runWithEnvironment(stubTrackerProviders.validate('stub', authored), {
       STUB_TRACKER_TOKEN: 'secret',
     })
 
-    const rotated = validated.revalidate(authored, { STUB_TRACKER_TOKEN: 'rotated' })
+    const rotated = runWithEnvironment(validated.revalidate(authored), {
+      STUB_TRACKER_TOKEN: 'rotated',
+    })
 
     expect(rotated.kind).toBe('stub')
     expect(stubProviderToken(rotated)).toBe('rotated')
     expect(sameTrackerProvider(rotated, validated)).toBe(false)
     expect(
-      sameTrackerProvider(rotated.revalidate(authored, { STUB_TRACKER_TOKEN: 'rotated' }), rotated),
+      sameTrackerProvider(
+        runWithEnvironment(rotated.revalidate(authored), { STUB_TRACKER_TOKEN: 'rotated' }),
+        rotated,
+      ),
     ).toBe(true)
   })
 

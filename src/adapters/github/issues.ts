@@ -1,5 +1,5 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, type Layer } from 'effect'
+import { Effect, Redacted, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
@@ -119,7 +119,7 @@ const makeGitHubTrackerToolExecutor =
     if (!githubTrackerToolSpecs.some((spec) => spec.name === name)) {
       return unsupportedHostTool(name)
     }
-    if (provider.token.length === 0) {
+    if (Redacted.value(provider.token).length === 0) {
       return toolFailure('missing_auth', 'GitHub credential is not configured')
     }
     const issueNumber = githubIssueNumber(provider, context)

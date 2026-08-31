@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { Effect } from 'effect'
+import { Config, Effect, Redacted } from 'effect'
 
 import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.js'
@@ -51,20 +51,30 @@ export type { AgentLaunch, AgentResult } from '../../ports/agent-runner.js'
  * The environment values a session's telemetry must never echo. The tracker's own secret names come
  * from the workflow; Codex's authentication sources are added because they are present in the
  * subprocess environment by design and could be printed by any tool the agent runs.
+ *
+ * Each name is read through the calling fiber's `ConfigProvider` — the host environment, not the
+ * environment the subprocess is given. That distinction is deliberate: the tracker's own secret is
+ * stripped from what Codex inherits, and a value the agent never receives is exactly the one most
+ * worth removing if some tool prints it back. A name that is not set is simply absent, because a
+ * missing credential is not an error here.
  */
 export const sessionSecretValues = (
-  environment: NodeJS.ProcessEnv,
   secretEnvironmentNames: readonly string[],
-): readonly string[] => {
+): Effect.Effect<readonly string[]> => {
   const names = new Set([
     ...secretEnvironmentNames,
     ...codexAuthenticationEnvironmentNames,
     'GITHUB_TOKEN',
     'GH_TOKEN',
   ])
-  return [...names]
-    .map((name) => environment[name])
-    .filter((value): value is string => value !== undefined && value.length > 0)
+  return Effect.forEach([...names], (name) => Config.option(Config.redacted(name))).pipe(
+    Effect.map((values) =>
+      values
+        .flatMap((value) => (value._tag === 'Some' ? [Redacted.value(value.value)] : []))
+        .filter((value) => value.length > 0),
+    ),
+    Effect.orDie,
+  )
 }
 
 type PendingRequest = Readonly<{
@@ -341,14 +351,18 @@ class CodexConnection {
     cwd: string,
     config: AgentRunnerConfig,
     secretEnvironmentNames: readonly string[],
+    // Resolved from the host environment rather than read out of the subprocess's: the tracker's
+    // own secret is stripped from what Codex inherits, and a value the agent never receives is
+    // exactly the one most worth removing if some tool prints it back.
+    knownSecretValues: readonly string[],
     hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
   ) {
+    // The full host environment, minus the names this session must not hand down. It is read here
+    // rather than described as a `Config`, because what the child inherits is every remaining
+    // variable, not a set of values named in advance.
     const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
-    // Read from the host environment rather than the subprocess's: the tracker's own secret is
-    // stripped from what Codex inherits, and a value the agent never receives is exactly the one
-    // most worth removing if some tool prints it back.
-    this.#knownSecretValues = sessionSecretValues(process.env, secretEnvironmentNames)
+    this.#knownSecretValues = knownSecretValues
     this.#hostTools = hostTools
     this.#redact = makeRedactor(this.#knownSecretValues)
     this.#process = spawn('bash', ['-lc', command], {
@@ -1160,16 +1174,19 @@ const runVerifiedAgent = (
 
   return Effect.scoped(
     Effect.acquireRelease(
-      Effect.sync(
-        () =>
-          new CodexConnection(
-            launch.config.command,
-            verified.path,
-            launch.config,
-            launch.secretEnvironmentNames,
-            launch.hostTools ?? null,
-            launch.onEvent,
-          ),
+      sessionSecretValues(launch.secretEnvironmentNames).pipe(
+        Effect.map(
+          (knownSecretValues) =>
+            new CodexConnection(
+              launch.config.command,
+              verified.path,
+              launch.config,
+              launch.secretEnvironmentNames,
+              knownSecretValues,
+              launch.hostTools ?? null,
+              launch.onEvent,
+            ),
+        ),
       ),
       (connection) => Effect.promise(() => connection.stop()),
     ).pipe(

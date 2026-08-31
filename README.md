@@ -287,6 +287,13 @@ fields; for GitHub that is `tracker.provider.token`, which must be a `$VAR` refe
 string — including `codex.command` and hook scripts — is used literally, so a `$VAR` inside a hook
 is expanded by the hook shell rather than by the loader.
 
+Every one of these reads goes through Effect's `Config`, resolved against the `ConfigProvider` the
+running fiber carries: the composition root supplies the process environment, and a test supplies
+exactly the variables its case is about. A declared secret is read with `Config.redacted`, so the
+resolved credential is wrapped from the moment it leaves the environment and is unwrapped only
+where it is used — for GitHub, the `Authorization` header. A reference that resolves to nothing, or
+to an empty value, is rejected as a missing environment variable.
+
 ### Adapter-owned provider configuration
 
 `tracker.provider` is kept as the exact JSON object that was authored and is handed to the adapter

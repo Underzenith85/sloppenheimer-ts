@@ -5,7 +5,7 @@ import * as HttpClient from '@effect/platform/HttpClient'
 import type * as HttpClientError from '@effect/platform/HttpClientError'
 import * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import type * as HttpMethod from '@effect/platform/HttpMethod'
-import { Effect, Layer, Option } from 'effect'
+import { Effect, Layer, Option, Redacted } from 'effect'
 
 import type { JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
@@ -165,7 +165,8 @@ const githubRequest = (
   const request = HttpClientRequest.make(init?.method ?? 'GET')(url).pipe(
     HttpClientRequest.setHeaders({
       Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${provider.token}`,
+      // The one place the credential is unwrapped: the header it authenticates.
+      Authorization: `Bearer ${Redacted.value(provider.token)}`,
       'User-Agent': githubUserAgent,
       'X-GitHub-Api-Version': githubApiVersion,
     }),
