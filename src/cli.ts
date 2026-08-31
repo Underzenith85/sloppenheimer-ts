@@ -8,6 +8,7 @@ import {
   githubProviderOf,
   layerGitHubIssueControl,
   makeGitHubCodeReview,
+  makeGitHubSourceControl,
   makeGitHubTracker,
 } from './adapters/github/index.js'
 import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
@@ -15,7 +16,7 @@ import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { loadWorkflow, preflightWorkflow } from './config/workflow.js'
 import { trackerProviders } from './tracker-adapters.js'
 import { startOrchestrator, type OrchestratorServices } from './core/orchestrator.js'
-import { TrackerError, type WorkflowError } from './errors.js'
+import { SourceControlError, TrackerError, type WorkflowError } from './errors.js'
 import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
 import {
@@ -23,16 +24,19 @@ import {
   CurrentIssueControl,
   layerAgentRunner,
   layerCodeReviewPorts,
+  layerSourceControlPorts,
   layerCurrentIssueControl,
   layerPorts,
   layerWorkflowLoader,
   layerWorkflowWatcher,
   portsConfiguration,
   TrackerFactory,
+  SourceControlFactory,
   WorkflowLoader,
   WorkspaceManagerFactory,
   type AdapterServices,
   type CodeReviewServices,
+  type SourceControlServices,
 } from './ports/index.js'
 import { logInfo } from './support/logging.js'
 
@@ -120,6 +124,21 @@ const codeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFacto
     }),
 })
 
+const sourceControl: Layer.Layer<SourceControlFactory> = Layer.succeed(SourceControlFactory, {
+  make: (validated) =>
+    Effect.try({
+      try: () => makeGitHubSourceControl(githubProviderOf(validated)),
+      catch: (cause: unknown) =>
+        new SourceControlError({
+          category: 'invalid_repository',
+          message: `tracker kind ${validated.kind} cannot configure host source control`,
+          retryable: false,
+          worktreePreserved: true,
+          cause,
+        }),
+    }),
+})
+
 /** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
 const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.pipe(
   Layer.provide(layerGitHubIssueControl),
@@ -132,8 +151,8 @@ const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.
 const ports = (
   workflowPath: string,
 ): Layer.Layer<
-  OrchestratorServices | CodeReviewServices | CurrentIssueControl,
-  WorkflowError | TrackerError
+  OrchestratorServices | CodeReviewServices | SourceControlServices | CurrentIssueControl,
+  WorkflowError | TrackerError | SourceControlError
 > =>
   Layer.unwrapEffect(
     loadWorkflow(workflowPath, trackerProviders).pipe(
@@ -142,6 +161,7 @@ const ports = (
         return Layer.mergeAll(
           layerPorts(configuration, adapters),
           layerCodeReviewPorts(configuration, codeReview),
+          layerSourceControlPorts(configuration, sourceControl),
           issueControl,
         )
       }),

@@ -1,4 +1,4 @@
-import { Effect, Layer, Stream } from 'effect'
+import { Effect, Layer, Option, Stream } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { HooksConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
@@ -9,12 +9,15 @@ import {
   AgentRunner,
   codeReview,
   CodeReviewFactory,
+  SourceControlFactory,
   layerAgentRunner,
   layerCodeReviewPorts,
+  layerSourceControlPorts,
   layerPorts,
   layerWorkflowLoader,
   layerWorkflowWatcher,
   tracker,
+  sourceControl,
   TrackerFactory,
   workspaces,
   WorkflowLoader,
@@ -156,6 +159,55 @@ describe('port layer composition', (): void => {
     )
 
     expect(absent).toBeNull()
+  })
+
+  it('composes source control independently from tracker and code review', async (): Promise<void> => {
+    const absent = await Effect.runPromise(
+      Effect.scoped(
+        sourceControl.pipe(
+          Effect.provide(
+            layerSourceControlPorts({
+              tracker: validated,
+              workspaces: { root: '/workspaces', hooks },
+            }),
+          ),
+        ),
+      ),
+    )
+    expect(absent).toBeNull()
+
+    const supplied = await Effect.runPromise(
+      Effect.scoped(
+        sourceControl.pipe(
+          Effect.provide(
+            layerSourceControlPorts(
+              { tracker: validated, workspaces: { root: '/workspaces', hooks } },
+              Layer.succeed(SourceControlFactory, {
+                make: () =>
+                  Effect.succeed({
+                    prepare: (_issue, workspace, target) =>
+                      Effect.succeed({
+                        workspace,
+                        target,
+                        baseBranch: 'main',
+                        baseSha: 'base',
+                        baselineSha: 'base',
+                        expectedRemoteHead: Option.none(),
+                      }),
+                    publish: (_issue, prepared) =>
+                      Effect.succeed({
+                        _tag: 'NoChanges',
+                        branchName: prepared.target.branchName,
+                        baselineSha: prepared.baselineSha,
+                      }),
+                  }),
+              }),
+            ),
+          ),
+        ),
+      ),
+    )
+    expect(supplied).not.toBeNull()
   })
 
   it('keeps a supplied code-review factory in place of the absence marker', async (): Promise<void> => {

@@ -718,6 +718,10 @@ export const adoptExecutions = (
     tracker: next.tracker,
     codeReview:
       execution.codeReview === previous.codeReview ? next.codeReview : execution.codeReview,
+    sourceControl:
+      execution.sourceControl === previous.sourceControl
+        ? next.sourceControl
+        : execution.sourceControl,
     secretEnvironmentNames: [...next.tracker.secretEnvironmentNames],
   })
   let updated = state
@@ -730,7 +734,9 @@ export const adoptExecutions = (
     updated = noteSupersededPorts(
       updated,
       entry.runId,
-      [entry.execution.tracker, entry.execution.codeReview].filter((instance) => instance !== null),
+      [entry.execution.tracker, entry.execution.codeReview, entry.execution.sourceControl].filter(
+        (instance) => instance !== null,
+      ),
     )
     updated = {
       ...updated,

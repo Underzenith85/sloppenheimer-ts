@@ -144,7 +144,11 @@ const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
   issue,
   fiber: settledFiber,
   execution,
-  sessionPorts: MutableRef.make({ tracker: execution.tracker, codeReview: null }),
+  sessionPorts: MutableRef.make({
+    tracker: execution.tracker,
+    codeReview: null,
+    sourceControl: null,
+  }),
   attempt: null,
   startedAt: new Date('2026-01-01T00:00:00.000Z'),
   lastEventAt: null,

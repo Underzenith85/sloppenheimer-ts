@@ -47,6 +47,21 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
   readonly cause?: unknown
 }> {}
 
+export class SourceControlError extends Data.TaggedError('SourceControlError')<{
+  readonly category:
+    | 'invalid_repository'
+    | 'prepare_failed'
+    | 'publication_failed'
+    | 'rebase_conflict'
+    | 'lease_conflict'
+    | 'authentication_failed'
+  readonly message: string
+  readonly retryable: boolean
+  /** Whether the local edits or commit remain available for another publication attempt. */
+  readonly worktreePreserved: boolean
+  readonly cause?: unknown
+}> {}
+
 export class AgentError extends Data.TaggedError('AgentError')<{
   readonly category:
     | 'spawn_failed'

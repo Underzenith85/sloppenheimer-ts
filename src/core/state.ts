@@ -9,6 +9,8 @@ import type {
   AgentRunnerPort,
   CodeReviewCell,
   CodeReviewPort,
+  SourceControlCell,
+  SourceControlPort,
   TrackerCell,
   TrackerPort,
   WorkflowLoaderPort,
@@ -103,7 +105,7 @@ export type RuntimeState = Readonly<{
 }>
 
 /** The ports a session reaches its provider through, as they stand at the moment of the call. */
-export type SessionPorts = Pick<ExecutionSnapshot, 'tracker' | 'codeReview'>
+export type SessionPorts = Pick<ExecutionSnapshot, 'tracker' | 'codeReview' | 'sourceControl'>
 
 export type RunningEntry = Readonly<{
   runId: number
@@ -214,6 +216,7 @@ export type EffectiveWorkflow = Readonly<{
   workflow: Workflow
   tracker: TrackerPort
   codeReview: CodeReviewPort | null
+  sourceControl: SourceControlPort | null
   workspaces: WorkspaceManagerPort
   loadedAt: Date
 }>
@@ -222,6 +225,7 @@ export type ExecutionSnapshot = Readonly<{
   workflow: Workflow
   tracker: TrackerPort
   codeReview: CodeReviewPort | null
+  sourceControl: SourceControlPort | null
   requiredLabels: readonly string[]
   activeStates: readonly string[]
   terminalStates: readonly string[]
@@ -274,7 +278,7 @@ export type PublishedDetail =
  * its execution snapshot captured, and a handoff holds the workspace manager its run created.
  */
 export type PendingRetirement = Readonly<{
-  kind: 'tracker' | 'codeReview' | 'workspaces'
+  kind: 'tracker' | 'codeReview' | 'sourceControl' | 'workspaces'
   instance: unknown
   retire: Effect.Effect<void>
 }>
@@ -296,6 +300,8 @@ export type RuntimePorts = Readonly<{
    * application follows the core continuation lifecycle.
    */
   codeReviewCell: Option.Option<CodeReviewCell>
+  /** None when host-owned publication is not composed. */
+  sourceControlCell: Option.Option<SourceControlCell>
 }>
 
 /** How many finished agents keep their timeline for post-mortem inspection. */
