@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { access, mkdir, readFile, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
-import { Effect, Fiber } from 'effect'
+import { Clock, Effect, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
@@ -67,15 +67,22 @@ describe('workspace safety', (): void => {
   )
 })
 
-/** Polls the host for a condition a hook's own process tree reaches on its own schedule. */
+/**
+ * Polls the host for a condition a hook's own process tree reaches on its own schedule.
+ *
+ * Deadline and wait both run on the fiber's own clock rather than the ambient one, so a case that
+ * drives `TestClock` sees the poll move with it instead of quietly falling back to wall time.
+ * Every caller is `it.live`, where that clock is the wall clock — which is what waiting on a real
+ * process needs.
+ */
 const waitFor = (predicate: () => boolean, timeoutMs = 10_000): Effect.Effect<boolean> =>
-  host(async () => {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
+  Effect.gen(function* () {
+    const deadline = (yield* Clock.currentTimeMillis) + timeoutMs
+    while ((yield* Clock.currentTimeMillis) < deadline) {
       if (predicate()) {
         return true
       }
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25))
+      yield* Effect.sleep(25)
     }
     return predicate()
   })
