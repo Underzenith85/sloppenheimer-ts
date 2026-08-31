@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { runAgent } from '../../src/adapters/codex/codex.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
-import { githubProviderDefaults } from '../../src/config/tracker-config.js'
+import { githubProviderDefaults } from '../../src/adapters/github/provider.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
 
 const environment = process.env

@@ -2,6 +2,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect } from 'effect'
+
+import { trackerProviders } from '../../src/tracker-adapters.js'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
@@ -48,7 +50,7 @@ describe('Core Conformance workflow errors and strict parsing', (): void => {
     ],
   ] as const)('returns a typed error for %s', async (_name, source, category): Promise<void> => {
     const path = await writeWorkflow(source)
-    const error = await Effect.runPromise(Effect.flip(loadWorkflow(path, {})))
+    const error = await Effect.runPromise(Effect.flip(loadWorkflow(path, {}, trackerProviders)))
     expect(error.category).toBe(category)
   })
 
@@ -70,7 +72,9 @@ codex:
 ---
 {{ issue.identifier }} {{ attempt }}
 `)
-    const workflow = await Effect.runPromise(loadWorkflow(path, { TRACKER_TOKEN: 'secret' }))
+    const workflow = await Effect.runPromise(
+      loadWorkflow(path, { TRACKER_TOKEN: 'secret' }, trackerProviders),
+    )
     expect(workflow.config.codex.command).toBe('printf "$UNCHANGED" | codex app-server')
     expect([...workflow.config.agent.maxConcurrentAgentsByState]).toEqual([['ready', 2]])
     expect(await Effect.runPromise(renderPrompt(workflow, issue, 4))).toBe('owner/repository#19 4')
@@ -87,7 +91,9 @@ tracker:
 ---
 {{ unknown.value }}
 `)
-    const workflow = await Effect.runPromise(loadWorkflow(path, { TRACKER_TOKEN: 'secret' }))
+    const workflow = await Effect.runPromise(
+      loadWorkflow(path, { TRACKER_TOKEN: 'secret' }, trackerProviders),
+    )
     const error = await Effect.runPromise(Effect.flip(renderPrompt(workflow, issue, null)))
     expect(error.category).toBe('template_render_error')
   })

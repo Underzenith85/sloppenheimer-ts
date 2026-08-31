@@ -5,11 +5,7 @@ import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.
 import { TrackerError } from '../../errors.js'
 import { isJsonArray } from '../../support/json.js'
 import { logWarning } from '../../support/logging.js'
-import {
-  githubAuthenticationEnvironmentNames,
-  sameTrackerProvider,
-  type GitHubProviderConfig,
-} from '../../config/tracker-config.js'
+import { sameTrackerProvider } from '../../domain/tracker-provider.js'
 import type { HostToolResult, HostToolSpec } from '../../host-tools.js'
 import { unsupportedHostTool } from '../../host-tools.js'
 import {
@@ -20,6 +16,11 @@ import {
 } from '../../ports/issue-control.js'
 import type { TrackerPort } from '../../ports/tracker.js'
 import { githubJson, githubPageSize, trackerResponseError, withBoundHttpClient } from './client.js'
+import {
+  githubProviderOf,
+  githubSecretEnvironmentNames,
+  type GitHubProviderConfig,
+} from './provider.js'
 import {
   decodeGitHubDependency,
   decodeGitHubIssue,
@@ -294,9 +295,7 @@ export const makeGitHubTracker = (
   return {
     toolSpecs: githubTrackerToolSpecs,
     executeTool: makeGitHubTrackerToolExecutor(provider, prefix, httpClient),
-    secretEnvironmentNames: [
-      ...new Set([provider.tokenEnvironmentName, ...githubAuthenticationEnvironmentNames]),
-    ],
+    secretEnvironmentNames: githubSecretEnvironmentNames(provider),
     fetchIssuesByStates: (
       states,
       dependencyLabels,
@@ -432,7 +431,17 @@ export const makeGitHubIssueControl = (
  * nothing else about the workflow reaches it.
  */
 export const gitHubIssueControlFactory: IssueControlFactoryPort = {
-  make: (provider) => Effect.succeed(makeGitHubIssueControl(provider.provider)),
+  make: (provider) =>
+    Effect.try({
+      try: () => makeGitHubIssueControl(githubProviderOf(provider)),
+      catch: (cause) =>
+        new TrackerError({
+          category: 'unsupported_tracker_kind',
+          message: `tracker.kind ${provider.kind} does not supply GitHub's issue control`,
+          retryable: false,
+          cause,
+        }),
+    }),
   serves: sameTrackerProvider,
 }
 

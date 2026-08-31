@@ -10,9 +10,12 @@ import type { Issue, JsonObject, JsonValue } from '../domain/domain.js'
 import { expandHomePath, resolvePathReference } from './env-reference.js'
 import { WorkflowError } from '../errors.js'
 import { emptyJsonObject, JsonConversionError, toJsonObject, toJsonValue } from '../support/json.js'
-import { validateTrackerProvider, type ValidatedTrackerProvider } from './tracker-config.js'
+import type {
+  TrackerProviderRegistry,
+  ValidatedTrackerProvider,
+} from '../domain/tracker-provider.js'
 
-export type { GitHubProviderConfig, ValidatedTrackerProvider } from './tracker-config.js'
+export type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
 export type TrackerConfig = Readonly<{
   kind: string
@@ -512,9 +515,14 @@ const splitWorkflow = (source: string): Readonly<{ config: unknown; prompt: stri
 }
 
 /**
- * Re-runs the validation that must hold before every dispatch: a supported `tracker.kind`, an
- * adapter-accepted `tracker.provider` (including its secret indirection), and a usable
- * `codex.command`.
+ * Re-runs the validation that must hold before every dispatch: an adapter-accepted
+ * `tracker.provider` (including its secret indirection) and a usable `codex.command`.
+ *
+ * The provider is re-read from the workflow, so an edit to `tracker.provider` takes effect; the
+ * adapter that validates it comes from the selection rather than from a registry looked up again by
+ * kind. A workflow loaded with a caller's own registry therefore keeps revalidating through that
+ * registry's adapter: routing this through a default registry instead would report every kind the
+ * default does not carry as unsupported, and the run would silently keep its superseded credential.
  */
 export const preflightWorkflow = (
   workflow: Workflow,
@@ -528,11 +536,7 @@ export const preflightWorkflow = (
           message: 'codex.command must be a non-empty string',
         })
       }
-      return validateTrackerProvider(
-        workflow.config.tracker.kind,
-        workflow.config.tracker.provider,
-        environment,
-      )
+      return workflow.tracker.revalidate(workflow.config.tracker.provider, environment)
     },
     catch: (cause: unknown) =>
       cause instanceof WorkflowError
@@ -544,9 +548,18 @@ export const preflightWorkflow = (
           }),
   })
 
+/**
+ * Reads and validates a workflow definition.
+ *
+ * `providers` is supplied by the caller rather than defaulted here: the registry names concrete
+ * adapters, and this layer must not reach up to the composition root to find them. The selection
+ * this returns carries the adapter that validated it, so every later revalidation stays with the
+ * registry used here.
+ */
 export const loadWorkflow = (
-  path = resolve(process.cwd(), 'WORKFLOW.md'),
-  environment: NodeJS.ProcessEnv = process.env,
+  path: string,
+  environment: NodeJS.ProcessEnv,
+  providers: TrackerProviderRegistry,
 ): Effect.Effect<Workflow, WorkflowError> =>
   Effect.tryPromise({
     try: async () => {
@@ -576,7 +589,7 @@ export const loadWorkflow = (
         path,
         fingerprint: createHash('sha256').update(source).digest('hex'),
         config,
-        tracker: validateTrackerProvider(config.tracker.kind, config.tracker.provider, environment),
+        tracker: providers.validate(config.tracker.kind, config.tracker.provider, environment),
         promptTemplate: definition.prompt,
       }
     },

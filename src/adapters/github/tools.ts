@@ -3,7 +3,7 @@ import { Effect } from 'effect'
 
 import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { TrackerError } from '../../errors.js'
-import type { GitHubProviderConfig } from '../../config/tracker-config.js'
+import type { GitHubProviderConfig } from './provider.js'
 import type { HostToolContext, HostToolFailureCode, HostToolResult } from '../../host-tools.js'
 import { isJsonRecord, trackerResponseError, withBoundHttpClient } from './client.js'
 

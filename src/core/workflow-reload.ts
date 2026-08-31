@@ -1,6 +1,6 @@
 import { Effect, Option } from 'effect'
 
-import { sameTrackerProvider } from '../config/tracker-config.js'
+import { sameTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
 import { WorkflowError } from '../errors.js'
 import { portsConfiguration, type AdapterCell, type CodeReviewPort } from '../ports/index.js'

@@ -161,14 +161,9 @@
             // negation there suppresses any later group for the same specifier.
             "paths": [
               {
-                "name": "../config/tracker-config.js",
-                "allowTypeImports": true,
-                "message": "ports/ may reference this only as a type until #94 removes the GitHub-shaped provider type from the core surface."
-              },
-              {
                 "name": "../config/workflow.js",
                 "allowTypeImports": true,
-                "message": "ports/ may reference this only as a type until #94 and #105 settle the workflow configuration type surface."
+                "message": "ports/ may reference this only as a type until #105 settles the workflow configuration type surface."
               },
               {
                 "name": "../errors.js",
@@ -192,7 +187,6 @@
                   "../**",
                   "!../domain/**",
                   "!../support/**",
-                  "!../config/tracker-config.js",
                   "!../config/workflow.js",
                   "!../errors.js",
                   "!../host-tools.js",

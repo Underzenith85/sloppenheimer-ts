@@ -5,6 +5,7 @@ import { Cause, Effect, Exit, Layer } from 'effect'
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
 import {
   githubHttpClientLayer,
+  githubProviderOf,
   layerGitHubIssueControl,
   makeGitHubCodeReview,
   makeGitHubTracker,
@@ -12,8 +13,9 @@ import {
 import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { loadWorkflow, preflightWorkflow } from './config/workflow.js'
+import { trackerProviders } from './tracker-adapters.js'
 import { startOrchestrator, type OrchestratorServices } from './core/orchestrator.js'
-import type { TrackerError, WorkflowError } from './errors.js'
+import { TrackerError, type WorkflowError } from './errors.js'
 import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
 import {
@@ -37,6 +39,22 @@ import { logInfo } from './support/logging.js'
 const shutdownTimeoutMs = 10_000
 
 /**
+ * What an operator is owed when a workflow names a kind `trackerProviders` validates but this
+ * executable has no ports for. Reading the selection back through the GitHub adapter throws, and
+ * these factories build their instance eagerly, so the throw is caught here and reported as a
+ * typed failure the orchestrator can surface rather than a defect that takes the host down.
+ */
+const boundToGitHub =
+  (kind: string) =>
+  (cause: unknown): TrackerError =>
+    new TrackerError({
+      category: 'unsupported_tracker_kind',
+      message: `tracker.kind ${kind} is validated but this build binds its ports to github only`,
+      retryable: false,
+      cause,
+    })
+
+/**
  * The concrete adapters this executable binds: GitHub for the tracker and for code review, Codex
  * for the agent runner, and the host filesystem for workflows and workspaces. Nothing below the
  * composition root names any of them.
@@ -44,13 +62,17 @@ const shutdownTimeoutMs = 10_000
 const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   layerAgentRunner(codexAgentRunner),
   Layer.succeed(TrackerFactory, {
-    make: (validated) => Effect.succeed(makeGitHubTracker(validated.provider)),
+    make: (validated) =>
+      Effect.try({
+        try: () => makeGitHubTracker(githubProviderOf(validated)),
+        catch: boundToGitHub(validated.kind),
+      }),
   }),
   Layer.succeed(WorkspaceManagerFactory, {
     make: (settings) => Effect.succeed(makeWorkspaceManager(settings.root, settings.hooks)),
   }),
   layerWorkflowLoader({
-    load: (path) => loadWorkflow(path),
+    load: (path) => loadWorkflow(path, process.env, trackerProviders),
     preflight: (workflow) => preflightWorkflow(workflow),
   }),
   layerWorkflowWatcher({
@@ -70,7 +92,11 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
 )
 
 const codeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFactory, {
-  make: (validated) => Effect.succeed(makeGitHubCodeReview(validated.provider)),
+  make: (validated) =>
+    Effect.try({
+      try: () => makeGitHubCodeReview(githubProviderOf(validated)),
+      catch: boundToGitHub(validated.kind),
+    }),
 })
 
 /** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
@@ -89,7 +115,7 @@ const ports = (
   WorkflowError | TrackerError
 > =>
   Layer.unwrapEffect(
-    loadWorkflow(workflowPath).pipe(
+    loadWorkflow(workflowPath, process.env, trackerProviders).pipe(
       Effect.map((workflow) => {
         const configuration = portsConfiguration(workflow)
         return Layer.mergeAll(

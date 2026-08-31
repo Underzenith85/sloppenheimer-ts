@@ -40,7 +40,11 @@ const fixtures: Readonly<Record<string, string>> = {
   // only as types: a port must not acquire a runtime dependency on configuration or on root
   // infrastructure under cover of the exemption.
   'src/ports/permitted-allow-list.ts':
-    "import type { ValidatedTrackerProvider } from '../config/tracker-config.js'\nimport type { Workflow } from '../config/workflow.js'\nimport type { TrackerError } from '../errors.js'\nimport type { HostToolSpec } from '../host-tools.js'\nimport type { AgentEvent } from '../telemetry.js'\n\nexport type Vocabulary = [ValidatedTrackerProvider, Workflow, TrackerError, HostToolSpec, AgentEvent]\n",
+    "import type { Workflow } from '../config/workflow.js'\nimport type { TrackerError } from '../errors.js'\nimport type { HostToolSpec } from '../host-tools.js'\nimport type { AgentEvent } from '../telemetry.js'\n\nexport type Vocabulary = [Workflow, TrackerError, HostToolSpec, AgentEvent]\n",
+  // #94 retired the tracker-configuration entry: the validated tracker selection is domain
+  // vocabulary now, so a port reaches it through domain/ rather than through configuration.
+  'src/ports/violates-retired-tracker-config-allow-list.ts':
+    "import type { ValidatedTrackerProvider } from '../config/tracker-config.js'\n\nexport type V = ValidatedTrackerProvider\n",
   'src/ports/violates-allow-list-value.ts':
     "import { loadWorkflow } from '../config/workflow.js'\n\nexport const load = loadWorkflow\n",
   'src/ports/violates-allow-list-side-effect.ts': "import '../telemetry.js'\n",

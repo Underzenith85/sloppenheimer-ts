@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { githubJson, type GitHubHttpResult } from '../../../src/adapters/github/client.js'
 import { makeGitHubTracker } from '../../../src/adapters/github/issues.js'
 import { issueId, issueIdentifier } from '../../../src/domain/domain.js'
-import type { GitHubProviderConfig } from '../../../src/config/tracker-config.js'
+import type { GitHubProviderConfig } from '../../../src/adapters/github/index.js'
 import type { TrackerError } from '../../../src/errors.js'
 
 const provider: GitHubProviderConfig = {
