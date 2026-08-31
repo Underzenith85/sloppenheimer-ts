@@ -65,17 +65,28 @@ const append = (current: string, chunk: Buffer): string => {
   return `${current}${chunk.toString('utf8')}`.slice(0, outputLimit)
 }
 
+/** What a failure reads like to a human: both streams, so no diagnostic is lost from the message. */
 const failureText = (failure: GitFailure): string => `${failure.stderr}\n${failure.stdout}`.trim()
 
+/**
+ * The text a failure is classified from: git's diagnostics, never its data.
+ *
+ * `stdout` is what the command was asked for — `rev-parse` writes a commit SHA there, `ls-remote` a
+ * ref listing — and a failure carries whatever of it had been read. Classifying on that text made a
+ * SHA containing `403` read as an HTTP status, which is a real reading for roughly one commit in
+ * fifty-four.
+ */
+const diagnosticText = (failure: GitFailure): string => failure.stderr.trim()
+
 const isAuthenticationFailure = (failure: GitFailure): boolean =>
-  /authentication failed|could not read username|invalid username or password|permission denied|repository not found|403|401/iu.test(
-    failureText(failure),
+  /authentication failed|could not read username|invalid username or password|permission denied|repository not found|returned error: 40[13]/iu.test(
+    diagnosticText(failure),
   )
 
 const sourceControlFailure = (failure: GitFailure, operation: GitOperation): SourceControlError => {
   const authentication = isAuthenticationFailure(failure)
   const leaseConflict = /stale info|fetch first|non-fast-forward|rejected.*stale/iu.test(
-    failureText(failure),
+    diagnosticText(failure),
   )
   return new SourceControlError({
     category: authentication
