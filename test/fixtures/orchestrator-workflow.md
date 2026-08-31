@@ -18,6 +18,8 @@ agent:
   max_retry_backoff_ms: 300000
 codex:
   stall_timeout_ms: 30000
+handoff:
+  enabled: true
 ---
 
 Work on {{ issue.identifier }} attempt {{ attempt }}.
