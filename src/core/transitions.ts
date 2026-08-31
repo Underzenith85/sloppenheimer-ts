@@ -1,4 +1,4 @@
-import type { Deferred } from 'effect'
+import { Option, type Deferred } from 'effect'
 
 import type { Issue, IssueId, JsonObject } from '../domain/domain.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
@@ -27,7 +27,9 @@ import {
  * A transition the caller must then act on — a retry fiber to interrupt, a run entry to account for
  * — hands the value back beside the state rather than performing the effect itself, so the decision
  * stays separable from what carries it out. Those return `[value, nextState]`, which is the order
- * `Ref.modify` consumes and so the order a call site can hand straight to the cell.
+ * `Ref.modify` consumes and so the order a call site can hand straight to the cell. A lookup that
+ * may find nothing answers with `Option`, because what it found is what decides the caller's next
+ * branch — never with `null`, which this codebase keeps for data that is serialized.
  */
 
 const withEntry = <Key, Value>(
@@ -135,12 +137,12 @@ export const endRun = (
   state: RuntimeState,
   id: IssueId,
   expectedRunId: number | null,
-): readonly [RunningEntry | null, RuntimeState] => {
+): readonly [Option.Option<RunningEntry>, RuntimeState] => {
   const entry = state.running.get(id)
   if (entry === undefined || (expectedRunId !== null && entry.runId !== expectedRunId)) {
-    return [null, state]
+    return [Option.none(), state]
   }
-  return [entry, { ...state, running: withoutEntry(state.running, id) }]
+  return [Option.some(entry), { ...state, running: withoutEntry(state.running, id) }]
 }
 
 /** Replaces a live run's entry, if the run is still the one the caller read. */
@@ -312,8 +314,8 @@ export const mergeRateLimits = (state: RuntimeState, rateLimits: JsonObject): Ru
 export const scheduleRetry = (
   state: RuntimeState,
   entry: RetryEntry,
-): readonly [RetryEntry | null, RuntimeState] => {
-  const existing = state.retries.get(entry.issue.id) ?? null
+): readonly [Option.Option<RetryEntry>, RuntimeState] => {
+  const existing = Option.fromNullable(state.retries.get(entry.issue.id))
   const claimed = claimIssue(state, entry.issue)
   return [existing, { ...claimed, retries: withEntry(claimed.retries, entry.issue.id, entry) }]
 }
@@ -322,12 +324,12 @@ export const scheduleRetry = (
 export const takeRetry = (
   state: RuntimeState,
   id: IssueId,
-): readonly [RetryEntry | null, RuntimeState] => {
+): readonly [Option.Option<RetryEntry>, RuntimeState] => {
   const entry = state.retries.get(id)
   if (entry === undefined) {
-    return [null, state]
+    return [Option.none(), state]
   }
-  return [entry, { ...state, retries: withoutEntry(state.retries, id) }]
+  return [Option.some(entry), { ...state, retries: withoutEntry(state.retries, id) }]
 }
 
 /**
@@ -338,12 +340,12 @@ export const takeDueRetry = (
   state: RuntimeState,
   id: IssueId,
   attempt: number,
-): readonly [RetryEntry | null, RuntimeState] => {
+): readonly [Option.Option<RetryEntry>, RuntimeState] => {
   const entry = state.retries.get(id)
   if (entry?.attempt !== attempt) {
-    return [null, state]
+    return [Option.none(), state]
   }
-  return [entry, { ...state, retries: withoutEntry(state.retries, id) }]
+  return [Option.some(entry), { ...state, retries: withoutEntry(state.retries, id) }]
 }
 
 // ---------------------------------------------------------------------------

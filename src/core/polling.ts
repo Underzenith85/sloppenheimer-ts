@@ -1,4 +1,4 @@
-import { Deferred, Effect, Fiber, Queue, Ref, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
 
 import { cyclicIssueIdentifiers } from '../domain/dependencies.js'
 import type { Issue } from '../domain/domain.js'
@@ -207,14 +207,14 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           break
         }
         case 'WorkerExited': {
-          const entry = yield* Ref.modify(context.state, (current) =>
+          const ended = yield* Ref.modify(context.state, (current) =>
             Transitions.endRun(current, event.issueId, event.runId),
           )
-          if (entry === null) {
+          if (Option.isNone(ended)) {
             break
           }
           const settled = yield* Ref.modify(context.state, (current) =>
-            Transitions.applyPendingTelemetry(current, event.issueId, entry),
+            Transitions.applyPendingTelemetry(current, event.issueId, ended.value),
           )
           yield* Ref.update(context.state, (current) =>
             Transitions.accountEndedRun(current, settled, Date.now()),
@@ -369,10 +369,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           break
         }
         case 'RetryDue': {
-          const retry = yield* Ref.modify(context.state, (current) =>
+          const due = yield* Ref.modify(context.state, (current) =>
             Transitions.takeDueRetry(current, event.issueId, event.attempt),
           )
-          if (retry === null) {
+          if (Option.isNone(due)) {
             break
           }
           const current = yield* Ref.get(context.state)
@@ -385,7 +385,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           )
           if (refreshResult._tag === 'Failed') {
             yield* context.scheduleRetry(
-              retry.issue,
+              due.value.issue,
               event.attempt + 1,
               `retry refresh failed: ${refreshResult.error.message}`,
               false,
@@ -453,10 +453,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               const retry = yield* Ref.modify(context.state, (current) =>
                 Transitions.takeRetry(current, id),
               )
-              if (retry === null) {
+              if (Option.isNone(retry)) {
                 continue
               }
-              yield* Fiber.interrupt(retry.fiber)
+              yield* Fiber.interrupt(retry.value.fiber)
               // Dropping the queued retry ends the agent, so its detail has to say so: without
               // this the record would publish as completed while still claiming to be waiting
               // to retry, and the retry it pointed at would never arrive.

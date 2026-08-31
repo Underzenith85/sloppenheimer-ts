@@ -1,4 +1,4 @@
-import { Exit, Fiber, MutableRef } from 'effect'
+import { Exit, Fiber, MutableRef, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { Workflow } from '../../src/config/workflow.js'
@@ -317,7 +317,7 @@ describe('retry scheduling', (): void => {
   it('claims the issue and queues the retry together', (): void => {
     const [displaced, scheduled] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
 
-    expect(displaced).toBeNull()
+    expect(Option.isNone(displaced)).toBe(true)
     expect(scheduled.claimed.has(issue.id)).toBe(true)
     expect(scheduled.retries.get(issue.id)?.attempt).toBe(1)
   })
@@ -327,7 +327,7 @@ describe('retry scheduling', (): void => {
 
     const [displaced, second] = Transitions.scheduleRetry(first, retryEntry(issue, 2))
 
-    expect(displaced?.attempt).toBe(1)
+    expect(Option.getOrNull(displaced)?.attempt).toBe(1)
     expect(second.retries.get(issue.id)?.attempt).toBe(2)
   })
 
@@ -337,9 +337,9 @@ describe('retry scheduling', (): void => {
     const [stale, unchanged] = Transitions.takeDueRetry(scheduled, issue.id, 1)
     const [due, drained] = Transitions.takeDueRetry(scheduled, issue.id, 2)
 
-    expect(stale).toBeNull()
+    expect(Option.isNone(stale)).toBe(true)
     expect(unchanged.retries.has(issue.id)).toBe(true)
-    expect(due?.attempt).toBe(2)
+    expect(Option.getOrNull(due)?.attempt).toBe(2)
     expect(drained.retries.has(issue.id)).toBe(false)
   })
 
@@ -359,9 +359,9 @@ describe('run lifecycle', (): void => {
     const [superseded, kept] = Transitions.endRun(started, issue.id, 6)
     const [ended, cleared] = Transitions.endRun(started, issue.id, 7)
 
-    expect(superseded).toBeNull()
+    expect(Option.isNone(superseded)).toBe(true)
     expect(kept.running.has(issue.id)).toBe(true)
-    expect(ended?.runId).toBe(7)
+    expect(Option.getOrNull(ended)?.runId).toBe(7)
     expect(cleared.running.has(issue.id)).toBe(false)
   })
 

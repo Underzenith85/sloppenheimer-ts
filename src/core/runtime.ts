@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { Deferred, Effect, Fiber, Queue, Ref, Runtime, Stream, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, Ref, Runtime, Stream, type Scope } from 'effect'
 
 import {
   issueId,
@@ -225,7 +225,7 @@ export type OrchestratorContext = Readonly<{
     id: IssueId,
     cleanupWorkspace: boolean,
     reason?: string,
-  ) => Effect.Effect<RunningEntry | null>
+  ) => Effect.Effect<Option.Option<RunningEntry>>
   /** Mirrors an observed pull-request disposition onto the issue's retained handoff detail. */
   noteHandoffOutcome: (
     id: IssueId,
@@ -769,12 +769,12 @@ export const startOrchestratorRuntime = (
       id: IssueId,
       cleanupWorkspace: boolean,
       reason = 'the orchestrator cancelled the run',
-    ): Effect.Effect<RunningEntry | null> =>
+    ): Effect.Effect<Option.Option<RunningEntry>> =>
       Effect.gen(function* () {
         const before = yield* Ref.get(state)
         const running = before.running.get(id)
         if (running === undefined) {
-          return null
+          return Option.none()
         }
         const queuedBeforeInterruption = before.pendingLifecycle.get(id)?.length ?? 0
         yield* Fiber.interrupt(running.fiber)
@@ -828,7 +828,7 @@ export const startOrchestratorRuntime = (
             ),
           )
         }
-        return settled
+        return Option.some(settled)
       })
 
     const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
@@ -880,8 +880,8 @@ export const startOrchestratorRuntime = (
         const displaced = yield* Ref.modify(state, (pending) =>
           Transitions.scheduleRetry(pending, { issue, attempt, dueAt, error, fiber }),
         )
-        if (displaced !== null) {
-          yield* Fiber.interrupt(displaced.fiber)
+        if (Option.isSome(displaced)) {
+          yield* Fiber.interrupt(displaced.value.fiber)
         }
         const scheduledAt = new Date()
         yield* Ref.update(state, (pending) =>
@@ -940,8 +940,13 @@ export const startOrchestratorRuntime = (
             false,
             `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
           )
-          if (ended !== null) {
-            yield* scheduleRetry(ended.issue, (ended.attempt ?? 0) + 1, 'agent stalled', false)
+          if (Option.isSome(ended)) {
+            yield* scheduleRetry(
+              ended.value.issue,
+              (ended.value.attempt ?? 0) + 1,
+              'agent stalled',
+              false,
+            )
           }
         }
       }

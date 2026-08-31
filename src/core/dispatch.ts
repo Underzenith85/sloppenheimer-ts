@@ -1,4 +1,4 @@
-import { Effect, Fiber, MutableRef, Queue, Ref, type Scope } from 'effect'
+import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue } from '../domain/domain.js'
@@ -77,8 +77,8 @@ export const dispatch = (
     const displacedRetry = yield* Ref.modify(context.state, (current) =>
       Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
     )
-    if (displacedRetry !== null) {
-      yield* Fiber.interrupt(displacedRetry.fiber)
+    if (Option.isSome(displacedRetry)) {
+      yield* Fiber.interrupt(displacedRetry.value.fiber)
     }
 
     const base = effectiveOverride ?? before.lastKnownGood
