@@ -65,18 +65,6 @@ const hostIsLoopback = (value: string | undefined): boolean => {
   }
 }
 
-/**
- * The shape a tracker identifier may take. Rejecting anything else keeps a malformed path from
- * reaching the actor at all, and keeps the reflected error free of caller-supplied text.
- *
- * The length bound only excludes paths no tracker could have produced: a GitHub owner and
- * repository can together run to 140 characters, and a `detail_url` the runtime snapshot publishes
- * must never be rejected by the endpoint it points at.
- */
-const issueIdentifierPattern = /^[\w.\-/]{1,512}#\d{1,12}$/u
-
-const isIssueIdentifier = (value: string): boolean => issueIdentifierPattern.test(value)
-
 const backendFailure = errorResponse(
   502,
   'backend_error',
@@ -209,15 +197,13 @@ const makeRouter = (
       '/api/v1/agents/:identifier',
       withMethod(
         'GET',
+        // As with the baseline resource, the identifier is not matched against a shape: this route is
+        // what a published `detail_url` points at, so a pattern here would make a tracker's own
+        // inspection resource unreachable for the identifiers it spells. The lookup distinguishes
+        // the four outcomes, and an identifier this session has never run is `404 agent_not_found`
+        // whether it is unknown or unspellable.
         Effect.flatMap(HttpRouter.params, (params) => {
           const identifier = params['identifier'] ?? ''
-          if (!isIssueIdentifier(identifier)) {
-            return errorResponse(
-              400,
-              'invalid_identifier',
-              'The agent identifier is not a valid issue identifier',
-            )
-          }
           return Effect.map(backend.agentDetail(identifier), (lookup) => {
             switch (lookup._tag) {
               case 'Found': {

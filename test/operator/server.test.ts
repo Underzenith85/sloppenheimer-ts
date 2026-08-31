@@ -297,7 +297,7 @@ describe('operator server', (): void => {
   )
 
   it.live(
-    'distinguishes retrying, completed, sessionless, unavailable, missing, and malformed detail requests',
+    'distinguishes retrying, completed, sessionless, unavailable, and missing detail requests',
     () =>
       withServer(makeBackend(), async (url) => {
         const detailFor = (identifier: string): Promise<Response> =>
@@ -330,8 +330,9 @@ describe('operator server', (): void => {
         })
         expect(missing.status).toBe(404)
         expect(await missing.json()).toMatchObject({ error: { code: 'agent_not_found' } })
-        expect(malformed.status).toBe(400)
-        expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_identifier' } })
+        // Nothing this session ran is spelled that way, which is what `agent_not_found` means.
+        expect(malformed.status).toBe(404)
+        expect(await malformed.json()).toMatchObject({ error: { code: 'agent_not_found' } })
         expect(longIdentifier.status).toBe(200)
         expect(wrongMethod.status).toBe(405)
       }),
@@ -555,6 +556,21 @@ describe('operator server', (): void => {
         const missing = await fetch(`${url}/api/v1/${encodeURIComponent('GH-8')}`)
         expect(missing.status).toBe(404)
         expect(await missing.json()).toMatchObject({ error: { code: 'issue_not_found' } })
+
+        // The link a successful response advertises must be one its own target accepts. The agent
+        // route answers for this identifier on its own terms — no session ran for it — rather than
+        // refusing to read it at all.
+        const body: unknown = await (
+          await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`)
+        ).json()
+        const detailUrl =
+          typeof body === 'object' && body !== null && 'detail_url' in body
+            ? String((body as { detail_url: unknown }).detail_url)
+            : ''
+        expect(detailUrl).toBe('/api/v1/agents/GH-7')
+        const followed = await fetch(`${url}${detailUrl}`)
+        expect(followed.status).toBe(404)
+        expect(await followed.json()).toMatchObject({ error: { code: 'agent_not_found' } })
       })
     }),
   )

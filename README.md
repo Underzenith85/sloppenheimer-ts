@@ -348,6 +348,13 @@ being reported absent — the host can disprove that absence. The superset keeps
 where an issue with no live agent session is `409 agent_not_active`, because that is the question an
 inspector is asking.
 
+Neither resource matches its identifier against a shape. `IssueIdentifier` is an unconstrained
+branded string and the port boundary is tracker-neutral, so a tracker is free to spell one `GH-7`;
+deciding syntactically which spellings are addressable would make both resources unreachable for a
+provider whose identifiers carry no `#`. Existence is the only question, and in-memory state answers
+it — which also keeps a published `detail_url` followable, since the link and its target read the
+identifier the same way.
+
 Three baseline fields are mapped rather than stored under those names. `workspace.path` publishes
 the deterministic workspace key, not the host absolute path: the path is a filesystem detail the
 console never needs, and the detail pipeline redacts it before retention, so there is no absolute
