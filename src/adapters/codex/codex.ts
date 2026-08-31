@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as NodeStream from '@effect/platform-node/NodeStream'
-import { Effect, Fiber, Stream } from 'effect'
+import { Effect, Fiber, Runtime, Stream, type Scope } from 'effect'
 
 import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.js'
@@ -240,6 +240,13 @@ const isApprovalRequest = (method: string): boolean =>
   /requestApproval$/u.test(method) && !isPermissionsApproval(method)
 const isUserInputRequest = (method: string): boolean => /requestUserInput$/u.test(method)
 
+/**
+ * How a session starts its readers. The caller supplies it from the runtime and scope the session
+ * runs in, so a reader is a child of that scope rather than a fiber on the default runtime: one
+ * left running by a session that never stopped cleanly is interrupted when the scope closes.
+ */
+type ForkReader = (reader: Effect.Effect<void>) => Fiber.RuntimeFiber<void>
+
 class CodexConnection {
   readonly #process: ChildProcessWithoutNullStreams
   readonly #readTimeoutMs: number
@@ -285,6 +292,7 @@ class CodexConnection {
     secretEnvironmentNames: readonly string[],
     hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
+    fork: ForkReader,
   ) {
     const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
     // Read from the host environment rather than the subprocess's: the tracker's own secret is
@@ -307,7 +315,7 @@ class CodexConnection {
     // stdout carries protocol framing only. Reading it as a stream keeps the framing state in
     // the pipeline rather than in the connection, and lets the framing limit end the read the way
     // any other protocol error does.
-    this.#stdout = Effect.runFork(
+    this.#stdout = fork(
       NodeStream.fromReadable<AgentError>(
         () => this.#process.stdout,
         (cause) =>
@@ -338,7 +346,7 @@ class CodexConnection {
     // value into an unkeyed fragment that can escape the header redactor. A read that fails is the
     // end of the diagnostics rather than a session failure, and ends the stream so that whatever
     // record was still open is flushed.
-    this.#stderr = Effect.runFork(
+    this.#stderr = fork(
       NodeStream.fromReadable<AgentError>(
         () => this.#process.stderr,
         (cause) =>
@@ -1114,7 +1122,15 @@ const runVerifiedAgent = (
       ),
     )
 
-  return Effect.scoped(
+  /**
+   * The session's readers are forked against this scope, so they belong to the run rather than to
+   * the default runtime. The scope closes after the session has stopped, which is where a reader
+   * the stop did not already finish is interrupted.
+   */
+  const openConnection = (
+    runtime: Runtime.Runtime<never>,
+    scope: Scope.Scope,
+  ): Effect.Effect<CodexConnection, never, Scope.Scope> =>
     Effect.acquireRelease(
       Effect.sync(
         () =>
@@ -1125,54 +1141,60 @@ const runVerifiedAgent = (
             launch.secretEnvironmentNames,
             launch.hostTools ?? null,
             launch.onEvent,
+            (reader) => Runtime.runFork(runtime)(reader, { scope }),
           ),
       ),
       (connection) => Effect.promise(() => connection.stop()),
-    ).pipe(
-      Effect.flatMap((connection) =>
-        Effect.tryPromise({
-          try: async () => {
-            await rebind()
-            const threadId = await connection.initialize(launch.config, verified.path)
-            // Re-bound after the boundary too: a swap during the request window is then detected
-            // and the session torn down before any turn runs.
-            await rebind()
-            let turnId = ''
-            let turnCount = 0
-            while (turnCount < launch.maxTurns) {
-              const turnPrompt =
-                turnCount === 0
-                  ? launch.prompt
-                  : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
+    )
+
+  return Effect.scoped(
+    Effect.all([Effect.runtime<never>(), Effect.scope])
+      .pipe(Effect.flatMap(([runtime, scope]) => openConnection(runtime, scope)))
+      .pipe(
+        Effect.flatMap((connection) =>
+          Effect.tryPromise({
+            try: async () => {
               await rebind()
-              turnId = await connection.startTurn(
-                threadId,
-                verified.path,
-                launch.config,
-                turnPrompt,
-                turnCount + 1,
-              )
+              const threadId = await connection.initialize(launch.config, verified.path)
+              // Re-bound after the boundary too: a swap during the request window is then detected
+              // and the session torn down before any turn runs.
               await rebind()
-              await connection.awaitTurn(turnId)
-              turnCount += 1
-              const refreshed = await Effect.runPromise(launch.refreshIssue())
-              if (refreshed === null || !launch.isRoutable(refreshed)) {
-                break
+              let turnId = ''
+              let turnCount = 0
+              while (turnCount < launch.maxTurns) {
+                const turnPrompt =
+                  turnCount === 0
+                    ? launch.prompt
+                    : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
+                await rebind()
+                turnId = await connection.startTurn(
+                  threadId,
+                  verified.path,
+                  launch.config,
+                  turnPrompt,
+                  turnCount + 1,
+                )
+                await rebind()
+                await connection.awaitTurn(turnId)
+                turnCount += 1
+                const refreshed = await Effect.runPromise(launch.refreshIssue())
+                if (refreshed === null || !launch.isRoutable(refreshed)) {
+                  break
+                }
               }
-            }
-            return { threadId, turnId, turnCount }
-          },
-          catch: (cause: unknown) =>
-            cause instanceof AgentError
-              ? cause
-              : new AgentError({
-                  category: 'protocol_error',
-                  message: `Codex session failed for ${launch.issue.identifier}`,
-                  cause,
-                }),
-        }),
+              return { threadId, turnId, turnCount }
+            },
+            catch: (cause: unknown) =>
+              cause instanceof AgentError
+                ? cause
+                : new AgentError({
+                    category: 'protocol_error',
+                    message: `Codex session failed for ${launch.issue.identifier}`,
+                    cause,
+                  }),
+          }),
+        ),
       ),
-    ),
   )
 }
 
