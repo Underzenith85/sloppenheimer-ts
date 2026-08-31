@@ -1,4 +1,4 @@
-import { Effect, type Scope } from 'effect'
+import { Effect, Option, type Scope } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import { classifyPullRequest } from '../domain/handoff.js'
@@ -51,12 +51,13 @@ export const reconcileHandoffs = (
         continue
       }
       // A repair agent has finished: attribute the head it produced before anything else reads it.
-      if (inspected.observation.state === 'open' && handoff.repairStartedHeadSha !== null) {
+      // Refused dispatches remain in flight while their retry is queued; restored baselines do not.
+      const repair = handoff.repair
+      if (inspected.observation.state === 'open' && Option.isSome(repair)) {
         const repairedHeadSha = inspected.observation.headSha
-        if (repairedHeadSha !== handoff.repairStartedHeadSha) {
+        if (repairedHeadSha !== repair.value.startedHeadSha) {
           if (handoff.repairObservedHeadShas.includes(repairedHeadSha)) {
-            handoff.repairStartedHeadSha = null
-            handoff.repairBaselineRestored = false
+            handoff.repair = Option.none()
             handoff.state = 'intervention_required'
             handoff.headSha = repairedHeadSha
             handoff.reason =
@@ -65,17 +66,15 @@ export const reconcileHandoffs = (
           }
           handoff.repairHeadShas.push(repairedHeadSha)
           handoff.repairObservedHeadShas.push(repairedHeadSha)
-          handoff.repairStartedHeadSha = null
-          handoff.repairBaselineRestored = false
-        } else if (handoff.repairBaselineRestored) {
+          handoff.repair = Option.none()
+        } else if (!repair.value.inFlight) {
           // The baseline outlived the process that dispatched the repair, so an unchanged head is
           // an interrupted repair, not a completed no-op. Drop the baseline and let the normal
           // repair path retry; no head was observed, so the budget is untouched.
-          handoff.repairStartedHeadSha = null
-          handoff.repairBaselineRestored = false
+          handoff.repair = Option.none()
         } else {
           const unchangedDisposition = classifyPullRequest(inspected.observation)
-          handoff.repairStartedHeadSha = null
+          handoff.repair = Option.none()
           if (unchangedDisposition.state === 'repair_needed') {
             handoff.state = 'intervention_required'
             handoff.headSha = repairedHeadSha
@@ -243,8 +242,22 @@ export const reconcileHandoffs = (
           workspaces: handoff.execution.workspaces,
           loadedAt: handoff.observedAt,
         }
-        // The budget is spent by an observed head, not by dispatching: record the baseline only
-        // once a session really started, so a refused dispatch costs nothing.
+        // A repair owns its baseline from the decision to repair, including any refused dispatch
+        // and the retry that follows it. The budget is still spent only by an observed new head.
+        const baselineHeadSha = inspected.observation.headSha
+        if (baselineHeadSha === null) {
+          handoff.reason = `Cannot dispatch a repair without a pull request head. ${disposition.reason}`
+          continue
+        }
+        handoff.repair = Option.some({
+          issue: repairIssue,
+          startedHeadSha: baselineHeadSha,
+          inFlight: true,
+          workerStarted: false,
+        })
+        if (!handoff.repairObservedHeadShas.includes(baselineHeadSha)) {
+          handoff.repairObservedHeadShas.push(baselineHeadSha)
+        }
         const started = yield* dispatch(
           context,
           repairIssue,
@@ -252,16 +265,15 @@ export const reconcileHandoffs = (
           effective,
         )
         if (started) {
-          const baselineHeadSha = inspected.observation.headSha
-          handoff.repairStartedHeadSha = baselineHeadSha
-          if (
-            baselineHeadSha !== null &&
-            !handoff.repairObservedHeadShas.includes(baselineHeadSha)
-          ) {
-            handoff.repairObservedHeadShas.push(baselineHeadSha)
-          }
-          handoff.repairBaselineRestored = false
+          handoff.repair = Option.some({
+            issue: repairIssue,
+            startedHeadSha: baselineHeadSha,
+            inFlight: true,
+            workerStarted: true,
+          })
           handoff.reason = `Repair agent running. ${disposition.reason}`
+        } else {
+          handoff.reason = `Repair agent waiting to retry. ${disposition.reason}`
         }
       }
     }

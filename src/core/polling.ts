@@ -1,7 +1,8 @@
-import { Deferred, Effect, Fiber, Queue, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, type Scope } from 'effect'
 
 import { cyclicIssueIdentifiers } from '../domain/dependencies.js'
 import type { Issue } from '../domain/domain.js'
+import { classifyPullRequest } from '../domain/handoff.js'
 import type { Workflow } from '../config/workflow.js'
 import { mergeSparseObject } from '../support/json.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -297,8 +298,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               reason: 'Awaiting the first protected-branch observation',
               repairHeadShas: existingHandoff?.repairHeadShas ?? [],
               repairObservedHeadShas: existingHandoff?.repairObservedHeadShas ?? [],
-              repairStartedHeadSha: existingHandoff?.repairStartedHeadSha ?? null,
-              repairBaselineRestored: existingHandoff?.repairBaselineRestored ?? false,
+              repair: existingHandoff === undefined ? Option.none() : existingHandoff.repair,
               reviewRequestedHeadSha: existingHandoff?.reviewRequestedHeadSha ?? null,
               reviewCompletedHeadSha: existingHandoff?.reviewCompletedHeadSha ?? null,
               observedAt: new Date(),
@@ -346,6 +346,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           }
           const issue = refreshResult.issues.find((candidate) => candidate.id === event.issueId)
           if (issue === undefined) {
+            const handoff = context.state.handoffs.get(event.issueId)
+            if (handoff !== undefined && Option.isSome(handoff.repair)) {
+              handoff.repair = Option.none()
+              yield* context.persistHandoffsEffect()
+            }
             context.state.claimed.delete(event.issueId)
             break
           }
@@ -362,6 +367,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 }),
               ),
             )
+            const handoff = context.state.handoffs.get(event.issueId)
+            if (handoff !== undefined && Option.isSome(handoff.repair)) {
+              handoff.repair = Option.none()
+              yield* context.persistHandoffsEffect()
+            }
             context.state.claimed.delete(event.issueId)
             break
           }
@@ -369,22 +379,90 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             !context.issueIsActiveValue(issue, effective.workflow) ||
             !context.issueIsRoutableValue(issue, effective.workflow)
           ) {
+            const handoff = context.state.handoffs.get(event.issueId)
+            if (handoff !== undefined && Option.isSome(handoff.repair)) {
+              // A worker may have pushed immediately before failing. Keep its baseline for one
+              // handoff reconciliation even though the continuation cannot currently be routed.
+              // A dispatch refused before any worker started has no output to attribute.
+              handoff.repair = handoff.repair.value.workerStarted
+                ? Option.some({ ...handoff.repair.value, inFlight: false })
+                : Option.none()
+              yield* context.persistHandoffsEffect()
+            }
             context.state.claimed.delete(event.issueId)
             break
           }
-          if (!context.stateHasSlotValue(issue, context.state, effective.workflow)) {
+          const handoff = context.state.handoffs.get(event.issueId)
+          const repair = handoff?.repair ?? Option.none()
+          let dispatchIssue =
+            Option.isSome(repair) && repair.value.inFlight
+              ? { ...issue, description: repair.value.issue.description }
+              : issue
+          if (!context.stateHasSlotValue(dispatchIssue, context.state, effective.workflow)) {
             yield* context.scheduleRetryEffect(
-              issue,
+              dispatchIssue,
               event.attempt + 1,
               'no available orchestrator slots',
               false,
             )
             break
           }
-          // A worker retry is a continuation, not a repair, so it establishes no repair baseline.
-          // Repairs are baselined only where they are dispatched as repairs, in reconciliation,
-          // from a head observed in the same pass.
-          yield* dispatch(context, issue, event.attempt)
+          if (
+            handoff !== undefined &&
+            Option.isSome(repair) &&
+            repair.value.inFlight &&
+            !repair.value.workerStarted
+          ) {
+            const codeReview = handoff.execution.codeReview
+            if (codeReview === null) {
+              handoff.repair = Option.none()
+              yield* context.persistHandoffsEffect()
+              break
+            }
+            const inspected = yield* codeReview.inspectPullRequest(handoff.pullRequestNumber).pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+              }),
+            )
+            if (inspected._tag === 'Failed') {
+              yield* context.scheduleRetryEffect(
+                repair.value.issue,
+                event.attempt + 1,
+                `repair baseline refresh failed: ${inspected.error.message}`,
+                false,
+              )
+              break
+            }
+            const disposition = classifyPullRequest(inspected.observation)
+            if (inspected.observation.state !== 'open' || disposition.state !== 'repair_needed') {
+              handoff.repair = Option.none()
+              yield* context.persistHandoffsEffect()
+              break
+            }
+            const startedHeadSha = inspected.observation.headSha
+            dispatchIssue = {
+              ...issue,
+              description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${startedHeadSha}\n\n${disposition.reason}`,
+            }
+            handoff.repair = Option.some({
+              issue: dispatchIssue,
+              startedHeadSha,
+              inFlight: true,
+              workerStarted: false,
+            })
+            if (!handoff.repairObservedHeadShas.includes(startedHeadSha)) {
+              handoff.repairObservedHeadShas.push(startedHeadSha)
+            }
+            yield* context.persistHandoffsEffect()
+          }
+          // An ordinary worker continuation has no repair identity and establishes no baseline.
+          // A refused repair dispatch refreshes its baseline and repair-shaped prompt on retries.
+          const started = yield* dispatch(context, dispatchIssue, event.attempt)
+          if (started && handoff !== undefined && Option.isSome(handoff.repair)) {
+            handoff.repair = Option.some({ ...handoff.repair.value, workerStarted: true })
+            yield* context.persistHandoffsEffect()
+          }
           break
         }
         case 'SetIssuePaused': {
@@ -404,6 +482,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 yield* Fiber.interrupt(retry.fiber)
                 context.state.retries.delete(id)
                 context.state.claimed.delete(id)
+                const handoff = context.state.handoffs.get(id)
+                if (handoff !== undefined && Option.isSome(handoff.repair)) {
+                  handoff.repair = Option.none()
+                  yield* context.persistHandoffsEffect()
+                }
                 // Dropping the queued retry ends the agent, so its detail has to say so: without
                 // this the record would publish as completed while still claiming to be waiting
                 // to retry, and the retry it pointed at would never arrive.

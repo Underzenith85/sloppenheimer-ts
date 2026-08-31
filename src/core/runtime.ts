@@ -80,6 +80,17 @@ export type RetryEntry = {
   fiber: Fiber.RuntimeFiber<void>
 }
 
+export type RepairEntry = {
+  /** The repair-shaped issue, retained so a refused dispatch can render the same repair on retry. */
+  issue: Issue
+  /** Pull-request head from which this repair was started. */
+  startedHeadSha: string
+  /** False only when a persisted baseline was restored without its original worker or retry. */
+  inFlight: boolean
+  /** Whether a worker actually started, as opposed to a dispatch refused before launch. */
+  workerStarted: boolean
+}
+
 export type HandoffEntry = {
   issue: Issue
   execution: ExecutionSnapshot
@@ -97,14 +108,8 @@ export type HandoffEntry = {
    * repair started from.
    */
   repairObservedHeadShas: string[]
-  /** Head observed when the in-flight repair was dispatched, or null when no repair is running. */
-  repairStartedHeadSha: string | null
-  /**
-   * Whether repairStartedHeadSha came back from the store rather than from a dispatch in this
-   * process. Not persisted: a restored baseline proves a repair started, never that it finished,
-   * so an unchanged head means the repair was interrupted rather than a no-op.
-   */
-  repairBaselineRestored: boolean
+  /** The repair currently running or waiting to retry; None for ordinary worker continuations. */
+  repair: Option.Option<RepairEntry>
   reviewRequestedHeadSha: string | null
   reviewCompletedHeadSha: string | null
   observedAt: Date
@@ -424,6 +429,7 @@ export type OrchestratorContext = {
     id: IssueId,
     cleanupWorkspace: boolean,
     reason?: string,
+    repairDisposition?: 'release' | 'retain',
   ) => Effect.Effect<RunningEntry | null, never>
   scheduleNextTickEffect: () => Effect.Effect<void, never, Scope.Scope>
   hydrateRestoredHandoffsEffect: () => Effect.Effect<void>
@@ -853,7 +859,10 @@ export const startOrchestratorRuntime = (
         repairAttempts: handoff.repairHeadShas.length,
         repairHeadShas: [...handoff.repairHeadShas],
         repairObservedHeadShas: [...handoff.repairObservedHeadShas],
-        repairStartedHeadSha: handoff.repairStartedHeadSha,
+        repairStartedHeadSha: Option.match(handoff.repair, {
+          onNone: () => null,
+          onSome: (repair) => repair.startedHeadSha,
+        }),
         reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
         reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
         observedAt: handoff.observedAt.toISOString(),
@@ -942,8 +951,15 @@ export const startOrchestratorRuntime = (
             ],
             // Preserved rather than cleared: a repair may have pushed a new head just before the
             // restart, and the first observation after recovery needs this baseline to attribute it.
-            repairStartedHeadSha: restored.repairStartedHeadSha ?? null,
-            repairBaselineRestored: (restored.repairStartedHeadSha ?? null) !== null,
+            repair:
+              restored.repairStartedHeadSha === undefined || restored.repairStartedHeadSha === null
+                ? Option.none()
+                : Option.some({
+                    issue,
+                    startedHeadSha: restored.repairStartedHeadSha,
+                    inFlight: false,
+                    workerStarted: true,
+                  }),
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
@@ -1196,8 +1212,7 @@ export const startOrchestratorRuntime = (
             reason: 'reason' in disposition ? disposition.reason : null,
             repairHeadShas: [],
             repairObservedHeadShas: [],
-            repairStartedHeadSha: null,
-            repairBaselineRestored: false,
+            repair: Option.none(),
             reviewRequestedHeadSha: null,
             reviewCompletedHeadSha: null,
             observedAt,
@@ -1326,6 +1341,7 @@ export const startOrchestratorRuntime = (
       id: IssueId,
       cleanupWorkspace: boolean,
       reason = 'the orchestrator cancelled the run',
+      repairDisposition: 'release' | 'retain' = 'release',
     ): Effect.Effect<RunningEntry | null, never> =>
       Effect.gen(function* () {
         const entry = state.running.get(id)
@@ -1354,6 +1370,15 @@ export const startOrchestratorRuntime = (
         applyPendingTelemetry(id, entry)
         endRunning(id, null)
         accountEndedRuntime(entry, Date.now())
+        const handoff = state.handoffs.get(id)
+        if (
+          handoff !== undefined &&
+          Option.isSome(handoff.repair) &&
+          repairDisposition === 'release'
+        ) {
+          handoff.repair = Option.none()
+          yield* persistHandoffs()
+        }
         const record = state.details.get(id)
         if (record !== undefined) {
           recordCancellation(record, new Date(), reason)
@@ -1397,6 +1422,7 @@ export const startOrchestratorRuntime = (
               id,
               false,
               `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
+              'retain',
             )
             if (ended !== null) {
               yield* scheduleRetry(ended.issue, (ended.attempt ?? 0) + 1, 'agent stalled', false)
