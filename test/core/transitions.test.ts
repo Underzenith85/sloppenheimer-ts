@@ -261,6 +261,49 @@ describe('turn identity', (): void => {
     expect(detail.turnCount).toBe(2)
   })
 
+  it('retains one session summary per composed session id', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    let detail = recordAgentEvent(detailFor(issue), agentEvent(null, 'thread-1', 0))
+
+    // The thread is known before any turn runs, so the summary opened there is completed by the
+    // first turn rather than left beside a second one describing the same stretch of work.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1'])
+
+    detail = recordAgentEvent(detail, agentEvent('turn-1', 'thread-1-turn-1', 1))
+
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1-turn-1'])
+    expect(detail.sessions.at(-1)?.endedAt).toBeNull()
+
+    detail = recordAgentEvent(detail, agentEvent('turn-2', 'thread-1-turn-2', 2))
+
+    // Each continuation turn is its own session, and the one it succeeds is closed rather than
+    // left open beside it.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual([
+      'thread-1-turn-1',
+      'thread-1-turn-2',
+    ])
+    expect(detail.sessions.at(0)?.endedAt).not.toBeNull()
+    expect(detail.sessions.at(-1)?.endedAt).toBeNull()
+    expect(detail.sessions.every((session) => session.threadId === 'thread-1')).toBe(true)
+    expect(detail.sessionId).toBe('thread-1-turn-2')
+  })
+
+  it('does not reopen a session for a superseded turn reporting late', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const detail = recordAgentEvent(
+      recordAgentEvent(
+        recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+        agentEvent('turn-2', 'thread-1-turn-2', 2),
+      ),
+      agentEvent('turn-1', 'thread-1-turn-1', 1),
+    )
+
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual([
+      'thread-1-turn-1',
+      'thread-1-turn-2',
+    ])
+  })
+
   it('lets a new attempt start again at turn one after the count was reset', (): void => {
     const issue = makeIssue('example/symphony#1')
     const restarted = recordAttemptStarted(

@@ -925,7 +925,7 @@ const noteChangedPath = (
   }
 }
 
-/** Opens a session summary for the thread the agent has just identified itself with. */
+/** Opens a session summary for the identity the agent has just reported. */
 const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
   const sessions = [
     ...record.sessions,
@@ -944,6 +944,42 @@ const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => 
       sessions.length > retainedAttemptLimit ? sessions.slice(-retainedAttemptLimit) : sessions,
     ),
   }
+}
+
+/**
+ * Keeps the retained session history on the same identity the record reports. A session is one turn
+ * on a thread, so each turn is its own retained session: when the composed id changes the open
+ * summary is closed and a new one opened. The first turn on a thread is the exception — it
+ * completes the summary `session_started` opened while only the thread was known, because there was
+ * no session before that turn, only the thread that would run it.
+ */
+const alignSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  if (record.threadId === null) {
+    return record
+  }
+  const open = record.sessions.at(-1)
+  if (open === undefined || open.endedAt !== null || open.threadId !== record.threadId) {
+    return openSession(record, at)
+  }
+  if (open.sessionId === record.sessionId) {
+    return record
+  }
+  const replaceOpen = (summary: AgentSessionSummary): readonly AgentSessionSummary[] =>
+    Object.freeze([...record.sessions.slice(0, -1), Object.freeze(summary)])
+  if (open.sessionId === record.threadId) {
+    return {
+      ...record,
+      sessions: replaceOpen({
+        ...open,
+        sessionId: record.sessionId,
+        processId: record.processId,
+      }),
+    }
+  }
+  return openSession(
+    { ...record, sessions: replaceOpen({ ...open, endedAt: at.toISOString() }) },
+    at,
+  )
 }
 
 const messageOperation = (text: string | null): string =>
@@ -988,7 +1024,7 @@ export const recordAgentEvent = (
   // consumes them rather than deriving its own. The same token counts reach the record and the
   // usage timeline event, and a timeline event is only frozen shallowly, so the object they share
   // is frozen here rather than left reachable through `events[i].tokens`.
-  const observed: AgentDetailRecord = {
+  const reported: AgentDetailRecord = {
     ...record,
     lastActivityAt: at,
     processId: event.processId ?? record.processId,
@@ -997,6 +1033,9 @@ export const recordAgentEvent = (
     tokens: event.usage === null ? record.tokens : Object.freeze({ ...event.usage }),
     rateLimits: event.rateLimits === null ? record.rateLimits : decodeRateLimits(event.rateLimits),
   }
+  // Every event, not only a session-scoped one: whichever event first reports a turn's identity
+  // is the one the retained history has to follow, or the summaries drift from `identity`.
+  const observed = alignSession(reported, at)
   const base = {
     sequence: nextSequence(observed),
     attempt: observed.attempt,
@@ -1016,14 +1055,10 @@ export const recordAgentEvent = (
   }
   switch (payload.kind) {
     case 'session': {
-      const sessioned =
-        observed.threadId !== null && observed.sessions.at(-1)?.threadId !== observed.threadId
-          ? openSession(observed, at)
-          : observed
       const next =
-        sessioned.phase === 'starting'
-          ? setPhase(sessioned, 'awaiting_model', 'Waiting for the model', at)
-          : sessioned
+        observed.phase === 'starting'
+          ? setPhase(observed, 'awaiting_model', 'Waiting for the model', at)
+          : observed
       return push(next, {
         ...base,
         operation: next.operation,
