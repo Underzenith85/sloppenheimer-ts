@@ -1,6 +1,7 @@
 import { Effect, Either, MutableRef, Option, Ref } from 'effect'
 
 import { sameTrackerProvider } from '../domain/tracker-provider.js'
+import { currentInstant } from '../support/clock.js'
 import type { Workflow } from '../config/workflow.js'
 import { SourceControlError, WorkflowError } from '../errors.js'
 import {
@@ -181,7 +182,7 @@ export const rebuildEffectiveWorkflow = (
         codeReview,
         sourceControl,
         workspaces,
-        loadedAt: new Date(),
+        loadedAt: yield* currentInstant,
       }
       return built
     }).pipe(

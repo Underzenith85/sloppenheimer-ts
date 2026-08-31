@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  Clock,
   Effect,
   Exit,
   Fiber,
@@ -2183,7 +2184,9 @@ describe('restored pull request handoffs', (): void => {
           while (launchedDescriptions.length === 0) {
             yield* Effect.yieldNow()
           }
-          yield* TestClock.adjust(1)
+          // Past the one-millisecond stall bound, which the orchestrator now measures against the
+          // same clock this test drives.
+          yield* TestClock.adjust(2)
           yield* control.refresh
           let current = yield* control.snapshot
           expect(current.running).toEqual([])
@@ -5950,6 +5953,9 @@ describe('session telemetry accounting', (): void => {
           yield* Effect.yieldNow()
           yield* Effect.yieldNow()
 
+          // The last event is dated at the clock's origin, so the stall bound is passed by moving
+          // the clock rather than by however long the test itself took.
+          yield* TestClock.adjust(2)
           yield* control.refresh
 
           const snapshot = yield* control.snapshot
@@ -6387,9 +6393,12 @@ describe('session telemetry accounting', (): void => {
     const ports: TestPorts = {
       ...harness.ports,
       runAgent: () =>
-        Effect.sync(() => {
-          failureAt = Date.now()
-        }).pipe(
+        Clock.currentTimeMillis.pipe(
+          Effect.tap((now) =>
+            Effect.sync(() => {
+              failureAt = now
+            }),
+          ),
           Effect.zipRight(
             Effect.fail(new AgentError({ category: 'process_exited', message: 'test failure' })),
           ),

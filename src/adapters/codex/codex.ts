@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as NodeStream from '@effect/platform-node/NodeStream'
 import {
+  Clock,
   Config,
   Deferred,
   Effect,
@@ -18,6 +19,7 @@ import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.js'
 import { AgentError, type WorkspaceError } from '../../errors.js'
 import type { AgentLaunch, AgentResult, AgentRunnerConfig } from '../../ports/agent-runner.js'
+import { currentInstant } from '../../support/clock.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from '../../support/json.js'
 import { processGroupIsAlive } from '../../support/subprocess.js'
 import type { HostToolResult, HostToolSession } from '../../host-tools.js'
@@ -459,7 +461,7 @@ class CodexConnection {
       ])
       this.#onEvent({
         event: 'account/rateLimits/read',
-        timestamp: new Date(),
+        timestamp: yield* currentInstant,
         processId: this.processId,
         message: null,
         usage: null,
@@ -795,9 +797,9 @@ class CodexConnection {
    */
   #reapGroup(): Effect.Effect<void> {
     return Effect.gen(this, function* () {
-      const escalateAt = Date.now() + shutdownGraceMs
+      const escalateAt = (yield* Clock.currentTimeMillis) + shutdownGraceMs
       while (this.#processGroupIsAlive()) {
-        if (Date.now() >= escalateAt) {
+        if ((yield* Clock.currentTimeMillis) >= escalateAt) {
           this.#terminate('SIGKILL')
           break
         }
@@ -806,8 +808,8 @@ class CodexConnection {
       // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
       // finalizer complete — and terminal reconciliation start removing the workspace — while a
       // descendant is still running in it.
-      const deadline = Date.now() + groupReapDeadlineMs
-      while (this.#processGroupIsAlive() && Date.now() < deadline) {
+      const deadline = (yield* Clock.currentTimeMillis) + groupReapDeadlineMs
+      while (this.#processGroupIsAlive() && (yield* Clock.currentTimeMillis) < deadline) {
         yield* Effect.sleep(groupReapPollMs)
       }
     })
@@ -1344,7 +1346,7 @@ class CodexConnection {
       const eventTurnId = Option.getOrNull(turnId)
       this.#onEvent({
         event: method,
-        timestamp: new Date(),
+        timestamp: yield* currentInstant,
         processId: this.processId,
         message: messageFrom(message, this.#knownSecretValues),
         usage: Option.getOrNull(usage),
@@ -1411,8 +1413,8 @@ class CodexConnection {
   ): Effect.Effect<void> {
     const carriedThreadId = Option.fromNullable(carried.threadId)
     const carriedTurnId = Option.fromNullable(carried.turnId)
-    return Ref.get(this.#state).pipe(
-      Effect.tap((state) =>
+    return Effect.all([Ref.get(this.#state), currentInstant]).pipe(
+      Effect.tap(([state, timestamp]) =>
         Effect.sync(() => {
           const threadId = carriedThreadId.pipe(Option.orElse(() => state.threadId))
           const turnId = carriedTurnId.pipe(Option.orElse(() => state.turnId))
@@ -1421,7 +1423,7 @@ class CodexConnection {
           const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
           this.#onEvent({
             event,
-            timestamp: new Date(),
+            timestamp,
             processId: this.processId,
             message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
             usage: null,

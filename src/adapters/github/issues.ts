@@ -1,5 +1,5 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, Redacted, type Layer } from 'effect'
+import { Clock, Effect, Redacted, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from '../../domain/dependencies.js'
@@ -259,37 +259,36 @@ const hydrateDependencies = (
 ): Effect.Effect<readonly Issue[], TrackerError> =>
   Effect.forEach(
     issues,
-    (issue) => {
-      const shouldHydrate =
-        issue.dispatchable &&
-        (dependencyLabels === null ||
-          (dependencyLabels.length > 0 &&
-            dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))))
-      if (!shouldHydrate) {
-        return Effect.succeed(issue)
-      }
-      const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
-      const cached = cache.get(issue.id)
-      if (
-        useCache &&
-        dependencyLabels === null &&
-        cached !== undefined &&
-        cached.issueUpdatedAt === issueUpdatedAt &&
-        cached.expiresAt > Date.now()
-      ) {
-        return Effect.succeed({ ...issue, blockedBy: cached.blockedBy })
-      }
-      return fetchBlockedBy(provider, prefix, issue).pipe(
-        Effect.map((blockedBy) => {
-          cache.set(issue.id, {
-            blockedBy,
-            issueUpdatedAt,
-            expiresAt: Date.now() + dependencyCacheTtlMs,
-          })
-          return { ...issue, blockedBy }
-        }),
-      )
-    },
+    (issue) =>
+      Effect.gen(function* () {
+        const shouldHydrate =
+          issue.dispatchable &&
+          (dependencyLabels === null ||
+            (dependencyLabels.length > 0 &&
+              dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))))
+        if (!shouldHydrate) {
+          return issue
+        }
+        const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
+        const cached = cache.get(issue.id)
+        const now = yield* Clock.currentTimeMillis
+        if (
+          useCache &&
+          dependencyLabels === null &&
+          cached !== undefined &&
+          cached.issueUpdatedAt === issueUpdatedAt &&
+          cached.expiresAt > now
+        ) {
+          return { ...issue, blockedBy: cached.blockedBy }
+        }
+        const blockedBy = yield* fetchBlockedBy(provider, prefix, issue)
+        cache.set(issue.id, {
+          blockedBy,
+          issueUpdatedAt,
+          expiresAt: now + dependencyCacheTtlMs,
+        })
+        return { ...issue, blockedBy }
+      }),
     { concurrency: dependencyConcurrency },
   ).pipe(Effect.map(applyDispatchEligibility))
 
