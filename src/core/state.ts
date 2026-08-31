@@ -178,7 +178,9 @@ export type RepairEntry = Readonly<{
  * What a cancelled run does with the repair identity it was carrying.
  *
  * - `release`: the repair is over, so the identity goes with it.
- * - `retain`: a retry continues this repair from the same baseline.
+ * - `retain`: leave the identity exactly as it stands, because something else still resolves it --
+ *   a retry that continues this repair, or the next pull-request inspection, which is what reaches
+ *   the verdict on a repair that changed nothing.
  * - `settle`: nothing continues it, but the worker may have pushed before it was cancelled, so the
  *   baseline outlives it for exactly one handoff inspection to attribute that head.
  */

@@ -584,8 +584,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 }),
               ),
             )
-            // A terminal issue abandons its pull request, so the repair ends with it.
-            yield* releaseHandoffRepair(context, event.issueId, handoff)
+            // The repair identity is deliberately left alone: the handoff outlives the issue, and
+            // the next inspection is what resolves the baseline -- attributing a head the worker
+            // pushed, or escalating a repair that changed nothing. Releasing it here would erase
+            // that verdict and let reconciliation dispatch another repair for abandoned work.
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),
             )

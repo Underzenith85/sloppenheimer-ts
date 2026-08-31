@@ -1054,10 +1054,11 @@ export const startOrchestratorRuntime = (
             terminal
               ? `the issue reached the terminal state ${issue.state}`
               : `the issue left its active states as ${issue.state}`,
-            // A worker may have pushed immediately before its issue left the active states, and
+            // A worker may have pushed immediately before its issue stopped qualifying, and
             // nothing continues it: keep the baseline for one inspection so that head is
-            // attributed. A terminal issue abandons the pull request outright.
-            terminal ? 'release' : 'settle',
+            // attributed. A terminal issue keeps its baseline untouched, so the next inspection
+            // still reaches the verdict for a repair that changed nothing.
+            terminal ? 'retain' : 'settle',
           )
         } else {
           yield* Ref.update(state, (current) =>

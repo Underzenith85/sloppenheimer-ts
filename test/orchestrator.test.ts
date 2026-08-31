@@ -2426,6 +2426,139 @@ describe('restored pull request handoffs', (): void => {
     await rm(reloadedRoot, { force: true, recursive: true })
   })
 
+  it('does not dispatch a fresh repair once a repair retry finds its issue terminal', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-terminal-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let currentIssue = issue
+    let launches = 0
+    let workspacesCreated = 0
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      makeWorkspaces: (settings) => ({
+        ...harness.ports.makeWorkspaces(settings),
+        create: () =>
+          Effect.sync(() => {
+            workspacesCreated += 1
+            return { path: '/tmp/symphony-test', key: 'test', createdNow: true }
+          }),
+      }),
+      // The repair pushes nothing and fails, so a retry is queued behind it.
+      runAgent: () =>
+        Effect.suspend(() => {
+          launches += 1
+          return Effect.fail(
+            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+          )
+        }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The issue closes while the repair retry is queued, so the retry stands down.
+          currentIssue = { ...issue, state: 'closed' }
+          yield* TestClock.adjust('20 seconds')
+          while (current.retrying.length !== 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    // The handoff outlives the issue, so the baseline the stood-down retry left behind is what the
+    // next inspection reads: a repair that changed nothing is an operator's problem, not grounds
+    // for another agent and another checkout of work that was just abandoned.
+    expect(launches).toBe(1)
+    expect(workspacesCreated).toBe(1)
+    expect(snapshot.handoffs[0]).toMatchObject({
+      state: 'intervention_required',
+      repairAttempts: 0,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('does not dispatch a fresh repair once a running repair finds its issue terminal', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-terminal-run-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let currentIssue = issue
+    let launches = 0
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      // The repair pushes nothing and stays open, so only the cancellation ends it.
+      runAgent: () =>
+        Effect.suspend(() => {
+          launches += 1
+          return Effect.never
+        }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.running.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The issue closes while its repair is running, so reconciliation cancels the worker.
+          currentIssue = { ...issue, state: 'closed' }
+          while (current.running.length !== 0) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    // The cancelled worker's baseline is left standing, so the next inspection reaches the verdict
+    // for a repair that changed nothing rather than starting another one.
+    expect(launches).toBe(1)
+    expect(snapshot.handoffs[0]).toMatchObject({
+      state: 'intervention_required',
+      repairAttempts: 0,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('attributes a repair head when the tracker omits the issue mid-run', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-missing-run-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
