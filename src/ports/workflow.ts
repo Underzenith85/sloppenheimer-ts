@@ -1,4 +1,4 @@
-import { Context, Layer, type Effect, type Stream } from 'effect'
+import { Context, Layer, type Effect, type Scope, type Stream } from 'effect'
 
 import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
@@ -28,14 +28,17 @@ export const layerWorkflowLoader = (loader: WorkflowLoaderPort): Layer.Layer<Wor
 /**
  * Watches the workflow definition for edits.
  *
- * The edits arrive as a stream rather than through a callback the adapter invokes: an adapter that
- * hands the orchestrator a callback forces it to re-enter the runtime from outside a fiber, and the
- * work that callback starts then belongs to no scope. Consuming a stream keeps every change inside
- * the orchestrator's own fiber, and the watcher itself lives in the scope the stream is run in, so
- * it is torn down on shutdown without a `close` the orchestrator has to remember to call.
+ * Installing the watcher is a scoped acquisition, and what it yields is a stream of edits: the
+ * orchestrator consumes that stream on a fiber of its own, so a change never re-enters the runtime
+ * from a callback, and the watcher is torn down with the scope that acquired it rather than through
+ * a `close` the orchestrator has to remember to call.
+ *
+ * The acquisition completes before the effect returns, so the watcher is in place by the time
+ * startup continues. An edit that arrives before the consuming fiber has subscribed waits in the
+ * stream instead of being missed until the next defensive poll.
  */
 export type WorkflowWatcherPort = Readonly<{
-  changes: (path: string) => Stream.Stream<void>
+  changes: (path: string) => Effect.Effect<Stream.Stream<void>, never, Scope.Scope>
 }>
 
 export class WorkflowWatcher extends Context.Tag('symphony/WorkflowWatcher')<

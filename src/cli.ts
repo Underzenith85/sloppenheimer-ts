@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import chokidar from 'chokidar'
-import { Cause, Effect, Exit, Layer, Stream } from 'effect'
+import { Cause, Effect, Exit, Layer, Queue, Stream } from 'effect'
 
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
 import {
@@ -76,27 +76,33 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
     preflight: (workflow) => preflightWorkflow(workflow),
   }),
   layerWorkflowWatcher({
-    // `asyncPush` is the adapter for a push-based source: chokidar's callback only offers into the
-    // stream's buffer, and the runtime is entered on the consuming fiber instead. The buffer is
-    // unbounded because a dropped change is a reload that never happens.
+    // The queue is what turns chokidar's callback into a stream: `unsafeOffer` is a write to a data
+    // structure rather than an entry into the runtime, and the consuming fiber is where the change
+    // becomes an effect. It is unbounded because a dropped change is a reload that never happens.
+    //
+    // Both resources are acquired here rather than inside a stream the consumer starts later, so
+    // chokidar is installed before startup continues and an edit that lands before the orchestrator
+    // subscribes waits in the queue.
     changes: (path) =>
-      Stream.asyncPush<void>(
-        (emit) =>
-          Effect.acquireRelease(
-            Effect.sync(() => {
-              const watcher = chokidar.watch(path, {
-                awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
-                ignoreInitial: true,
-              })
-              watcher.on('change', () => {
-                emit.single(undefined)
-              })
-              return watcher
-            }),
-            (watcher) => Effect.promise(() => watcher.close()),
-          ),
-        { bufferSize: 'unbounded' },
-      ),
+      Effect.gen(function* () {
+        const changes = yield* Effect.acquireRelease(Queue.unbounded<void>(), (queue) =>
+          Queue.shutdown(queue),
+        )
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const watcher = chokidar.watch(path, {
+              awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+              ignoreInitial: true,
+            })
+            watcher.on('change', () => {
+              Queue.unsafeOffer(changes, undefined)
+            })
+            return watcher
+          }),
+          (watcher) => Effect.promise(() => watcher.close()),
+        )
+        return Stream.fromQueue(changes)
+      }),
   }),
 )
 

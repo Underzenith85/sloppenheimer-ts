@@ -66,7 +66,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
       ),
     preflight: () => Effect.succeed(validated),
   }),
-  layerWorkflowWatcher({ changes: () => Stream.empty }),
+  layerWorkflowWatcher({ changes: () => Effect.succeed(Stream.empty) }),
 )
 
 describe('port layer composition', (): void => {
@@ -116,7 +116,7 @@ describe('port layer composition', (): void => {
             isRoutable: () => true,
             onEvent: () => {},
           })
-          yield* Stream.runDrain(watcher.changes('WORKFLOW.md'))
+          yield* Stream.runDrain(yield* watcher.changes('WORKFLOW.md'))
           const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
           return {
             secretEnvironmentNames: currentTracker.secretEnvironmentNames,

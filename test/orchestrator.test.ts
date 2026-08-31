@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Exit, Fiber, Layer, Scope, Stream, TestClock, TestContext } from 'effect'
+import { Effect, Exit, Fiber, Layer, Queue, Scope, Stream, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
@@ -281,18 +281,17 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
       // The harness pushes into the stream exactly as the chokidar adapter does, so a test drives
       // the same path the composition root binds rather than a callback seam of its own.
       changes: (path) =>
-        Stream.asyncPush<void>(
-          (emit) =>
-            Effect.acquireRelease(
-              Effect.sync(() => {
-                ports.watchWorkflow(path, () => {
-                  emit.single(undefined)
-                })
-              }),
-              () => Effect.sync(() => ports.onWatchReleased?.(path)),
+        Effect.gen(function* () {
+          const changes = yield* Effect.acquireRelease(Queue.unbounded<void>(), (queue) =>
+            Queue.shutdown(queue).pipe(
+              Effect.zipRight(Effect.sync(() => ports.onWatchReleased?.(path))),
             ),
-          { bufferSize: 'unbounded' },
-        ),
+          )
+          ports.watchWorkflow(path, () => {
+            Queue.unsafeOffer(changes, undefined)
+          })
+          return Stream.fromQueue(changes)
+        }),
     }),
   )
 
@@ -354,12 +353,7 @@ const makeHarness = (
   environment: NodeJS.ProcessEnv = testEnvironment,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
-  // A change signalled before the orchestrator has subscribed is held rather than lost: the stream
-  // registers on its consuming fiber, which is scheduled after the call that forked it returns.
-  let pendingChanges = 0
-  let notifyChanged = (): void => {
-    pendingChanges += 1
-  }
+  let notifyChanged = (): void => undefined
   let loadCount = 0
   let stateFetchCount = 0
   const stateFetchStates: (readonly string[])[] = []
@@ -459,11 +453,6 @@ const makeHarness = (
     environment,
     watchWorkflow: (_path, onChange) => {
       notifyChanged = onChange
-      const held = pendingChanges
-      pendingChanges = 0
-      for (let index = 0; index < held; index += 1) {
-        onChange()
-      }
     },
     onTrackerReleased: (provider) => {
       releasedTrackers.push(provider)
@@ -2498,6 +2487,31 @@ describe('workflow hot reload', (): void => {
     expect(fingerprint).toBe('watched')
   })
 
+  it('installs the workflow watcher before startup returns', async (): Promise<void> => {
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+    let watchedPath: string | null = null
+    const ports: TestPorts = {
+      ...harness.ports,
+      watchWorkflow: (path, onChange) => {
+        watchedPath = path
+        harness.ports.watchWorkflow(path, onChange)
+      },
+    }
+
+    const observed = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          // Read before yielding: an edit made the instant startup returns has to find the watcher
+          // already in place, not a subscription still waiting on a fiber to be scheduled.
+          return watchedPath
+        }),
+      ),
+    )
+
+    expect(observed).toBe('/tmp/WORKFLOW.md')
+  })
+
   it('interrupts a watcher-triggered tick when the orchestrator shuts down', async (): Promise<void> => {
     let pollShouldBlock = false
     let pollBlocked = false
@@ -3426,6 +3440,43 @@ describe('live agent detail', (): void => {
     expect(detail.timeline.events.at(-1)).toMatchObject({ category: 'handoff', status: 'pending' })
     blockHandoff = false
     await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('applies an agent update reported in the same turn the worker settles', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#21'),
+          )
+          // The offer the runner's callback makes has to be in the mailbox by the time the callback
+          // returns. If it were only scheduled, the worker's own exit could overtake it and the
+          // event loop would drop the update as belonging to a run that has already ended.
+          agent.notify('item/completed', { item: { type: 'reasoning' } })
+          agent.settle('completed')
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#21',
+              (candidate) => candidate.status !== 'running',
+              'the settled record',
+            ),
+          )
+        }),
+      ),
+    )
+
+    // First in the timeline, ahead of everything the worker's exit records: the update was applied
+    // to the live run rather than dropped after it ended.
+    expect(detail.timeline.events[0]).toMatchObject({ category: 'reasoning', sequence: 1 })
   })
 
   it('answers unknown, sessionless, and starting identifiers distinctly', async (): Promise<void> => {

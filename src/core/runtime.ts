@@ -1002,12 +1002,12 @@ export const startOrchestratorRuntime = (
       }),
     )
 
-    // Forked into the orchestrator's scope, so the watcher and the tick a change requests are both
-    // interrupted on shutdown rather than left running against a stopped orchestrator.
+    // The watcher is installed before startup continues; only its consumption is forked, into the
+    // orchestrator's scope, so the tick a change requests is interrupted on shutdown rather than
+    // left running against a stopped orchestrator.
     const workflowWatcher = yield* WorkflowWatcher
-    yield* Effect.forkScoped(
-      Stream.runForEach(workflowWatcher.changes(selectedWorkflowPath), () => requestTick('change')),
-    )
+    const workflowChanges = yield* workflowWatcher.changes(selectedWorkflowPath)
+    yield* Effect.forkScoped(Stream.runForEach(workflowChanges, () => requestTick('change')))
 
     const scheduleNextTick = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
