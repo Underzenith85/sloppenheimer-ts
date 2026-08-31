@@ -4,7 +4,7 @@ import { describe, expect } from 'vitest'
 
 import type { IssueControlPort, TrackerPort } from '../src/ports/index.js'
 import { makeTrackerPortFactories, type RegisteredTrackerPorts } from '../src/tracker-adapters.js'
-import { runWithEnvironment } from './harness/environment.js'
+import { withEnvironment } from './harness/environment.js'
 import {
   stubProvider,
   stubProviderToken,
@@ -46,7 +46,7 @@ describe('registered tracker port factories', (): void => {
             Effect.succeed(stubIssueControl(stubProviderToken(provider), issueControls)),
         }
         const factories = makeTrackerPortFactories([entry])
-        const provider = runWithEnvironment(
+        const provider = yield* withEnvironment(
           factories.providers.validate('stub', { token: 'STUB_TOKEN' }),
           { STUB_TOKEN: 'second-kind-secret' },
         )
