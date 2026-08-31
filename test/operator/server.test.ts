@@ -72,6 +72,8 @@ const snapshot: OrchestratorSnapshot = {
   ],
   retrying: [],
   completed: [],
+  saturatedStates: [],
+  inspectableAgents: [],
   totals: { inputTokens: 10, outputTokens: 5, totalTokens: 15, secondsRunning: 60 },
   rateLimits: null,
 }
@@ -166,6 +168,7 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
         createdAt: '2026-08-29T10:00:00.000Z',
         enabled: true,
         state: 'open',
+        normalizedState: 'open',
         blockedBy: [],
         readiness: 'ready',
         reason: null,

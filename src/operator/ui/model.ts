@@ -81,6 +81,12 @@ type WorkItem = Readonly<{
   unlocks: number
   /** Whether an agent session exists to inspect behind this row. */
   hasDetail: boolean
+  /**
+   * Which dispatch limit is currently binding for this issue, when one is. It is what the row says
+   * after a queue request, so the operator is told why the work did not start rather than only
+   * that it did not.
+   */
+  queueReason: string | null
   finishedAt: string | null
   pullRequestUrl: string | null
   action: ActionKind
@@ -286,6 +292,7 @@ const runningItem = (
   entry: RunningEntry,
   issue: BacklogIssue | undefined,
   paused: ReadonlySet<number>,
+  inspectable: ReadonlySet<string>,
   now: number,
 ): WorkItem => {
   const stalled = stalledNowAt(entry.stallDeadline, now)
@@ -306,7 +313,8 @@ const runningItem = (
     ranking: stalled ? attentionRanking('stalled', issue?.priority ?? null) : null,
     blockers: [],
     unlocks: issue?.unlocks ?? 0,
-    hasDetail: true,
+    hasDetail: inspectable.has(entry.identifier),
+    queueReason: null,
     finishedAt: null,
     pullRequestUrl: null,
     action: 'pause',
@@ -317,6 +325,7 @@ const retryingItem = (
   entry: RetryingEntry,
   issue: BacklogIssue | undefined,
   paused: ReadonlySet<number>,
+  inspectable: ReadonlySet<string>,
 ): WorkItem => ({
   identifier: entry.identifier,
   issueNumber: issue?.number ?? issueNumberOf(entry.identifier),
@@ -332,7 +341,8 @@ const retryingItem = (
   ranking: null,
   blockers: [],
   unlocks: issue?.unlocks ?? 0,
-  hasDetail: true,
+  hasDetail: inspectable.has(entry.identifier),
+  queueReason: null,
   finishedAt: null,
   pullRequestUrl: null,
   action: 'pause',
@@ -352,6 +362,7 @@ const handoffItem = (
   entry: HandoffEntry,
   issue: BacklogIssue | undefined,
   paused: ReadonlySet<number>,
+  inspectable: ReadonlySet<string>,
   now: number,
 ): WorkItem => {
   const phase = handoffPhases[entry.state] ?? 'handing_off'
@@ -373,7 +384,10 @@ const handoffItem = (
     ranking: attention === null ? null : attentionRanking(attention, issue?.priority ?? null),
     blockers: [],
     unlocks: issue?.unlocks ?? 0,
-    hasDetail: true,
+    // A handoff restored from the store after a restart has no agent session behind it, so it gets
+    // its pull request and nothing to inspect.
+    hasDetail: inspectable.has(entry.identifier),
+    queueReason: null,
     finishedAt: merged ? new Date(now).toISOString() : null,
     pullRequestUrl: entry.pullRequestUrl,
     action: 'none',
@@ -396,14 +410,41 @@ const completedItem = (entry: CompletedEntry): WorkItem => ({
   blockers: [],
   unlocks: 0,
   hasDetail: false,
+  queueReason: null,
   finishedAt: entry.finishedAt,
   pullRequestUrl: entry.pullRequestUrl,
   action: 'none',
 })
 
+/**
+ * Which dispatch limit stops this issue starting immediately, if either does. The scheduler
+ * enforces a global limit and an optional per-state one, and an operator told "Start agent" for
+ * work that will sit in a queue has been told the wrong thing.
+ */
+const bindingLimit = (
+  issue: BacklogIssue,
+  capacity: WorkModel['capacity'],
+  saturated: ReadonlySet<string>,
+): string | null => {
+  if (capacity.full) {
+    return (
+      'Symphony is at capacity (' +
+      String(capacity.running) +
+      ' of ' +
+      String(capacity.limit) +
+      ' agents)'
+    )
+  }
+  if (saturated.has(issue.normalizedState)) {
+    return 'issues in state “' + issue.state + '” have reached their own concurrency limit'
+  }
+  return null
+}
+
 const backlogItem = (
   issue: BacklogIssue,
-  capacityFull: boolean,
+  capacity: WorkModel['capacity'],
+  saturated: ReadonlySet<string>,
   paused: ReadonlySet<number>,
 ): WorkItem => {
   const blockers = blockerList(issue)
@@ -414,13 +455,14 @@ const backlogItem = (
   const state: WorkState =
     attention !== null ? 'attention' : issue.readiness === 'ready' ? 'ready' : 'blocked'
   const eligibility = eligibilityOf(issue, paused)
+  const queueReason = bindingLimit(issue, capacity, saturated)
   const action: ActionKind =
     state === 'ready'
       ? eligibility === 'eligible'
         ? 'pause'
-        : capacityFull
-          ? 'queue'
-          : 'start'
+        : queueReason === null
+          ? 'start'
+          : 'queue'
       : 'blockers'
   return {
     identifier: issue.identifier,
@@ -438,6 +480,7 @@ const backlogItem = (
     blockers,
     unlocks: issue.unlocks,
     hasDetail: false,
+    queueReason: action === 'queue' ? queueReason : null,
     finishedAt: null,
     pullRequestUrl: null,
     action,
@@ -533,14 +576,17 @@ const buildWorkModel = (
   const limit = state?.maxConcurrentAgents ?? 0
   const capacityFull = limit > 0 && running.length >= limit
   const paused = new Set(state?.pausedIssueNumbers ?? [])
+  const inspectable = new Set(state?.inspectableAgents ?? [])
+  const saturated = new Set(state?.saturatedStates ?? [])
+  const capacity = { running: running.length, limit, full: capacityFull }
   for (const entry of running) {
-    claim(runningItem(entry, issues.get(entry.identifier), paused, now))
+    claim(runningItem(entry, issues.get(entry.identifier), paused, inspectable, now))
   }
   for (const entry of state?.retrying ?? []) {
-    claim(retryingItem(entry, issues.get(entry.identifier), paused))
+    claim(retryingItem(entry, issues.get(entry.identifier), paused, inspectable))
   }
   for (const entry of state?.handoffs ?? []) {
-    claim(handoffItem(entry, issues.get(entry.identifier), paused, now))
+    claim(handoffItem(entry, issues.get(entry.identifier), paused, inspectable, now))
   }
   for (const entry of state?.completed ?? []) {
     if (now - new Date(entry.finishedAt).getTime() <= finishedWindowMs) {
@@ -548,7 +594,7 @@ const buildWorkModel = (
     }
   }
   for (const issue of backlog?.issues ?? []) {
-    claim(backlogItem(issue, capacityFull, paused))
+    claim(backlogItem(issue, capacity, saturated, paused))
   }
   const attention = items.filter((item) => item.state === 'attention').sort(byAttention)
   const ready = items.filter((item) => item.state === 'ready').sort(byReadiness)
@@ -573,7 +619,7 @@ const buildWorkModel = (
       progress: progress.length,
       finished: finished.length,
     },
-    capacity: { running: running.length, limit, full: capacityFull },
+    capacity,
   }
 }
 

@@ -23,6 +23,8 @@ const snapshot: OrchestratorSnapshot = {
   maxConcurrentAgents: 1,
   counts: { running: 0, retrying: 0, completed: 0 },
   completed: [],
+  saturatedStates: [],
+  inspectableAgents: [],
   pausedIssueNumbers: [],
   handoffs: [],
   running: [],

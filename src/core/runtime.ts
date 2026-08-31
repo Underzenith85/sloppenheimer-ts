@@ -219,6 +219,20 @@ export type OrchestratorSnapshot = Readonly<{
   retrying: readonly RetrySnapshot[]
   /** Finished work, newest first and bounded by {@link publishedCompletedWork}. */
   completed: readonly CompletedSnapshot[]
+  /**
+   * Normalized issue states with no dispatch slot left, because the workflow narrows
+   * `agent.max_concurrent_agents_by_state` below the global limit and that state has reached its
+   * own cap. The scheduler enforces both limits, so a console that knew only the global one would
+   * promise an immediate start for work that will in fact stay queued. Normalization is the
+   * runtime's rule, so the runtime publishes the answer rather than the inputs.
+   */
+  saturatedStates: readonly string[]
+  /**
+   * Issue identifiers whose agent detail will answer, rather than report no session. A handoff
+   * restored from the store after a restart has no agent session behind it, so a console must not
+   * offer to inspect one.
+   */
+  inspectableAgents: readonly string[]
   totals: TokenTotals
   rateLimits: JsonObject | null
 }>

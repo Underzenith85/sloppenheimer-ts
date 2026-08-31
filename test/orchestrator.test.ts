@@ -927,6 +927,10 @@ describe('restored pull request handoffs', (): void => {
 
     expect(inspections).toBe(1)
     expect(snapshot.running).toEqual([])
+    // The handoff came back from the store and nothing ran for it in this process, so its detail
+    // resource would report no session. The console reads this list to decide whether to offer an
+    // inspection at all, rather than rendering one that refuses.
+    expect(snapshot.inspectableAgents).toEqual([])
     expect(snapshot.handoffs).toEqual([
       expect.objectContaining({
         issueId: '75',
@@ -3958,6 +3962,73 @@ describe('session telemetry accounting', (): void => {
           expect(snapshot.running).toEqual([])
           expect(snapshot.retrying).toEqual([])
           expect(removed).toEqual([])
+        }),
+      ),
+    )
+  })
+
+  it('publishes the saturated issue states and the agents whose detail will answer', async (): Promise<void> => {
+    const perStateWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        agent: {
+          ...workflow.config.agent,
+          maxConcurrentAgents: 4,
+          // Open issues get a narrower cap than the host as a whole, so the state saturates while
+          // there is still global capacity — the case a console reading only the global limit
+          // would report as a free slot.
+          maxConcurrentAgentsByState: new Map([['open', 1]]),
+        },
+      },
+    }
+    const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(perStateWorkflow, () => [issue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.maxConcurrentAgents).toBe(4)
+          expect(snapshot.saturatedStates).toEqual(['open'])
+          // The running agent's detail resource will answer, so the console may offer to inspect it.
+          expect(snapshot.inspectableAgents).toEqual([issue.identifier])
+        }),
+      ),
+    )
+  })
+
+  it('reports no saturated state when the workflow sets no per-state limit', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+
+          expect((yield* control.snapshot).saturatedStates).toEqual([])
         }),
       ),
     )

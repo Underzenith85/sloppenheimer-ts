@@ -26,6 +26,11 @@ export type BacklogIssue = Readonly<{
   createdAt: string | null
   enabled: boolean
   state: string
+  /**
+   * The issue's state under the runtime's own normalization, so the console can match it against
+   * the saturated states the snapshot publishes without restating that rule in the browser.
+   */
+  normalizedState: string
   blockedBy: Issue['blockedBy']
   readiness: 'ready' | 'blocked' | 'cyclic'
   reason: string | null
@@ -156,6 +161,7 @@ export const buildBacklogSnapshot = (
       enabled:
         !pausedIssueNumbers.has(Number(issue.id)) && issue.labels.includes(label.toLowerCase()),
       state: issue.state,
+      normalizedState: normalizeState(issue.state),
       // The table presents active scheduling constraints. Keep the complete dependency history in
       // `nodes` and `edges`, but do not label an issue as "Blocked by" a terminal dependency.
       blockedBy: blockers,

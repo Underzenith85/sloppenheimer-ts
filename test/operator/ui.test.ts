@@ -135,6 +135,10 @@ const retryingDetail = (): AgentDetailSnapshot => {
   })
 }
 
+/** Mirrors the overlay's own focusable-control selector. */
+const focusableSelector =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
+
 let page: ConsolePage
 let details: Map<string, DetailResponse>
 let detailPending: boolean
@@ -290,6 +294,47 @@ describe('operator console agent detail', (): void => {
     expect(dialog.hidden).toBe(true)
     expect(page.window.document.body.classList.contains('detail-open')).toBe(false)
     expect(page.window.document.activeElement).toBe(trigger)
+  })
+
+  it('keeps Tab inside the modal instead of letting it reach the page behind', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    // The same reachability rule the overlay applies: a control is in the cycle unless a `hidden`
+    // ancestor or a closed disclosure it is not the summary of puts it out of reach.
+    const reachable = [...page.query('#agent-detail').querySelectorAll(focusableSelector)].filter(
+      (node) =>
+        node.tagName === 'SUMMARY' ||
+        node.closest('details') === null ||
+        node.closest('details')?.hasAttribute('open') === true,
+    )
+    expect(reachable.length).toBeGreaterThan(2)
+    const first = reachable[0] as unknown as { focus: () => void }
+    const last = reachable[reachable.length - 1] as unknown as { focus: () => void }
+
+    last.focus()
+    page.window.document.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+    )
+    expect(page.window.document.activeElement).toBe(reachable[0])
+
+    first.focus()
+    page.window.document.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }),
+    )
+    expect(page.window.document.activeElement).toBe(reachable[reachable.length - 1])
+  })
+
+  it('pulls focus back into the modal when it has escaped', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    page.query('#refresh').focus()
+    page.window.document.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+    )
+
+    expect(page.query('#agent-detail').contains(page.window.document.activeElement)).toBe(true)
   })
 
   it('uses the same overlay on a phone, leaving the queue where it was', async (): Promise<void> => {

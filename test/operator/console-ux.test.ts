@@ -299,7 +299,25 @@ describe('operator console orchestration actions', (): void => {
 
     expect(console_.postLog).toContain('/api/v1/issues/50/start')
     expect(console_.card(readyTopIdentifier).querySelector('.row-feedback')?.textContent).toContain(
-      'Queued. Symphony is at capacity (2 of 2 agents)',
+      'Queued: Symphony is at capacity (2 of 2 agents). It starts when a slot frees.',
+    )
+  })
+
+  it('queues rather than promising a start when the issue state has its own cap', async (): Promise<void> => {
+    const state = consoleState()
+    // Global capacity is free — two of four agents — but the workflow caps open issues, and that
+    // cap is reached. The scheduler would leave the issue queued, so the console must not offer to
+    // start it.
+    const console_ = await boot({ state: { ...state, saturatedStates: ['open'] } })
+
+    const action = console_.card(readyTopIdentifier).querySelector('.action')
+    expect(action?.textContent).toBe('Queue issue')
+
+    ;(action as unknown as { click: () => void }).click()
+    await console_.flush()
+
+    expect(console_.card(readyTopIdentifier).querySelector('.row-feedback')?.textContent).toContain(
+      'issues in state “open” have reached their own concurrency limit',
     )
   })
 
@@ -749,6 +767,24 @@ describe('operator console workflows', (): void => {
     expect(console_.window.document.activeElement?.getAttribute('data-identifier')).toBe(
       stalledIdentifier,
     )
+  })
+
+  it('offers no agent inspection for a handoff restored without a session', async (): Promise<void> => {
+    const state = consoleState()
+    const console_ = await boot({
+      // A handoff read back from the store after a restart has a pull request but no agent session
+      // behind it, so its detail endpoint would refuse.
+      state: { ...state, inspectableAgents: [runningIdentifier, stalledIdentifier] },
+    })
+
+    console_.query('#tab-progress').click()
+    await console_.flush()
+
+    expect(console_.card(awaitingIdentifier).querySelector('.inspect')).toBeNull()
+    expect(console_.card(awaitingIdentifier).querySelector('a.link-button')).not.toBeNull()
+    expect(console_.card(runningIdentifier).querySelector('.inspect')).not.toBeNull()
+    // The retrying agent is not in the published index either, so it loses the control too.
+    expect(console_.card(retryingIdentifier).querySelector('.inspect')).toBeNull()
   })
 
   it('follows a handoff from In progress to its pull request', async (): Promise<void> => {

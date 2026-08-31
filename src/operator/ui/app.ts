@@ -62,7 +62,7 @@ const actionLabels: Readonly<Record<ActionKind, string>> = {
  */
 const actionDescriptions: Readonly<Record<ActionKind, string>> = {
   start: 'Makes the issue eligible and asks Symphony to reselect; a free slot starts it now.',
-  queue: 'Makes the issue eligible. Symphony is at capacity, so it starts when a slot frees.',
+  queue: 'Makes the issue eligible. No dispatch slot is free, so it starts when one is.',
   pause:
     'Removes the issue from orchestration, cancels its running agent, and drops queued retries.',
   blockers: 'Lists the unresolved dependencies that are holding this issue back.',
@@ -167,13 +167,9 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
     setFeedback(item.identifier, {
       tone: 'success',
       message: enable
-        ? model.capacity.full
-          ? 'Queued. Symphony is at capacity (' +
-            String(model.capacity.running) +
-            ' of ' +
-            String(model.capacity.limit) +
-            ' agents) and will start it when a slot frees.'
-          : 'Eligible. Symphony is selecting work and will start it shortly.'
+        ? item.queueReason === null
+          ? 'Eligible. Symphony is selecting work and will start it shortly.'
+          : 'Queued: ' + item.queueReason + '. It starts when a slot frees.'
         : 'Paused. Symphony will not select this issue.',
       retry: null,
     })

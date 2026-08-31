@@ -626,6 +626,72 @@ const copyDetailLink = async (): Promise<void> => {
   }
 }
 
+const focusableSelector =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
+
+/**
+ * Whether a control can actually be reached. Reachability is decided from the DOM — a `hidden`
+ * ancestor, or a closed disclosure the node is not the summary of — rather than from layout, which
+ * keeps the answer the same whether the page is being rendered or driven by a test.
+ */
+const isReachable = (node: HTMLElement): boolean => {
+  let current: HTMLElement | null = node
+  while (current !== null && current !== detailPanel) {
+    if (current.hidden) {
+      return false
+    }
+    const parent: HTMLElement | null = current.parentElement
+    if (
+      parent !== null &&
+      parent.tagName === 'DETAILS' &&
+      !parent.hasAttribute('open') &&
+      current.tagName !== 'SUMMARY'
+    ) {
+      return false
+    }
+    current = parent
+  }
+  return true
+}
+
+/** The overlay's focusable controls, in document order, skipping anything unreachable. */
+const focusableInDetail = (): readonly HTMLElement[] =>
+  [...detailPanel.querySelectorAll<HTMLElement>(focusableSelector)].filter(isReachable)
+
+/**
+ * Keeps Tab inside the dialog. The overlay is `aria-modal`, so tabbing past its last control must
+ * wrap to its first rather than land on the page it is covering — which is obscured, and which a
+ * keyboard user cannot see they have moved into.
+ */
+const containFocus = (event: KeyboardEvent): void => {
+  if (event.key !== 'Tab' || detailIdentifier === null) {
+    return
+  }
+  const focusable = focusableInDetail()
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (first === undefined || last === undefined) {
+    event.preventDefault()
+    detailTitle.focus()
+    return
+  }
+  const active = document.activeElement
+  if (!detailPanel.contains(active)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first).focus()
+    return
+  }
+  if (event.shiftKey && (active === first || active === detailTitle)) {
+    event.preventDefault()
+    last.focus()
+    return
+  }
+  if (!event.shiftKey && active === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
 const installDetailControls = (): void => {
   element('#detail-close').addEventListener('click', () => closeDetail())
   element('#detail-copy').addEventListener('click', () => {
@@ -635,7 +701,9 @@ const installDetailControls = (): void => {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && detailIdentifier !== null) {
       closeDetail()
+      return
     }
+    containFocus(event)
   })
   window.addEventListener('hashchange', syncFromHash)
   buildFilters()

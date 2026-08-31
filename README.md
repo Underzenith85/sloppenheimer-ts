@@ -197,7 +197,10 @@ The console answers four questions, and its navigation is the four answers with 
 | **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                      |
 | **Finished**        | Work merged and closed out in the last 24 hours. The window is stated on the view.                                                                                                           |
 
-Every issue and handoff has exactly one primary placement, so no row appears twice. Attention
+Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
+agent** control appears only where the detail resource will answer: a handoff restored from the
+store after a restart has a pull request to open but no agent session behind it, and the runtime
+publishes which identifiers are inspectable rather than leaving the console to guess. Attention
 condition, pipeline phase, and orchestration eligibility are separate from that placement and are
 shown as their own labelled chips — status is never carried by colour alone. Ordinary dependency
 blocking is not an exception: blocked work is summarised under Ready ("_n_ issues are waiting on a
@@ -210,8 +213,11 @@ Each Ready row says why it is ranked where it is — `P1 · unlocks 8 issues · 
 stop being blocked, transitively, once the issue is finished.
 
 Actions are named after what the backend does. Making an issue eligible adds the configured
-orchestration label and asks Symphony to reselect, so the control reads **Start agent** when there is
-spare capacity and **Queue issue** when there is not; the row then says which happened. **Pause**
+orchestration label and asks Symphony to reselect, so the control reads **Start agent** when a
+dispatch slot is free and **Queue issue** when none is; the row then says which happened, and names
+the limit that bound — the global `agent.max_concurrent_agents`, or the narrower
+`agent.max_concurrent_agents_by_state` cap for that issue's state. The runtime publishes which states
+are saturated, so the console never promises an immediate start for work the scheduler will queue. **Pause**
 removes the issue from orchestration eligibility, cancels the agent running for it, and drops any
 queued retry — it does not remove the Symphony label from the pull-request handoff lifecycle. Because
 pausing can interrupt live work, it asks for confirmation exactly when the issue is starting, running
@@ -230,7 +236,8 @@ The console is a single responsive layout: work is laid out as rows at desktop w
 below 768px, with title, state, reason and action kept together in both. There is a skip link into
 the work queues, the state navigation is a tablist reachable before any planning content, all
 primary controls clear a 44px touch target, and reduced-motion and forced-colors preferences are
-respected. `test/harness/accessibility.ts` runs a structural audit — accessible names, labelled
+respected. The agent overlay is `aria-modal`, and Tab and Shift+Tab cycle within it rather than
+reaching the obscured page behind. `test/harness/accessibility.ts` runs a structural audit — accessible names, labelled
 controls, tab/panel pairing, duplicate ids, forced tab order, heading levels, landmarks — over every
 view, the Plan, and the open detail overlay at 390px, 768px and 1280px, and over the empty
 dashboard. It is a structural audit rather than a browser-engine scan: happy-dom has no layout or
@@ -251,7 +258,7 @@ drops session handshakes, private reasoning, chat turns, individual tool calls a
 while keeping failures, retries, file changes, commands and handoff transitions; **Errors and
 retries**; and **Everything** — with the full per-category filters still available under **Advanced
 filters**. The panel is a modal overlay at every width, so opening it never displaces the queue row
-it was opened from. It has a copyable deep link
+it was opened from, and it contains keyboard focus while it is open. It has a copyable deep link
 (`#/agents/<identifier>`), closes on `Escape` with focus returned to the card that opened it, and
 polls on its own timer and its own request, so opening it cannot delay tracker polling or the
 dashboard. Elapsed time and the stall countdown are recomputed in the browser from the absolute
