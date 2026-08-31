@@ -373,7 +373,12 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           if (
             context.stateIsInValue(issue.state, effective.workflow.config.tracker.terminalStates)
           ) {
-            yield* effective.workspaces.remove(issue.identifier).pipe(
+            const handoff = context.state.handoffs.get(event.issueId)
+            // The checkout to remove is the one the work ran in. A reload can replace the
+            // workspace manager while the retry waits, and a repair retry dispatches into the
+            // handoff's manager, so its cleanup has to reach there rather than the newer root.
+            const workspaces = handoff?.execution.workspaces ?? effective.workspaces
+            yield* workspaces.remove(issue.identifier).pipe(
               Effect.catchAll((error) =>
                 logWarning('terminal workspace cleanup failed', {
                   ...context.logContextValue(issue),
@@ -383,7 +388,6 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 }),
               ),
             )
-            const handoff = context.state.handoffs.get(event.issueId)
             if (handoff !== undefined && Option.isSome(handoff.repair)) {
               handoff.repair = Option.none()
               yield* context.persistHandoffsEffect()
