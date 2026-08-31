@@ -21,6 +21,7 @@ import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
 import { processIsAlive } from '../../harness/processes.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
+import { anIssue } from '../../harness/fixtures.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -49,23 +50,12 @@ const makeWorkspace = (): Effect.Effect<Readonly<{ root: string; path: string }>
     return { root, path }
   })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('14'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#14'),
   title: 'Protocol conformance',
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
   url: 'https://example.test/issues/14',
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 type RunOutcome = Readonly<{
   result: AgentResult | null

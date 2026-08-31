@@ -1,25 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifyPullRequest, type PullRequestObservation } from '@symphony/core/domain/handoff.js'
-
-type OpenPullRequestObservation = Extract<PullRequestObservation, { state: 'open' }>
-
-const observation = (
-  overrides: Partial<OpenPullRequestObservation> = {},
-): OpenPullRequestObservation => ({
-  number: 41,
-  state: 'open',
-  url: 'https://github.com/example/symphony/pull/41',
-  headSha: 'abc123',
-  merged: false,
-  mergeCommitSha: null,
-  mergeable: true,
-  mergeState: 'clean',
-  checks: [{ name: 'quality', status: 'completed', conclusion: 'success', url: null }],
-  reviewDecision: null,
-  reviewThreads: [],
-  ...overrides,
-})
+import { classifyPullRequest } from '@symphony/core/domain/handoff.js'
+import { anOpenPullRequest as observation } from '../harness/fixtures.js'
 
 describe('pull request handoff state machine', (): void => {
   it('waits for checks and rejects stale or failed heads', (): void => {

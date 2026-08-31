@@ -16,28 +16,18 @@ import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/doma
 import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
 import { hostFileSystem } from '../harness/filesystem.js'
+import { anIssue } from '../harness/fixtures.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
   runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('fake-issue'),
-  nativeRef: null,
   identifier: issueIdentifier('fake/repository#19'),
   title: 'Exercise the App Server boundary',
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
   labels: [],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 type ScenarioOutcome = Readonly<{ events: readonly AgentEvent[]; result: AgentResult }>
 

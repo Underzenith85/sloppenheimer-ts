@@ -195,7 +195,15 @@ const issueNumberOf = (identifier: string): number | null => {
   return match?.[1] === undefined ? null : Number(match[1])
 }
 
-const comparePriority = (left: number | null, right: number | null): number => {
+/**
+ * Orders two numbers a row may not carry, absent last.
+ *
+ * Both the priority and the issue number are optional on a work item, and in each case an item
+ * without one sorts below every item that has one — a row with no priority is not "priority zero",
+ * and a row whose identifier carries no number has nothing to tie-break on. One comparator serves
+ * both because that is the whole of the rule.
+ */
+const compareOptionalNumber = (left: number | null, right: number | null): number => {
   if (left === right) {
     return 0
   }
@@ -208,18 +216,35 @@ const comparePriority = (left: number | null, right: number | null): number => {
   return left - right
 }
 
-const compareNumber = (left: number | null, right: number | null): number => {
-  if (left === right) {
+/** The position of a value in a fixed ordering, for the columns ranked by a named sequence. */
+const compareRank = <Value>(order: readonly Value[], left: Value, right: Value): number =>
+  order.indexOf(left) - order.indexOf(right)
+
+/**
+ * The first comparator that separates the two rows, or zero when none does.
+ *
+ * Every ordering below is a sequence of tie-breaks read in order, and writing that out by hand is
+ * what made three of them the same shape with different names in the middle. Stating the sequence
+ * as a list keeps each ordering readable as the rule it is.
+ */
+const inOrder =
+  <Value>(...comparators: readonly ((left: Value, right: Value) => number)[]) =>
+  (left: Value, right: Value): number => {
+    for (const compare of comparators) {
+      const result = compare(left, right)
+      if (result !== 0) {
+        return result
+      }
+    }
     return 0
   }
-  if (left === null) {
-    return 1
-  }
-  if (right === null) {
-    return -1
-  }
-  return left - right
-}
+
+/** The deterministic tie-break every queue ends with, so one snapshot always sorts one way. */
+const byIssueNumber = (left: WorkItem, right: WorkItem): number =>
+  compareOptionalNumber(left.issueNumber, right.issueNumber)
+
+const byPriority = (left: WorkItem, right: WorkItem): number =>
+  compareOptionalNumber(left.priority, right.priority)
 
 const priorityLabel = (priority: number | null): string =>
   priority === null ? 'no priority' : 'P' + String(priority)
@@ -531,31 +556,28 @@ const backlogItem = (
   }
 }
 
-const byAttention = (left: WorkItem, right: WorkItem): number => {
-  const leftRank = attentionOrder.indexOf(left.attention ?? 'blocked_priority')
-  const rightRank = attentionOrder.indexOf(right.attention ?? 'blocked_priority')
-  if (leftRank !== rightRank) {
-    return leftRank - rightRank
-  }
-  const priority = comparePriority(left.priority, right.priority)
-  return priority === 0 ? compareNumber(left.issueNumber, right.issueNumber) : priority
-}
+const byAttention = inOrder<WorkItem>(
+  (left, right) =>
+    compareRank(
+      attentionOrder,
+      left.attention ?? 'blocked_priority',
+      right.attention ?? 'blocked_priority',
+    ),
+  byPriority,
+  byIssueNumber,
+)
 
 /**
  * The Ready ordering: priority first, then how much the issue unblocks, then the issue number as a
  * deterministic tie-break. Every comparison is total, so the same snapshot always produces the same
  * queue.
  */
-const byReadiness = (left: WorkItem, right: WorkItem): number => {
-  const priority = comparePriority(left.priority, right.priority)
-  if (priority !== 0) {
-    return priority
-  }
-  if (left.unlocks !== right.unlocks) {
-    return right.unlocks - left.unlocks
-  }
-  return compareNumber(left.issueNumber, right.issueNumber)
-}
+const byReadiness = inOrder<WorkItem>(
+  byPriority,
+  // Descending: the issue that unblocks the most goes first.
+  (left, right) => right.unlocks - left.unlocks,
+  byIssueNumber,
+)
 
 const progressOrder: readonly PipelinePhase[] = [
   'starting',
@@ -567,14 +589,10 @@ const progressOrder: readonly PipelinePhase[] = [
   'merging',
 ]
 
-const byProgress = (left: WorkItem, right: WorkItem): number => {
-  const leftRank = progressOrder.indexOf(left.phase)
-  const rightRank = progressOrder.indexOf(right.phase)
-  if (leftRank !== rightRank) {
-    return leftRank - rightRank
-  }
-  return compareNumber(left.issueNumber, right.issueNumber)
-}
+const byProgress = inOrder<WorkItem>(
+  (left, right) => compareRank(progressOrder, left.phase, right.phase),
+  byIssueNumber,
+)
 
 const byFinished = (left: WorkItem, right: WorkItem): number => {
   const leftAt = left.finishedAt === null ? 0 : new Date(left.finishedAt).getTime()

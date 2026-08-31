@@ -8,6 +8,7 @@ import { classifyPullRequest } from '@symphony/core/domain/handoff.js'
 import { makeGitHubCodeReview } from '@symphony/adapter-github/code-review.js'
 import { issueBranchName } from '@symphony/core/domain/handoff.js'
 import type { GitHubProviderConfig } from '@symphony/adapter-github'
+import { anIssue } from './harness/fixtures.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
@@ -18,23 +19,12 @@ const provider: GitHubProviderConfig = {
   baseBranch: 'main',
 }
 
-const handoffIssue: Issue = {
+const handoffIssue: Issue = anIssue({
   id: issueId('28'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#28'),
   title: 'Migrate to pnpm',
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
   url: 'https://example.test/issues/28',
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 const requestUrl = (input: string | URL | Request): string => {
   if (typeof input === 'string') {

@@ -14,6 +14,7 @@ import { loadWorkflow } from '../../src/config/workflow.js'
 import type { WorkflowError } from '@symphony/core/domain/errors.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
+import { anIssue } from '../harness/fixtures.js'
 
 /** The workflow source is read through `FileSystem`; these tests read the files they wrote. */
 const loadHostWorkflow = (path: string): Effect.Effect<Workflow, WorkflowError> =>
@@ -28,23 +29,12 @@ const writeWorkflow = async (source: string): Promise<string> => {
   return path
 }
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('19'),
-  nativeRef: null,
   identifier: issueIdentifier('owner/repository#19'),
   title: 'Conformance',
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
   labels: [],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 afterEach(async (): Promise<void> => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })))
