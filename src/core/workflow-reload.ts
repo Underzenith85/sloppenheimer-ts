@@ -1,4 +1,4 @@
-import { Effect, MutableRef, Option, Ref } from 'effect'
+import { Effect, Either, MutableRef, Option, Ref } from 'effect'
 
 import { sameTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
@@ -15,12 +15,17 @@ import type {
 import * as Transitions from './transitions.js'
 
 /**
- * A rebuild's result: the ports it produced, and the instances it replaced. The retirements are
- * handed back rather than written anywhere, so rebuilding stays a function of its inputs and the
- * caller decides when they enter the state.
+ * A rebuild's result: what it produced, and the instances it replaced along the way.
+ *
+ * The outcome is an `Either` rather than the effect's failure channel because the two answers are
+ * independent. A rebuild that gets partway through has already had a cell install a replacement,
+ * and the predecessor that displaced needs retiring whether or not the workflow as a whole came
+ * out valid — a reload that keeps failing would otherwise leave one detached adapter scope open
+ * per attempt. The retirements are handed back rather than written anywhere, so rebuilding stays a
+ * function of its inputs and the caller decides when they enter the state.
  */
 export type RebuiltWorkflow = Readonly<{
-  value: EffectiveWorkflow
+  value: Either.Either<EffectiveWorkflow, WorkflowError>
   retirements: readonly PendingRetirement[]
 }>
 
@@ -113,26 +118,37 @@ const rebuildCodeReview = (
 export const rebuildEffectiveWorkflow = (
   ports: RuntimePorts,
   workflow: Workflow,
-): Effect.Effect<RebuiltWorkflow, WorkflowError> =>
-  Effect.gen(function* () {
+): Effect.Effect<RebuiltWorkflow> =>
+  Effect.suspend(() => {
     const replaced: Replaced = []
-    const tracker = yield* rebuildCell(
-      ports.trackerCell,
-      'tracker',
-      replaced,
-      workflow.tracker,
-    ).pipe(Effect.mapError(portConfigurationError))
-    const codeReview = yield* rebuildCodeReview(ports, replaced, workflow)
-    const workspaces = yield* rebuildCell(
-      ports.workspaceCell,
-      'workspaces',
-      replaced,
-      portsConfiguration(workflow).workspaces,
+    return Effect.gen(function* () {
+      const tracker = yield* rebuildCell(
+        ports.trackerCell,
+        'tracker',
+        replaced,
+        workflow.tracker,
+      ).pipe(Effect.mapError(portConfigurationError))
+      const codeReview = yield* rebuildCodeReview(ports, replaced, workflow)
+      const workspaces = yield* rebuildCell(
+        ports.workspaceCell,
+        'workspaces',
+        replaced,
+        portsConfiguration(workflow).workspaces,
+      )
+      const built: EffectiveWorkflow = {
+        workflow,
+        tracker,
+        codeReview,
+        workspaces,
+        loadedAt: new Date(),
+      }
+      return built
+    }).pipe(
+      Effect.either,
+      // Read once the rebuild has finished either way: `replaced` holds whatever the cells it did
+      // reach were displacing before one of them refused.
+      Effect.map((value) => ({ value, retirements: replaced })),
     )
-    return {
-      value: { workflow, tracker, codeReview, workspaces, loadedAt: new Date() },
-      retirements: replaced,
-    }
   })
 
 /**
@@ -150,8 +166,8 @@ export const revalidateCredentials = (
         return Effect.succeed(effective)
       }
       const workflow: Workflow = { ...effective.workflow, tracker: validated }
+      const replaced: Replaced = []
       return Effect.gen(function* () {
-        const replaced: Replaced = []
         const tracker = yield* rebuildCell(
           context.ports.trackerCell,
           'tracker',
@@ -159,11 +175,15 @@ export const revalidateCredentials = (
           validated,
         ).pipe(Effect.mapError(portConfigurationError))
         const codeReview = yield* rebuildCodeReview(context.ports, replaced, workflow)
-        yield* Ref.update(context.state, (current) =>
-          Transitions.holdRetirements(current, replaced),
-        )
         return { ...effective, workflow, tracker, codeReview }
-      })
+      }).pipe(
+        // Recorded whether or not the rebuild finished: the tracker cell may already have installed
+        // a replacement by the time the code-review rebuild refuses, and the predecessor it
+        // displaced is the drain's to release either way.
+        Effect.ensuring(
+          Ref.update(context.state, (current) => Transitions.holdRetirements(current, replaced)),
+        ),
+      )
     }),
   )
 

@@ -344,17 +344,20 @@ export const startOrchestratorRuntime = (
       ports,
       yield* ports.workflowLoader.load(selectedWorkflowPath),
     )
-    yield* cleanupTerminalWorkspaces(bootstrap.value)
+    // A bootstrap that refuses takes the whole host down with it, so whatever it replaced is
+    // released by the composition root's own scope rather than by a drain that never runs.
+    const bootstrapWorkflow = yield* bootstrap.value
+    yield* cleanupTerminalWorkspaces(bootstrapWorkflow)
 
     const handoffStorePath = resolve(
-      bootstrap.value.workflow.config.workspaceRoot,
+      bootstrapWorkflow.workflow.config.workspaceRoot,
       '.symphony',
       'handoffs.json',
     )
     // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
     // never be written back over it. A later handoff-enabled run still has to restore those
     // pull requests.
-    const handoffStoreDisabled = bootstrap.value.codeReview === null
+    const handoffStoreDisabled = bootstrapWorkflow.codeReview === null
     const restored = yield* handoffStoreDisabled
       ? Effect.succeed({
           handoffs: [] as readonly HandoffSnapshot[],
@@ -386,7 +389,7 @@ export const startOrchestratorRuntime = (
         )
 
     const state = yield* Ref.make(
-      Transitions.holdRetirements(initialState(bootstrap.value, restored), bootstrap.retirements),
+      Transitions.holdRetirements(initialState(bootstrapWorkflow, restored), bootstrap.retirements),
     )
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
 
@@ -396,10 +399,12 @@ export const startOrchestratorRuntime = (
       workflow: Workflow,
     ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
       rebuildEffectiveWorkflow(ports, workflow).pipe(
+        // Recorded before the outcome is raised: a rebuild that refused partway through has still
+        // displaced whatever the cells it did reach were holding.
         Effect.tap((rebuilt) =>
           Ref.update(state, (current) => Transitions.holdRetirements(current, rebuilt.retirements)),
         ),
-        Effect.map((rebuilt) => rebuilt.value),
+        Effect.flatMap((rebuilt) => rebuilt.value),
       )
 
     const detailRecord = (
