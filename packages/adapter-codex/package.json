@@ -18,6 +18,8 @@
     "build": "tsc -b tsconfig.json"
   },
   "dependencies": {
+    "@effect/platform": "0.97.1",
+    "@effect/platform-node": "0.108.1",
     "@symphony/adapter-node": "workspace:*",
     "@symphony/core": "workspace:*",
     "effect": "3.22.1"
