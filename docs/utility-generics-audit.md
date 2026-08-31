@@ -5,8 +5,12 @@ test) looking for one thing: code that is already a utility in everything but na
 verbatim, or written once per concrete type where one type parameter would do.
 
 Findings are ordered by how much they remove and how safe the removal is. Each names the call sites
-so the work can be scoped without re-deriving the search. Nothing here has been changed; this is the
-audit, not the refactor.
+so the work can be scoped without re-deriving the search.
+
+**Status.** Findings 1, 2, 3, 6, and 8 are implemented; each is marked below, and the line numbers in
+those sections refer to the code as it stood before the change. Findings 4, 5, 7, 9, 10, and 11
+remain open and are tracked in
+[#215](https://github.com/Underzenith85/symphony-ts/issues/215).
 
 Every proposed home respects the layering in `AGENTS.md`: `support/` is the bottom layer, `core/`
 and the adapter packages may both reach it, and all three adapter packages already import from
@@ -15,6 +19,8 @@ and the adapter packages may both reach it, and all three adapter packages alrea
 ---
 
 ## 1. The tagged settle idiom, written out 13 times
+
+_Implemented: `asSettled` in `packages/core/src/support/settled.ts`, applied at all thirteen sites._
 
 **Where.** `packages/core/src/core/dispatch.ts:98`, `:118`;
 `packages/core/src/core/polling.ts:64`, `:121`, `:312`, `:460`, `:510`;
@@ -64,6 +70,8 @@ call sites legible; `Effect.either` keeps the vocabulary smaller. Either beats t
 
 ## 2. Five generic collection helpers locked inside a policy module
 
+_Implemented: `packages/core/src/support/collections.ts`._
+
 **Where.** `packages/core/src/core/transitions.ts:41` (`withEntry`), `:47` (`withoutEntry`),
 `:59` (`withMember`), `:62` (`withoutMember`), `:72` (`capped`).
 
@@ -89,6 +97,8 @@ identical patterns in `packages/adapter-codex/src/codex.ts:1047`
 ---
 
 ## 3. Process-group control implemented three times — twice next to the copy that already exists
+
+_Implemented: `signalChildGroup`, `childProcessGroupIsAlive`, `detachChildProcess`, and `resumeOnce` are exported from `support/subprocess.ts` and are now the only implementations._
 
 This is the largest verbatim duplication in the repository, and the most surprising, because the
 canonical implementations are already sitting in `packages/core/src/support/subprocess.ts` — just not
@@ -215,6 +225,8 @@ single `jsonRecord`. Leave the named-message family in the loader, but factor it
 
 ## 6. `isRecord` inlined at a call site that already imports the exported version
 
+_Implemented: both copies now call `isJsonObject`._
+
 `src/config/workflow.ts:390`:
 
 ```ts
@@ -252,6 +264,8 @@ on one guard chain, so a future guard is added once.
 ---
 
 ## 8. Scheduler policy predicates written once per configuration source
+
+_Implemented, including the normalization fix and its regression test._
 
 `packages/core/src/core/policy.ts` carries two pairs that differ only in where the same three fields
 are read from — `Workflow` (`workflow.config.tracker.*`) or `ExecutionSnapshot` (flat):

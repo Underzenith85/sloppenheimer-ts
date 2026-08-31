@@ -25,6 +25,7 @@ import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../d
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
+import { asSettled } from '../support/settled.js'
 import {
   createAgentDetailRecord,
   recordAttemptStarted,
@@ -50,7 +51,8 @@ import {
 import { eventLoop } from './polling.js'
 import {
   captureExecutionSnapshot,
-  issueIsActiveInSnapshot,
+  issueIsActive,
+  issueIsRoutable,
   logContext,
   sessionLogContext,
   stateIsIn,
@@ -651,12 +653,7 @@ export const startOrchestratorRuntime = (
         .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
           hydrateDependencies: false,
         })
-        .pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-          }),
-        )
+        .pipe(asSettled)
       if (fetched._tag === 'Failed') {
         const counts = yield* Ref.modify(state, (failing) => {
           const next = Transitions.noteRecovery(failing, { failed: 1 })
@@ -674,32 +671,23 @@ export const startOrchestratorRuntime = (
         return
       }
       let attemptFailed = false
-      for (const issue of fetched.issues) {
+      for (const issue of fetched.value) {
         if (!issue.dispatchable) {
           yield* Ref.update(state, (pass) =>
             Transitions.noteRecovery(Transitions.resolveRecovery(pass, issue.id), { skipped: 1 }),
           )
           continue
         }
-        const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-        const isLabeled = requiredLabels.every(
-          (label) => label.length > 0 && labels.has(label.trim().toLowerCase()),
-        )
         const pass = yield* Ref.get(state)
         if (
-          !isLabeled ||
+          !issueIsRoutable(issue, { requiredLabels }) ||
           pass.handoffs.has(issue.id) ||
           pass.pendingRestoredHandoffs.some((handoff) => handoff.issueId === issue.id) ||
           pass.recoveryResolved.has(issue.id)
         ) {
           continue
         }
-        const found = yield* capability.findExistingHandoff(issue).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
-          }),
-        )
+        const found = yield* capability.findExistingHandoff(issue).pipe(asSettled)
         if (found._tag === 'Failed') {
           attemptFailed = true
           yield* Ref.update(state, (failing) => Transitions.noteRecovery(failing, { failed: 1 }))
@@ -711,7 +699,7 @@ export const startOrchestratorRuntime = (
           })
           continue
         }
-        const foundResult = found.result
+        const foundResult = found.value
         if (foundResult._tag === 'NoBranch') {
           yield* Ref.update(state, (skipping) =>
             Transitions.noteRecovery(Transitions.resolveRecovery(skipping, issue.id), {
@@ -721,15 +709,12 @@ export const startOrchestratorRuntime = (
           continue
         }
         const observedAt = yield* currentInstant
-        const inspected = yield* capability.inspectPullRequest(foundResult.pullRequestNumber).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-          }),
-        )
+        const inspected = yield* capability
+          .inspectPullRequest(foundResult.pullRequestNumber)
+          .pipe(asSettled)
         const disposition =
           inspected._tag === 'Succeeded'
-            ? classifyPullRequest(inspected.observation)
+            ? classifyPullRequest(inspected.value)
             : { state: 'awaiting_checks' as const, reason: inspected.error.message }
         const opened = yield* detailRecord(issue, null, requiredLabels)
         const branchObserved = recordHandoff(opened, observedAt, {
@@ -761,7 +746,7 @@ export const startOrchestratorRuntime = (
             pullRequestUrl: foundResult.pullRequestUrl,
             branchName: foundResult.branchName,
             state: disposition.state,
-            headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
+            headSha: inspected._tag === 'Succeeded' ? inspected.value.headSha : null,
             reason: 'reason' in disposition ? disposition.reason : null,
             repairHeadShas: [],
             repairObservedHeadShas: [],
@@ -1080,12 +1065,7 @@ export const startOrchestratorRuntime = (
         }
         for (const [id, entry] of refreshing.running) {
           const execution = entry.execution
-          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-            }),
-          )
+          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(asSettled)
           if (refreshResult._tag === 'Failed') {
             yield* logWarning('reconciliation failed; keeping worker running', {
               ...logContext(entry.issue),
@@ -1095,7 +1075,7 @@ export const startOrchestratorRuntime = (
             })
             continue
           }
-          const issue = refreshResult.issues.find((candidate) => candidate.id === id)
+          const issue = refreshResult.value.find((candidate) => candidate.id === id)
           if (issue === undefined) {
             // The handoff outlives the issue the tracker stopped reporting, so a head this worker
             // pushed is still the repair's to account for on the next inspection.
@@ -1103,7 +1083,7 @@ export const startOrchestratorRuntime = (
             continue
           }
           const terminal = stateIsIn(issue.state, execution.terminalStates)
-          if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
+          if (terminal || !issueIsActive(issue, execution)) {
             yield* cancelRunning(
               id,
               terminal,

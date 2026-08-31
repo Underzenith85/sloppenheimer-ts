@@ -13,12 +13,19 @@
 
 import { Either, Schema } from 'effect'
 
-/** Rejects arrays and `null`, which `typeof value === 'object'` accepts and no record ever is. */
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
+import { isJsonObject } from './json.js'
 
-/** A protocol record read as-is: key spellings untouched, values still unknown. */
-export const protocolRecord = Schema.declare(isRecord)
+/**
+ * A protocol record read as-is: key spellings untouched, values still unknown.
+ *
+ * `isJsonObject` is the repository's one structural record test — it rejects arrays and `null`,
+ * which `typeof value === 'object'` accepts and no record ever is. Its `JsonObject` result type is
+ * narrower than what a protocol payload has been checked to be at this point, so the declaration
+ * widens the values back to `unknown` and leaves judging them to the fields below.
+ */
+export const protocolRecord = Schema.declare((value: unknown): value is Record<string, unknown> =>
+  isJsonObject(value),
+)
 
 /**
  * The camelCase spelling of a protocol key. A leading underscore is left alone: it is part of the

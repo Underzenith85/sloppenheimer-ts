@@ -387,7 +387,7 @@ const splitWorkflow = (
  * loader can act on, so it keeps its own category.
  */
 const frontMatterMap = (value: unknown): Effect.Effect<unknown, WorkflowError> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
+  isJsonObject(value)
     ? Effect.succeed(value)
     : Effect.fail(
         new WorkflowError({

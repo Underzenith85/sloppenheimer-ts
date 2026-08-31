@@ -2,6 +2,13 @@ import { Option, type Deferred } from 'effect'
 
 import type { Issue, IssueId, JsonObject } from '../domain/domain.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
+import {
+  capped,
+  withEntry,
+  withMember,
+  withoutEntry,
+  withoutMember,
+} from '../support/collections.js'
 import { mergeSparseObject } from '../support/json.js'
 import {
   agentDetailPath,
@@ -37,51 +44,6 @@ import {
  * may find nothing answers with `Option`, because what it found is what decides the caller's next
  * branch — never with `null`, which this codebase keeps for data that is serialized.
  */
-
-const withEntry = <Key, Value>(
-  map: ReadonlyMap<Key, Value>,
-  key: Key,
-  value: Value,
-): ReadonlyMap<Key, Value> => new Map(map).set(key, value)
-
-const withoutEntry = <Key, Value>(
-  map: ReadonlyMap<Key, Value>,
-  key: Key,
-): ReadonlyMap<Key, Value> => {
-  if (!map.has(key)) {
-    return map
-  }
-  const next = new Map(map)
-  next.delete(key)
-  return next
-}
-
-const withMember = <Value>(set: ReadonlySet<Value>, value: Value): ReadonlySet<Value> =>
-  set.has(value) ? set : new Set(set).add(value)
-
-const withoutMember = <Value>(set: ReadonlySet<Value>, value: Value): ReadonlySet<Value> => {
-  if (!set.has(value)) {
-    return set
-  }
-  const next = new Set(set)
-  next.delete(value)
-  return next
-}
-
-/** Drops oldest-first until the collection is within its cap. Insertion order is the age order. */
-const capped = <Value>(set: ReadonlySet<Value>, limit: number): ReadonlySet<Value> => {
-  if (set.size <= limit) {
-    return set
-  }
-  const next = new Set(set)
-  for (const value of set) {
-    if (next.size <= limit) {
-      break
-    }
-    next.delete(value)
-  }
-  return next
-}
 
 // ---------------------------------------------------------------------------
 // Claim lifecycle

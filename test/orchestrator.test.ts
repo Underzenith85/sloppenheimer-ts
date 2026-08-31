@@ -210,8 +210,34 @@ describe('orchestrator policies', (): void => {
   })
 
   it('matches required labels case-insensitively', (): void => {
-    expect(issueIsRoutable(makeIssue('GH-1', 1, null, ['Ready', 'SYMPHONY']), workflow)).toBe(true)
-    expect(issueIsRoutable(makeIssue('GH-2', 1, null, ['symphony']), workflow)).toBe(false)
+    expect(
+      issueIsRoutable(makeIssue('GH-1', 1, null, ['Ready', 'SYMPHONY']), workflow.config.tracker),
+    ).toBe(true)
+    expect(issueIsRoutable(makeIssue('GH-2', 1, null, ['symphony']), workflow.config.tracker)).toBe(
+      false,
+    )
+  })
+
+  /**
+   * The rules reaching this predicate are not always normalized. The workflow loader lowercases
+   * `required_labels` on the way in, but an `ExecutionSnapshot` copies whatever it was handed, and
+   * the startup recovery scan used to normalize at the point of use where the scheduler did not —
+   * so the same label matched in one place and was missed in the other.
+   */
+  it('matches a required label the rules did not arrive normalized', (): void => {
+    const rules = {
+      requiredLabels: [' Ready '],
+      activeStates: ['open'],
+      terminalStates: ['closed'],
+    }
+
+    expect(issueIsRoutable(makeIssue('GH-1', 1, null, ['ready']), rules)).toBe(true)
+  })
+
+  it('refuses an empty required label rather than skipping it', (): void => {
+    expect(issueIsRoutable(makeIssue('GH-1', 1, null, ['ready']), { requiredLabels: ['  '] })).toBe(
+      false,
+    )
   })
 
   it('rejects a provider record marked non-dispatchable at the scheduler boundary', (): void => {
@@ -220,7 +246,7 @@ describe('orchestrator policies', (): void => {
       dispatchable: false,
     }
 
-    expect(issueIsRoutable(issue, workflow)).toBe(false)
+    expect(issueIsRoutable(issue, workflow.config.tracker)).toBe(false)
   })
 
   it('leaves blocker metadata to adapter-supplied dispatchability', (): void => {
@@ -234,8 +260,8 @@ describe('orchestrator policies', (): void => {
     const blocked = makeIssue('example/symphony#2', 1, null, ['ready', 'symphony'], [openBlocker])
     const ready = { ...blocked, blockedBy: [{ ...openBlocker, state: 'closed' }] }
 
-    expect(issueIsRoutable(blocked, workflow)).toBe(true)
-    expect(issueIsRoutable(ready, workflow)).toBe(true)
+    expect(issueIsRoutable(blocked, workflow.config.tracker)).toBe(true)
+    expect(issueIsRoutable(ready, workflow.config.tracker)).toBe(true)
   })
 
   it('detects cycle members while leaving independent, chain, and diamond work acyclic', (): void => {

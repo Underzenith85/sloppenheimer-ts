@@ -1,6 +1,7 @@
-import type { ChildProcess } from 'node:child_process'
+import type { ChildProcess, ChildProcessByStdio } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
-import { Option } from 'effect'
+import type { Readable } from 'node:stream'
+import { Effect, Option } from 'effect'
 
 /** The `/proc/<pid>/stat` state character of a process that has exited but has not been reaped. */
 const zombieState = 'Z'
@@ -168,7 +169,16 @@ export const processGroupIsAlive = (pid: number): boolean => {
   return Option.getOrElse(procGroupHasLiveMember(pid), () => true)
 }
 
-const signalChildGroup = (child: ChildProcess, signal: NodeJS.Signals): void => {
+/**
+ * Signals a child's whole process group, not only the leader it was spawned as.
+ *
+ * A child spawned `detached` leads its own group, and the descendants that matter — the shell's
+ * children, the agent a hook started — are in that group rather than under the leader. Signalling
+ * the leader alone would leave them running. The fallback to the leader covers the case where the
+ * group signal is refused, and both are allowed to fail: the tree may have exited between the
+ * liveness check and delivery, which is the expected race rather than an error.
+ */
+export const signalChildGroup = (child: ChildProcess, signal: NodeJS.Signals): void => {
   const pid = child.pid
   if (pid === undefined) {
     return
@@ -184,12 +194,86 @@ const signalChildGroup = (child: ChildProcess, signal: NodeJS.Signals): void => 
   }
 }
 
-const childProcessGroupIsAlive = (child: ChildProcess): boolean => {
+/**
+ * Whether this child's process group still holds a member that can run.
+ *
+ * A child with no pid never started, so it leads no group. Everything else defers to
+ * {@link processGroupIsAlive}, which is what keeps unreaped zombies from counting as members.
+ */
+export const childProcessGroupIsAlive = (child: ChildProcess): boolean => {
   const pid = child.pid
   if (pid === undefined) {
     return false
   }
   return processGroupIsAlive(pid)
+}
+
+/**
+ * Releases a settled child: every listener this effect attached comes off, and the two pipes plus
+ * the child itself are left with a no-op `error` listener.
+ *
+ * The child can outlive the effect that was watching it — a timeout escalation still running, a
+ * cancelled fiber, a descendant holding the inherited pipes open — and Node rethrows an `error`
+ * event that has no listener as an uncaught exception. Leaving the process bare would therefore
+ * take the host down instead of failing the operation that owned it.
+ */
+export const detachChildProcess = (child: ChildProcessByStdio<null, Readable, Readable>): void => {
+  child.stdout.removeAllListeners()
+  child.stderr.removeAllListeners()
+  child.removeAllListeners('error')
+  child.removeAllListeners('close')
+  child.on('error', () => {})
+  child.stdout.on('error', () => {})
+  child.stderr.on('error', () => {})
+}
+
+/**
+ * The two ways one `Effect.async` registration over a child process can end.
+ *
+ * Both settle it, and only one of them may: an effect resumed twice is a defect, and a child
+ * terminated twice is a signal sent to a pid that may since have been recycled.
+ */
+export type SingleResume<Value, Failure> = Readonly<{
+  /** Settles the effect with its outcome, if nothing has settled it yet. */
+  settle: (effect: Effect.Effect<Value, Failure>) => void
+  /**
+   * Claims the settlement without resuming, for the interruption path: the fiber is already
+   * unwinding, so there is nothing left to resume — but the child is still running, and whoever
+   * claims it here is the one that has to terminate it. Answers whether this call was the claimant.
+   */
+  claim: () => boolean
+}>
+
+/**
+ * Guards an `Effect.async` resume so the effect settles exactly once, releasing the child as it
+ * does.
+ *
+ * A timeout, the child's own `close`, a spawn `error`, and an interrupted fiber can all reach the
+ * end of one registration, and any of them may arrive after another already has. The guard and the
+ * release belong together: whatever settles first is also what takes the listeners off, so no later
+ * event can reach a resume that has already fired.
+ */
+export const resumeOnce = <Value, Failure>(
+  resume: (effect: Effect.Effect<Value, Failure>) => void,
+  release: () => void,
+): SingleResume<Value, Failure> => {
+  let settled = false
+  const claim = (): boolean => {
+    if (settled) {
+      return false
+    }
+    settled = true
+    release()
+    return true
+  }
+  return {
+    settle: (effect: Effect.Effect<Value, Failure>): void => {
+      if (claim()) {
+        resume(effect)
+      }
+    },
+    claim,
+  }
 }
 
 /** After `SIGKILL`, how often to look for the process group to empty. */
