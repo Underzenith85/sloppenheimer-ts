@@ -927,17 +927,10 @@ class CodexConnection {
   }
 
   #settleResponse(id: number, parsed: JsonObject): Effect.Effect<void, AgentError> {
-    return Ref.modify(this.#state, (state) => {
-      const pending = state.pending.get(id)
-      if (pending === undefined) {
-        return [undefined, state]
-      }
-      const remaining = new Map(state.pending)
-      remaining.delete(id)
-      return [pending, { ...state, pending: remaining }]
-    }).pipe(
-      Effect.flatMap((pending) => {
-        if (pending === undefined) {
+    return Ref.get(this.#state).pipe(
+      Effect.flatMap((state) => {
+        const request = state.pending.get(id)
+        if (request === undefined) {
           // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
           // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
           return this.#emit(
@@ -948,37 +941,37 @@ class CodexConnection {
         const error = parsed['error']
         if (error !== undefined) {
           return Deferred.fail(
-            pending.reply,
+            request.reply,
             new AgentError({
               category: 'protocol_error',
               message: boundedMessage(errorMessage(error), this.#knownSecretValues),
             }),
-          ).pipe(Effect.asVoid)
+          ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
         }
         const result = parsed['result']
         if (result === undefined) {
           return Deferred.fail(
-            pending.reply,
+            request.reply,
             new AgentError({ category: 'protocol_error', message: 'response has no result' }),
-          ).pipe(Effect.asVoid)
+          ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
         }
         return this.#adoptIdentity(result).pipe(
           Effect.flatMap((identity) => {
             const events =
-              pending.method === 'thread/start' && identity.threadId !== null
+              request.method === 'thread/start' && identity.threadId !== null
                 ? this.#emit('thread_started', null).pipe(
                     Effect.zipRight(this.#emit('session_started', null)),
                   )
                 : Effect.void
             const turnStarted =
-              pending.method === 'turn/start' &&
-              pending.turnCount !== null &&
+              request.method === 'turn/start' &&
+              request.turnCount !== null &&
               identity.turnId !== null
                 ? this.#turnState(identity.turnId).pipe(
                     Effect.zipRight(
                       this.#ensureTurnStarted(
                         identity.turnId,
-                        pending.turnCount,
+                        request.turnCount,
                         identity.threadId,
                       ),
                     ),
@@ -986,13 +979,25 @@ class CodexConnection {
                 : Effect.void
             return events.pipe(
               Effect.zipRight(turnStarted),
-              Effect.zipRight(Deferred.succeed(pending.reply, result)),
+              Effect.zipRight(Deferred.succeed(request.reply, result)),
+              Effect.zipRight(this.#removePending(id, request.reply)),
               Effect.asVoid,
             )
           }),
         )
       }),
     )
+  }
+
+  #removePending(id: number, reply: Deferred.Deferred<JsonValue, AgentError>): Effect.Effect<void> {
+    return Ref.update(this.#state, (state) => {
+      if (state.pending.get(id)?.reply !== reply) {
+        return state
+      }
+      const pending = new Map(state.pending)
+      pending.delete(id)
+      return { ...state, pending }
+    })
   }
 
   /**
@@ -1337,40 +1342,49 @@ class CodexConnection {
    * relabelled as a session failure.
    */
   #fail(error: AgentError, remember = true): Effect.Effect<void> {
-    return Ref.modify(this.#state, (state) => [
-      {
-        pending: [...state.pending.values()],
-        turns: [...state.turns.entries()],
-        turnId: state.turnId,
-      },
-      {
-        ...state,
-        pending: new Map(),
-        terminalError: remember && state.terminalError === null ? error : state.terminalError,
-      },
-    ]).pipe(
-      Effect.flatMap(({ pending, turns, turnId }) =>
-        Effect.all(
-          [
-            ...pending.map((request) => Deferred.fail(request.reply, error).pipe(Effect.asVoid)),
-            ...turns.map(([id, turn]) =>
-              Deferred.fail(turn.settlement, error).pipe(
-                Effect.tap((won) =>
-                  won
-                    ? this.#emit('turn/terminated', null, { threadId: null, turnId: id }, 'failed')
-                    : Effect.void,
-                ),
-                Effect.asVoid,
+    return Effect.gen(this, function* () {
+      const settlement = yield* Deferred.make<void, AgentError>()
+      const activity = yield* Queue.dropping<void>(1)
+      const candidate: TurnState = { settlement, activity, timerStarted: false }
+      const outstanding = yield* Ref.modify(this.#state, (state) => {
+        const turns = new Map(state.turns)
+        if (state.turnId !== null && !turns.has(state.turnId)) {
+          // Publish the current turn's Deferred in the same transition as the terminal error. A
+          // turn/start response racing this failure can then find and await the recorded failure.
+          turns.set(state.turnId, candidate)
+        }
+        return [
+          {
+            pending: [...state.pending.values()],
+            turns: [...turns.entries()],
+          },
+          {
+            ...state,
+            pending: new Map(),
+            turns,
+            terminalError: remember && state.terminalError === null ? error : state.terminalError,
+          },
+        ]
+      })
+      yield* Effect.all(
+        [
+          ...outstanding.pending.map((request) =>
+            Deferred.fail(request.reply, error).pipe(Effect.asVoid),
+          ),
+          ...outstanding.turns.map(([id, turn]) =>
+            Deferred.fail(turn.settlement, error).pipe(
+              Effect.tap((won) =>
+                won
+                  ? this.#emit('turn/terminated', null, { threadId: null, turnId: id }, 'failed')
+                  : Effect.void,
               ),
+              Effect.asVoid,
             ),
-            ...(turnId !== null && !turns.some(([id]) => id === turnId)
-              ? [this.#settle(turnId, { _tag: 'failed', error }).pipe(Effect.asVoid)]
-              : []),
-          ],
-          { concurrency: 'unbounded', discard: true },
-        ),
-      ),
-    )
+          ),
+        ],
+        { concurrency: 'unbounded', discard: true },
+      )
+    })
   }
 
   #failUnlessClosed(error: AgentError): Effect.Effect<void> {
