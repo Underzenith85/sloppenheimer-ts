@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import { Clock, Effect } from 'effect'
 
 import { WorkspaceError } from '../../errors.js'
@@ -22,9 +23,16 @@ type StreamCapture = {
   chunks: Buffer[]
   capturedBytes: number
   totalBytes: number
+  /** Set when the pipe itself failed, so the head that was read is not reported as the whole of it. */
+  interrupted: boolean
 }
 
-const makeCapture = (): StreamCapture => ({ chunks: [], capturedBytes: 0, totalBytes: 0 })
+const makeCapture = (): StreamCapture => ({
+  chunks: [],
+  capturedBytes: 0,
+  totalBytes: 0,
+  interrupted: false,
+})
 
 /** Keeps the head of a stream up to the capture limit while still consuming every chunk. */
 const appendCapture = (capture: StreamCapture, chunk: Buffer): void => {
@@ -40,7 +48,27 @@ const appendCapture = (capture: StreamCapture, chunk: Buffer): void => {
 
 const captureText = (capture: StreamCapture): string => {
   const text = Buffer.concat(capture.chunks).toString('utf8').trim()
-  return capture.totalBytes > capture.capturedBytes ? `${text}… (truncated)` : text
+  return capture.interrupted || capture.totalBytes > capture.capturedBytes
+    ? `${text}… (truncated)`
+    : text
+}
+
+/**
+ * Drains one output pipe into its capture.
+ *
+ * A pipe that fails is recorded rather than raised. What a hook writes is diagnostic — its contract
+ * is the exit code — so losing part of it must not turn a hook that succeeded into a failure. It
+ * must not be reported as the whole of the output either, so the capture is marked and reads back
+ * truncated. Attaching the listener at all is what keeps an `error` on the stream from reaching
+ * Node's uncaught-exception path and taking the host down with it.
+ */
+const captureStream = (stream: Readable, capture: StreamCapture): void => {
+  stream.on('data', (chunk: Buffer) => {
+    appendCapture(capture, chunk)
+  })
+  stream.on('error', () => {
+    capture.interrupted = true
+  })
 }
 
 const excerpt = (text: string): string =>
@@ -133,6 +161,13 @@ const runHookProcess = (
         child.stderr.removeAllListeners()
         child.removeAllListeners('error')
         child.removeAllListeners('close')
+        // The hook's process tree can outlive settlement — that is what the retained escalation
+        // above is for — so the child and its two pipes are left with listeners rather than bare.
+        // Node rethrows an `error` event that has none as an uncaught exception, which would take
+        // the host down instead of failing the hook that owns it.
+        child.on('error', () => {})
+        child.stdout.on('error', () => {})
+        child.stderr.on('error', () => {})
       }
 
       const settle = (effect: Effect.Effect<HookOutcome, WorkspaceError>): void => {
@@ -152,12 +187,8 @@ const runHookProcess = (
           }),
         )
 
-      child.stdout.on('data', (chunk: Buffer) => {
-        appendCapture(stdout, chunk)
-      })
-      child.stderr.on('data', (chunk: Buffer) => {
-        appendCapture(stderr, chunk)
-      })
+      captureStream(child.stdout, stdout)
+      captureStream(child.stderr, stderr)
 
       child.once('error', (cause: unknown) => {
         settle(

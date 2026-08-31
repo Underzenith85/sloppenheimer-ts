@@ -135,6 +135,7 @@ const runProcess = (
     let stdout = ''
     let stderr = ''
     let settled = false
+    let streamFailure: unknown
 
     const detach = (): void => {
       child.stdout.removeAllListeners()
@@ -146,6 +147,26 @@ const runProcess = (
       // exception, which would take the whole host down rather than fail the operation. The
       // replacement listener keeps that from outliving the effect that could report it.
       child.on('error', () => {})
+      // The two output pipes are the same hazard with a different trigger: they are streams, so an
+      // `error` on either with no listener is likewise uncaught, and the child can still be running
+      // after this effect has settled or been cancelled.
+      child.stdout.on('error', () => {})
+      child.stderr.on('error', () => {})
+    }
+
+    /**
+     * Reads one output pipe, remembering the first error it raises.
+     *
+     * A pipe that fails mid-read leaves `stdout` holding a prefix of git's output rather than the
+     * whole of it, and callers here read that output for revisions and status. Reporting the
+     * invocation as a failure is therefore the safe reading: a truncated answer must never be
+     * mistaken for a complete one, whatever exit code git goes on to report.
+     */
+    const capture = (stream: Readable, append: (chunk: Buffer) => void): void => {
+      stream.on('data', append)
+      stream.on('error', (cause: unknown) => {
+        streamFailure ??= cause
+      })
     }
 
     const settle = (effect: Effect.Effect<string, SourceControlError>): void => {
@@ -157,10 +178,10 @@ const runProcess = (
       resume(effect)
     }
 
-    child.stdout.on('data', (chunk: Buffer) => {
+    capture(child.stdout, (chunk: Buffer) => {
       stdout = append(stdout, chunk)
     })
-    child.stderr.on('data', (chunk: Buffer) => {
+    capture(child.stderr, (chunk: Buffer) => {
       stderr = append(stderr, chunk)
     })
     child.once('error', (cause: unknown) => {
@@ -170,8 +191,21 @@ const runProcess = (
         ),
       )
     })
-    // `close` rather than `exit`: both pipes are fully drained by then.
+    // `close` rather than `exit`: both pipes are fully drained by then — which is also what makes
+    // this the point at which a pipe failure is known, so it is reported here rather than settling
+    // early and leaving the git process running with nobody waiting on it.
     child.once('close', (exitCode: number | null) => {
+      if (streamFailure !== undefined) {
+        settle(
+          Effect.fail(
+            sourceControlFailure(
+              { args, exitCode, stdout, stderr, cause: streamFailure },
+              operation,
+            ),
+          ),
+        )
+        return
+      }
       if (exitCode === 0) {
         settle(Effect.succeed(stdout))
         return
