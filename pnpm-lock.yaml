@@ -14,15 +14,24 @@ importers:
       '@effect/platform-node':
         specifier: 0.108.1
         version: 0.108.1(@effect/cluster@0.60.2(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
+      '@symphony/adapter-codex':
+        specifier: workspace:*
+        version: link:packages/adapter-codex
+      '@symphony/adapter-github':
+        specifier: workspace:*
+        version: link:packages/adapter-github
+      '@symphony/adapter-node':
+        specifier: workspace:*
+        version: link:packages/adapter-node
+      '@symphony/core':
+        specifier: workspace:*
+        version: link:packages/core
       chokidar:
         specifier: 5.0.0
         version: 5.0.0
       effect:
         specifier: 3.22.1
         version: 3.22.1
-      liquidjs:
-        specifier: 10.29.0
-        version: 10.29.0
       yaml:
         specifier: 2.9.0
         version: 2.9.0
@@ -57,6 +66,79 @@ importers:
       vitest:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.13.3)(happy-dom@20.0.11)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0))
+
+  packages/adapter-codex:
+    dependencies:
+      '@effect/platform':
+        specifier: 0.97.1
+        version: 0.97.1(effect@3.22.1)
+      '@effect/platform-node':
+        specifier: 0.108.1
+        version: 0.108.1(@effect/cluster@0.60.2(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
+      '@symphony/adapter-node':
+        specifier: workspace:*
+        version: link:../adapter-node
+      '@symphony/core':
+        specifier: workspace:*
+        version: link:../core
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+
+  packages/adapter-github:
+    dependencies:
+      '@effect/platform':
+        specifier: 0.97.1
+        version: 0.97.1(effect@3.22.1)
+      '@symphony/adapter-node':
+        specifier: workspace:*
+        version: link:../adapter-node
+      '@symphony/core':
+        specifier: workspace:*
+        version: link:../core
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+
+  packages/adapter-node:
+    dependencies:
+      '@effect/platform':
+        specifier: 0.97.1
+        version: 0.97.1(effect@3.22.1)
+      '@symphony/core':
+        specifier: workspace:*
+        version: link:../core
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+
+  packages/core:
+    dependencies:
+      '@effect/platform':
+        specifier: 0.97.1
+        version: 0.97.1(effect@3.22.1)
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
+      liquidjs:
+        specifier: 10.29.0
+        version: 10.29.0
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
 
 packages:
 

@@ -1,6 +1,6 @@
-import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
 import type { BacklogSnapshot } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '../../src/core/orchestrator.js'
+import type { OrchestratorSnapshot } from '@symphony/core'
 
 /**
  * One repository state exercising every classification the console can make: running, stalled,

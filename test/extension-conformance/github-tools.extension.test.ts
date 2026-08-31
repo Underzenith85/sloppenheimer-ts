@@ -11,21 +11,26 @@ import {
   type AgentEvent,
   type AgentLaunch,
   type AgentResult,
-} from '../../src/adapters/codex/codex.js'
-import type { AgentError } from '../../src/errors.js'
-import { makeHostToolSession } from '../../src/core/dispatch.js'
-import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
+} from '@symphony/adapter-codex/codex.js'
+import type { AgentError } from '@symphony/core/domain/errors.js'
+import { makeHostToolSession } from '@symphony/core/core/dispatch.js'
+import {
+  issueId,
+  issueIdentifier,
+  type Issue,
+  type JsonValue,
+} from '@symphony/core/domain/domain.js'
 import type {
   HostToolContext,
   HostToolResult,
   HostToolSession,
   HostToolSpec,
-} from '../../src/host-tools.js'
-import { makeGitHubCodeReview } from '../../src/adapters/github/code-review.js'
-import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
-import type { TrackerPort } from '../../src/ports/tracker.js'
-import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
-import type { CodexConfig } from '../../src/config/workflow.js'
+} from '@symphony/core/domain/host-tools.js'
+import { makeGitHubCodeReview } from '@symphony/adapter-github/code-review.js'
+import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
+import type { TrackerPort } from '@symphony/core/ports/tracker.js'
+import type { GitHubProviderConfig } from '@symphony/adapter-github'
+import type { CodexConfig } from '@symphony/core/config/workflow.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */

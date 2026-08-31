@@ -4,7 +4,7 @@ import { describe, expect } from 'vitest'
 
 import { parseCliArguments } from '../../src/config/cli-options.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '../../src/core/orchestrator.js'
+import type { OrchestratorSnapshot } from '@symphony/core'
 import { startOperatorServer } from '../../src/operator/server.js'
 
 const snapshot: OrchestratorSnapshot = {

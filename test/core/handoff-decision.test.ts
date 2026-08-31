@@ -1,12 +1,12 @@
 import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import type {
   PullRequestCheck,
   PullRequestObservation,
   PullRequestReviewThread,
-} from '../../src/domain/handoff.js'
+} from '@symphony/core/domain/handoff.js'
 import {
   afterMerge,
   afterRepairDispatched,
@@ -15,8 +15,8 @@ import {
   afterThreadsResolved,
   observeHandoff,
   repairLimit,
-} from '../../src/core/handoff-decision.js'
-import type { ExecutionSnapshot, HandoffEntry, RepairEntry } from '../../src/core/state.js'
+} from '@symphony/core/core/handoff-decision.js'
+import type { ExecutionSnapshot, HandoffEntry, RepairEntry } from '@symphony/core/core/state.js'
 
 /**
  * Handoff reconciliation, exercised as what it is: a function from one observation of a pull

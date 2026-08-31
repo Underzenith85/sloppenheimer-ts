@@ -38,7 +38,7 @@ DOM-only `tsconfig.browser.json` and writes the served assets into `dist/operato
 source strips the same files' types in memory, so `pnpm dev` and the test suites need no build
 first. Because oxlint reads one file at a time it cannot see a declaration another of those files
 uses, so `no-unused-vars` is off for that directory alone; the compiler still catches real misuse.
-The console's timeline categories come from `src/telemetry.ts` at load time rather than being
+The console's timeline categories come from `packages/core/src/telemetry.ts` at load time rather than being
 restated in the browser script.
 
 The console's own regression suite is deterministic and runs inside `pnpm check`: `test/operator/`
@@ -415,7 +415,7 @@ That holds for the types as well as the JSON: a validated selection carries its 
 alongside the adapter's own equality and the environment names it resolved secrets from, so no
 provider-specific type reaches the core. Each adapter owns the validation for its kind and
 registers it in the composition root, which is also where the supported kinds are enumerated;
-adding a kind changes no file under `src/config/` or `src/core/`.
+adding a kind changes no file under `packages/core/`.
 
 Values that cannot round-trip through JSON are rejected. The GitHub adapter validates:
 

@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 
-import type { IssueIdentifier, Workspace } from '../../src/domain/domain.js'
-import type { WorkspaceManagerPort } from '../../src/ports/workspace.js'
+import type { IssueIdentifier, Workspace } from '@symphony/core/domain/domain.js'
+import type { WorkspaceManagerPort } from '@symphony/core/ports/workspace.js'
 
 export type WorkspaceOperation = Readonly<{
   operation: 'create' | 'exists' | 'beforeRun' | 'afterRun' | 'remove'

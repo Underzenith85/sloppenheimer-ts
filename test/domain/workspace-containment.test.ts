@@ -1,7 +1,7 @@
 import { Either, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { issueIdentifier, type Workspace } from '../../src/domain/domain.js'
+import { issueIdentifier, type Workspace } from '@symphony/core/domain/domain.js'
 import {
   containedWorkspacePath,
   declaredWorkspacePath,
@@ -13,8 +13,8 @@ import {
   verifiedRootRejection,
   workspaceKey,
   type VerifiedWorkspace,
-} from '../../src/domain/workspace-containment.js'
-import { WorkspaceError } from '../../src/errors.js'
+} from '@symphony/core/domain/workspace-containment.js'
+import { WorkspaceError } from '@symphony/core/domain/errors.js'
 
 /**
  * The containment rules are what stop an issue identifier escaping the configured workspace root,

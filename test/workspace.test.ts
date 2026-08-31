@@ -5,11 +5,14 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, Either, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
-import type { HooksConfig } from '../src/config/workflow.js'
-import { makeWorkspaceManager } from '../src/adapters/node/workspace-manager.js'
-import { containedWorkspacePath, workspaceKey } from '../src/domain/workspace-containment.js'
-import type { WorkspaceManagerPort } from '../src/ports/workspace.js'
+import { issueIdentifier, type Workspace } from '@symphony/core/domain/domain.js'
+import type { HooksConfig } from '@symphony/core/config/workflow.js'
+import { makeWorkspaceManager } from '@symphony/adapter-node/workspace-manager.js'
+import {
+  containedWorkspacePath,
+  workspaceKey,
+} from '@symphony/core/domain/workspace-containment.js'
+import type { WorkspaceManagerPort } from '@symphony/core/ports/workspace.js'
 import { hostFileSystem } from './harness/filesystem.js'
 import { processIsAlive } from './harness/processes.js'
 

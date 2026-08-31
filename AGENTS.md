@@ -17,77 +17,107 @@ This convention is the architecture record for the boundary. Do not create a sep
 
 ## Repository structure
 
-Symphony is intended to be a private pnpm workspace with these architectural package boundaries:
+Symphony is a private pnpm workspace. `pnpm-workspace.yaml` declares `packages/*` beside the
+`allowBuilds` policy that gates postinstall scripts.
 
-- `packages/core` contains domain types, ports, and orchestration policy. It must not depend on
-  concrete adapters.
-- `packages/adapter-github` contains the GitHub tracker and code-review implementations.
-- `packages/adapter-codex` contains the Codex agent-runner implementation.
-- The root application is the composition root for the CLI, operator server, configuration, and the
-  single Symphony executable.
+- `packages/core` (`@symphony/core`) contains domain types, ports, and orchestration policy. It
+  depends on no adapter package.
+- `packages/adapter-node` (`@symphony/adapter-node`) contains the host-platform adapters: the
+  filesystem questions `FileSystem` does not answer, Git source control, workspace hooks, and the
+  workspace manager. Both provider adapters build on it, which is why it is a package of its own
+  rather than a directory inside either of them.
+- `packages/adapter-github` (`@symphony/adapter-github`) contains the GitHub tracker, issue-control,
+  code-review, and source-control implementations.
+- `packages/adapter-codex` (`@symphony/adapter-codex`) contains the Codex agent-runner
+  implementation.
+- The repository root is the composition root: the CLI, the operator server, the workflow-definition
+  loader, and the single `symphony` executable. It is the only package that names a concrete
+  adapter.
 
-Package manifests must encode the dependency direction so that `packages/core` cannot import either
-adapter package. These packages are architectural units, not independently published products. They
-remain private and share one lockfile, CI pipeline, versioning policy, and deployable Symphony
-executable.
+The dependency direction is:
 
-Issues #84 and #86 establish the source layout and import rules first. Issue #109 then performs the
-package migration without reopening those boundaries. If that migration is too large for one safe
-pull request, split it into independently buildable steps; do not land a half-migrated workspace.
+```
+core  <-  adapter-node  <-  adapter-github, adapter-codex  <-  root application
+```
+
+Each manifest declares only the packages beneath it, and `test/package-boundaries.test.ts` asserts
+that graph so a widened manifest fails `pnpm check` rather than passing quietly. The check is worth
+having because pnpm installs the composition root's own dependencies at the repository root, and
+Node's directory walk reaches them from inside every package: the manifests are what encode the
+boundary, and `.oxlintrc.json` denies the import by name beside them.
+
+These packages are architectural units, not independently published products. They stay private and
+share one lockfile, one CI pipeline, one versioning policy, and one deployable Symphony executable.
+They are not built or released separately.
+
+The build is a TypeScript project graph. Each package emits `dist/` from its own `tsconfig.json`,
+and `tsconfig.build.json` at the root references all four, so `pnpm build` is a single `tsc -b` that
+orders them and then compiles the composition root into the `dist/` the `symphony` bin points at. A
+package's `exports` resolves types to its TypeScript sources and the runtime entry to its built
+JavaScript, which is why `pnpm lint`, `pnpm typecheck`, and `pnpm test` need no prior build. The
+Vitest configurations alias `@symphony/*` back to source through `vitest.shared.ts` for the same
+reason.
+
+The tests stay in the root `test/` tree and run once, against the whole workspace, from the root
+`pnpm check`. The three Vitest configurations select by test path, so a package split does not
+change which tests each profile runs.
 
 ## Module import direction
 
-The directories under `src/` are layers, and imports may only ever point downwards:
+The directories under `packages/core/src/` are layers, and imports may only ever point downwards:
 
 ```
-support/  <-  domain/  <-  ports/  <-  core/  <-  config/, operator/, adapters/, src/ root
+support/  <-  domain/  <-  ports/  <-  core/  <-  config/
 ```
 
 - `support/` is the bottom layer. It may import only from `support/` itself and from third-party or
   Node packages.
-- `domain/` may import from `support/` only.
+- `domain/` may import from `support/` only. It holds the error vocabulary and the host-tool
+  vocabulary as well as the domain records.
 - `ports/` may import from `domain/` and `support/` only.
 - `core/` holds orchestration policy. It may import from `config/`, `ports/`, `domain/`, and
   `support/`, and it may never name a concrete adapter — it depends on a port and lets the
   composition root bind the implementation.
-- `adapters/` is restricted as an import target, never as a source.
-- The `src/` root is the composition root. It binds the concrete adapters and is unrestricted.
+- The adapter packages are restricted as an import target, never as a source, and the root
+  application is unrestricted.
 
 `.oxlintrc.json` enforces this with `no-restricted-imports` overrides, so `pnpm lint` — and
 therefore `pnpm check` — fails on a violation. The groups match the import specifier as written
 rather than its resolved target, so each layer takes two overrides:
 
-- Every file in the layer, at any depth, is denied the sibling layers by name.
+- Every file in the layer, at any depth, is denied the sibling layers by name, and every layer is
+  denied `@symphony/**`.
 - Files directly in the layer are denied everything that leaves the layer, with the layers below
   re-admitted by negation. A directory added later is therefore forbidden until the rule names it.
 
 The second rule cannot be extended to nested modules, because `../json.js` is a same-layer import
-from `src/support/parsers/value.ts` and an escape to the `src/` root from `src/support/json.ts`.
-Nested modules keep the first rule only, which trades an undetected import of a root module for
+from `support/parsers/value.ts` and an escape to the package root from `support/json.ts`. Nested
+modules keep the first rule only, which trades an undetected import of a package-root module for
 never rejecting a compliant one. Prefer flat layers.
 
 `test/import-boundaries.test.ts` lints a fixture tree with that same configuration, at both depths,
 and asserts the rule still fires.
 
-Some vocabulary has not been placed in a layer yet: the modules #84 left at the `src/` root, and the
-workflow configuration types that #88 declared the ports against. `core/`, `ports/`, and `domain/`
-reach them through migration allow-lists in `.oxlintrc.json`, where each entry names the issue under
-[#76](https://github.com/Underzenith85/symphony-ts/issues/76) that removes it. The entries name
-files rather than directories, so the rest of each directory stays denied.
+One module has not been placed in a layer yet: `packages/core/src/telemetry.ts`. `core/` and
+`ports/` reach it through migration allow-lists in `.oxlintrc.json`, where the entry names
+[#98](https://github.com/Underzenith85/symphony-ts/issues/98), which converts the telemetry record
+to pure reducers and removes it. `ports/` also reaches the workflow configuration types
+[#88](https://github.com/Underzenith85/symphony-ts/issues/88) declared it against, until
+[#105](https://github.com/Underzenith85/symphony-ts/issues/105) settles that type surface.
 
-The `ports/` allow-list is `import type` only, enforced through the rule's `paths` option. #88
-declared the ports as types, and an exemption that also admitted runtime values would let a port
-acquire a real dependency on configuration or on root infrastructure under cover of the migration.
-The `core/` allow-list is not so restricted: `core/` legitimately calls into those modules today.
-The exemption covers the flat modules that exist now — a nested port has none.
+Both `ports/` allow-list entries are `import type` only, enforced through the rule's `paths` option.
+An exemption that also admitted runtime values would let a port acquire a real dependency on
+configuration or on package-root infrastructure under cover of the migration. The `core/` allow-list
+is not so restricted: `core/` legitimately calls into telemetry today.
 
-The `domain/` allow-list is a single entry, `../errors.js`. #91 moved the workspace containment
-rules into `domain/`, and they reject by constructing a `WorkspaceError`, so this one cannot be held
-to `import type`. The error vocabulary is domain vocabulary that has not moved yet rather than root
-infrastructure a domain module has no business calling; #109 removes the entry with the file.
+#109 retired the rest. The error and host-tool vocabulary moved into `domain/`, where every layer
+above reaches them with no exemption; the handoff store moved into `core/` beside the runtime that
+is its only caller; and the workflow configuration split, so that the model `ports/` and `core/` are
+written against lives in `packages/core/src/config/workflow.ts` while the loader that reads a
+definition off disk stays in the composition root.
 
-Add to an allow-list only for a type that has not moved yet; never to admit an import of
-`adapters/`, which stays denied at every tier.
+Add to an allow-list only for a type that has not moved yet; never to admit an import of an adapter
+package, which stays denied at every tier.
 
 ## TypeScript and Effect
 

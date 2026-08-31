@@ -1,13 +1,15 @@
 {
-  "extends": "./tsconfig.json",
+  "extends": "./tsconfig.package.json",
   "compilerOptions": {
-    "declaration": true,
-    "declarationMap": true,
-    "noEmit": false,
     "outDir": "dist",
-    "rootDir": "src",
-    "sourceMap": true
+    "rootDir": "src"
   },
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/adapter-node" },
+    { "path": "./packages/adapter-github" },
+    { "path": "./packages/adapter-codex" }
+  ],
   "include": ["src/**/*.ts"],
-  "exclude": ["test", "src/operator/ui/*.ts"]
+  "exclude": ["src/operator/ui/*.ts"]
 }

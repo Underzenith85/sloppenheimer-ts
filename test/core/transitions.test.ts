@@ -2,9 +2,9 @@ import { it } from '@effect/vitest'
 import { Exit, Fiber, MutableRef, Option } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { Workflow } from '../../src/config/workflow.js'
-import { issueId, issueIdentifier, type Issue, type IssueId } from '../../src/domain/domain.js'
-import { dispatchAdmission, hasSlot } from '../../src/core/policy.js'
+import type { Workflow } from '@symphony/core/config/workflow.js'
+import { issueId, issueIdentifier, type Issue, type IssueId } from '@symphony/core/domain/domain.js'
+import { dispatchAdmission, hasSlot } from '@symphony/core/core/policy.js'
 import {
   initialState,
   retainedCompletedDetails,
@@ -14,15 +14,15 @@ import {
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
-} from '../../src/core/state.js'
-import * as Transitions from '../../src/core/transitions.js'
+} from '@symphony/core/core/state.js'
+import * as Transitions from '@symphony/core/core/transitions.js'
 import {
   createAgentDetailRecord,
   recordAgentEvent,
   recordAttemptStarted,
   type AgentDetailRecord,
   type AgentEvent,
-} from '../../src/telemetry.js'
+} from '@symphony/core/telemetry.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
 
 /**

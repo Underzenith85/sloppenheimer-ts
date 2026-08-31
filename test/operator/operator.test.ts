@@ -5,32 +5,29 @@ import { it } from '@effect/vitest'
 import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import type { WorkflowError } from '../../src/errors.js'
+import type { WorkflowError } from '@symphony/core/domain/errors.js'
 import {
   issueId,
   issueIdentifier,
   type BlockerRef,
   type Issue,
   type JsonObject,
-} from '../../src/domain/domain.js'
+} from '@symphony/core/domain/domain.js'
 import { buildBacklogSnapshot, makeOperatorBackend } from '../../src/operator/operator.js'
-import {
-  layerGitHubIssueControl,
-  makeGitHubIssueControl,
-} from '../../src/adapters/github/issues.js'
+import { layerGitHubIssueControl, makeGitHubIssueControl } from '@symphony/adapter-github/issues.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { OrchestratorControl, OrchestratorSnapshot } from '../../src/core/orchestrator.js'
+import type { OrchestratorControl, OrchestratorSnapshot } from '@symphony/core'
 import {
   CurrentIssueControl,
   layerCurrentIssueControl,
   layerIssueControlFactory,
   layerWorkflowLoader,
   type IssueControlPort,
-} from '../../src/ports/index.js'
+} from '@symphony/core'
 import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { hostFileSystem } from '../harness/filesystem.js'
-import { githubProviderOf, type GitHubProviderConfig } from '../../src/adapters/github/index.js'
+import { githubProviderOf, type GitHubProviderConfig } from '@symphony/adapter-github'
 
 const temporaryDirectories: string[] = []
 

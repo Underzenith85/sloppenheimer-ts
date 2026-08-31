@@ -3,9 +3,9 @@
 // and protocol facts are still here, one disclosure down, because they are what an operator needs
 // second rather than first.
 
-type AgentDetailSnapshot = import('../../telemetry.js').AgentDetailSnapshot
-type AgentTimelineCategory = import('../../telemetry.js').AgentTimelineCategory
-type AgentTimelineEvent = import('../../telemetry.js').AgentTimelineEvent
+type AgentDetailSnapshot = import('@symphony/core/telemetry.js').AgentDetailSnapshot
+type AgentTimelineCategory = import('@symphony/core/telemetry.js').AgentTimelineCategory
+type AgentTimelineEvent = import('@symphony/core/telemetry.js').AgentTimelineEvent
 
 /** Supplied by the server from the same telemetry module the runtime uses. */
 declare const timelineCategories: readonly AgentTimelineCategory[]

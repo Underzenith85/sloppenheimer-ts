@@ -4,9 +4,9 @@ import { join } from 'node:path'
 import { Effect, Fiber, Option, Redacted } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { makeGitSourceControl } from '../src/adapters/node/source-control.js'
-import { SourceControlError } from '../src/errors.js'
-import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
+import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
+import { SourceControlError } from '@symphony/core/domain/errors.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { commitFile, git, makeGitRepository } from './harness/git-repository.js'
 
 const roots: string[] = []

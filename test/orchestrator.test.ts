@@ -18,10 +18,10 @@ import {
 } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
-import { githubProviderOf, githubTrackerProvider } from '../src/adapters/github/index.js'
-import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/adapters/codex/codex.js'
-import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
+import { codexAgentEventSemantics } from '@symphony/adapter-codex/agent-runner.js'
+import { githubProviderOf, githubTrackerProvider } from '@symphony/adapter-github'
+import { telemetryFrom, type AgentEvent, type AgentResult } from '@symphony/adapter-codex/codex.js'
+import { cyclicIssueIdentifiers, findDependencyCycles } from '@symphony/core/domain/dependencies.js'
 import {
   issueId,
   issueIdentifier,
@@ -29,7 +29,7 @@ import {
   type Issue,
   type IssueId,
   type JsonObject,
-} from '../src/domain/domain.js'
+} from '@symphony/core/domain/domain.js'
 import {
   AgentError,
   SourceControlError,
@@ -37,16 +37,16 @@ import {
   WorkflowError,
   WorkspaceError,
   type HandoffStoreError,
-} from '../src/errors.js'
+} from '@symphony/core/domain/errors.js'
 import {
   loadHandoffs as loadHandoffsAgainstFileSystem,
   saveHandoffs as saveHandoffsAgainstFileSystem,
-} from '../src/handoff-store.js'
+} from '@symphony/core/core/handoff-store.js'
 import type {
   CodexReviewObservation,
   HandoffSnapshot,
   PullRequestObservation,
-} from '../src/domain/handoff.js'
+} from '@symphony/core/domain/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -55,9 +55,9 @@ import {
   type AgentDetailLookup,
   type OrchestratorControl,
   type OrchestratorServices,
-} from '../src/core/orchestrator.js'
-import { makeRedactor } from '../src/support/redaction.js'
-import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
+} from '@symphony/core'
+import { makeRedactor } from '@symphony/core/support/redaction.js'
+import { normalizePayload, type AgentDetailSnapshot } from '@symphony/core/telemetry.js'
 import {
   CodeReviewFactory,
   SourceControlFactory,
@@ -81,8 +81,9 @@ import {
   type TrackerPort,
   type WorkspaceManagerPort,
   type WorkspaceSettings,
-} from '../src/ports/index.js'
-import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
+} from '@symphony/core'
+import type { Workflow } from '@symphony/core/config/workflow.js'
+import { preflightWorkflow } from '../src/config/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
@@ -115,8 +116,8 @@ const saveHandoffs = (
   handoffs: readonly HandoffSnapshot[],
 ): Effect.Effect<void, HandoffStoreError> =>
   onHostFileSystem(saveHandoffsAgainstFileSystem(path, handoffs))
-import type { HostToolSession } from '../src/host-tools.js'
-import type { ValidatedTrackerProvider } from '../src/domain/tracker-provider.js'
+import type { HostToolSession } from '@symphony/core/domain/host-tools.js'
+import type { ValidatedTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
 
 const makeIssue = (
   identifier: string,
@@ -5737,87 +5738,95 @@ describe('live agent detail', (): void => {
 })
 
 describe('aged-out agent detail', (): void => {
-  it.scoped('keeps reporting an evicted session as completed on later publications', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-aged-out-')
-      const total = retainedCompletedDetails + 1
-      const issues = Array.from({ length: total }, (_unused, index) => ({
-        ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
-        id: issueId(String(index + 20)),
-      }))
-      const isolated: Workflow = {
-        ...workflow,
-        config: {
-          ...workflow.config,
-          workspaceRoot,
-          agent: { ...workflow.config.agent, maxConcurrentAgents: total },
-        },
-      }
-      let active = true
-      const harness = makeHarness(isolated, () => (active ? issues : []))
-      const factory = makeAgentFactory()
-      const ports: TestPorts = {
-        ...harness.ports,
-        runAgent: factory.runAgent,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          handoffCompletedWork: (issue) =>
-            Effect.succeed({
-              _tag: 'PullRequest',
-              branchName: `symphony/issue-${issue.id}`,
-              pullRequestUrl: `https://example.test/pull/${issue.id}`,
-              pullRequestNumber: Number(issue.id),
-              created: true,
-            }),
-          inspectPullRequest: (number) =>
-            Effect.succeed({
-              number,
-              url: `https://example.test/pull/${String(number)}`,
-              headSha: `head-${String(number)}`,
-              merged: false,
-              state: 'open',
-              mergeCommitSha: null,
-              mergeable: null,
-              mergeState: 'unknown',
-              checks: [],
-              reviewDecision: null,
-              reviewThreads: [],
-              codexReview: { headShaPrefix: `head-${String(number)}`, status: 'pending' },
-            }),
-        }),
-      }
+  it.scoped(
+    'keeps reporting an evicted session as completed on later publications',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-aged-out-')
+        const total = retainedCompletedDetails + 1
+        const issues = Array.from({ length: total }, (_unused, index) => ({
+          ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
+          id: issueId(String(index + 20)),
+        }))
+        const isolated: Workflow = {
+          ...workflow,
+          config: {
+            ...workflow.config,
+            workspaceRoot,
+            agent: { ...workflow.config.agent, maxConcurrentAgents: total },
+          },
+        }
+        let active = true
+        const harness = makeHarness(isolated, () => (active ? issues : []))
+        const factory = makeAgentFactory()
+        const ports: TestPorts = {
+          ...harness.ports,
+          runAgent: factory.runAgent,
+          makeCodeReview: (provider) => ({
+            ...requireCodeReview(harness.ports, provider),
+            handoffCompletedWork: (issue) =>
+              Effect.succeed({
+                _tag: 'PullRequest',
+                branchName: `symphony/issue-${issue.id}`,
+                pullRequestUrl: `https://example.test/pull/${issue.id}`,
+                pullRequestNumber: Number(issue.id),
+                created: true,
+              }),
+            inspectPullRequest: (number) =>
+              Effect.succeed({
+                number,
+                url: `https://example.test/pull/${String(number)}`,
+                headSha: `head-${String(number)}`,
+                merged: false,
+                state: 'open',
+                mergeCommitSha: null,
+                mergeable: null,
+                mergeState: 'unknown',
+                checks: [],
+                reviewDecision: null,
+                reviewThreads: [],
+                codexReview: { headShaPrefix: `head-${String(number)}`, status: 'pending' },
+              }),
+          }),
+        }
 
-      const observed = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          for (const issue of issues) {
-            const agent = yield* Effect.promise(() => awaitAgent(factory.agents, issue.identifier))
-            agent.settle('completed')
-          }
-          let pending = yield* control.snapshot
-          while (pending.retrying.length !== total) {
-            yield* Effect.yieldNow()
-            pending = yield* control.snapshot
-          }
-          active = false
-          yield* TestClock.adjust('1 second')
-          yield* Effect.yieldNow()
-          const evicted = yield* Effect.promise(() =>
-            waitUntil(() => {
-              const aged = issues.filter(
-                (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
+        const observed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            for (const issue of issues) {
+              const agent = yield* Effect.promise(() =>
+                awaitAgent(factory.agents, issue.identifier),
               )
-              return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
-            }, 'the oldest detail to age out'),
-          )
-          // Any later publication must not downgrade the aged-out answer to "no session".
-          yield* control.setIssuePaused(9_999, true)
-          return { evicted, after: readDetail(control, evicted) }
-        }),
-      )
+              agent.settle('completed')
+            }
+            let pending = yield* control.snapshot
+            while (pending.retrying.length !== total) {
+              yield* Effect.yieldNow()
+              pending = yield* control.snapshot
+            }
+            active = false
+            yield* TestClock.adjust('1 second')
+            yield* Effect.yieldNow()
+            const evicted = yield* Effect.promise(() =>
+              waitUntil(() => {
+                const aged = issues.filter(
+                  (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
+                )
+                return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
+              }, 'the oldest detail to age out'),
+            )
+            // Any later publication must not downgrade the aged-out answer to "no session".
+            yield* control.setIssuePaused(9_999, true)
+            return { evicted, after: readDetail(control, evicted) }
+          }),
+        )
 
-      expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
-    }),
+        expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
+      }),
+    // This one drives `retainedCompletedDetails + 1` agents, each through a real temporary
+    // workspace, and needs six to eight seconds on an unloaded machine. The 5s default left
+    // no margin: it passes on a fast runner and times out on a slow one.
+    30_000,
   )
 })
 

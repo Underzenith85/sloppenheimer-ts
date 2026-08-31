@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+
+    // Each package declares `@types/node` itself and names it here. A workspace package resolves
+    // its ambient types from its own `node_modules`, so relying on whatever the root install
+    // happens to hoist would make the build depend on the installer's layout.
+    "types": ["node"]
+  }
+}

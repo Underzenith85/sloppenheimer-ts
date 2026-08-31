@@ -2,7 +2,7 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { IssueControlPort, TrackerPort } from '../src/ports/index.js'
+import type { IssueControlPort, TrackerPort } from '@symphony/core'
 import { makeTrackerPortFactories, type RegisteredTrackerPorts } from '../src/tracker-adapters.js'
 import { withEnvironment } from './harness/environment.js'
 import {

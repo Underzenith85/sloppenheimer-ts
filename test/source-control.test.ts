@@ -4,8 +4,8 @@ import { it } from '@effect/vitest'
 import { Effect, Option } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { makeGitSourceControl } from '../src/adapters/node/source-control.js'
-import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
+import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { makeGitRepository, git } from './harness/git-repository.js'
 
 const roots: string[] = []

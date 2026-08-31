@@ -6,11 +6,11 @@ import {
   codexAgentEventSemantics,
   codexAgentRunner,
   layerCodexAgentRunner,
-} from '../../../src/adapters/codex/agent-runner.js'
-import { issueId, issueIdentifier, type Issue } from '../../../src/domain/domain.js'
-import type { CodexConfig } from '../../../src/config/workflow.js'
-import type { AgentLaunch } from '../../../src/adapters/codex/codex.js'
-import { AgentRunner, type AgentRunnerPort } from '../../../src/ports/agent-runner.js'
+} from '@symphony/adapter-codex/agent-runner.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import type { CodexConfig } from '@symphony/core/config/workflow.js'
+import type { AgentLaunch } from '@symphony/adapter-codex/codex.js'
+import { AgentRunner, type AgentRunnerPort } from '@symphony/core/ports/agent-runner.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 
 const codexConfig: CodexConfig = {

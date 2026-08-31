@@ -7,22 +7,17 @@ import { Effect, Redacted } from 'effect'
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { afterEach, describe, expect } from 'vitest'
 
-import { githubProviderOf } from '../../src/adapters/github/index.js'
-import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
-import { sameTrackerProvider } from '../../src/domain/tracker-provider.js'
-import type { WorkflowError } from '../../src/errors.js'
-import type { TrackerProviderRegistry } from '../../src/domain/tracker-provider.js'
+import { githubProviderOf } from '@symphony/adapter-github'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { sameTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
+import type { WorkflowError } from '@symphony/core/domain/errors.js'
+import type { TrackerProviderRegistry } from '@symphony/core/domain/tracker-provider.js'
 import { withEnvironment } from '../harness/environment.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { stubProviderToken, stubTrackerProviders } from '../harness/stub-tracker-provider.js'
-import { JsonConversionError, toJsonValue } from '../../src/support/json.js'
-import {
-  loadWorkflow,
-  preflightWorkflow,
-  renderPrompt,
-  workflowDefaults,
-  type Workflow,
-} from '../../src/config/workflow.js'
+import { JsonConversionError, toJsonValue } from '@symphony/core/support/json.js'
+import { renderPrompt, workflowDefaults, type Workflow } from '@symphony/core/config/workflow.js'
+import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 
 /**
  * `loadWorkflow` reads its source through `FileSystem`; every test here reads the real files it

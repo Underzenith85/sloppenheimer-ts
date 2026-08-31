@@ -13,19 +13,24 @@ import {
   sessionSecretValues,
   telemetryFrom,
   type AgentLaunch,
-} from '../../../src/adapters/codex/codex.js'
+} from '@symphony/adapter-codex/codex.js'
 import { withEnvironment } from '../../harness/environment.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
-import { issueId, issueIdentifier, type Issue, type Workspace } from '../../../src/domain/domain.js'
-import type { VerifiedWorkspace } from '../../../src/domain/workspace-containment.js'
-import type { AgentError, WorkspaceError } from '../../../src/errors.js'
-import type { AgentResult } from '../../../src/ports/agent-runner.js'
-import type { CodexConfig } from '../../../src/config/workflow.js'
+import {
+  issueId,
+  issueIdentifier,
+  type Issue,
+  type Workspace,
+} from '@symphony/core/domain/domain.js'
+import type { VerifiedWorkspace } from '@symphony/core/domain/workspace-containment.js'
+import type { AgentError, WorkspaceError } from '@symphony/core/domain/errors.js'
+import type { AgentResult } from '@symphony/core/ports/agent-runner.js'
+import type { CodexConfig } from '@symphony/core/config/workflow.js'
 import {
   assertWorkspaceIdentity as assertWorkspaceIdentityAgainstFileSystem,
   openVerifiedWorkspace as openVerifiedWorkspaceAgainstFileSystem,
   verifyWorkspaceForLaunch as verifyWorkspaceForLaunchAgainstFileSystem,
-} from '../../../src/adapters/node/workspace-identity.js'
+} from '@symphony/adapter-node/workspace-identity.js'
 
 /**
  * Launch verification reads real directories through `FileSystem`, so each entry point is bound to
