@@ -75,12 +75,6 @@ export type HandoffDisposition =
 
 const successfulConclusions = new Set(['success', 'neutral', 'skipped'])
 
-/**
- * How many heads a repair may produce for one pull request before the handoff is handed to an
- * operator. Shared so the reconciliation pass and a queued repair retry spend the same budget.
- */
-export const maxRepairAttempts = 3
-
 export const classifyPullRequest = (observation: PullRequestObservation): HandoffDisposition => {
   if (observation.merged) {
     return { state: 'merged', mergeCommitSha: observation.mergeCommitSha }
