@@ -74,9 +74,9 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   Layer.succeed(TrackerFactory, {
     make: (validated) =>
       Effect.try({
-        try: () => makeGitHubTracker(githubProviderOf(validated)),
+        try: () => githubProviderOf(validated),
         catch: boundToGitHub(validated.kind),
-      }),
+      }).pipe(Effect.flatMap((provider) => makeGitHubTracker(provider))),
   }),
   Layer.succeed(WorkspaceManagerFactory, {
     make: (settings) => Effect.succeed(makeWorkspaceManager(settings.root, settings.hooks)),

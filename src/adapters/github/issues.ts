@@ -1,5 +1,5 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, Redacted, type Layer } from 'effect'
+import { Effect, Option, Redacted, Ref, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from '../../domain/dependencies.js'
@@ -49,6 +49,23 @@ type DependencyCacheEntry = Readonly<{
   issueUpdatedAt: number | null
   expiresAt: number
 }>
+
+/**
+ * The tracker's dependency cache. It is a `Ref` rather than a `Map` in the constructor's closure
+ * because `hydrateDependencies` runs its writes at `dependencyConcurrency`: a `Ref` update is a
+ * defined transition in the effect channel, so an interrupted hydration leaves no entry behind and
+ * a later read-modify-write has somewhere to happen.
+ */
+type DependencyCache = Ref.Ref<ReadonlyMap<IssueId, DependencyCacheEntry>>
+
+/** A cache hit: present, matching the issue revision it was recorded against, and unexpired. */
+const liveBlockedBy = (
+  entry: DependencyCacheEntry | undefined,
+  issueUpdatedAt: number | null,
+): Option.Option<readonly BlockerRef[]> =>
+  entry !== undefined && entry.issueUpdatedAt === issueUpdatedAt && entry.expiresAt > Date.now()
+    ? Option.some(entry.blockedBy)
+    : Option.none()
 
 /** GitHub owns blocker and cycle eligibility; core treats `dispatchable` as authoritative. */
 const applyDispatchEligibility = (issues: readonly Issue[]): readonly Issue[] => {
@@ -254,7 +271,7 @@ const hydrateDependencies = (
   prefix: string,
   issues: readonly Issue[],
   dependencyLabels: readonly string[] | null,
-  cache: Map<IssueId, DependencyCacheEntry>,
+  cache: DependencyCache,
   useCache = true,
 ): Effect.Effect<readonly Issue[], TrackerError> =>
   Effect.forEach(
@@ -269,25 +286,32 @@ const hydrateDependencies = (
         return Effect.succeed(issue)
       }
       const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
-      const cached = cache.get(issue.id)
-      if (
-        useCache &&
-        dependencyLabels === null &&
-        cached !== undefined &&
-        cached.issueUpdatedAt === issueUpdatedAt &&
-        cached.expiresAt > Date.now()
-      ) {
-        return Effect.succeed({ ...issue, blockedBy: cached.blockedBy })
-      }
-      return fetchBlockedBy(provider, prefix, issue).pipe(
-        Effect.map((blockedBy) => {
-          cache.set(issue.id, {
-            blockedBy,
-            issueUpdatedAt,
-            expiresAt: Date.now() + dependencyCacheTtlMs,
-          })
-          return { ...issue, blockedBy }
-        }),
+      const readCache =
+        useCache && dependencyLabels === null
+          ? Ref.get(cache).pipe(
+              Effect.map((entries) => liveBlockedBy(entries.get(issue.id), issueUpdatedAt)),
+            )
+          : Effect.succeed(Option.none<readonly BlockerRef[]>())
+      return readCache.pipe(
+        Effect.flatMap(
+          Option.match({
+            onSome: (blockedBy) => Effect.succeed({ ...issue, blockedBy }),
+            onNone: () =>
+              fetchBlockedBy(provider, prefix, issue).pipe(
+                Effect.tap((blockedBy) =>
+                  Ref.update(cache, (entries) => {
+                    const entry: DependencyCacheEntry = {
+                      blockedBy,
+                      issueUpdatedAt,
+                      expiresAt: Date.now() + dependencyCacheTtlMs,
+                    }
+                    return new Map<IssueId, DependencyCacheEntry>([...entries, [issue.id, entry]])
+                  }),
+                ),
+                Effect.map((blockedBy) => ({ ...issue, blockedBy })),
+              ),
+          }),
+        ),
       )
     },
     { concurrency: dependencyConcurrency },
@@ -300,147 +324,149 @@ const hydrateDependencies = (
 export const makeGitHubTracker = (
   configuredProvider: GitHubProviderConfig,
   httpClient?: HttpClient.HttpClient,
-): TrackerPort => {
-  const provider = Object.freeze({ ...configuredProvider })
-  const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-  const dependencyCache = new Map<IssueId, DependencyCacheEntry>()
-  const bindClient = withBoundHttpClient(httpClient)
-  return {
-    toolSpecs: githubTrackerToolSpecs,
-    executeTool: makeGitHubTrackerToolExecutor(provider, prefix, httpClient),
-    secretEnvironmentNames: githubSecretEnvironmentNames(provider),
-    fetchIssuesByStates: (
-      states,
-      dependencyLabels,
-      options,
-    ): Effect.Effect<readonly Issue[], TrackerError> => {
-      if (states.length === 0) {
-        return Effect.succeed([])
-      }
-      const fetchState = (state: string): Effect.Effect<DecodedPage, TrackerError> =>
-        paginate(
-          provider,
-          `${provider.apiBaseUrl}${prefix}/issues?state=${encodeURIComponent(state.toLowerCase())}&per_page=${String(githubPageSize)}`,
-          (body) => decodeIssuePage(body, provider),
-        ).pipe(
-          Effect.map((pages) => ({
-            issues: pages.flatMap((page) => page.issues),
-            malformed: pages.flatMap((page) => page.malformed),
-          })),
-        )
-      return bindClient(
-        Effect.forEach(states, fetchState, { concurrency: 1 }).pipe(
-          Effect.tap((pages) => {
-            const malformed = pages.flatMap((page) => page.malformed)
-            return malformed.length === 0
-              ? Effect.void
-              : logWarning('tracker state list contained malformed records', {
-                  tracker_kind: 'github',
-                  provider_scope: `${provider.owner}/${provider.repository}`,
-                  skipped: malformed.length,
-                  details: malformed.slice(0, 10),
-                })
-          }),
-          Effect.map((pages) => [
-            ...new Map(
-              pages.flatMap((page) => page.issues).map((issue) => [issue.id, issue] as const),
-            ).values(),
-          ]),
-          Effect.flatMap((issues) =>
-            options?.hydrateDependencies === false
-              ? Effect.succeed(issues)
-              : hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
-          ),
-        ),
-      )
-    },
-    fetchIssuesByIds: (ids, options): Effect.Effect<readonly Issue[], TrackerError> => {
-      const uniqueIds = [...new Set(ids)]
-      if (uniqueIds.length === 0) {
-        return Effect.succeed([])
-      }
-      return bindClient(
-        Effect.forEach(
-          uniqueIds,
-          (id) =>
-            githubJson(
-              provider,
-              `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
-            ).pipe(
-              Effect.flatMap(({ body }) =>
-                Effect.try({
-                  try: () => normalizeIssue(decodeGitHubIssue(body ?? null), provider),
-                  catch: (cause: unknown) =>
-                    cause instanceof TrackerError
-                      ? cause
-                      : trackerResponseError(`GitHub issue ${id} could not be decoded`, cause),
-                }),
-              ),
+): Effect.Effect<TrackerPort> =>
+  Effect.gen(function* () {
+    const provider = Object.freeze({ ...configuredProvider })
+    const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+    const dependencyCache = yield* Ref.make<ReadonlyMap<IssueId, DependencyCacheEntry>>(new Map())
+    const bindClient = withBoundHttpClient(httpClient)
+    return {
+      toolSpecs: githubTrackerToolSpecs,
+      executeTool: makeGitHubTrackerToolExecutor(provider, prefix, httpClient),
+      secretEnvironmentNames: githubSecretEnvironmentNames(provider),
+      fetchIssuesByStates: (
+        states,
+        dependencyLabels,
+        options,
+      ): Effect.Effect<readonly Issue[], TrackerError> => {
+        if (states.length === 0) {
+          return Effect.succeed([])
+        }
+        const fetchState = (state: string): Effect.Effect<DecodedPage, TrackerError> =>
+          paginate(
+            provider,
+            `${provider.apiBaseUrl}${prefix}/issues?state=${encodeURIComponent(state.toLowerCase())}&per_page=${String(githubPageSize)}`,
+            (body) => decodeIssuePage(body, provider),
+          ).pipe(
+            Effect.map((pages) => ({
+              issues: pages.flatMap((page) => page.issues),
+              malformed: pages.flatMap((page) => page.malformed),
+            })),
+          )
+        return bindClient(
+          Effect.forEach(states, fetchState, { concurrency: 1 }).pipe(
+            Effect.tap((pages) => {
+              const malformed = pages.flatMap((page) => page.malformed)
+              return malformed.length === 0
+                ? Effect.void
+                : logWarning('tracker state list contained malformed records', {
+                    tracker_kind: 'github',
+                    provider_scope: `${provider.owner}/${provider.repository}`,
+                    skipped: malformed.length,
+                    details: malformed.slice(0, 10),
+                  })
+            }),
+            Effect.map((pages) => [
+              ...new Map(
+                pages.flatMap((page) => page.issues).map((issue) => [issue.id, issue] as const),
+              ).values(),
+            ]),
+            Effect.flatMap((issues) =>
+              options?.hydrateDependencies === false
+                ? Effect.succeed(issues)
+                : hydrateDependencies(provider, prefix, issues, dependencyLabels, dependencyCache),
             ),
-          { concurrency: idRefreshConcurrency },
-        ).pipe(
-          Effect.map((issues) => [
-            ...new Map(issues.map((issue) => [issue.id, issue] as const)).values(),
-          ]),
-          Effect.flatMap((issues) =>
-            options?.hydrateDependencies === false
-              ? Effect.succeed(issues)
-              : hydrateDependencies(provider, prefix, issues, null, dependencyCache, false),
           ),
-        ),
-      )
-    },
-  }
-}
+        )
+      },
+      fetchIssuesByIds: (ids, options): Effect.Effect<readonly Issue[], TrackerError> => {
+        const uniqueIds = [...new Set(ids)]
+        if (uniqueIds.length === 0) {
+          return Effect.succeed([])
+        }
+        return bindClient(
+          Effect.forEach(
+            uniqueIds,
+            (id) =>
+              githubJson(
+                provider,
+                `${provider.apiBaseUrl}${prefix}/issues/${encodeURIComponent(id)}`,
+              ).pipe(
+                Effect.flatMap(({ body }) =>
+                  Effect.try({
+                    try: () => normalizeIssue(decodeGitHubIssue(body ?? null), provider),
+                    catch: (cause: unknown) =>
+                      cause instanceof TrackerError
+                        ? cause
+                        : trackerResponseError(`GitHub issue ${id} could not be decoded`, cause),
+                  }),
+                ),
+              ),
+            { concurrency: idRefreshConcurrency },
+          ).pipe(
+            Effect.map((issues) => [
+              ...new Map(issues.map((issue) => [issue.id, issue] as const)).values(),
+            ]),
+            Effect.flatMap((issues) =>
+              options?.hydrateDependencies === false
+                ? Effect.succeed(issues)
+                : hydrateDependencies(provider, prefix, issues, null, dependencyCache, false),
+            ),
+          ),
+        )
+      },
+    }
+  })
 
 export const makeGitHubIssueControl = (
   provider: GitHubProviderConfig,
   httpClient?: HttpClient.HttpClient,
-): IssueControlPort => {
-  const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-  const tracker = makeGitHubTracker(provider, httpClient)
-  const bindClient = withBoundHttpClient(httpClient)
-  return {
-    listOpenIssues: () =>
-      tracker
-        .fetchIssuesByStates(['open'], null)
-        .pipe(
-          Effect.map((issues) =>
-            issues.filter((issue) => issue.dispatchable || issue.blockedBy.length > 0),
+): Effect.Effect<IssueControlPort> =>
+  Effect.gen(function* () {
+    const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+    const tracker = yield* makeGitHubTracker(provider, httpClient)
+    const bindClient = withBoundHttpClient(httpClient)
+    return {
+      listOpenIssues: () =>
+        tracker
+          .fetchIssuesByStates(['open'], null)
+          .pipe(
+            Effect.map((issues) =>
+              issues.filter((issue) => issue.dispatchable || issue.blockedBy.length > 0),
+            ),
           ),
-        ),
-    addLabel: (issueNumber, label) => {
-      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
-        return Effect.fail(
-          new TrackerError({
-            category: 'tracker_request',
-            message: 'issue number must be a positive safe integer',
-            retryable: false,
-          }),
+      addLabel: (issueNumber, label) => {
+        if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+          return Effect.fail(
+            new TrackerError({
+              category: 'tracker_request',
+              message: 'issue number must be a positive safe integer',
+              retryable: false,
+            }),
+          )
+        }
+        if (label.length === 0) {
+          return Effect.fail(
+            new TrackerError({
+              category: 'tracker_request',
+              message: 'orchestration label must not be empty',
+              retryable: false,
+            }),
+          )
+        }
+        return bindClient(
+          githubJson(
+            provider,
+            `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}/labels`,
+            {
+              method: 'POST',
+              body: JSON.stringify({ labels: [label] }),
+            },
+          ).pipe(Effect.asVoid),
         )
-      }
-      if (label.length === 0) {
-        return Effect.fail(
-          new TrackerError({
-            category: 'tracker_request',
-            message: 'orchestration label must not be empty',
-            retryable: false,
-          }),
-        )
-      }
-      return bindClient(
-        githubJson(
-          provider,
-          `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}/labels`,
-          {
-            method: 'POST',
-            body: JSON.stringify({ labels: [label] }),
-          },
-        ).pipe(Effect.asVoid),
-      )
-    },
-  }
-}
+      },
+    }
+  })
 
 /**
  * Binds the console's issue surface to GitHub. `serves` is `sameTrackerProvider` because the
@@ -450,7 +476,7 @@ export const makeGitHubIssueControl = (
 export const gitHubIssueControlFactory: IssueControlFactoryPort = {
   make: (provider) =>
     Effect.try({
-      try: () => makeGitHubIssueControl(githubProviderOf(provider)),
+      try: () => githubProviderOf(provider),
       catch: (cause) =>
         new TrackerError({
           category: 'unsupported_tracker_kind',
@@ -458,7 +484,7 @@ export const gitHubIssueControlFactory: IssueControlFactoryPort = {
           retryable: false,
           cause,
         }),
-    }),
+    }).pipe(Effect.flatMap((config) => makeGitHubIssueControl(config))),
   serves: sameTrackerProvider,
 }
 

@@ -217,7 +217,9 @@ describe('operator dependency graph', (): void => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(makeGitHubIssueControl(provider).listOpenIssues())
+    const issues = await Effect.runPromise(
+      Effect.runSync(makeGitHubIssueControl(provider)).listOpenIssues(),
+    )
 
     expect(issues.map((issue) => issue.id)).toEqual(['1'])
   })
