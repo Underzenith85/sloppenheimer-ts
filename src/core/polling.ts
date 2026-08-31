@@ -148,7 +148,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
       }
     }
     yield* reconcileHandoffs(context, !dispatchValidationFailed)
-    yield* context.reconcile
+    yield* context.reconcile(!dispatchValidationFailed)
     if (dispatchValidationFailed) {
       return
     }

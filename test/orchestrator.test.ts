@@ -4152,6 +4152,46 @@ describe('workflow hot reload', (): void => {
     expect(harness.agentRuns()).toHaveLength(1)
   })
 
+  it('defers stalled-worker retry creation until validation recovers', async (): Promise<void> => {
+    const issue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+    const initial: Workflow = {
+      ...changedWorkflow({ fingerprint: 'last-known-good' }),
+      config: {
+        ...workflow.config,
+        codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+      },
+    }
+    const harness = makeHarness(initial, () => [issue])
+
+    const observed = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* harness.awaitAgentRun
+          yield* TestClock.adjust(2)
+          harness.setWorkflow(
+            new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
+          )
+          yield* control.refresh
+          const failedSnapshot = yield* control.snapshot
+          harness.setWorkflow(initial)
+          yield* control.refresh
+          return { failedSnapshot, recoveredSnapshot: yield* control.snapshot }
+        }),
+      ),
+    )
+
+    expect(observed.failedSnapshot.workflowReloadError?.message).toBe('invalid reload')
+    expect(observed.failedSnapshot.running[0]?.issueId).toBe(issue.id)
+    expect(observed.failedSnapshot.retrying).toEqual([])
+    expect(observed.recoveredSnapshot.running).toEqual([])
+    expect(observed.recoveredSnapshot.retrying[0]).toMatchObject({
+      issueId: issue.id,
+      attempt: 1,
+      error: 'agent stalled',
+    })
+  })
+
   it('reconciles a repair handoff without dispatching it during a failed tick', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-invalid-repair-tick-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
