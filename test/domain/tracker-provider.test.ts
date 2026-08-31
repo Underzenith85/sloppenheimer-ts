@@ -1,3 +1,4 @@
+import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runFailureWithEnvironment, runWithEnvironment } from '../harness/environment.js'
@@ -48,6 +49,8 @@ describe('tracker provider registry', (): void => {
     )
 
     expect(registry.kinds).toEqual(['github', 'stub'])
+    expect(registry.get('stub')).toEqual(Option.some(stubTrackerProviderEntry))
+    expect(registry.get('missing')).toEqual(Option.none())
     expect(validated.kind).toBe('stub')
     expect(stubProviderToken(validated)).toBe('secret')
     expect(validated.secretEnvironmentNames).toEqual(['STUB_TRACKER_TOKEN'])

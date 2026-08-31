@@ -3,18 +3,17 @@ import chokidar from 'chokidar'
 import { Cause, ConfigProvider, Effect, Exit, Layer, Queue, Stream } from 'effect'
 
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
-import {
-  githubHttpClientLayer,
-  githubProviderOf,
-  layerGitHubIssueControl,
-  makeGitHubCodeReview,
-  makeGitHubSourceControl,
-  makeGitHubTracker,
-} from './adapters/github/index.js'
+import { githubHttpClientLayer } from './adapters/github/index.js'
 import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { loadWorkflow, preflightWorkflow } from './config/workflow.js'
-import { trackerProviders } from './tracker-adapters.js'
+import {
+  codeReviewFactory,
+  issueControlFactory,
+  sourceControlFactory,
+  trackerFactory,
+  trackerProviders,
+} from './tracker-adapters.js'
 import { startOrchestrator, type OrchestratorServices } from './core/orchestrator.js'
 import { SourceControlError, TrackerError, type WorkflowError } from './errors.js'
 import { makeOperatorBackend } from './operator/operator.js'
@@ -22,6 +21,7 @@ import { startOperatorServer } from './operator/server.js'
 import {
   CodeReviewFactory,
   CurrentIssueControl,
+  IssueControlFactory,
   layerAgentRunner,
   layerCodeReviewPorts,
   layerSourceControlPorts,
@@ -49,35 +49,13 @@ import { logInfo } from './support/logging.js'
 const shutdownTimeoutMs = 10_000
 
 /**
- * What an operator is owed when a workflow names a kind `trackerProviders` validates but this
- * executable has no ports for. Reading the selection back through the GitHub adapter throws, and
- * these factories build their instance eagerly, so the throw is caught here and reported as a
- * typed failure the orchestrator can surface rather than a defect that takes the host down.
- */
-const boundToGitHub =
-  (kind: string) =>
-  (cause: unknown): TrackerError =>
-    new TrackerError({
-      category: 'unsupported_tracker_kind',
-      message: `tracker.kind ${kind} is validated but this build binds its ports to github only`,
-      retryable: false,
-      cause,
-    })
-
-/**
  * The concrete adapters this executable binds: GitHub for the tracker and for code review, Codex
  * for the agent runner, and the host filesystem for workflows and workspaces. Nothing below the
  * composition root names any of them.
  */
 const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   layerAgentRunner(codexAgentRunner),
-  Layer.succeed(TrackerFactory, {
-    make: (validated) =>
-      Effect.try({
-        try: () => makeGitHubTracker(githubProviderOf(validated)),
-        catch: boundToGitHub(validated.kind),
-      }),
-  }),
+  Layer.succeed(TrackerFactory, trackerFactory),
   Layer.succeed(WorkspaceManagerFactory, {
     make: (settings) => Effect.succeed(makeWorkspaceManager(settings.root, settings.hooks)),
   }),
@@ -116,32 +94,19 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   }),
 )
 
-const codeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(CodeReviewFactory, {
-  make: (validated) =>
-    Effect.try({
-      try: () => makeGitHubCodeReview(githubProviderOf(validated)),
-      catch: boundToGitHub(validated.kind),
-    }),
-})
+const codeReview: Layer.Layer<CodeReviewFactory> = Layer.succeed(
+  CodeReviewFactory,
+  codeReviewFactory,
+)
 
-const sourceControl: Layer.Layer<SourceControlFactory> = Layer.succeed(SourceControlFactory, {
-  make: (validated) =>
-    Effect.try({
-      try: () => makeGitHubSourceControl(githubProviderOf(validated)),
-      catch: (cause: unknown) =>
-        new SourceControlError({
-          category: 'invalid_repository',
-          message: `tracker kind ${validated.kind} cannot configure host source control`,
-          retryable: false,
-          worktreePreserved: true,
-          cause,
-        }),
-    }),
-})
+const sourceControl: Layer.Layer<SourceControlFactory> = Layer.succeed(
+  SourceControlFactory,
+  sourceControlFactory,
+)
 
-/** The console's issue surface, bound to GitHub here so `operator/` never names an adapter. */
+/** The console's issue surface, selected from the same provider registry as the tracker. */
 const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.pipe(
-  Layer.provide(layerGitHubIssueControl),
+  Layer.provide(Layer.succeed(IssueControlFactory, issueControlFactory)),
 )
 
 /**
