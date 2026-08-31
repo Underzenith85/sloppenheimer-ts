@@ -628,7 +628,6 @@ export const startOrchestratorRuntime = (
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
           })
-          next = Transitions.claimIssue(next, issue)
           hydrated.add(restored.issueId)
         }
         return Transitions.dropRestoredHandoffs(next, hydrated)
@@ -771,10 +770,9 @@ export const startOrchestratorRuntime = (
             reviewCompletedHeadSha: null,
             observedAt,
           })
-          return Transitions.noteRecovery(
-            Transitions.resolveRecovery(Transitions.claimIssue(withHandoff, issue), issue.id),
-            { recovered: 1 },
-          )
+          return Transitions.noteRecovery(Transitions.resolveRecovery(withHandoff, issue.id), {
+            recovered: 1,
+          })
         })
         yield* logInfo('open pull request handoff recovered', {
           ...logContext(issue),

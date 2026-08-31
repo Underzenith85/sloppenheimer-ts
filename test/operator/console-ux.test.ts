@@ -121,6 +121,32 @@ describe('operator console information architecture', (): void => {
     expect(chips.every((label) => (label ?? '').trim().length > 0)).toBe(true)
   })
 
+  it('explains why a handed-off issue is not dispatchable', async (): Promise<void> => {
+    const backlog = consoleBacklog()
+    const console_ = await boot({
+      backlog: {
+        ...backlog,
+        issues: backlog.issues.map((issue) =>
+          issue.identifier === interventionIdentifier
+            ? {
+                ...issue,
+                dispatchable: false,
+                readiness: 'blocked' as const,
+                reason: 'Waiting for example/symphony#50',
+                blockedBy:
+                  backlog.issues.find((candidate) => candidate.identifier === blockedIdentifier)
+                    ?.blockedBy ?? [],
+              }
+            : issue,
+        ),
+      },
+    })
+
+    const card = console_.card(interventionIdentifier)
+    expect(card.textContent).toContain('Not eligible')
+    expect(card.textContent).toContain('Not dispatchable: Waiting for example/symphony#50.')
+  })
+
   it('tells a paused issue apart from one that was never made eligible', async (): Promise<void> => {
     const state = consoleState()
     const console_ = await boot({ state: { ...state, pausedIssueNumbers: [52] } })

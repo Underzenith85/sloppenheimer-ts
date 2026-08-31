@@ -264,7 +264,26 @@ const eligibilityOf = (
   if (paused.has(issue.number)) {
     return 'paused'
   }
-  return issue.enabled ? 'eligible' : 'not_eligible'
+  return issue.enabled && issue.dispatchable ? 'eligible' : 'not_eligible'
+}
+
+const ineligibilityReason = (
+  issue: BacklogIssue | undefined,
+  paused: ReadonlySet<number>,
+): string | null => {
+  if (issue === undefined) {
+    return 'the tracker no longer reports the issue'
+  }
+  if (paused.has(issue.number)) {
+    return 'the issue is paused by an operator'
+  }
+  if (!issue.enabled) {
+    return 'the required dispatch label is absent'
+  }
+  if (!issue.dispatchable) {
+    return issue.reason ?? 'the tracker reports the issue is not dispatchable'
+  }
+  return null
 }
 
 /**
@@ -380,6 +399,8 @@ const handoffItem = (
   const attention = handoffAttention(phase)
   const merged = phase === 'merged'
   const state: WorkState = attention !== null ? 'attention' : merged ? 'finished' : 'progress'
+  const notDispatchable = ineligibilityReason(issue, paused)
+  const handoffReason = entry.reason ?? 'Head ' + (entry.headSha ?? 'pending')
   return {
     identifier: entry.identifier,
     issueNumber: issueNumberOf(entry.identifier),
@@ -391,9 +412,12 @@ const handoffItem = (
     eligibility: eligibilityOf(issue, paused),
     priority: issue?.priority ?? null,
     labels: issue?.labels ?? [],
-    reason: entry.reason ?? 'Head ' + (entry.headSha ?? 'pending'),
+    reason:
+      notDispatchable === null
+        ? handoffReason
+        : `${handoffReason} Not dispatchable: ${notDispatchable}.`,
     ranking: attention === null ? null : attentionRanking(attention, issue?.priority ?? null),
-    blockers: [],
+    blockers: issue === undefined ? [] : blockerList(issue),
     unlocks: issue?.unlocks ?? 0,
     // A handoff restored from the store after a restart has no agent session behind it, so it gets
     // its pull request and nothing to inspect.

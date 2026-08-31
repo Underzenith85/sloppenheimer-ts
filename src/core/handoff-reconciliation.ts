@@ -400,5 +400,17 @@ export const reconcileHandoffs = (
         )
       }
     }
+    // Handoffs are observations, not claim owners. A live worker or queued retry retains its claim;
+    // every idle handoff releases one that was restored from an older snapshot or left behind by a
+    // completed transition.
+    yield* Ref.update(context.state, (current) => {
+      let released = current
+      for (const id of current.handoffs.keys()) {
+        if (!current.running.has(id) && !current.retries.has(id)) {
+          released = Transitions.releaseClaim(released, id)
+        }
+      }
+      return released
+    })
     yield* context.persistHandoffs
   })

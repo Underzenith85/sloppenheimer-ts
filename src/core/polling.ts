@@ -382,11 +382,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             }),
           )
           const handedOffAt = yield* currentInstant
-          yield* Ref.update(context.state, (current) => {
+          const completedRepair = yield* Ref.modify(context.state, (current) => {
             // Carried over, not reset: the worker attempt number is not a repair count, and an
             // existing handoff already holds the heads that were actually observed.
             const existing = current.handoffs.get(event.issueId)
-            return Transitions.putHandoff(current, event.issueId, {
+            const next = Transitions.putHandoff(current, event.issueId, {
               issue: existing?.issue ?? settled.issue,
               execution: settled.execution,
               pullRequestNumber: result.pullRequestNumber,
@@ -402,6 +402,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
               observedAt: handedOffAt,
             })
+            return [existing !== undefined && Option.isSome(existing.repair), next] as const
           })
           yield* context.persistHandoffs
           yield* logInfo('worker handed off pull request', {
@@ -412,6 +413,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             branch: result.branchName,
             pull_request_url: result.pullRequestUrl,
           })
+          if (completedRepair) {
+            yield* Ref.update(context.state, (current) =>
+              Transitions.releaseClaim(current, event.issueId),
+            )
+          } else {
+            yield* context.scheduleRetry(settled.issue, 1, null, true)
+          }
           break
         }
         case 'RetryDue': {

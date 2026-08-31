@@ -25,6 +25,7 @@ export type BacklogIssue = Readonly<{
   priority: number | null
   createdAt: string | null
   enabled: boolean
+  dispatchable: boolean
   state: string
   /**
    * The issue's state under the runtime's own normalization, so the console can match it against
@@ -180,6 +181,7 @@ export const buildBacklogSnapshot = (
       createdAt: issue.createdAt?.toISOString() ?? null,
       enabled:
         !pausedIssueNumbers.has(Number(issue.id)) && issue.labels.includes(label.toLowerCase()),
+      dispatchable: issue.dispatchable,
       state: issue.state,
       normalizedState: normalizeState(issue.state),
       // The table presents active scheduling constraints. Keep the complete dependency history in
