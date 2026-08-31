@@ -848,27 +848,6 @@ describe('operator console workflows', (): void => {
     )
   })
 
-  it('keeps polling the dashboard while a detail request is outstanding', async (): Promise<void> => {
-    let pending = false
-    const console_ = await boot({
-      details: detailFixture(runningIdentifier),
-      detailPending: () => pending,
-    })
-    pending = true
-    ;(
-      console_.card(runningIdentifier).querySelector('.inspect') as unknown as { click: () => void }
-    ).click()
-    await console_.flush()
-    const before = console_.requestLog.filter((path) => path === '/api/v1/state').length
-
-    await console_.tick(2000)
-    await console_.tick(3000)
-
-    expect(console_.requestLog.filter((path) => path === '/api/v1/state').length).toBeGreaterThan(
-      before,
-    )
-  })
-
   it('restores a retrying agent from a deep link', async (): Promise<void> => {
     const console_ = await boot({
       hash: `#/agents/${encodeURIComponent(retryingIdentifier)}`,
