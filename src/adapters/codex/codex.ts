@@ -343,6 +343,9 @@ class CodexConnection {
         () => this.#process.stderr,
         (cause) =>
           new AgentError({ category: 'protocol_error', message: 'Codex stderr failed', cause }),
+        // The pipe outlives the reader. Closing it under a child that is still running would fail
+        // its diagnostic writes, so the reader gives up on the record and leaves the pipe open.
+        { closeOnDone: false },
       ).pipe(
         Stream.catchAll(() => Stream.empty),
         diagnosticLines(codexMaxLineBytes),
@@ -355,6 +358,10 @@ class CodexConnection {
         Effect.catchAll(() =>
           Effect.sync(() => {
             this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
+            // Framing has given up on this stream, but the child has not stopped writing to it.
+            // Keep emptying the pipe and discard what arrives: a full stderr buffer blocks the App
+            // Server mid-protocol, which would turn a diagnostic-only overflow into a dead turn.
+            this.#process.stderr.resume()
           }),
         ),
       ),
@@ -609,6 +616,9 @@ class CodexConnection {
         Effect.asVoid,
       ),
     )
+    // The reader leaves the pipe open for a child that is still writing; with the session over
+    // there is no such child, and the handle is released rather than held to the end of the host.
+    this.#process.stderr.destroy()
   }
 
   /**

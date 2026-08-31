@@ -411,6 +411,20 @@ describe('App Server request handling', (): void => {
     expect(JSON.stringify(diagnostics)).not.toContain('final-secret')
   })
 
+  it('keeps serving the protocol after a stderr record passes the framing limit', async (): Promise<void> => {
+    const outcome = await runScenario('oversize-stderr')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    // Framing gives up on the record, but the pipe still has to be emptied: a child blocked on a
+    // full stderr buffer cannot answer the protocol, so a diagnostic overflow would become a turn
+    // timeout.
+    expect(outcome.error).toBeNull()
+    expect(outcome.result?.turnCount).toBe(1)
+    expect(diagnostics).toContain('Codex diagnostic line exceeded the framing limit')
+  }, 30_000)
+
   it('records absolute token usage reported during a turn', async (): Promise<void> => {
     const outcome = await runScenario('usage')
 
