@@ -332,7 +332,8 @@ explicitly rather than being silent.
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are
 `tracker`, `polling`, `workspace`, `hooks`, `agent`, `codex`, and `server`. The current tracker
 profile is GitHub Issues; the orchestration interfaces keep tracker and workspace concerns separate
-so additional profiles can be implemented without weakening the domain types.
+so additional profiles can be implemented without weakening the domain types. A second profile is
+designed but not implemented in [the Linear tracker adapter design](docs/linear-adapter-design.md).
 
 Unknown front-matter keys are preserved verbatim on `config.extensions` and otherwise ignored, so a
 newer workflow file stays loadable on an older host without weakening required-field validation. A
