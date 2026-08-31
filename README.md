@@ -29,11 +29,24 @@ and Oxfmt enforces no-semicolon formatting. Strict compiler options, `no-explici
 type-aware unsafe-operation rules, and mandatory braces are CI errors.
 
 The operator console's markup, styles, and browser script live as real source files under
-`src/operator/ui/`, so all three are linted, formatted, and typechecked. `pnpm build` compiles
-`app.ts` against a DOM-only `tsconfig.browser.json` and writes the served assets into
-`dist/operator/ui/`; running from source strips the same file's types in memory, so `pnpm dev` and
-the test suites need no build first. The console's timeline categories come from
-`src/telemetry.ts` at load time rather than being restated in the browser script.
+`src/operator/ui/`, so all three are linted, formatted, and typechecked. The script is four files —
+`model.ts` (the pure view model), `dom.ts` (browser primitives), `detail.ts` (the agent overlay) and
+`app.ts` (the shell) — written as classic scripts rather than modules: none of them imports or
+exports, so `tsconfig.browser.json` typechecks them as one program and the server concatenates them,
+in that order, into the single classic script the page loads. `pnpm build` compiles them against a
+DOM-only `tsconfig.browser.json` and writes the served assets into `dist/operator/ui/`; running from
+source strips the same files' types in memory, so `pnpm dev` and the test suites need no build
+first. Because oxlint reads one file at a time it cannot see a declaration another of those files
+uses, so `no-unused-vars` is off for that directory alone; the compiler still catches real misuse.
+The console's timeline categories come from `src/telemetry.ts` at load time rather than being
+restated in the browser script.
+
+The console's own regression suite is deterministic and runs inside `pnpm check`: `test/operator/`
+drives the exact published script under happy-dom, through the shared harness in
+`test/harness/operator-console.ts` and one repository fixture in `test/harness/console-fixtures.ts`
+covering blocked, cyclic, stalled, retrying, intervention-required, ready, running, awaiting-checks,
+merged and completed work. Run it alone with `pnpm test test/operator`. There is no separate slower
+browser suite to schedule.
 
 The `effect`, `@effect/platform`, and `@effect/platform-node` versions are pinned as a compatible
 Effect 3 set. Update them together: Platform releases declare Effect-line peer ranges, and a partial
@@ -49,9 +62,12 @@ GITHUB_TOKEN=github_pat_... pnpm start -- WORKFLOW.md
 The workflow path is optional and defaults to `WORKFLOW.md` in the current directory. The CLI
 accepts at most one path and one `--port <0-65535>` override; invalid arguments and startup failures
 exit nonzero with a concise error. `SIGINT` and `SIGTERM` initiate a scoped shutdown of polling,
-watching, workers, hooks, App Server subprocesses, and the HTTP listener. A completed signal-driven
-shutdown exits zero, while an abnormal host failure or a shutdown exceeding 10 seconds exits
-nonzero.
+watching, workers, hooks, App Server subprocesses, and the HTTP listener. Those finalizers run
+concurrently, so the wall-clock cost of shutdown is the slowest single agent's teardown rather than
+one teardown per active agent: the operator port is released and the host exits within the deadline
+whatever `agent.max_concurrent_agents` is set to. A completed signal-driven shutdown exits zero,
+while an abnormal host failure or a shutdown exceeding 10 seconds exits nonzero; that 10-second
+watchdog is a last-resort failure path, not the bound cleanup is designed against.
 
 Tracker credentials in repository-owned workflow files must use `$VAR` references; literal tracker
 tokens are rejected. The host retains the reference's environment-variable name as secret
@@ -74,11 +90,10 @@ keeps the inode allocated so a directory deleted and recreated at the same path 
 and it re-confirms the device and inode at each path-consuming boundary — after the process is
 created and before every turn — rejecting a directory whose identity changed.
 
-The configured operator console is available at `http://127.0.0.1:3000`. It shows live and retrying
-agents, session totals, and the open GitHub backlog. **Start** adds the configured orchestration label;
-**Pause** removes it and reconciliation stops the worker. The browser never receives GitHub or
-ChatGPT credentials. Override the workflow port with `--port 8080`, or use `--port 0` to select an
-ephemeral port.
+The configured operator console is available at `http://127.0.0.1:3000`. It is organised around four
+work states rather than around implementation surfaces — see [Operator console](#operator-console)
+below. The browser never receives GitHub or ChatGPT credentials. Override the workflow port with
+`--port 8080`, or use `--port 0` to select an ephemeral port.
 
 The server deliberately binds only to loopback. From another machine, reach an LXC deployment with
 an SSH tunnel:
@@ -174,15 +189,85 @@ separate test compares the methods, policy values, and permission types this cli
 `codex app-server generate-json-schema` when Codex is installed, and is inert when it is not, so no
 machine-specific schema is committed.
 
+## Operator console
+
+The console answers four questions, and its navigation is the four answers with their counts:
+
+| View                | What is in it                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                                                                                                                                    |
+| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                                                                                                                                                  |
+| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                                                                                                                                         |
+| **Finished**        | Work this host merged and closed out in the last 24 hours. The scope is stated on the view — it is a window _and_ a lifetime, since completions live in the running host's state and a restart empties it. An item is dated by the provider's merge time rather than by when Symphony noticed it, so a pull request merged while the host was down does not reappear as recent. |
+
+Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
+agent** control appears only where the detail resource will answer: a handoff restored from the
+store after a restart has a pull request to open but no agent session behind it, and the runtime
+publishes which identifiers are inspectable rather than leaving the console to guess. Finished work
+keeps the control for as long as its timeline is retained, so a post-mortem stays one click away. Attention
+condition, pipeline phase, and orchestration eligibility are separate from that placement and are
+shown as their own labelled chips — status is never carried by colour alone. Ordinary dependency
+blocking is not an exception: blocked work is summarised under Ready ("_n_ issues are waiting on a
+dependency"), enumerated in the complete work list, and laid out in the Plan view. The console opens
+on Needs attention while an exception is live and on Ready otherwise, and an idle host collapses to
+one system-health line rather than four empty panels.
+
+Each Ready row says why it is ranked where it is — `P1 · unlocks 8 issues · ranked first`. The
+`unlocks` count is computed by the backend from the dependency graph. It is a cascade, not plain
+reachability: an issue is credited only with work whose _every_ unresolved blocker it clears, so work
+held by two blockers counts for neither of them alone, and blockers already in a terminal state are
+ignored.
+
+Actions are named after what the backend does. Making an issue eligible adds the configured
+orchestration label and asks Symphony to reselect, so the control reads **Start agent** when a
+dispatch slot is free and **Queue issue** when none is; the row then says which happened, and names
+the limit that bound — the global `agent.max_concurrent_agents`, or the narrower
+`agent.max_concurrent_agents_by_state` cap for that issue's state. The runtime publishes which states
+are saturated, so the console never promises an immediate start for work the scheduler will queue.
+The backlog and the runtime snapshot are fetched separately, so until the runtime half arrives
+capacity is unknown rather than free, and the control reads **Queue issue** for the same reason. **Pause**
+removes the issue from orchestration eligibility, cancels the agent running for it, and drops any
+queued retry — it does not remove the Symphony label from the pull-request handoff lifecycle. Because
+pausing can interrupt live work, it asks for confirmation exactly when the issue is starting, running
+or retrying. Every mutation reports pending, success and failure in the affected row, keeps a failure
+attached to that row with a retry, cannot be submitted twice from one row, and survives the next poll.
+Blocked work never offers a start control at all: it offers **View blockers**, which lists the
+unresolved dependencies and can open the Plan view focused on that issue.
+
+The dependency graph is not on the default dashboard. **Open dependency plan** reveals a secondary
+Plan view with cycle diagnostics, a focus control that narrows to one issue with its immediate
+blockers and dependents, and a complete text list of every dependency relationship. The graph itself
+is drawn inside a bounded viewport that pans rather than growing the document, and on a small screen
+the list stands in for it entirely.
+
+The console is a single responsive layout: work is laid out as rows at desktop widths and as cards
+below 768px, with title, state, reason and action kept together in both. There is a skip link into
+the work queues, the state navigation is a tablist reachable before any planning content, all
+primary controls clear a 44px touch target, and reduced-motion and forced-colors preferences are
+respected. The agent overlay is `aria-modal`, and Tab and Shift+Tab cycle within it rather than
+reaching the obscured page behind. `test/harness/accessibility.ts` runs a structural audit — accessible names, labelled
+controls, tab/panel pairing, duplicate ids, forced tab order, heading levels, landmarks — over every
+view, the Plan, and the open detail overlay at 390px, 768px and 1280px, and over the empty
+dashboard. It is a structural audit rather than a browser-engine scan: happy-dom has no layout or
+computed styles, so a contrast or overlap check there would be reporting on a page nobody sees.
+Those remain a manual review.
+
 ## Live agent inspection
 
 Every running and retrying agent has a detail resource at
 `GET /api/v1/agents/<url-encoded issue identifier>`, and each running and retrying entry in
 `/api/v1/state` carries that link as `detailUrl`, identical to the `self` link inside the detail
 itself. The console turns each live work card into an inspector: a phase header, elapsed time, last
-activity, the stall countdown, thread/turn/session identity, process and worker, attempt and retry
-timing, token totals, rate limits, an aggregate workspace summary, handoff state, and a bounded
-chronological timeline with per-category filters. The panel has a copyable deep link
+activity, the stall countdown, an aggregate workspace summary, handoff progress, and what the agent
+is expected to do next — which on a host that composes no code-review services says the continuation
+lifecycle will run rather than promising a pull request that will never be opened. Process and worker identity, thread/turn/session identity, attempt and retry
+timing, token totals and raw rate limits are one **Diagnostics** disclosure below that, available
+without being the first thing an operator reads. The timeline has three presets — **Summary**, which
+drops session handshakes, private reasoning, chat turns, individual tool calls and usage accounting
+while keeping failures, retries, file changes, commands and handoff transitions; **Errors and
+retries**; and **Everything** — with the full per-category filters still available under **Advanced
+filters**. The panel is a modal overlay at every width, so opening it never displaces the queue row
+it was opened from, and it contains keyboard focus while it is open. It has a copyable deep link
 (`#/agents/<identifier>`), closes on `Escape` with focus returned to the card that opened it, and
 polls on its own timer and its own request, so opening it cannot delay tracker polling or the
 dashboard. Elapsed time and the stall countdown are recomputed in the browser from the absolute

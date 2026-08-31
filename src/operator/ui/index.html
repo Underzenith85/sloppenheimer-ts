@@ -9,82 +9,199 @@
     <script src="/app.js" defer></script>
   </head>
   <body>
-    <div class="grain"></div>
-    <main>
-      <header class="masthead">
-        <div>
-          <p class="eyebrow"><span class="pulse"></span> Symphony / Operator</p>
-          <h1>Conduct the work.</h1>
-          <p class="lede">
-            Move an issue into the score, watch agents play their parts, and intervene when needed.
-          </p>
-        </div>
-        <button id="refresh" class="refresh" type="button">Refresh now</button>
-      </header>
+    <a class="skip-link" href="#work">Skip to work queues</a>
+    <div class="grain" aria-hidden="true"></div>
 
-      <section class="metrics" aria-label="Runtime metrics">
-        <article>
-          <span>Running</span><strong id="running-count">—</strong
-          ><small id="capacity">agents</small>
-        </article>
-        <article>
-          <span>Retrying</span><strong id="retrying-count">—</strong
-          ><small>queued recoveries</small>
-        </article>
-        <article>
-          <span>Completed</span><strong id="completed-count">—</strong><small>this session</small>
-        </article>
-        <article>
-          <span>Tokens</span><strong id="token-count">—</strong><small id="runtime">runtime</small>
-        </article>
-      </section>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Symphony / Operator</p>
+        <h1>Operations</h1>
+        <p id="system-health" class="lede">Waiting for the first runtime snapshot…</p>
+        <p id="label-note" class="label-note">Loading orchestration label…</p>
+      </div>
+      <button id="refresh" class="refresh" type="button">Refresh now</button>
+    </header>
 
-      <section class="live-grid">
-        <article class="panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Now playing</p>
-              <h2>Active agents</h2>
-            </div>
-            <span id="updated-at" class="timestamp">Waiting for state</span>
-          </div>
-          <div id="running-list" class="work-list"><p class="empty">No agents are running.</p></div>
-        </article>
-        <article class="panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">On deck</p>
-              <h2>Recovery queue</h2>
-            </div>
-          </div>
-          <div id="retry-list" class="work-list">
-            <p class="empty">No retries are scheduled.</p>
-          </div>
-        </article>
-        <article class="panel handoff-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">After the agent</p>
-              <h2>Pull request handoffs</h2>
-            </div>
-          </div>
-          <div id="handoff-list" class="work-list">
-            <p class="empty">No pull requests are being monitored.</p>
-          </div>
-        </article>
-      </section>
+    <main id="work" tabindex="-1">
+      <h2 class="sr-only" id="work-heading">Work by state</h2>
+      <div class="state-nav" role="tablist" aria-labelledby="work-heading">
+        <button
+          id="tab-attention"
+          class="state-tab"
+          type="button"
+          role="tab"
+          aria-controls="view-attention"
+          aria-selected="false"
+        >
+          <span class="state-name">Needs attention</span>
+          <span class="state-count" id="count-attention">0</span>
+        </button>
+        <button
+          id="tab-ready"
+          class="state-tab"
+          type="button"
+          role="tab"
+          aria-controls="view-ready"
+          aria-selected="true"
+        >
+          <span class="state-name">Ready</span>
+          <span class="state-count" id="count-ready">0</span>
+        </button>
+        <button
+          id="tab-progress"
+          class="state-tab"
+          type="button"
+          role="tab"
+          aria-controls="view-progress"
+          aria-selected="false"
+        >
+          <span class="state-name">In progress</span>
+          <span class="state-count" id="count-progress">0</span>
+        </button>
+        <button
+          id="tab-finished"
+          class="state-tab"
+          type="button"
+          role="tab"
+          aria-controls="view-finished"
+          aria-selected="false"
+        >
+          <span class="state-name">Finished</span>
+          <span class="state-count" id="count-finished">0</span>
+        </button>
+      </div>
 
-      <aside
-        id="agent-detail"
-        class="detail-panel"
-        role="region"
-        aria-labelledby="detail-title"
+      <p id="idle-summary" class="idle-summary" hidden></p>
+
+      <section
+        id="view-attention"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-attention"
+        tabindex="0"
         hidden
       >
+        <p class="view-lede">Exceptions Symphony cannot clear on its own.</p>
+        <div id="attention-alerts" class="work-list"></div>
+        <div id="attention-list" class="work-list"></div>
+      </section>
+
+      <section
+        id="view-ready"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-ready"
+        tabindex="0"
+      >
+        <p class="view-lede">Dependency-cleared work, most useful first.</p>
+        <div id="ready-list" class="work-list"></div>
+        <aside id="blocked-summary" class="blocker-summary" aria-label="Blocked work"></aside>
+      </section>
+
+      <section
+        id="view-progress"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-progress"
+        tabindex="0"
+        hidden
+      >
+        <p class="view-lede">Agents and pull-request handoffs in flight.</p>
+        <div id="progress-list" class="work-list"></div>
+      </section>
+
+      <section
+        id="view-finished"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-finished"
+        tabindex="0"
+        hidden
+      >
+        <p id="finished-scope" class="scope-label">
+          Scope: work this host finished in the last 24 hours; a restart clears it.
+        </p>
+        <div id="finished-list" class="work-list"></div>
+      </section>
+    </main>
+
+    <section class="panel" aria-labelledby="all-work-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="all-work-heading">All work</h2>
+          <p id="all-work-count" class="label-note">0 items</p>
+        </div>
+        <button
+          id="plan-toggle"
+          class="refresh"
+          type="button"
+          aria-expanded="false"
+          aria-controls="plan"
+        >
+          Open dependency plan
+        </button>
+      </div>
+      <div class="work-controls-bar">
+        <label class="search" for="work-search">Search work</label>
+        <input id="work-search" type="search" placeholder="Issue, title or label" />
+        <fieldset id="work-filters">
+          <legend>Filter by state</legend>
+          <label class="filter"
+            ><input type="checkbox" value="attention" /><span>Needs attention</span></label
+          >
+          <label class="filter"><input type="checkbox" value="ready" /><span>Ready</span></label>
+          <label class="filter"
+            ><input type="checkbox" value="progress" /><span>In progress</span></label
+          >
+          <label class="filter"
+            ><input type="checkbox" value="blocked" /><span>Blocked</span></label
+          >
+          <label class="filter"
+            ><input type="checkbox" value="finished" /><span>Finished</span></label
+          >
+        </fieldset>
+      </div>
+      <div id="all-work-list" class="work-list"></div>
+    </section>
+
+    <section id="plan" class="panel plan-panel" aria-labelledby="plan-heading" hidden>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">Plan</p>
+          <h2 id="plan-heading" tabindex="-1">Dependency plan</h2>
+        </div>
+        <button id="plan-close" class="refresh" type="button">Close plan</button>
+      </div>
+      <div class="plan-controls">
+        <label for="plan-focus">Focus an issue</label>
+        <select id="plan-focus"></select>
+      </div>
+      <div id="cycle-diagnostics" class="cycle-diagnostics" aria-live="polite"></div>
+      <h3 id="plan-list-heading">Every dependency relationship</h3>
+      <ul id="plan-list" class="plan-list" aria-labelledby="plan-list-heading"></ul>
+      <div
+        id="dependency-graph"
+        class="dependency-graph"
+        tabindex="0"
+        role="img"
+        aria-label="Issue dependency graph. The list above carries the same relationships."
+      ></div>
+    </section>
+
+    <div
+      id="agent-detail"
+      class="detail-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="detail-title"
+      hidden
+    >
+      <div id="detail-scrim" class="detail-scrim"></div>
+      <div class="detail-body">
         <div class="detail-head">
           <div>
             <p class="eyebrow">
-              <span id="detail-pulse" class="pulse"></span>
+              <span id="detail-pulse" class="pulse" aria-hidden="true"></span>
               <span id="detail-phase">Agent detail</span>
             </p>
             <h2 id="detail-title" tabindex="-1">Select an agent</h2>
@@ -96,63 +213,31 @@
           </div>
         </div>
         <p id="detail-status" class="detail-status" role="status" aria-live="polite"></p>
-        <dl id="detail-facts" class="detail-facts"></dl>
-        <div class="detail-filters">
+        <div id="detail-summary" class="detail-summary"></div>
+        <p id="detail-outcome" class="detail-outcome"></p>
+        <div class="timeline-controls">
           <p class="eyebrow" id="filter-label">Timeline</p>
-          <div id="detail-filters" role="group" aria-labelledby="filter-label"></div>
+          <div
+            id="detail-presets"
+            class="preset-group"
+            role="group"
+            aria-labelledby="filter-label"
+          ></div>
+          <details class="advanced-filters">
+            <summary>Advanced filters</summary>
+            <div id="detail-filters" role="group" aria-label="Timeline categories"></div>
+          </details>
         </div>
         <ol id="detail-timeline" class="detail-timeline" aria-labelledby="filter-label">
           <li class="empty">No events yet.</li>
         </ol>
-      </aside>
+        <details class="diagnostics">
+          <summary>Diagnostics</summary>
+          <div id="detail-diagnostics"></div>
+        </details>
+      </div>
+    </div>
 
-      <section class="panel graph-panel" aria-labelledby="dependency-heading">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Dependency graph</p>
-            <h2 id="dependency-heading">Native issue dependencies</h2>
-          </div>
-          <p class="label-note">Blockers flow left to right</p>
-        </div>
-        <div id="cycle-diagnostics" class="cycle-diagnostics" aria-live="polite"></div>
-        <div
-          id="dependency-graph"
-          class="dependency-graph"
-          tabindex="0"
-          aria-label="Issue dependency graph"
-        >
-          <p class="empty">Loading dependency graph…</p>
-        </div>
-      </section>
-
-      <section class="panel backlog-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">GitHub backlog</p>
-            <h2>Choose the next movement</h2>
-          </div>
-          <p id="label-note" class="label-note">Loading orchestration label…</p>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Issue</th>
-                <th>Priority</th>
-                <th>Labels</th>
-                <th>Status</th>
-                <th><span class="sr-only">Action</span></th>
-              </tr>
-            </thead>
-            <tbody id="backlog">
-              <tr>
-                <td colspan="5" class="empty">Loading open issues…</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-      <p id="notice" class="notice" role="status" aria-live="polite"></p>
-    </main>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
   </body>
 </html>

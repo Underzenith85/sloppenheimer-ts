@@ -168,13 +168,15 @@ describe('dispositions', (): void => {
         headSha: 'head-1',
         merged: true,
         mergeCommitSha: 'merge-1',
+        mergedAt: '2026-01-05T00:00:00.000Z',
         mergeable: null,
         mergeState: null,
       },
       observedAt,
     )
 
-    expect(decision.action).toEqual({ _tag: 'Complete' })
+    // The provider's own instant, not the one this pass observed it at.
+    expect(decision.action).toEqual({ _tag: 'Complete', mergedAt: '2026-01-05T00:00:00.000Z' })
     expect(decision.handoff.state).toBe('merged')
   })
 

@@ -1,9 +1,62 @@
 import { Effect, Ref } from 'effect'
 
+import { normalizeState } from '../domain/domain.js'
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
-import type { AgentDetailLookup, OrchestratorContext, OrchestratorSnapshot } from './runtime.js'
-import type { RuntimeState } from './state.js'
+import {
+  publishedCompletedWork,
+  type AgentDetailLookup,
+  type CompletedSnapshot,
+  type OrchestratorContext,
+  type OrchestratorSnapshot,
+} from './runtime.js'
+import type { CompletedEntry, RuntimeState } from './state.js'
 import { handoffSnapshots } from './transitions.js'
+
+/**
+ * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
+ * detection is off for that agent, which the console must be able to tell apart from a deadline
+ * that has not arrived yet.
+ */
+const stallDeadlineOf = (lastActiveAt: Date, stallTimeoutMs: number): string | null =>
+  stallTimeoutMs > 0 ? new Date(lastActiveAt.getTime() + stallTimeoutMs).toISOString() : null
+
+/**
+ * The normalized issue states that cannot take another agent right now. Only states the workflow
+ * gives an explicit cap can saturate ahead of the global limit, so only those are considered; the
+ * global limit is already published as `maxConcurrentAgents` beside the running count.
+ */
+const saturatedStatesOf = (state: RuntimeState): readonly string[] => {
+  const byState = state.lastKnownGood.workflow.config.agent.maxConcurrentAgentsByState
+  if (byState.size === 0) {
+    return []
+  }
+  const running = new Map<string, number>()
+  for (const entry of state.running.values()) {
+    const normalized = normalizeState(entry.issue.state)
+    running.set(normalized, (running.get(normalized) ?? 0) + 1)
+  }
+  return [...byState]
+    .filter(([issueState, limit]) => (running.get(normalizeState(issueState)) ?? 0) >= limit)
+    .map(([issueState]) => normalizeState(issueState))
+    .sort((left, right) => left.localeCompare(right))
+}
+
+/** The identifiers whose detail resource will answer with a snapshot rather than a refusal. */
+const inspectableAgentsOf = (state: RuntimeState): readonly string[] =>
+  [...state.publishedDetails]
+    .filter(([, published]) => published._tag === 'Found')
+    .map(([identifier]) => identifier)
+    .sort((left, right) => left.localeCompare(right))
+
+const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
+  issueId: entry.issueId,
+  identifier: entry.identifier,
+  title: entry.title,
+  url: entry.url,
+  outcome: entry.outcome,
+  finishedAt: entry.finishedAt.toISOString(),
+  pullRequestUrl: entry.pullRequestUrl,
+})
 
 /**
  * The operator's view of one instant. Pure in the state it is given: the value was read from the
@@ -86,6 +139,10 @@ export const createSnapshot = (state: RuntimeState, workflowPath: string): Orche
       tokens: entry.tokens,
       lastReportedTokens: entry.lastReportedTokens,
       workerHost: 'local',
+      stallDeadline: stallDeadlineOf(
+        entry.lastEventAt ?? entry.startedAt,
+        entry.execution.stallTimeoutMs,
+      ),
       detailUrl: agentDetailPath(entry.issue.identifier),
     })),
     retrying: [...state.retries.values()].map((entry) => ({
@@ -99,6 +156,12 @@ export const createSnapshot = (state: RuntimeState, workflowPath: string): Orche
       workerHost: 'local',
       detailUrl: agentDetailPath(entry.issue.identifier),
     })),
+    completed: [...state.completed.values()]
+      .sort((left, right) => right.finishedAt.getTime() - left.finishedAt.getTime())
+      .slice(0, publishedCompletedWork)
+      .map(completedSnapshot),
+    saturatedStates: saturatedStatesOf(state),
+    inspectableAgents: inspectableAgentsOf(state),
     totals: {
       inputTokens: state.totals.inputTokens + activeTokens.inputTokens,
       outputTokens: state.totals.outputTokens + activeTokens.outputTokens,

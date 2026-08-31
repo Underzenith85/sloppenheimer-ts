@@ -15,6 +15,7 @@ import {
   type HandoffAction,
 } from './handoff-decision.js'
 import { hasSlot, identifierIssueNumber, logContext } from './policy.js'
+import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
 import * as Transitions from './transitions.js'
@@ -30,6 +31,31 @@ const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boole
   return Option.exists(identifierIssueNumber(handoff.issue.identifier), (issueNumber) =>
     state.pausedIssueNumbers.has(issueNumber),
   )
+}
+
+/**
+ * What a merged handoff leaves behind. The runtime already recorded that the issue completed; this
+ * keeps the title, link and instant alongside it so the console can answer what Symphony finished
+ * and when, instead of publishing a bare count.
+ *
+ * A reported merge time wins over the observation's own: dating a restored handoff now would put
+ * finished work back into the console's recent-activity window.
+ */
+const finishedWork = (
+  id: IssueId,
+  handoff: HandoffEntry,
+  mergedAt: string | null,
+): CompletedEntry => {
+  const reported = mergedAt === null ? null : new Date(mergedAt)
+  return {
+    issueId: id,
+    identifier: handoff.issue.identifier,
+    title: handoff.issue.title,
+    url: handoff.issue.url,
+    outcome: 'merged',
+    finishedAt: reported === null || Number.isNaN(reported.getTime()) ? new Date() : reported,
+    pullRequestUrl: handoff.pullRequestUrl,
+  }
 }
 
 const writeHandoff = (
@@ -88,7 +114,10 @@ const perform = (
       case 'Complete': {
         yield* writeHandoff(context, id, handoff)
         yield* context.noteHandoffOutcome(id, handoff, 'merged')
-        yield* Ref.update(context.state, (current) => Transitions.completeHandoff(current, id))
+        const finished = finishedWork(id, handoff, action.mergedAt)
+        yield* Ref.update(context.state, (current) =>
+          Transitions.completeHandoff(current, id, finished),
+        )
         return
       }
       case 'NoteClosed': {
@@ -112,7 +141,11 @@ const perform = (
           return
         }
         yield* context.noteHandoffOutcome(id, settled, 'merged')
-        yield* Ref.update(context.state, (current) => Transitions.completeHandoff(current, id))
+        // This host performed the merge just now, so the instant is its own.
+        const finished = finishedWork(id, settled, null)
+        yield* Ref.update(context.state, (current) =>
+          Transitions.completeHandoff(current, id, finished),
+        )
         yield* logInfo('pull request merged', {
           ...logContext(handoff.issue),
           action: 'pull_request_merge',

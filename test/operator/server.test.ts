@@ -66,10 +66,14 @@ const snapshot: OrchestratorSnapshot = {
       tokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       lastReportedTokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       workerHost: 'local',
+      stallDeadline: '2026-08-29T12:04:00.000Z',
       detailUrl: '/api/v1/agents/example%2Fsymphony%2317',
     },
   ],
   retrying: [],
+  completed: [],
+  saturatedStates: [],
+  inspectableAgents: [],
   totals: { inputTokens: 10, outputTokens: 5, totalTokens: 15, secondsRunning: 60 },
   rateLimits: null,
 }
@@ -114,6 +118,7 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     status: 'running',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
+    handoffEnabled: true,
     branch: 'symphony/issue-17',
     retry: null,
   })
@@ -164,9 +169,11 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
         createdAt: '2026-08-29T10:00:00.000Z',
         enabled: true,
         state: 'open',
+        normalizedState: 'open',
         blockedBy: [],
         readiness: 'ready',
         reason: null,
+        unlocks: 0,
       },
     ],
     nodes: [
@@ -214,7 +221,7 @@ describe('operator server', (): void => {
 
       expect(page.status).toBe(200)
       expect(page.headers.get('content-security-policy')).toContain("default-src 'self'")
-      expect(await page.text()).toContain('Native issue dependencies')
+      expect(await page.text()).toContain('Work by state')
       expect(state.status).toBe(200)
       expect(await state.json()).toMatchObject({ counts: { running: 1 }, maxConcurrentAgents: 2 })
       expect(await backlog.json()).toMatchObject({
@@ -230,7 +237,14 @@ describe('operator server', (): void => {
       expect(source).toContain(
         '(state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)',
       )
-      expect(source).toContain("button.disabled = !issue.enabled && issue.readiness !== 'ready'")
+      // The served bundle is the whole console, in dependency order: the view model, the shared
+      // browser primitives, the detail overlay and the shell.
+      expect(source).toContain("start: 'Start agent'")
+      expect(source).toContain('const buildWorkModel =')
+      expect(source).toContain('const installDetailControls =')
+      expect(source.indexOf('const buildWorkModel =')).toBeLessThan(
+        source.indexOf('const installDetailControls ='),
+      )
     })
   })
 

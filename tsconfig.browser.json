@@ -3,12 +3,17 @@
   "compilerOptions": {
     "declaration": false,
     "declarationMap": false,
+    "isolatedModules": false,
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleDetection": "legacy",
+    "moduleResolution": "Bundler",
     "noEmit": false,
     "outDir": ".operator-ui-build",
     "rootDir": "src",
-    "sourceMap": false
+    "sourceMap": false,
+    "verbatimModuleSyntax": false
   },
-  "include": ["src/operator/ui/app.ts"],
+  "include": ["src/operator/ui/*.ts"],
   "exclude": []
 }

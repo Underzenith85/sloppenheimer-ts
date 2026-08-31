@@ -34,7 +34,8 @@ export type RuntimeState = Readonly<{
   /** Issues this orchestrator has taken responsibility for, in any phase. */
   claimed: ReadonlySet<IssueId>
   retries: ReadonlyMap<IssueId, RetryEntry>
-  completed: ReadonlySet<IssueId>
+  /** Finished work, keyed by issue: enough of each to say what Symphony merged, and when. */
+  completed: ReadonlyMap<IssueId, CompletedEntry>
   pausedIssueNumbers: ReadonlySet<number>
   handoffs: ReadonlyMap<IssueId, HandoffEntry>
   totals: TokenTotals
@@ -132,6 +133,21 @@ export type RunningEntry = Readonly<{
   turnActive: boolean
   tokens: Omit<TokenTotals, 'secondsRunning'>
   lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
+}>
+
+/**
+ * One piece of finished work, as the console shows it. The runtime already had to know which
+ * issues had completed; it keeps enough of each to answer "what did Symphony finish, and when"
+ * without the console inventing a session history of its own.
+ */
+export type CompletedEntry = Readonly<{
+  issueId: IssueId
+  identifier: string
+  title: string
+  url: string | null
+  outcome: 'merged'
+  finishedAt: Date
+  pullRequestUrl: string | null
 }>
 
 export type RetryEntry = Readonly<{
@@ -278,7 +294,7 @@ export const initialState = (
   // A persisted handoff is a claim this orchestrator already holds, before its issue is hydrated.
   claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
-  completed: new Set(),
+  completed: new Map(),
   pausedIssueNumbers: new Set(),
   handoffs: new Map(),
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },

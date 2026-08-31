@@ -860,6 +860,8 @@ describe('restored pull request handoffs', (): void => {
               headSha: null,
               merged: true as const,
               mergeCommitSha: null,
+              // The merge happened long before this host came back up.
+              mergedAt: '2026-08-20T09:00:00.000Z',
               mergeable: null,
               mergeState: 'unknown',
               checks: [],
@@ -883,6 +885,18 @@ describe('restored pull request handoffs', (): void => {
     expect(inspections).toBe(1)
     expect(snapshot.handoffs).toEqual([])
     expect(snapshot.counts.completed).toBe(1)
+    // Finished work is published as described entries, not only as a count: the console scopes its
+    // Finished view to a time window and needs the instant each issue landed to do that.
+    expect(snapshot.completed).toHaveLength(1)
+    expect(snapshot.completed[0]).toMatchObject({
+      identifier: issue.identifier,
+      title: issue.title,
+      outcome: 'merged',
+      pullRequestUrl: 'https://github.test/example/symphony/pull/44',
+      // The provider's merge time, not the instant this host noticed it. Dating it now would put
+      // work merged days ago back into the console's recent-activity window.
+      finishedAt: '2026-08-20T09:00:00.000Z',
+    })
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
     await rm(workspaceRoot, { force: true, recursive: true })
   })
@@ -952,6 +966,10 @@ describe('restored pull request handoffs', (): void => {
 
     expect(inspections).toBe(1)
     expect(snapshot.running).toEqual([])
+    // The handoff came back from the store and nothing ran for it in this process, so its detail
+    // resource would report no session. The console reads this list to decide whether to offer an
+    // inspection at all, rather than rendering one that refuses.
+    expect(snapshot.inspectableAgents).toEqual([])
     expect(snapshot.handoffs).toEqual([
       expect.objectContaining({
         issueId: '75',
@@ -4162,6 +4180,73 @@ describe('session telemetry accounting', (): void => {
     )
   })
 
+  it('publishes the saturated issue states and the agents whose detail will answer', async (): Promise<void> => {
+    const perStateWorkflow: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        agent: {
+          ...workflow.config.agent,
+          maxConcurrentAgents: 4,
+          // Open issues get a narrower cap than the host as a whole, so the state saturates while
+          // there is still global capacity — the case a console reading only the global limit
+          // would report as a free slot.
+          maxConcurrentAgentsByState: new Map([['open', 1]]),
+        },
+      },
+    }
+    const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(perStateWorkflow, () => [issue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.maxConcurrentAgents).toBe(4)
+          expect(snapshot.saturatedStates).toEqual(['open'])
+          // The running agent's detail resource will answer, so the console may offer to inspect it.
+          expect(snapshot.inspectableAgents).toEqual([issue.identifier])
+        }),
+      ),
+    )
+  })
+
+  it('reports no saturated state when the workflow sets no per-state limit', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () => Effect.sync(resolveStarted).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+
+          expect((yield* control.snapshot).saturatedStates).toEqual([])
+        }),
+      ),
+    )
+  })
+
   it('updates running snapshot metadata when an active issue refreshes', async (): Promise<void> => {
     let currentIssue = makeIssue('example/symphony#25', 1, null, ['symphony', 'ready'])
     const harness = makeHarness(workflow, () => [currentIssue])
@@ -4189,6 +4274,15 @@ describe('session telemetry accounting', (): void => {
             issueId: currentIssue.id,
             title: 'Updated while active',
           })
+          // The stall deadline is published absolutely so the console can decide the agent has
+          // gone quiet without waiting for a later snapshot to say so.
+          const deadline = snapshot.running[0]?.stallDeadline ?? ''
+          expect(Number.isNaN(Date.parse(deadline))).toBe(false)
+          expect(new Date(deadline).getTime()).toBe(
+            new Date(
+              snapshot.running[0]?.lastEventAt ?? snapshot.running[0]?.startedAt ?? '',
+            ).getTime() + workflow.config.codex.stallTimeoutMs,
+          )
         }),
       ),
     )

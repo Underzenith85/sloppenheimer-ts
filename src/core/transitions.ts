@@ -12,6 +12,7 @@ import {
   type ExecutionSnapshot,
   type HandoffEntry,
   type HandoffRecoveryCounts,
+  type CompletedEntry,
   type PendingRetirement,
   type PublishedDetail,
   type RetryEntry,
@@ -107,10 +108,17 @@ export const releaseClaim = (state: RuntimeState, id: IssueId): RuntimeState => 
   claimed: withoutMember(state.claimed, id),
 })
 
-/** The issue is finished with: it counts as completed and the claim is given up together. */
-export const completeIssue = (state: RuntimeState, id: IssueId): RuntimeState => ({
+/**
+ * The issue is finished with: what it finished as is filed, and the claim is given up in the same
+ * step. Nothing else may complete an issue while still holding it.
+ */
+export const completeIssue = (
+  state: RuntimeState,
+  id: IssueId,
+  finished: CompletedEntry,
+): RuntimeState => ({
   ...state,
-  completed: withMember(state.completed, id),
+  completed: withEntry(state.completed, id, finished),
   claimed: withoutMember(state.claimed, id),
 })
 
@@ -381,8 +389,11 @@ export const removeHandoff = (state: RuntimeState, id: IssueId): RuntimeState =>
 })
 
 /** The pull request is finished with: the handoff goes, and the issue is completed and released. */
-export const completeHandoff = (state: RuntimeState, id: IssueId): RuntimeState =>
-  completeIssue(removeHandoff(state, id), id)
+export const completeHandoff = (
+  state: RuntimeState,
+  id: IssueId,
+  finished: CompletedEntry,
+): RuntimeState => completeIssue(removeHandoff(state, id), id, finished)
 
 /**
  * What the store is asked to persist: the handoffs still waiting for hydration, followed by the
@@ -462,6 +473,9 @@ export const publishDetails = (state: RuntimeState): RuntimeState => {
         status,
         stallTimeoutMs: running?.execution.stallTimeoutMs ?? 0,
         workerHost: 'local',
+        // Read from the execution the agent is running under, falling back to the workflow in
+        // force: composing no code-review services at all is what "handoff disabled" means.
+        handoffEnabled: (running?.execution.codeReview ?? state.lastKnownGood.codeReview) !== null,
         branch: record.handoff.expectedBranch,
         retry:
           retry === undefined

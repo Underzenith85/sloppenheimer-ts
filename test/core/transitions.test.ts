@@ -9,6 +9,7 @@ import {
   retainedCompletedDetails,
   type EffectiveWorkflow,
   type ExecutionSnapshot,
+  type CompletedEntry,
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
@@ -167,6 +168,16 @@ const retryEntry = (issue: Issue, attempt: number): RetryEntry => ({
   fiber: settledFiber,
 })
 
+const finishedWork = (issue: Issue): CompletedEntry => ({
+  issueId: issue.id,
+  identifier: issue.identifier,
+  title: issue.title,
+  url: null,
+  outcome: 'merged',
+  finishedAt: new Date('2026-01-02T00:00:00.000Z'),
+  pullRequestUrl: 'https://example.test/pulls/7',
+})
+
 const detailFor = (issue: Issue): AgentDetailRecord =>
   createAgentDetailRecord({
     issueId: issue.id,
@@ -206,10 +217,16 @@ describe('claim lifecycle', (): void => {
     const completed = Transitions.completeIssue(
       Transitions.claimIssue(emptyState(), issue),
       issue.id,
+      finishedWork(issue),
     )
 
     expect(completed.claimed.has(issue.id)).toBe(false)
-    expect(completed.completed.has(issue.id)).toBe(true)
+    // Filed with what it finished as, not merely counted.
+    expect(completed.completed.get(issue.id)).toMatchObject({
+      identifier: issue.identifier,
+      outcome: 'merged',
+      pullRequestUrl: 'https://example.test/pulls/7',
+    })
   })
 
   it('leaves the state it was given untouched', (): void => {
@@ -541,10 +558,10 @@ describe('handoff bookkeeping', (): void => {
 
     expect(Transitions.handoffSnapshots(held).map((snapshot) => snapshot.issueId)).toEqual([id])
 
-    const completed = Transitions.completeHandoff(held, id)
+    const completed = Transitions.completeHandoff(held, id, finishedWork(issue))
 
     expect(completed.handoffs.has(id)).toBe(false)
-    expect(completed.completed.has(id)).toBe(true)
+    expect(completed.completed.get(id)?.outcome).toBe('merged')
     expect(completed.claimed.has(id)).toBe(false)
     expect(Transitions.handoffSnapshots(completed)).toEqual([])
   })

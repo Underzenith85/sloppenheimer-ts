@@ -19,8 +19,12 @@ export type HandoffAction =
   /** Resolve stale review threads left behind by a verified repair. */
   | Readonly<{ _tag: 'ResolveThreads'; threadIds: readonly string[] }>
   | Readonly<{ _tag: 'Merge'; headSha: string }>
-  /** Already merged when observed: the handoff is finished with. */
-  | Readonly<{ _tag: 'Complete' }>
+  /**
+   * Already merged when observed: the handoff is finished with. The instant is the provider's own
+   * when it reports one, because a handoff read back from the store after a restart is observed
+   * now but may have merged long before.
+   */
+  | Readonly<{ _tag: 'Complete'; mergedAt: string | null }>
   /** Closed without merging: retained, but nothing further is attempted. */
   | Readonly<{ _tag: 'NoteClosed' }>
   | Readonly<{ _tag: 'Repair'; reason: string; headSha: string | null; attempt: number }>
@@ -240,7 +244,7 @@ export const observeHandoff = (
   }
   switch (disposition.state) {
     case 'merged': {
-      return decided(settled, { _tag: 'Complete' })
+      return decided(settled, { _tag: 'Complete', mergedAt: observation.mergedAt ?? null })
     }
     case 'closed_without_merge': {
       return decided(settled, { _tag: 'NoteClosed' })

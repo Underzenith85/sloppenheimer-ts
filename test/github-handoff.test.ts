@@ -185,6 +185,36 @@ describe('GitHub pull request monitor', (): void => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('reports when GitHub says the merge happened, and null when it does not', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (): Promise<Response> =>
+      Response.json({
+        state: 'closed',
+        merged: true,
+        merged_at: '2026-08-20T09:00:00Z',
+        mergeable: null,
+        mergeable_state: 'unknown',
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const dated = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(44))
+    expect(dated).toMatchObject({ merged: true, mergedAt: '2026-08-20T09:00:00Z' })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (): Promise<Response> =>
+        Response.json({
+          state: 'closed',
+          merged: true,
+          mergeable: null,
+          mergeable_state: 'unknown',
+        }),
+      ),
+    )
+    const undated = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(44))
+    expect(undated).toMatchObject({ merged: true, mergedAt: null })
+  })
+
   it('accepts a merged pull request with an omitted merge SHA', async (): Promise<void> => {
     const fetchMock = vi.fn(async (): Promise<Response> =>
       Response.json({
