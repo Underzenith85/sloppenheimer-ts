@@ -1163,7 +1163,7 @@ describe('restored pull request handoffs', (): void => {
     }),
   )
 
-  it.scoped('retains a closed unmerged handoff without dispatching repair work', () =>
+  it.scoped('releases a restored closed handoff claim and dispatches by current routability', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-closed-handoff-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
@@ -1238,12 +1238,11 @@ describe('restored pull request handoffs', (): void => {
 
       expect(inspections).toBe(1)
       expect(refreshesAfterClose).toBeGreaterThan(0)
-      expect(issueRefreshes).toBe(refreshesAfterClose)
-      expect(snapshot.running).toEqual([])
-      // The handoff came back from the store and nothing ran for it in this process, so its detail
-      // resource would report no session. The console reads this list to decide whether to offer an
-      // inspection at all, rather than rendering one that refuses.
-      expect(snapshot.inspectableAgents).toEqual([])
+      expect(issueRefreshes).toBeGreaterThanOrEqual(refreshesAfterClose)
+      expect(snapshot.running).toEqual([
+        expect.objectContaining({ issueId: issue.id, identifier: issue.identifier }),
+      ])
+      expect(snapshot.inspectableAgents).toContain(issue.identifier)
       expect(snapshot.handoffs).toEqual([
         expect.objectContaining({
           issueId: '75',
@@ -1356,6 +1355,7 @@ describe('restored pull request handoffs', (): void => {
       const issue = {
         ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
         id: issueId('20'),
+        dispatchable: false,
       }
       const initialHead = 'abcdef1234567890abcdef1234567890abcdef12'
       yield* saveHandoffs(handoffStorePath, [
@@ -1463,6 +1463,7 @@ describe('restored pull request handoffs', (): void => {
       const issue = {
         ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
         id: issueId('20'),
+        dispatchable: false,
       }
       const repairedHead = 'abcdef1234567890abcdef1234567890abcdef12'
       yield* saveHandoffs(handoffStorePath, [
@@ -1763,7 +1764,7 @@ describe('restored pull request handoffs', (): void => {
     }),
   )
 
-  it.scoped('stops a no-op repair without consuming the changed-head budget', () =>
+  it.scoped('releases a no-op repair claim when the handoff reaches intervention required', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-no-progress-')
       const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
@@ -1835,7 +1836,10 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
 
-      expect(snapshot.running).toEqual([])
+      expect(snapshot.running).toEqual([
+        expect.objectContaining({ issueId: issue.id, identifier: issue.identifier }),
+      ])
+      expect(snapshot.retrying).toEqual([])
       expect(snapshot.handoffs[0]).toMatchObject({
         state: 'intervention_required',
         repairAttempts: 0,
@@ -3577,6 +3581,7 @@ describe('restored pull request handoffs', (): void => {
       const issue = {
         ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
         id: issueId('20'),
+        dispatchable: false,
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
       yield* saveHandoffs(handoffStorePath, [
@@ -4369,8 +4374,20 @@ describe('workflow hot reload', (): void => {
       let repairReady = false
       let inspections = 0
       let launches = 0
+      let candidatePasses = 0
       const ports: TestPorts = {
         ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByStates: () =>
+              Effect.sync(() => {
+                candidatePasses += 1
+                return []
+              }),
+          }
+        },
         makeCodeReview: (provider) => ({
           ...requireCodeReview(harness.ports, provider),
           inspectPullRequest: (number) =>
@@ -4392,7 +4409,7 @@ describe('workflow hot reload', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
-          const candidateFetches = harness.stateFetches()
+          const candidatePassesBeforeFailure = candidatePasses
           const inspectionsBeforeFailure = inspections
           repairReady = true
           delete environment['SYMPHONY_TEST_TOKEN']
@@ -4404,7 +4421,7 @@ describe('workflow hot reload', (): void => {
           return {
             failedSnapshot,
             recoveredSnapshot: yield* control.snapshot,
-            candidateFetches,
+            candidatePassesBeforeFailure,
             inspectionsBeforeFailure,
             launchesAfterFailure,
           }
@@ -4418,7 +4435,7 @@ describe('workflow hot reload', (): void => {
         state: 'repair_needed',
         repairStartedHeadSha: null,
       })
-      expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
+      expect(candidatePasses).toBe(observed.candidatePassesBeforeFailure + 1)
       expect(launches).toBe(1)
       expect(observed.recoveredSnapshot.running[0]?.issueId).toBe(issue.id)
     }),
@@ -5412,18 +5429,17 @@ describe('live agent detail', (): void => {
             awaitDetail(
               control,
               'example/symphony#13',
-              // The worker leaves `running` before the tracker is asked, so the handoff transition
-              // is published as a completed status while the handoff itself is still pending.
-              // Waiting on the status alone would race that publication and assert against a
-              // half-finished handoff; the terminal outcome is what these assertions need.
+              // The worker leaves `running` before the tracker is asked. Wait for both the
+              // completed handoff and its mandatory continuation retry publication.
               (candidate) =>
-                candidate.status === 'completed' && candidate.handoff.outcome !== 'in_progress',
+                candidate.status === 'retrying' && candidate.handoff.outcome !== 'in_progress',
               'the completed handoff',
             ),
           )
         }),
       )
 
+      expect(detail.status).toBe('retrying')
       expect(detail.handoff).toMatchObject({
         expectedBranch: 'symphony/issue-13',
         remoteBranch: { status: 'observed', name: 'symphony/issue-13' },
@@ -5436,17 +5452,17 @@ describe('live agent detail', (): void => {
         dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
         outcome: 'pull_request_open',
       })
-      // Four steps: the transition published before the tracker was asked, then the branch, the
-      // pull request, and the dispatch-label step it does not perform.
+      // Four handoff steps are followed by the mandatory continuation retry.
       expect(detail.timeline.events.map((event) => event.category)).toEqual([
         'handoff',
         'handoff',
         'handoff',
         'handoff',
+        'retry',
       ])
       expect(
         detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
-      ).toEqual(['pending', 'observed', 'observed', 'not_performed'])
+      ).toEqual(['pending', 'observed', 'observed', 'not_performed', false])
       expect(detail.activity.stallDeadline).toBeNull()
     }),
   )
@@ -5737,7 +5753,8 @@ describe('aged-out agent detail', (): void => {
           agent: { ...workflow.config.agent, maxConcurrentAgents: total },
         },
       }
-      const harness = makeHarness(isolated, () => issues)
+      let active = true
+      const harness = makeHarness(isolated, () => (active ? issues : []))
       const factory = makeAgentFactory()
       const ports: TestPorts = {
         ...harness.ports,
@@ -5752,6 +5769,21 @@ describe('aged-out agent detail', (): void => {
               pullRequestNumber: Number(issue.id),
               created: true,
             }),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              url: `https://example.test/pull/${String(number)}`,
+              headSha: `head-${String(number)}`,
+              merged: false,
+              state: 'open',
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: `head-${String(number)}`, status: 'pending' },
+            }),
         }),
       }
 
@@ -5762,6 +5794,14 @@ describe('aged-out agent detail', (): void => {
             const agent = yield* Effect.promise(() => awaitAgent(factory.agents, issue.identifier))
             agent.settle('completed')
           }
+          let pending = yield* control.snapshot
+          while (pending.retrying.length !== total) {
+            yield* Effect.yieldNow()
+            pending = yield* control.snapshot
+          }
+          active = false
+          yield* TestClock.adjust('1 second')
+          yield* Effect.yieldNow()
           const evicted = yield* Effect.promise(() =>
             waitUntil(() => {
               const aged = issues.filter(
@@ -6064,6 +6104,79 @@ describe('session telemetry accounting', (): void => {
           })
         }),
       )
+    }),
+  )
+
+  it.scoped('reconciles a pull request before starting its continuation', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-branch-continuation-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/symphony#24', 1, null, ['symphony', 'ready']),
+        id: issueId('24'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let inspections = 0
+      let runs = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'symphony/issue-24',
+              pullRequestUrl: 'https://github.test/example/symphony/pull/24',
+              pullRequestNumber: 24,
+              created: true,
+            }),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              inspections += 1
+              return {
+                ...repairObservation(number, head),
+                mergeable: null,
+                mergeState: 'unknown',
+                codexReview: { headShaPrefix: head.slice(0, 7), status: 'pending' as const },
+              }
+            }),
+        }),
+        runAgent: () =>
+          Effect.suspend(() => {
+            runs += 1
+            return runs === 1
+              ? Effect.succeed({ threadId: 'thread-normal', turnId: 'turn-normal', turnCount: 1 })
+              : Effect.never
+          }),
+      }
+
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+      let current = yield* control.snapshot
+      while (current.retrying.length === 0) {
+        yield* Effect.yieldNow()
+        current = yield* control.snapshot
+      }
+      const scheduled = current
+      yield* TestClock.adjust('1 second')
+      while (current.running.length === 0) {
+        yield* Effect.yieldNow()
+        current = yield* control.snapshot
+      }
+
+      expect(scheduled.handoffs).toEqual([
+        expect.objectContaining({
+          issueId: issue.id,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/24',
+          state: 'awaiting_checks',
+        }),
+      ])
+      expect(scheduled.retrying).toEqual([
+        expect.objectContaining({ issueId: issue.id, attempt: 1, error: null }),
+      ])
+      expect(inspections).toBe(1)
+      expect(runs).toBe(2)
+      expect(current.running).toEqual([expect.objectContaining({ issueId: issue.id, attempt: 1 })])
     }),
   )
 

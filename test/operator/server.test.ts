@@ -170,6 +170,7 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
         priority: 1,
         createdAt: '2026-08-29T10:00:00.000Z',
         enabled: true,
+        dispatchable: true,
         state: 'open',
         normalizedState: 'open',
         blockedBy: [],

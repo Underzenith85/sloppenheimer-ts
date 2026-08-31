@@ -382,11 +382,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             }),
           )
           const handedOffAt = yield* currentInstant
-          yield* Ref.update(context.state, (current) => {
+          const completedRepair = yield* Ref.modify(context.state, (current) => {
             // Carried over, not reset: the worker attempt number is not a repair count, and an
             // existing handoff already holds the heads that were actually observed.
             const existing = current.handoffs.get(event.issueId)
-            return Transitions.putHandoff(current, event.issueId, {
+            const next = Transitions.putHandoff(current, event.issueId, {
               issue: existing?.issue ?? settled.issue,
               execution: settled.execution,
               pullRequestNumber: result.pullRequestNumber,
@@ -402,6 +402,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
               observedAt: handedOffAt,
             })
+            return [existing !== undefined && Option.isSome(existing.repair), next] as const
           })
           yield* context.persistHandoffs
           yield* logInfo('worker handed off pull request', {
@@ -412,6 +413,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             branch: result.branchName,
             pull_request_url: result.pullRequestUrl,
           })
+          if (completedRepair) {
+            yield* Ref.update(context.state, (current) =>
+              Transitions.releaseClaim(current, event.issueId),
+            )
+          } else {
+            yield* context.scheduleRetry(settled.issue, 1, null, true)
+          }
           break
         }
         case 'RetryDue': {
@@ -420,6 +428,23 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           )
           if (Option.isNone(due)) {
             break
+          }
+          const awaiting = yield* Ref.get(context.state)
+          const awaitingHandoff = Option.fromNullable(awaiting.handoffs.get(event.issueId))
+          if (Option.exists(awaitingHandoff, (entry) => Option.isNone(entry.repair))) {
+            // Taking the due retry creates the boundary at which the handoff no longer has a
+            // queued or running continuation. Observe that pull request before another worker can
+            // take ownership, so checks, review, merge, or repair cannot be starved by an active
+            // issue that keeps completing normal continuation turns.
+            yield* reconcileHandoffs(context, true, Option.some(event.issueId))
+            const reconciled = yield* Ref.get(context.state)
+            if (
+              !reconciled.handoffs.has(event.issueId) ||
+              reconciled.running.has(event.issueId) ||
+              reconciled.retries.has(event.issueId)
+            ) {
+              break
+            }
           }
           const current = yield* Ref.get(context.state)
           const effective = current.lastKnownGood

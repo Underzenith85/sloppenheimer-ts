@@ -109,16 +109,19 @@ diff, rebases it onto the current protected base, verifies the remote head still
 captured lease, and pushes it with the host credential. An empty diff remains distinct from a
 publication failure, and lease or authentication failures preserve the local work for retry.
 
-After publication, Symphony creates or reuses an open pull request and stops continuation turns.
-Dispatch labels remain unchanged. Pull-request inspection and merge remain separate code-review
-operations and also use only the host-side credential.
+After publication, Symphony creates or reuses an open pull request and schedules the same short
+continuation retry used when no branch exists. The handoff is observation-only: only a live worker
+or queued retry owns the issue claim, and the refreshed tracker state plus routability decide
+whether another worker starts. Dispatch labels remain unchanged. Pull-request inspection and merge
+remain separate code-review operations and also use only the host-side credential.
 
 After handoff, Symphony persists the PR under the workspace root and monitors its exact head SHA,
 CI checks, mergeability, review decision, and unresolved review threads. Failed checks, requested
 changes, stale branches, and conflicts return to the coding agent with repair context. A clean PR is
 squash-merged only through the repository protection rules with an expected-head guard. The
-operator console shows each active handoff and its current blocker; no handoff or pause transition
-removes the Symphony label.
+operator console shows each active handoff, its current blocker, and why its issue is not
+dispatchable when tracker eligibility prevents continuation. No handoff or pause transition removes
+the Symphony label.
 
 ## Codex App Server client
 
