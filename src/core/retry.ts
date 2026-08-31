@@ -7,10 +7,17 @@ const baseRetryDelayMs = 10_000
 /**
  * Agent backoff as a value: ten seconds, doubling for every attempt, capped by workflow config.
  */
-export const agentRetrySchedule = (maximumMs: number): Schedule.Schedule<number> =>
+export const agentRetrySchedule = (maximumMs: number): Schedule.Schedule<number, number> =>
   Schedule.exponential(baseRetryDelayMs).pipe(
-    Schedule.map((delay) => Math.min(Duration.toMillis(delay), maximumMs)),
+    Schedule.zipWith(Schedule.identity<number>(), (base, attempt) =>
+      Math.min(Duration.toMillis(base) * 2 ** Math.max(attempt - 1, 0), maximumMs),
+    ),
   )
+
+type TrackerRetryAttempt = Readonly<{
+  attempt: number
+  error: TrackerError
+}>
 
 /**
  * Tracker retry policy. The identity schedule carries the adapter's advertised delay alongside the
@@ -20,11 +27,12 @@ export const agentRetrySchedule = (maximumMs: number): Schedule.Schedule<number>
  */
 export const trackerRetrySchedule = (
   maximumMs: number,
-): Schedule.Schedule<Option.Option<number>, TrackerError> =>
+): Schedule.Schedule<Option.Option<number>, TrackerRetryAttempt> =>
   agentRetrySchedule(maximumMs).pipe(
+    Schedule.mapInput((input: TrackerRetryAttempt) => input.attempt),
     Schedule.union(
-      Schedule.identity<TrackerError>().pipe(
-        Schedule.map((error) => ({
+      Schedule.identity<TrackerRetryAttempt>().pipe(
+        Schedule.map(({ error }) => ({
           retryable: error.retryable,
           advertised: Option.fromNullable(error.retryAfterMs),
         })),
@@ -35,15 +43,12 @@ export const trackerRetrySchedule = (
         ? tracker.advertised.pipe(Option.orElse(() => Option.some(computed)))
         : Option.none(),
     ),
-    Schedule.whileInput((error) => error.retryable),
+    Schedule.whileInput(({ error }) => error.retryable),
   )
-
-const repeated = <A>(value: A, count: number): readonly A[] =>
-  Array.from({ length: Math.max(count, 1) }, () => value)
 
 /** Evaluate the delay for an agent attempt without sleeping. */
 export const agentRetryDelay = (attempt: number, maximumMs: number): Effect.Effect<number> =>
-  Schedule.run(agentRetrySchedule(maximumMs), 0, repeated(undefined, attempt)).pipe(
+  Schedule.run(agentRetrySchedule(maximumMs), 0, [attempt]).pipe(
     Effect.map((delays) => Chunk.last(delays).pipe(Option.getOrElse(() => maximumMs))),
   )
 
@@ -53,7 +58,7 @@ export const trackerRetryDelay = (
   attempt: number,
   maximumMs: number,
 ): Effect.Effect<Option.Option<number>> =>
-  Schedule.run(trackerRetrySchedule(maximumMs), 0, repeated(error, attempt)).pipe(
+  Schedule.run(trackerRetrySchedule(maximumMs), 0, [{ error, attempt }]).pipe(
     Effect.map((delays) => Chunk.last(delays).pipe(Option.flatten)),
   )
 

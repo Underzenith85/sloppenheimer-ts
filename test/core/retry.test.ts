@@ -19,10 +19,15 @@ const trackerError = (retryable = true, retryAfterMs?: number): TrackerError =>
 describe('retry schedules', () => {
   it('expresses capped exponential agent backoff as a schedule', async (): Promise<void> => {
     const delays = await Effect.runPromise(
-      Schedule.run(agentRetrySchedule(25_000), 0, [undefined, undefined, undefined, undefined]),
+      Effect.forEach([1, 2, 3, 4], (attempt) =>
+        Schedule.run(agentRetrySchedule(25_000), 0, [attempt]).pipe(
+          Effect.map(Chunk.toReadonlyArray),
+          Effect.map(([delay]) => delay),
+        ),
+      ),
     )
 
-    expect(Chunk.toReadonlyArray(delays)).toEqual([10_000, 20_000, 25_000, 25_000])
+    expect(delays).toEqual([10_000, 20_000, 25_000, 25_000])
   })
 
   it('gives tracker retry-after precedence over computed backoff', async (): Promise<void> => {
@@ -35,7 +40,10 @@ describe('retry schedules', () => {
     const error = trackerError(false)
     const delay = await Effect.runPromise(trackerRetryDelay(error, 1, 300_000))
     const outputs = await Effect.runPromise(
-      Schedule.run(trackerRetrySchedule(300_000), 0, [error, error]),
+      Schedule.run(trackerRetrySchedule(300_000), 0, [
+        { error, attempt: 1 },
+        { error, attempt: 2 },
+      ]),
     )
 
     expect(delay).toEqual(Option.none())
