@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as NodeStream from '@effect/platform-node/NodeStream'
 import {
+  Clock,
   Config,
   Deferred,
   Effect,
@@ -18,6 +19,7 @@ import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.js'
 import { AgentError, type WorkspaceError } from '../../errors.js'
 import type { AgentLaunch, AgentResult, AgentRunnerConfig } from '../../ports/agent-runner.js'
+import { currentInstant } from '../../support/clock.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from '../../support/json.js'
 import { processGroupIsAlive } from '../../support/subprocess.js'
 import type { HostToolResult, HostToolSession } from '../../host-tools.js'
@@ -31,6 +33,16 @@ import {
 } from '../../telemetry.js'
 import { assertWorkspaceIdentity, openVerifiedWorkspace } from '../node/workspace-identity.js'
 import { diagnosticLines, diagnosticRecords, protocolLines } from './framing.js'
+import {
+  hostToolCallFrom,
+  messageTextFrom,
+  notificationIdentity,
+  protocolErrorMessage,
+  responseIdentity,
+  telemetryFrom,
+  turnFrom,
+  type ProtocolIdentity,
+} from './protocol.js'
 import type { VerifiedWorkspace } from '../../domain/workspace-containment.js'
 
 export const makeCodexEnvironment = (
@@ -71,6 +83,7 @@ export const composeSessionId = (threadId: string, turnId: string | null): strin
 export const isCancelledTurnStatus = (status: string): boolean =>
   status === 'cancelled' || status === 'canceled' || status === 'interrupted'
 
+export { telemetryFrom }
 export type { AgentEvent } from '../../telemetry.js'
 export type { AgentLaunch, AgentResult } from '../../ports/agent-runner.js'
 
@@ -162,70 +175,6 @@ const initialConnectionState: ConnectionState = {
   turnCount: 0,
 }
 
-const errorMessage = (value: JsonValue): string => {
-  if (!isJsonObject(value)) {
-    return 'unknown protocol error'
-  }
-  const message = value['message']
-  return typeof message === 'string' ? message : 'unknown protocol error'
-}
-
-const nonNegativeInteger = (value: JsonValue | undefined): number | null =>
-  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
-
-const valueAt = (object: JsonObject, camelCase: string, snakeCase: string): number | null =>
-  nonNegativeInteger(object[camelCase] ?? object[snakeCase])
-
-const tokenTotalsFrom = (value: JsonValue | undefined): AgentEvent['usage'] => {
-  if (!isJsonObject(value)) {
-    return null
-  }
-  const inputTokens = valueAt(value, 'inputTokens', 'input_tokens')
-  const outputTokens = valueAt(value, 'outputTokens', 'output_tokens')
-  const totalTokens = valueAt(value, 'totalTokens', 'total_tokens')
-  return inputTokens === null || outputTokens === null || totalTokens === null
-    ? null
-    : { inputTokens, outputTokens, totalTokens }
-}
-
-const wrapperFrom = (params: JsonObject): JsonObject => {
-  const message = params['msg']
-  return isJsonObject(message) ? message : params
-}
-
-export const telemetryFrom = (
-  method: string,
-  message: JsonObject,
-): Readonly<{ usage: AgentEvent['usage']; rateLimits: JsonObject | null }> => {
-  const params = message['params']
-  if (!isJsonObject(params)) {
-    return { usage: null, rateLimits: null }
-  }
-  if (method === 'thread/tokenUsage/updated') {
-    const tokenUsage = params['tokenUsage']
-    const total = isJsonObject(tokenUsage) ? tokenUsage['total'] : undefined
-    return { usage: tokenTotalsFrom(total), rateLimits: null }
-  }
-  if (method === 'turn/usage') {
-    return { usage: tokenTotalsFrom(params['usage']), rateLimits: null }
-  }
-  if (method === 'account/rateLimits/updated') {
-    const rateLimits = params['rateLimits']
-    return { usage: null, rateLimits: isJsonObject(rateLimits) ? rateLimits : null }
-  }
-  if (method === 'codex/event/token_count') {
-    const wrapper = wrapperFrom(params)
-    const info = wrapper['info']
-    const total = isJsonObject(info) ? info['total_token_usage'] : undefined
-    const rateLimits = wrapper['rate_limits']
-    return {
-      usage: tokenTotalsFrom(total),
-      rateLimits: isJsonObject(rateLimits) ? rateLimits : null,
-    }
-  }
-  return { usage: null, rateLimits: null }
-}
-
 export const boundedMessage = (
   value: string,
   knownSecretValues: readonly string[] = [],
@@ -240,44 +189,10 @@ export const boundedMessage = (
   return redacted.length <= 512 ? redacted : `${redacted.slice(0, 509)}...`
 }
 
+/** Redacted and bounded at ingest, before the event that carries it is ever retained. */
 const messageFrom = (message: JsonObject, knownSecretValues: readonly string[]): string | null => {
-  const params = message['params']
-  if (!isJsonObject(params)) {
-    return null
-  }
-  const direct = params['message']
-  if (typeof direct === 'string') {
-    return boundedMessage(direct, knownSecretValues)
-  }
-  const error = params['error']
-  if (isJsonObject(error) && typeof error['message'] === 'string') {
-    return boundedMessage(error['message'], knownSecretValues)
-  }
-  const item = params['item']
-  if (isJsonObject(item) && item['type'] === 'agentMessage' && typeof item['text'] === 'string') {
-    return boundedMessage(item['text'], knownSecretValues)
-  }
-  return null
-}
-
-/**
- * Identity a notification carries itself. Item and delta notifications declare `threadId` and
- * `turnId` directly under `params`, so they attribute correctly even out of order; the turn
- * lifecycle notifications carry the turn nested under `params.turn` instead.
- */
-const notificationIdentity = (
-  message: JsonObject,
-): Readonly<{ threadId: string | null; turnId: string | null }> => {
-  const params = message['params']
-  if (!isJsonObject(params)) {
-    return { threadId: null, turnId: null }
-  }
-  const threadId = params['threadId']
-  const turnId = params['turnId']
-  return {
-    threadId: typeof threadId === 'string' ? threadId : null,
-    turnId: typeof turnId === 'string' ? turnId : null,
-  }
+  const text = messageTextFrom(message)
+  return text === null ? null : boundedMessage(text, knownSecretValues)
 }
 
 /**
@@ -470,7 +385,7 @@ class CodexConnection {
       ])
       this.#onEvent({
         event: 'account/rateLimits/read',
-        timestamp: new Date(),
+        timestamp: yield* currentInstant,
         processId: this.processId,
         message: null,
         usage: null,
@@ -806,9 +721,9 @@ class CodexConnection {
    */
   #reapGroup(): Effect.Effect<void> {
     return Effect.gen(this, function* () {
-      const escalateAt = Date.now() + shutdownGraceMs
+      const escalateAt = (yield* Clock.currentTimeMillis) + shutdownGraceMs
       while (this.#processGroupIsAlive()) {
-        if (Date.now() >= escalateAt) {
+        if ((yield* Clock.currentTimeMillis) >= escalateAt) {
           this.#terminate('SIGKILL')
           break
         }
@@ -817,8 +732,8 @@ class CodexConnection {
       // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
       // finalizer complete — and terminal reconciliation start removing the workspace — while a
       // descendant is still running in it.
-      const deadline = Date.now() + groupReapDeadlineMs
-      while (this.#processGroupIsAlive() && Date.now() < deadline) {
+      const deadline = (yield* Clock.currentTimeMillis) + groupReapDeadlineMs
+      while (this.#processGroupIsAlive() && (yield* Clock.currentTimeMillis) < deadline) {
         yield* Effect.sleep(groupReapPollMs)
       }
     })
@@ -1012,7 +927,7 @@ class CodexConnection {
               request.reply,
               new AgentError({
                 category: 'protocol_error',
-                message: boundedMessage(errorMessage(error), this.#knownSecretValues),
+                message: boundedMessage(protocolErrorMessage(error), this.#knownSecretValues),
               }),
             ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
           }
@@ -1082,25 +997,16 @@ class CodexConnection {
   #adoptIdentity(
     result: JsonValue,
   ): Effect.Effect<Readonly<{ threadId: Option.Option<string>; turnId: Option.Option<string> }>> {
-    if (!isJsonObject(result)) {
-      return Ref.get(this.#state).pipe(
-        Effect.map((state) => ({
-          threadId: state.threadId,
-          turnId: state.turnId,
-        })),
-      )
-    }
-    const thread = result['thread']
-    const turn = result['turn']
+    const declared = responseIdentity(result)
     return Ref.modify(this.#state, (state) => {
-      const threadId: Option.Option<string> =
-        isJsonObject(thread) && typeof thread['id'] === 'string'
-          ? Option.some(thread['id'])
-          : state.threadId
-      const turnId: Option.Option<string> =
-        isJsonObject(turn) && typeof turn['id'] === 'string'
-          ? Option.some(turn['id'])
-          : state.turnId
+      const threadId: Option.Option<string> = Option.orElse(
+        Option.fromNullable(declared.threadId),
+        () => state.threadId,
+      )
+      const turnId: Option.Option<string> = Option.orElse(
+        Option.fromNullable(declared.turnId),
+        () => state.turnId,
+      )
       return [
         { threadId, turnId },
         {
@@ -1205,15 +1111,13 @@ class CodexConnection {
   #handleHostToolCall(
     id: string | number,
     message: JsonObject,
-    identity: Readonly<{ threadId: string | null; turnId: string | null }>,
+    identity: ProtocolIdentity,
   ): Effect.Effect<void> {
     return Effect.gen(this, function* () {
-      const params = message['params']
-      const tool = isJsonObject(params) ? params['tool'] : undefined
-      const argumentsValue = isJsonObject(params) ? params['arguments'] : undefined
+      const { tool, arguments: argumentsValue } = hostToolCallFrom(message)
       const hostTools = this.#hostTools
       let result: HostToolResult
-      if (typeof tool !== 'string' || argumentsValue === undefined) {
+      if (tool === null || argumentsValue === undefined) {
         result = {
           success: false,
           error: {
@@ -1243,11 +1147,7 @@ class CodexConnection {
         result: { success: result.success, contentItems: [{ type: 'inputText', text }] },
       }).pipe(
         Effect.zipRight(
-          this.#emit(
-            result.success ? 'host_tool_succeeded' : 'host_tool_failed',
-            typeof tool === 'string' ? tool : null,
-            identity,
-          ),
+          this.#emit(result.success ? 'host_tool_succeeded' : 'host_tool_failed', tool, identity),
         ),
       )
     })
@@ -1255,7 +1155,7 @@ class CodexConnection {
 
   #handleNotification(method: string, message: JsonObject): Effect.Effect<void, AgentError> {
     return Effect.gen(this, function* () {
-      const turn = Option.fromNullable(this.#turnFrom(message))
+      const turn = Option.fromNullable(turnFrom(message))
       const carried = notificationIdentity(message)
       const carriedThreadId = Option.fromNullable(carried.threadId)
       const carriedTurnId = Option.fromNullable(carried.turnId)
@@ -1355,7 +1255,7 @@ class CodexConnection {
       const eventTurnId = Option.getOrNull(turnId)
       this.#onEvent({
         event: method,
-        timestamp: new Date(),
+        timestamp: yield* currentInstant,
         processId: this.processId,
         message: messageFrom(message, this.#knownSecretValues),
         usage: Option.getOrNull(usage),
@@ -1393,20 +1293,6 @@ class CodexConnection {
     })
   }
 
-  #turnFrom(message: JsonObject): Readonly<{ id: string; status: string | null }> | null {
-    const params = message['params']
-    if (!isJsonObject(params) || !isJsonObject(params['turn'])) {
-      return null
-    }
-    const turn = params['turn']
-    const id = turn['id']
-    if (typeof id !== 'string') {
-      return null
-    }
-    const status = turn['status']
-    return { id, status: typeof status === 'string' ? status : null }
-  }
-
   /**
    * Emits a client-side event. Identity carried by the message that provoked it wins over
    * connection state, which lags whenever a message arrives before the response that would set it.
@@ -1414,16 +1300,13 @@ class CodexConnection {
   #emit(
     event: string,
     message: string | null,
-    carried: Readonly<{ threadId: string | null; turnId: string | null }> = {
-      threadId: null,
-      turnId: null,
-    },
+    carried: ProtocolIdentity = { threadId: null, turnId: null },
     turnStatus: string | null = null,
   ): Effect.Effect<void> {
     const carriedThreadId = Option.fromNullable(carried.threadId)
     const carriedTurnId = Option.fromNullable(carried.turnId)
-    return Ref.get(this.#state).pipe(
-      Effect.tap((state) =>
+    return Effect.all([Ref.get(this.#state), currentInstant]).pipe(
+      Effect.tap(([state, timestamp]) =>
         Effect.sync(() => {
           const threadId = carriedThreadId.pipe(Option.orElse(() => state.threadId))
           const turnId = carriedTurnId.pipe(Option.orElse(() => state.turnId))
@@ -1432,7 +1315,7 @@ class CodexConnection {
           const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
           this.#onEvent({
             event,
-            timestamp: new Date(),
+            timestamp,
             processId: this.processId,
             message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
             usage: null,

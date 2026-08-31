@@ -66,14 +66,16 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       const repositoryName = repositoryParts[1] ?? ''
       expect(owner.length).toBeGreaterThan(0)
       expect(repositoryName.length).toBeGreaterThan(0)
-      const tracker = makeGitHubTracker({
-        owner,
-        repository: repositoryName,
-        token: Redacted.make(token),
-        tokenEnvironmentName: 'GITHUB_TOKEN',
-        apiBaseUrl: githubProviderDefaults.apiBaseUrl,
-        baseBranch: githubProviderDefaults.baseBranch,
-      })
+      const tracker = Effect.runSync(
+        makeGitHubTracker({
+          owner,
+          repository: repositoryName,
+          token: Redacted.make(token),
+          tokenEnvironmentName: 'GITHUB_TOKEN',
+          apiBaseUrl: githubProviderDefaults.apiBaseUrl,
+          baseBranch: githubProviderDefaults.baseBranch,
+        }),
+      )
       const issues = await Effect.runPromise(
         tracker.fetchIssuesByStates(['open'], null, { hydrateDependencies: false }),
       )

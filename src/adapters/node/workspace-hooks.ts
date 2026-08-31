@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { Effect } from 'effect'
+import { Clock, Effect } from 'effect'
 
 import { WorkspaceError } from '../../errors.js'
 import { processGroupIsAlive } from '../../support/subprocess.js'
@@ -69,151 +69,152 @@ const runHookProcess = (
   cwd: string,
   timeoutMs: number,
 ): Effect.Effect<HookOutcome, WorkspaceError> =>
-  Effect.async<HookOutcome, WorkspaceError>((resume) => {
-    const startedAt = Date.now()
-    const stdout = makeCapture()
-    const stderr = makeCapture()
-    let settled = false
-    let timedOut = false
-    let timeoutTimer: NodeJS.Timeout | undefined
-    let graceTimer: NodeJS.Timeout | undefined
+  Effect.flatMap(Clock.currentTimeMillis, (startedAt) =>
+    Effect.async<HookOutcome, WorkspaceError>((resume) => {
+      const stdout = makeCapture()
+      const stderr = makeCapture()
+      let settled = false
+      let timedOut = false
+      let timeoutTimer: NodeJS.Timeout | undefined
+      let graceTimer: NodeJS.Timeout | undefined
 
-    const child = spawn('bash', ['-lc', script], {
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-    })
+      const child = spawn('bash', ['-lc', script], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      })
 
-    /**
-     * Whether the hook's original process group still has a member that can run. Used to decide
-     * whether the forceful escalation is still needed; a group with no running member must never be
-     * signalled again, because its leader's PID can be recycled. Zombies do not count as members:
-     * on a host that does not reap orphans they would otherwise keep a killed tree reporting alive.
-     */
-    const hookGroupIsAlive = (): boolean => {
-      const { pid } = child
-      return pid !== undefined && processGroupIsAlive(pid)
-    }
-
-    const terminate = (signal: NodeJS.Signals): void => {
-      const { pid } = child
-      if (pid === undefined) {
-        return
+      /**
+       * Whether the hook's original process group still has a member that can run. Used to decide
+       * whether the forceful escalation is still needed; a group with no running member must never be
+       * signalled again, because its leader's PID can be recycled. Zombies do not count as members:
+       * on a host that does not reap orphans they would otherwise keep a killed tree reporting alive.
+       */
+      const hookGroupIsAlive = (): boolean => {
+        const { pid } = child
+        return pid !== undefined && processGroupIsAlive(pid)
       }
-      try {
-        process.kill(-pid, signal)
-      } catch {
+
+      const terminate = (signal: NodeJS.Signals): void => {
+        const { pid } = child
+        if (pid === undefined) {
+          return
+        }
         try {
-          child.kill(signal)
+          process.kill(-pid, signal)
         } catch {
-          // The process tree is already gone.
+          try {
+            child.kill(signal)
+          } catch {
+            // The process tree is already gone.
+          }
         }
       }
-    }
 
-    const clearTimers = (): void => {
-      if (timeoutTimer !== undefined) {
-        clearTimeout(timeoutTimer)
-        timeoutTimer = undefined
+      const clearTimers = (): void => {
+        if (timeoutTimer !== undefined) {
+          clearTimeout(timeoutTimer)
+          timeoutTimer = undefined
+        }
+        // The escalation survives settlement only while the group still has a running member: a
+        // descendant that ignores `SIGTERM` and redirected its inherited pipes lets the shell emit
+        // `close` while the group is alive, so cancelling here would let it run on. Once nothing but
+        // zombies is left the timer is cancelled, so a recycled leader PID is never signalled and a
+        // host that does not reap orphans cannot strand the escalation.
+        if (graceTimer !== undefined && !hookGroupIsAlive()) {
+          clearTimeout(graceTimer)
+          graceTimer = undefined
+        }
       }
-      // The escalation survives settlement only while the group still has a running member: a
-      // descendant that ignores `SIGTERM` and redirected its inherited pipes lets the shell emit
-      // `close` while the group is alive, so cancelling here would let it run on. Once nothing but
-      // zombies is left the timer is cancelled, so a recycled leader PID is never signalled and a
-      // host that does not reap orphans cannot strand the escalation.
-      if (graceTimer !== undefined && !hookGroupIsAlive()) {
-        clearTimeout(graceTimer)
-        graceTimer = undefined
+
+      const detach = (): void => {
+        clearTimers()
+        child.stdout.removeAllListeners()
+        child.stderr.removeAllListeners()
+        child.removeAllListeners('error')
+        child.removeAllListeners('close')
       }
-    }
 
-    const detach = (): void => {
-      clearTimers()
-      child.stdout.removeAllListeners()
-      child.stderr.removeAllListeners()
-      child.removeAllListeners('error')
-      child.removeAllListeners('close')
-    }
-
-    const settle = (effect: Effect.Effect<HookOutcome, WorkspaceError>): void => {
-      if (settled) {
-        return
+      const settle = (effect: Effect.Effect<HookOutcome, WorkspaceError>): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        detach()
+        resume(effect)
       }
-      settled = true
-      detach()
-      resume(effect)
-    }
 
-    const timeoutFailure = (): Effect.Effect<HookOutcome, WorkspaceError> =>
-      Effect.fail(
-        new WorkspaceError({
-          category: 'hook_timeout',
-          message: `hook timed out after ${String(timeoutMs)}ms`,
-        }),
-      )
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      appendCapture(stdout, chunk)
-    })
-    child.stderr.on('data', (chunk: Buffer) => {
-      appendCapture(stderr, chunk)
-    })
-
-    child.once('error', (cause: unknown) => {
-      settle(
+      const timeoutFailure = (): Effect.Effect<HookOutcome, WorkspaceError> =>
         Effect.fail(
-          new WorkspaceError({ category: 'hook_failed', message: 'failed to start hook', cause }),
-        ),
-      )
-    })
+          new WorkspaceError({
+            category: 'hook_timeout',
+            message: `hook timed out after ${String(timeoutMs)}ms`,
+          }),
+        )
 
-    // `close` rather than `exit`: both pipes are fully drained by then.
-    child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
-      if (timedOut) {
-        settle(timeoutFailure())
-        return
-      }
-      settle(
-        Effect.succeed({
-          code,
-          signal,
-          stdout: captureText(stdout),
-          stderr: captureText(stderr),
-          stdoutBytes: stdout.totalBytes,
-          stderrBytes: stderr.totalBytes,
-          durationMs: Date.now() - startedAt,
-        }),
-      )
-    })
+      child.stdout.on('data', (chunk: Buffer) => {
+        appendCapture(stdout, chunk)
+      })
+      child.stderr.on('data', (chunk: Buffer) => {
+        appendCapture(stderr, chunk)
+      })
 
-    timeoutTimer = setTimeout(() => {
-      timedOut = true
-      terminate('SIGTERM')
-      graceTimer = setTimeout(() => {
-        // Re-checked at fire time as well, so an escalation retained at `close` is dropped if the
-        // group emptied during the grace period.
-        if (hookGroupIsAlive()) {
-          terminate('SIGKILL')
+      child.once('error', (cause: unknown) => {
+        settle(
+          Effect.fail(
+            new WorkspaceError({ category: 'hook_failed', message: 'failed to start hook', cause }),
+          ),
+        )
+      })
+
+      // `close` rather than `exit`: both pipes are fully drained by then.
+      child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
+        if (timedOut) {
+          settle(timeoutFailure())
+          return
         }
-        settle(timeoutFailure())
-      }, hookTerminationGraceMs)
-      graceTimer.unref()
-    }, timeoutMs)
+        settle(
+          Effect.map(Clock.currentTimeMillis, (finishedAt) => ({
+            code,
+            signal,
+            stdout: captureText(stdout),
+            stderr: captureText(stderr),
+            stdoutBytes: stdout.totalBytes,
+            stderrBytes: stderr.totalBytes,
+            durationMs: finishedAt - startedAt,
+          })),
+        )
+      })
 
-    return Effect.sync(() => {
-      if (settled) {
-        return
-      }
-      settled = true
-      detach()
-      terminate('SIGTERM')
-      setTimeout(() => {
-        if (hookGroupIsAlive()) {
-          terminate('SIGKILL')
+      timeoutTimer = setTimeout(() => {
+        timedOut = true
+        terminate('SIGTERM')
+        graceTimer = setTimeout(() => {
+          // Re-checked at fire time as well, so an escalation retained at `close` is dropped if the
+          // group emptied during the grace period.
+          if (hookGroupIsAlive()) {
+            terminate('SIGKILL')
+          }
+          settle(timeoutFailure())
+        }, hookTerminationGraceMs)
+        graceTimer.unref()
+      }, timeoutMs)
+
+      return Effect.sync(() => {
+        if (settled) {
+          return
         }
-      }, hookTerminationGraceMs).unref()
-    })
-  })
+        settled = true
+        detach()
+        terminate('SIGTERM')
+        setTimeout(() => {
+          if (hookGroupIsAlive()) {
+            terminate('SIGKILL')
+          }
+        }, hookTerminationGraceMs).unref()
+      })
+    }),
+  )
 
 /**
  * Runs a hook and reports it. The script text is never logged, and captured output is bounded, so
