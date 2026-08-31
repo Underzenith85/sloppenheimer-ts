@@ -110,14 +110,14 @@ This matrix targets the upstream Symphony SPEC Sections 17 and 18 as retrieved o
 
 ## 17.6 Observability
 
-| SPEC bullet                      | Deterministic test or disposition                                                                        | Implementation                                              |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Validation errors visible        | Invalid reload and CLI startup tests above                                                               | `src/core/polling.ts`, `src/core/snapshot.ts`, `src/cli.ts` |
-| Structured issue/session context | Codex identity test and orchestrator dispatch/log assertions                                             | `src/core/policy.ts`, `src/adapters/codex/codex.ts`         |
-| Sink failures do not crash       | Effect logger isolation exercised throughout orchestrator tests                                          | `src/support/logging.ts`                                    |
-| Token/rate-limit aggregation     | Session telemetry accounting tests plus the Core Codex usage telemetry test                              | `src/core/transitions.ts`, `src/adapters/codex/codex.ts`    |
-| Human-readable status surface    | `Extension Conformance: HTTP status surface > binds loopback and serves state owned by the orchestrator` | `src/operator/server.ts`, `src/operator/ui-assets.ts`       |
-| Humanized summaries              | Not shipped as a separate event transformation; UI displays immutable orchestrator snapshot fields.      | `src/operator/ui-assets.ts`                                 |
+| SPEC bullet                      | Deterministic test or disposition                                                                        | Implementation                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Validation errors visible        | Invalid reload and CLI startup tests above                                                               | `src/core/polling.ts`, `src/core/snapshot.ts`, `src/cli.ts`                     |
+| Structured issue/session context | Codex identity test and orchestrator dispatch/log assertions                                             | `src/core/policy.ts`, `src/adapters/codex/codex.ts`                             |
+| Sink failures do not crash       | Effect logger isolation exercised throughout orchestrator tests                                          | `src/support/logging.ts`                                                        |
+| Token/rate-limit aggregation     | Session telemetry accounting tests plus the Core Codex usage telemetry test                              | `src/core/transitions.ts`, `src/adapters/codex/codex.ts`                        |
+| Human-readable status surface    | `Extension Conformance: HTTP status surface > binds loopback and serves state owned by the orchestrator` | `src/operator/server.ts`, `src/operator/ui-assets.ts`                           |
+| Humanized summaries              | Not shipped as a separate event transformation; UI displays immutable orchestrator snapshot fields.      | `src/operator/ui/app.ts`, `src/operator/ui/detail.ts`, `src/operator/ui/dom.ts` |
 
 ## 17.7 CLI and host lifecycle
 
