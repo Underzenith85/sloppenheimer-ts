@@ -128,6 +128,7 @@ export const captureExecutionSnapshot = (
   workflow: effective.workflow,
   tracker: effective.tracker,
   codeReview: effective.codeReview,
+  sourceControl: effective.sourceControl,
   requiredLabels: [...effective.workflow.config.tracker.requiredLabels],
   activeStates: [...effective.workflow.config.tracker.activeStates],
   terminalStates: [...effective.workflow.config.tracker.terminalStates],

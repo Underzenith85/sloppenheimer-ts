@@ -280,11 +280,16 @@ const perform = (
           workflow: handoff.execution.workflow,
           tracker: handoff.execution.tracker,
           codeReview,
+          sourceControl: handoff.execution.sourceControl,
           workspaces: handoff.execution.workspaces,
           loadedAt: handoff.observedAt,
         }
         const attempt = Option.getOrElse(executionAttempt, () => action.attempt)
-        const started = yield* dispatch(context, issue, attempt, effective)
+        const started = yield* dispatch(context, issue, attempt, effective, {
+          _tag: 'Repair',
+          branchName: handoff.branchName,
+          expectedHeadSha: baselineHeadSha,
+        })
         yield* writeHandoff(
           context,
           id,

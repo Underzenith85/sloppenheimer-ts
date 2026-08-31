@@ -102,10 +102,16 @@ an SSH tunnel:
 ssh -L 3000:127.0.0.1:3000 symphony-host
 ```
 
-After a normal agent turn, Symphony looks for the expected `symphony/issue-<number>` branch. When
-the branch exists, the host creates or reuses an open pull request and stops continuation turns.
-Dispatch labels remain unchanged. Without a pushed branch, Symphony preserves the workspace and
-continues the issue. Pull-request operations use only the host-side GitHub credential.
+Before a normal turn, Symphony prepares `symphony/issue-<number>` from the current protected base;
+before a repair, it prepares the exact recorded pull-request head. The agent edits only ordinary
+worktree files and receives no GitHub credential. After a successful turn, the host commits the
+diff, rebases it onto the current protected base, verifies the remote head still matches the
+captured lease, and pushes it with the host credential. An empty diff remains distinct from a
+publication failure, and lease or authentication failures preserve the local work for retry.
+
+After publication, Symphony creates or reuses an open pull request and stops continuation turns.
+Dispatch labels remain unchanged. Pull-request inspection and merge remain separate code-review
+operations and also use only the host-side credential.
 
 After handoff, Symphony persists the PR under the workspace root and monitors its exact head SHA,
 CI checks, mergeability, review decision, and unresolved review threads. Failed checks, requested

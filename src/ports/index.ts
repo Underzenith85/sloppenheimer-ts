@@ -1,7 +1,7 @@
 import { Layer } from 'effect'
 
 import type { Workflow } from '../config/workflow.js'
-import type { TrackerError } from '../errors.js'
+import type { SourceControlError, TrackerError } from '../errors.js'
 import { AgentRunner } from './agent-runner.js'
 import {
   CodeReviewFactory,
@@ -10,6 +10,12 @@ import {
   layerNoCodeReview,
 } from './code-review.js'
 import { CurrentTracker, layerCurrentTracker, TrackerFactory } from './tracker.js'
+import {
+  CurrentSourceControl,
+  layerCurrentSourceControl,
+  layerNoSourceControl,
+  SourceControlFactory,
+} from './source-control.js'
 import { WorkflowLoader, WorkflowWatcher } from './workflow.js'
 import {
   CurrentWorkspaceManager,
@@ -19,6 +25,19 @@ import {
 } from './workspace.js'
 
 export { makeAdapterCell, type AdapterCell, type AdapterRebuild } from './cell.js'
+export {
+  CurrentSourceControl,
+  layerCurrentSourceControl,
+  layerNoSourceControl,
+  sourceControl,
+  SourceControlFactory,
+  type PreparedRepository,
+  type PublicationOutcome,
+  type SourceControlCell,
+  type SourceControlFactoryPort,
+  type SourceControlPort,
+  type SourceControlTarget,
+} from './source-control.js'
 export {
   AgentRunner,
   layerAgentRunner,
@@ -102,6 +121,9 @@ export type PortServices = AdapterServices | CurrentTracker | CurrentWorkspaceMa
  */
 export type CodeReviewServices = CodeReviewFactory | CurrentCodeReview
 
+/** Source control is composed beside code review and remains a distinct application capability. */
+export type SourceControlServices = SourceControlFactory | CurrentSourceControl
+
 /** The workflow-derived inputs the first instance of each rebuildable port is built from. */
 export type PortsConfiguration = Readonly<{
   tracker: Workflow['tracker']
@@ -137,3 +159,9 @@ export const layerCodeReviewPorts = (
   factory: Layer.Layer<CodeReviewFactory> = layerNoCodeReview,
 ): Layer.Layer<CodeReviewServices, TrackerError> =>
   layerCurrentCodeReview(configuration.tracker).pipe(Layer.provideMerge(factory))
+
+export const layerSourceControlPorts = (
+  configuration: PortsConfiguration,
+  factory: Layer.Layer<SourceControlFactory> = layerNoSourceControl,
+): Layer.Layer<SourceControlServices, SourceControlError> =>
+  layerCurrentSourceControl(configuration.tracker).pipe(Layer.provideMerge(factory))

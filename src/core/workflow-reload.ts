@@ -2,8 +2,13 @@ import { Effect, Either, MutableRef, Option, Ref } from 'effect'
 
 import { sameTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
-import { WorkflowError } from '../errors.js'
-import { portsConfiguration, type AdapterCell, type CodeReviewPort } from '../ports/index.js'
+import { SourceControlError, WorkflowError } from '../errors.js'
+import {
+  portsConfiguration,
+  type AdapterCell,
+  type CodeReviewPort,
+  type SourceControlPort,
+} from '../ports/index.js'
 import type { OrchestratorContext } from './runtime.js'
 import type {
   EffectiveWorkflow,
@@ -50,6 +55,12 @@ const requireCapability = (
   port: CodeReviewPort | null,
 ): Effect.Effect<CodeReviewPort | null, WorkflowError> =>
   port === null ? Effect.fail(handoffCapabilityMissing(workflow)) : Effect.succeed(port)
+
+const sourceControlCapabilityMissing = (workflow: Workflow): WorkflowError =>
+  new WorkflowError({
+    category: 'invalid_config',
+    message: `pull-request handoff is enabled, but tracker provider ${workflow.tracker.kind} does not supply SourceControlPort`,
+  })
 
 /**
  * Collects what one rebuild replaced. Local to the call that fills it: what leaves is a readonly
@@ -110,6 +121,28 @@ const rebuildCodeReview = (
       ),
   })
 
+const rebuildSourceControl = (
+  ports: RuntimePorts,
+  replaced: Replaced,
+  workflow: Workflow,
+  handoffEnabled: boolean,
+): Effect.Effect<SourceControlPort | null, WorkflowError> =>
+  Option.match(ports.sourceControlCell, {
+    onNone: () =>
+      handoffEnabled
+        ? Effect.fail(sourceControlCapabilityMissing(workflow))
+        : Effect.succeed<SourceControlPort | null>(null),
+    onSome: (cell) =>
+      rebuildCell(cell, 'sourceControl', replaced, workflow.tracker).pipe(
+        Effect.mapError((error: SourceControlError) => portConfigurationError(error)),
+        Effect.flatMap((port) =>
+          handoffEnabled && port === null
+            ? Effect.fail(sourceControlCapabilityMissing(workflow))
+            : Effect.succeed(port),
+        ),
+      ),
+  })
+
 /**
  * Builds every rebuildable port from a workflow the loader has just returned — at startup, and
  * again whenever a reload changes the file. All three are replaced together: a reload can move the
@@ -129,6 +162,12 @@ export const rebuildEffectiveWorkflow = (
         workflow.tracker,
       ).pipe(Effect.mapError(portConfigurationError))
       const codeReview = yield* rebuildCodeReview(ports, replaced, workflow)
+      const sourceControl = yield* rebuildSourceControl(
+        ports,
+        replaced,
+        workflow,
+        codeReview !== null,
+      )
       const workspaces = yield* rebuildCell(
         ports.workspaceCell,
         'workspaces',
@@ -139,6 +178,7 @@ export const rebuildEffectiveWorkflow = (
         workflow,
         tracker,
         codeReview,
+        sourceControl,
         workspaces,
         loadedAt: new Date(),
       }
@@ -175,7 +215,13 @@ export const revalidateCredentials = (
           validated,
         ).pipe(Effect.mapError(portConfigurationError))
         const codeReview = yield* rebuildCodeReview(context.ports, replaced, workflow)
-        return { ...effective, workflow, tracker, codeReview }
+        const sourceControl = yield* rebuildSourceControl(
+          context.ports,
+          replaced,
+          workflow,
+          codeReview !== null,
+        )
+        return { ...effective, workflow, tracker, codeReview, sourceControl }
       }).pipe(
         // Recorded whether or not the rebuild finished: the tracker cell may already have installed
         // a replacement by the time the code-review rebuild refuses, and the predecessor it
@@ -222,6 +268,12 @@ const stillHeld = (state: RuntimeState, retirement: PendingRetirement): boolean 
       return (
         state.lastKnownGood.codeReview === retirement.instance ||
         heldInstances(state, (execution) => execution.codeReview).includes(retirement.instance)
+      )
+    }
+    case 'sourceControl': {
+      return (
+        state.lastKnownGood.sourceControl === retirement.instance ||
+        heldInstances(state, (execution) => execution.sourceControl).includes(retirement.instance)
       )
     }
     case 'workspaces': {
@@ -289,6 +341,7 @@ export const adoptPorts = (
           MutableRef.set(entry.sessionPorts, {
             tracker: entry.execution.tracker,
             codeReview: entry.execution.codeReview,
+            sourceControl: entry.execution.sourceControl,
           })
         }
       }),

@@ -14,12 +14,6 @@ polling:
 workspace:
   root: .symphony/workspaces
 hooks:
-  after_create: git clone git@github.com:Underzenith85/symphony-ts.git .
-  before_run: |
-    if test -z "$(git status --porcelain)"; then
-      git fetch origin main
-      git checkout --detach origin/main
-    fi
   timeout_ms: 120000
 agent:
   max_concurrent_agents: 1
@@ -44,14 +38,12 @@ Description:
 {{ issue.description }}
 
 Follow the repository's TypeScript 7 conventions. Never use `any`, never omit braces around a
-control-flow body, and do not add TypeScript 6 compatibility. Create a branch named
-`symphony/issue-{{ issue.id }}`, run `pnpm check`, commit the implementation, and push the branch.
+control-flow body, and do not add TypeScript 6 compatibility. Implement and test the requested
+change in the prepared worktree, then run `pnpm check`. Do not create branches, commit, rebase,
+push, or request GitHub credentials; Symphony publishes the worktree through its host credential.
 
-When the description contains a `Pull request repair` section, update the existing pull-request
-branch instead of opening a replacement. Rebase the repaired branch onto the latest protected
-`main`, rerun `pnpm check`, and push the rebased head with `--force-with-lease` pinned to the head
-SHA supplied in the repair description. After the push succeeds, finish the handoff. Symphony
-submits `@codex review` on the existing pull request with its host-side GitHub credential after
-observing the pushed head; the repair agent must not use or request GitHub credentials. Do not
-resolve review threads yourself or merge the pull request; Symphony will do those only after CI
-passes and the latest-head review is verified.
+When the description contains a `Pull request repair` section, edit the prepared existing PR head
+instead of opening a replacement. Symphony rebases and publishes the resulting diff with an exact
+expected-head lease, then submits `@codex review` after observing the published head. Do not resolve
+review threads yourself or merge the pull request; Symphony will do those only after CI passes and
+the latest-head review is verified.
