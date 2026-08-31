@@ -408,6 +408,66 @@ describe('operator server', (): void => {
     }),
   )
 
+  /*
+   * The snapshot and the detail are two reads of the actor's state, so an agent that fails between
+   * them leaves a stale running row beside a fresh retrying detail. The response must be one
+   * source's reading rather than a blend: a `running` block beside a pending `retry`, under a
+   * status only one of them supports, is a state the host was never in.
+   */
+  it.live('never blends a stale snapshot row with a fresher detail record', () =>
+    Effect.gen(function* () {
+      const retryingDetail: AgentDetailSnapshot = {
+        ...makeDetail('example/symphony#17'),
+        status: 'retrying',
+        retry: { attempt: 2, dueAt: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
+      }
+      const skewed: OperatorBackend = {
+        ...makeBackend(),
+        // The row still says running; the detail read a moment later says the agent has failed.
+        agentDetail: () => Effect.succeed({ _tag: 'Found', detail: retryingDetail }),
+      }
+      yield* withServer(skewed, async (url) => {
+        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({
+          status: 'retrying',
+          tracked: true,
+          running: null,
+          retry: { attempt: 2, due_at: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
+        })
+      })
+    }),
+  )
+
+  /*
+   * A running row publishes its stall deadline rather than a flag, so that a reader can decide the
+   * deadline has passed without waiting for the next snapshot to say so. The fallback must make
+   * that decision rather than reporting an already-stalled agent as healthy beside the deadline
+   * that contradicts it.
+   */
+  it.live('derives the fallback stall flag from the deadline the row carries', () =>
+    Effect.gen(function* () {
+      const stalled: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          // The deadline passed a minute before this snapshot was taken.
+          generatedAt: '2026-08-29T12:05:00.000Z',
+        }),
+        // No detail record, so the running row stands in.
+        agentDetail: (identifier) =>
+          Effect.succeed({ _tag: 'Unavailable', identifier, reason: 'x' }),
+      }
+      yield* withServer(stalled, async (url) => {
+        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+        expect(await response.json()).toMatchObject({
+          status: 'running',
+          running: { stall_deadline: '2026-08-29T12:04:00.000Z', stalled: true },
+        })
+      })
+    }),
+  )
+
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {
       const rejected = await fetch(`${url}/api/v1/refresh`, { method: 'POST' })

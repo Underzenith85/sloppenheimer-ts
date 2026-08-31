@@ -413,6 +413,21 @@ const publishRunFromDetail = (detail: AgentDetailSnapshot): PublishedIssueRun =>
 })
 
 /**
+ * Whether the deadline a running row publishes has passed at the instant that row was taken. The
+ * row carries the deadline rather than a flag, precisely so a reader can decide this; hard-coding
+ * `false` would publish an already-stalled agent as healthy beside the deadline that says
+ * otherwise. A row with stall detection off has no deadline and is never stalled.
+ */
+const stalledAt = (stallDeadline: string | null, generatedAt: string): boolean => {
+  if (stallDeadline === null) {
+    return false
+  }
+  const deadline = Date.parse(stallDeadline)
+  const generated = Date.parse(generatedAt)
+  return Number.isFinite(deadline) && Number.isFinite(generated) && generated >= deadline
+}
+
+/**
  * The running row stands in when the actor has published no detail record for a live agent. It
  * carries scheduling identity but not the phase and idle accounting the detail pipeline folds, so
  * those fields are absent rather than invented.
@@ -431,7 +446,7 @@ const publishRunFromRow = (row: RunningRow, generatedAt: string): PublishedIssue
   turn_number: row.turnCount,
   worker_host: row.workerHost,
   stall_deadline: row.stallDeadline,
-  stalled: false,
+  stalled: stalledAt(row.stallDeadline, generatedAt),
   tokens: publishTokens(row.tokens),
 })
 
@@ -443,6 +458,15 @@ const publishRunFromRow = (row: RunningRow, generatedAt: string): PublishedIssue
  * running one, and answering `404` for it would report absence the host can disprove. The detail
  * lookup already distinguishes an unknown identifier from a known one with no live session, so the
  * two sources agree on what "unknown" means.
+ *
+ * The snapshot and the detail are two reads of the actor's state, so an agent that changes state
+ * between them leaves this function holding one stale value and one fresh one. What must never
+ * follow is a response that contradicts itself — a `running` block beside a `retry` block, under a
+ * status only one of them supports. `status` therefore picks a single source, and the live-state
+ * fields come from that source alone: the detail record whenever it has one to give, because it is
+ * the actor's own statement about the session, and the snapshot rows only where it does not. The
+ * response is then one source's reading, taken slightly earlier or slightly later, rather than a
+ * blend of both.
  */
 export const publishIssueDetail = (
   identifier: string,
@@ -463,26 +487,53 @@ export const publishIssueDetail = (
     return null
   }
   const detail = lookup._tag === 'Found' ? lookup.detail : null
+  // A detail record that reports a live session settles the status by itself. Only once it does not
+  // — no record, or a record whose session has finished — do the snapshot rows get a say, and a
+  // handoff outranks them because it is what the host is doing about the issue now.
   const status: PublishedIssueStatus =
-    running !== undefined
+    detail?.status === 'running'
       ? 'running'
-      : retrying !== undefined
+      : detail?.status === 'retrying'
         ? 'retrying'
         : handoff !== undefined
           ? 'handoff'
-          : completed !== undefined
+          : detail !== null
             ? 'completed'
-            : detail !== null
-              ? detail.status
-              : lookup._tag === 'Completed'
-                ? 'completed'
-                : lookup._tag === 'Unavailable'
-                  ? 'starting'
-                  : 'idle'
+            : running !== undefined
+              ? 'running'
+              : retrying !== undefined
+                ? 'retrying'
+                : completed !== undefined
+                  ? 'completed'
+                  : lookup._tag === 'Completed'
+                    ? 'completed'
+                    : lookup._tag === 'Unavailable'
+                      ? 'starting'
+                      : 'idle'
   const events = detail === null ? [] : detail.timeline.events.slice(-publishedRecentEvents)
   const lastError = detail?.errors.at(-1)
   const detailRetry = detail?.retry ?? null
   const rowAttempt = retrying?.attempt ?? running?.attempt ?? 0
+  // Both come from whichever source `status` was taken from, so a response never carries a run and
+  // a pending retry at once, nor either one under a status that denies it.
+  const publishedRun: PublishedIssueRun | null =
+    status !== 'running'
+      ? null
+      : detail !== null
+        ? publishRunFromDetail(detail)
+        : running === undefined
+          ? null
+          : publishRunFromRow(running, snapshot.generatedAt)
+  const publishedRetry: PublishedIssueRetry | null =
+    status !== 'retrying'
+      ? null
+      : detail !== null
+        ? detailRetry === null
+          ? null
+          : { attempt: detailRetry.attempt, due_at: detailRetry.dueAt, reason: detailRetry.reason }
+        : retrying === undefined
+          ? null
+          : { attempt: retrying.attempt, due_at: retrying.dueAt, reason: retrying.error }
   return {
     self: issueDetailPath(identifier),
     issue_id:
@@ -506,18 +557,8 @@ export const publishIssueDetail = (
       restart_count: detail?.attempt.retries ?? rowAttempt,
       current_retry_attempt: detail?.attempt.current ?? rowAttempt,
     },
-    running:
-      detail !== null && detail.status === 'running'
-        ? publishRunFromDetail(detail)
-        : running === undefined
-          ? null
-          : publishRunFromRow(running, snapshot.generatedAt),
-    retry:
-      detailRetry !== null
-        ? { attempt: detailRetry.attempt, due_at: detailRetry.dueAt, reason: detailRetry.reason }
-        : retrying === undefined
-          ? null
-          : { attempt: retrying.attempt, due_at: retrying.dueAt, reason: retrying.error },
+    running: publishedRun,
+    retry: publishedRetry,
     logs: {
       retained: detail?.timeline.retained ?? 0,
       dropped: detail?.timeline.dropped ?? 0,
