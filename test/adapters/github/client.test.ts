@@ -251,7 +251,7 @@ describe('GitHub adapter client binding', (): void => {
       )
     })
 
-    const result = await makeGitHubTracker(provider, client).executeTool(
+    const result = await Effect.runSync(makeGitHubTracker(provider, client)).executeTool(
       'github_add_comment',
       { body: 'hello' },
       {
@@ -281,7 +281,7 @@ describe('GitHub adapter client binding', (): void => {
     )
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider, client).fetchIssuesByStates(['open'], null),
+      Effect.runSync(makeGitHubTracker(provider, client)).fetchIssuesByStates(['open'], null),
     )
 
     expect(unusable).not.toHaveBeenCalled()

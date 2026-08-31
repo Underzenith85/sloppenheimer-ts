@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, type JsonObject } from '../src/domain/domain.js'
 import { makeGitHubIssueControl, makeGitHubTracker } from '../src/adapters/github/issues.js'
+import type { IssueControlPort } from '../src/ports/issue-control.js'
+import type { TrackerPort } from '../src/ports/tracker.js'
 import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
 
 const provider: GitHubProviderConfig = {
@@ -36,6 +38,13 @@ const githubDependency = (number: number, state = 'open'): JsonObject => ({
   html_url: `https://example.test/issues/${String(number)}`,
 })
 
+/** Tracker construction is an effect only because it allocates the dependency cache `Ref`. */
+const trackerOf = (config: GitHubProviderConfig = provider): TrackerPort =>
+  Effect.runSync(makeGitHubTracker(config))
+
+const issueControlOf = (config: GitHubProviderConfig = provider): IssueControlPort =>
+  Effect.runSync(makeGitHubIssueControl(config))
+
 const requestUrl = (input: string | URL | Request): string => {
   if (typeof input === 'string') {
     return input
@@ -49,7 +58,7 @@ afterEach((): void => {
 
 describe('GitHub tracker authentication provenance', (): void => {
   it('declares the configured secret variable and all fallback aliases', (): void => {
-    expect(makeGitHubTracker(provider).secretEnvironmentNames).toEqual([
+    expect(trackerOf(provider).secretEnvironmentNames).toEqual([
       'CUSTOM_GITHUB_TOKEN',
       'GITHUB_TOKEN',
       'GH_TOKEN',
@@ -58,7 +67,7 @@ describe('GitHub tracker authentication provenance', (): void => {
 
   it('deduplicates a configured fallback alias', (): void => {
     expect(
-      makeGitHubTracker({ ...provider, tokenEnvironmentName: 'GH_TOKEN' }).secretEnvironmentNames,
+      trackerOf({ ...provider, tokenEnvironmentName: 'GH_TOKEN' }).secretEnvironmentNames,
     ).toEqual(['GH_TOKEN', 'GITHUB_TOKEN'])
   })
 })
@@ -84,9 +93,7 @@ describe('GitHub tracker pagination', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
-    )
+    const issues = await Effect.runPromise(trackerOf(provider).fetchIssuesByStates(['open'], null))
 
     expect(issues.map((issue) => issue.id)).toEqual(['1', '2', '3'])
     expect(fetchMock).toHaveBeenCalledTimes(5)
@@ -111,7 +118,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -128,7 +135,7 @@ describe('GitHub tracker pagination', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_pagination')
@@ -142,7 +149,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['closed'], null, {
+      trackerOf(provider).fetchIssuesByStates(['closed'], null, {
         hydrateDependencies: false,
       }),
     )
@@ -156,7 +163,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByIds([issueId('1')], {
+      trackerOf(provider).fetchIssuesByIds([issueId('1')], {
         hydrateDependencies: false,
       }),
     )
@@ -175,7 +182,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], ['symphony']),
+      trackerOf(provider).fetchIssuesByStates(['open'], ['symphony']),
     )
 
     expect(issues).toHaveLength(2)
@@ -195,13 +202,51 @@ describe('GitHub native issue dependencies', (): void => {
         : Response.json([githubIssue(1)]),
     )
     vi.stubGlobal('fetch', fetchMock)
-    const tracker = makeGitHubTracker(provider)
+    const tracker = trackerOf(provider)
 
     await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
     const [second] = await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
 
     expect(second?.blockedBy).toHaveLength(1)
     expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('leaves one coherent cache entry when the same issue hydrates concurrently', async (): Promise<void> => {
+    let dependencyRequests = 0
+    let openGate: () => void = (): void => {}
+    // Neither dependency response lands until both requests are in flight, so both hydrations are
+    // guaranteed to miss the cache and race to write it.
+    const bothInFlight = new Promise<void>((resolve): void => {
+      openGate = resolve
+    })
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      if (!requestUrl(input).includes('/dependencies/blocked_by')) {
+        return Response.json([githubIssue(1)])
+      }
+      dependencyRequests += 1
+      const blocker = githubDependency(dependencyRequests === 1 ? 2 : 3)
+      if (dependencyRequests >= 2) {
+        openGate()
+      }
+      await bothInFlight
+      return Response.json([blocker])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const tracker = trackerOf(provider)
+
+    await Effect.runPromise(
+      Effect.all(
+        [tracker.fetchIssuesByStates(['open'], null), tracker.fetchIssuesByStates(['open'], null)],
+        { concurrency: 2 },
+      ),
+    )
+    const [cached] = await Effect.runPromise(tracker.fetchIssuesByStates(['open'], null))
+
+    // Both writers ran, the third refresh read the cache instead of the API, and what it read is
+    // one writer's entry whole rather than a blend of the two.
+    expect(dependencyRequests).toBe(2)
+    expect(cached?.blockedBy).toHaveLength(1)
+    expect(['Blocker 2', 'Blocker 3']).toContain(cached?.blockedBy[0]?.title)
   })
 
   it('bypasses the dependency cache for issue ID refreshes', async (): Promise<void> => {
@@ -215,7 +260,7 @@ describe('GitHub native issue dependencies', (): void => {
       return Response.json([githubDependency(3, dependencyFetches === 1 ? 'closed' : 'open')])
     })
     vi.stubGlobal('fetch', fetchMock)
-    const tracker = makeGitHubTracker(provider)
+    const tracker = trackerOf(provider)
 
     const [initial] = await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
     const [refreshed] = await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
@@ -244,9 +289,7 @@ describe('GitHub native issue dependencies', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const [issue] = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')]),
-    )
+    const [issue] = await Effect.runPromise(trackerOf(provider).fetchIssuesByIds([issueId('2')]))
 
     expect(issue?.blockedBy).toEqual([
       {
@@ -280,9 +323,7 @@ describe('GitHub native issue dependencies', (): void => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
-    )
+    const issues = await Effect.runPromise(trackerOf(provider).fetchIssuesByStates(['open'], null))
 
     expect(issues.map((issue) => [issue.id, issue.dispatchable])).toEqual([
       ['1', false],
@@ -304,7 +345,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')])),
+      Effect.flip(trackerOf(provider).fetchIssuesByIds([issueId('2')])),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -320,7 +361,7 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('2')])),
+      Effect.flip(trackerOf(provider).fetchIssuesByIds([issueId('2')])),
     )
 
     expect(error.category).toBe('tracker_status')
@@ -355,9 +396,7 @@ describe('GitHub tracker state-list contract', (): void => {
     const fetchMock = vi.fn(async (): Promise<Response> => Response.json([]))
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates([], null),
-    )
+    const issues = await Effect.runPromise(trackerOf(provider).fetchIssuesByStates([], null))
 
     expect(issues).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
@@ -371,9 +410,7 @@ describe('GitHub tracker state-list contract', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
-    )
+    const issues = await Effect.runPromise(trackerOf(provider).fetchIssuesByStates(['open'], null))
 
     expect(issues.map((issue) => [issue.id, issue.dispatchable])).toEqual([
       ['1', true],
@@ -401,7 +438,7 @@ describe('GitHub tracker state-list contract', (): void => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(makeGitHubIssueControl(provider).listOpenIssues())
+    const issues = await Effect.runPromise(issueControlOf(provider).listOpenIssues())
 
     expect(issues.map((issue) => [issue.id, issue.dispatchable])).toEqual([
       ['1', false],
@@ -424,7 +461,7 @@ describe('GitHub tracker state-list contract', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { value, logs } = await captureLogs(
-      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
+      trackerOf(provider).fetchIssuesByStates(['open'], null),
     )
 
     expect(value.map((issue) => issue.id)).toEqual(['1', '3'])
@@ -445,7 +482,7 @@ describe('GitHub tracker state-list contract', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_pagination')
@@ -458,7 +495,7 @@ describe('GitHub tracker identity refresh contract', (): void => {
     const fetchMock = vi.fn(async (): Promise<Response> => Response.json([]))
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(makeGitHubTracker(provider).fetchIssuesByIds([]))
+    const issues = await Effect.runPromise(trackerOf(provider).fetchIssuesByIds([]))
 
     expect(issues).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
@@ -473,7 +510,7 @@ describe('GitHub tracker identity refresh contract', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByIds([issueId('7'), issueId('7'), issueId('7')]),
+      trackerOf(provider).fetchIssuesByIds([issueId('7'), issueId('7'), issueId('7')]),
     )
 
     expect(issues.map((issue) => issue.id)).toEqual(['7'])
@@ -491,7 +528,7 @@ describe('GitHub tracker identity refresh contract', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByIds([issueId('7')])),
+      Effect.flip(trackerOf(provider).fetchIssuesByIds([issueId('7')])),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -516,9 +553,7 @@ describe('GitHub tracker normalization', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const [issue] = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByIds([issueId('11')]),
-    )
+    const [issue] = await Effect.runPromise(trackerOf(provider).fetchIssuesByIds([issueId('11')]))
 
     expect(issue).toEqual({
       id: '11',
@@ -553,9 +588,7 @@ describe('GitHub tracker normalization', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const [issue] = await Effect.runPromise(
-      makeGitHubTracker(scoped).fetchIssuesByIds([issueId('5')]),
-    )
+    const [issue] = await Effect.runPromise(trackerOf(scoped).fetchIssuesByIds([issueId('5')]))
 
     expect(issue?.identifier).toBe('other/fork#5')
     expect(issue?.nativeRef).toEqual({
@@ -579,7 +612,7 @@ describe('GitHub tracker error mapping', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_rate_limited')
@@ -599,7 +632,7 @@ describe('GitHub tracker error mapping', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_rate_limited')
@@ -612,7 +645,7 @@ describe('GitHub tracker error mapping', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_status')
@@ -627,7 +660,7 @@ describe('GitHub tracker error mapping', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_request')
@@ -642,7 +675,7 @@ describe('GitHub tracker error mapping', (): void => {
     vi.stubGlobal('fetch', fetchMock)
 
     const error = await Effect.runPromise(
-      Effect.flip(makeGitHubTracker(provider).fetchIssuesByStates(['open'], null)),
+      Effect.flip(trackerOf(provider).fetchIssuesByStates(['open'], null)),
     )
 
     expect(error.category).toBe('tracker_response')
@@ -657,9 +690,7 @@ describe('GitHub tracker dependency hydration selection', (): void => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider).fetchIssuesByStates(['closed'], []),
-    )
+    const issues = await Effect.runPromise(trackerOf(provider).fetchIssuesByStates(['closed'], []))
 
     expect(issues.map((issue) => issue.blockedBy)).toEqual([[]])
     expect(
