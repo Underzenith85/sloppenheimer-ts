@@ -126,6 +126,11 @@ const runProcess = (
       child.stderr.removeAllListeners()
       child.removeAllListeners('error')
       child.removeAllListeners('close')
+      // Node delivers a spawn failure asynchronously, so one can still arrive after this effect has
+      // settled or been cancelled — and an `error` event with no listener is rethrown as an uncaught
+      // exception, which would take the whole host down rather than fail the operation. The
+      // replacement listener keeps that from outliving the effect that could report it.
+      child.on('error', () => {})
     }
 
     const settle = (effect: Effect.Effect<string, SourceControlError>): void => {
