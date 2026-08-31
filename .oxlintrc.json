@@ -45,6 +45,16 @@
   // root module for never rejecting a compliant one.  Prefer flat layers.
   "overrides": [
     {
+      // The console's browser sources are classic scripts, not modules: they share one global
+      // scope, and `tsconfig.browser.json` typechecks them as a single program.  A declaration
+      // that another of those files uses is therefore not unused, but oxlint reads one file at a
+      // time and cannot see that.  Cross-file misuse is still caught, by the compiler.
+      "files": ["src/operator/ui/*.ts"],
+      "rules": {
+        "no-unused-vars": "off"
+      }
+    },
+    {
       "files": ["src/support/**"],
       "rules": {
         "no-restricted-imports": [

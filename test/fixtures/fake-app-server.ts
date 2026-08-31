@@ -48,6 +48,13 @@ const expectedDynamicTools =
   isJsonRecord(expectedArgument) && isUnknownArray(expectedArgument['dynamicTools'])
     ? expectedArgument['dynamicTools']
     : null
+/**
+ * Whether any host tool set is acceptable. The composition root decides which tools it offers, so
+ * a test about the host's lifecycle rather than its protocol payload should not have to restate
+ * that list here to get a session started.
+ */
+const acceptAnyDynamicTools =
+  isJsonRecord(expectedArgument) && expectedArgument['acceptAnyDynamicTools'] === true
 
 const rejectRequest = (id: unknown, message: string): void => {
   send({ id, error: { code: -32602, message } })
@@ -88,9 +95,10 @@ const hasThreadPayload = (params: unknown): params is JsonRecord & Readonly<{ cw
   params['approvalPolicy'] === expectedApprovalPolicy &&
   params['sandbox'] === expectedThreadSandbox &&
   params['serviceName'] === 'symphony_ts' &&
-  (expectedDynamicTools === null
-    ? !Object.hasOwn(params, 'dynamicTools')
-    : isDeepStrictEqual(params['dynamicTools'], expectedDynamicTools))
+  (acceptAnyDynamicTools ||
+    (expectedDynamicTools === null
+      ? !Object.hasOwn(params, 'dynamicTools')
+      : isDeepStrictEqual(params['dynamicTools'], expectedDynamicTools)))
 
 const hasTurnPayload = (params: unknown): boolean => {
   if (!isJsonRecord(params) || !isUnknownArray(params['input'])) {

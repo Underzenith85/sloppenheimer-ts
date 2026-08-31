@@ -29,6 +29,12 @@ export type BacklogIssue = Readonly<{
   blockedBy: Issue['blockedBy']
   readiness: 'ready' | 'blocked' | 'cyclic'
   reason: string | null
+  /**
+   * How many other open issues stop being blocked, directly or transitively, once this one is
+   * finished. It is the console's ranking signal, and it is computed here because the dependency
+   * graph the count comes from is already assembled here.
+   */
+  unlocks: number
 }>
 
 export type DependencyNode = Readonly<{
@@ -93,6 +99,40 @@ const issueNumber = (identifier: string): number | null => {
   return match?.[1] === undefined ? null : Number(match[1])
 }
 
+/**
+ * How many open issues each issue unblocks, counted transitively. A cycle cannot make the walk
+ * diverge: each issue is expanded once per traversal and its own identifier is never counted as
+ * one of its dependents.
+ */
+const downstreamCounts = (openIssues: readonly Issue[]): ReadonlyMap<string, number> => {
+  const dependents = new Map<string, string[]>()
+  for (const issue of openIssues) {
+    for (const blocker of issue.blockedBy) {
+      const existing = dependents.get(blocker.identifier)
+      if (existing === undefined) {
+        dependents.set(blocker.identifier, [issue.identifier])
+      } else {
+        existing.push(issue.identifier)
+      }
+    }
+  }
+  const counts = new Map<string, number>()
+  for (const issue of openIssues) {
+    const seen = new Set<string>([issue.identifier])
+    const queue = [...(dependents.get(issue.identifier) ?? [])]
+    while (queue.length > 0) {
+      const next = queue.pop()
+      if (next === undefined || seen.has(next)) {
+        continue
+      }
+      seen.add(next)
+      queue.push(...(dependents.get(next) ?? []))
+    }
+    counts.set(issue.identifier, seen.size - 1)
+  }
+  return counts
+}
+
 export const buildBacklogSnapshot = (
   openIssues: readonly Issue[],
   label: string,
@@ -101,6 +141,7 @@ export const buildBacklogSnapshot = (
 ): BacklogSnapshot => {
   const cycles = findDependencyCycles(openIssues)
   const cyclic = new Set(cycles.flatMap((cycle) => cycle.members))
+  const unlocks = downstreamCounts(openIssues)
   const issues = openIssues.map((issue): BacklogIssue => {
     const blockers = unresolvedBlockers(issue, terminalStates)
     const isCyclic = cyclic.has(issue.identifier)
@@ -125,6 +166,7 @@ export const buildBacklogSnapshot = (
         : blockers.length > 0
           ? `Waiting for ${blockers.map((blocker) => blocker.identifier).join(', ')}`
           : null,
+      unlocks: unlocks.get(issue.identifier) ?? 0,
     }
   })
   const nodes = new Map<string, DependencyNode>()

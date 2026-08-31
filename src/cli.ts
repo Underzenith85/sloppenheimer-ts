@@ -36,6 +36,12 @@ import {
 } from './ports/index.js'
 import { logInfo } from './support/logging.js'
 
+/**
+ * The CLI's last-resort bound. Cleanup is not allowed to depend on it: the host closes its scope
+ * with parallel finalizers, so the wall-clock cost of shutdown is the slowest single finaliser
+ * rather than the sum of one per active worker. This watchdog exists only for a finaliser that
+ * never settles at all.
+ */
 const shutdownTimeoutMs = 10_000
 
 /**
@@ -167,19 +173,29 @@ const main = async (): Promise<number> => {
    * falls back to this same layer when it is run without one, so a test can substitute a client.
    */
   const program = Effect.scoped(
-    Effect.gen(function* () {
-      const orchestrator = yield* startOrchestrator(options.workflowPath)
-      yield* logInfo('symphony host started', { workflow_path: options.workflowPath })
-      const loader = yield* WorkflowLoader
-      const workflow = yield* loader.load(options.workflowPath)
-      const port = options.port ?? workflow.config.serverPort
-      if (port !== null) {
-        const backend = yield* makeOperatorBackend(options.workflowPath, orchestrator)
-        const server = yield* startOperatorServer(port, backend)
-        yield* logInfo('operator console listening', { url: server.url })
-      }
-      return yield* orchestrator.awaitTermination
-    }),
+    /**
+     * Finalizers of the host scope run concurrently. The orchestrator forks one fiber per active
+     * worker into this scope, and interrupting a worker waits on the Codex App Server's bounded
+     * `SIGTERM` grace and post-`SIGKILL` reap. Sequentially — the Effect default — that cost is
+     * multiplied by `agent.max_concurrent_agents` and overruns the watchdog; run in parallel it is
+     * paid once, so the operator listener is released and the host exits within the deadline
+     * whatever the concurrency limit is set to.
+     */
+    Effect.parallelFinalizers(
+      Effect.gen(function* () {
+        const orchestrator = yield* startOrchestrator(options.workflowPath)
+        yield* logInfo('symphony host started', { workflow_path: options.workflowPath })
+        const loader = yield* WorkflowLoader
+        const workflow = yield* loader.load(options.workflowPath)
+        const port = options.port ?? workflow.config.serverPort
+        if (port !== null) {
+          const backend = yield* makeOperatorBackend(options.workflowPath, orchestrator)
+          const server = yield* startOperatorServer(port, backend)
+          yield* logInfo('operator console listening', { url: server.url })
+        }
+        return yield* orchestrator.awaitTermination
+      }),
+    ),
     // Provided around the whole program, not around the start: the cells the orchestrator rebuilds
     // through live as long as the host does. The GitHub adapter reads its HTTP transport from the
     // same context, so the client bound here reaches every request its ports make.

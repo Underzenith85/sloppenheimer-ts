@@ -129,8 +129,39 @@ export type RunningSnapshot = Readonly<{
   tokens: Omit<TokenTotals, 'secondsRunning'>
   lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
   workerHost: 'local'
+  /**
+   * The instant this agent is considered stalled, or `null` when stall detection is disabled for
+   * it. Published as an absolute time rather than a flag so the console can decide for itself that
+   * the deadline has passed without waiting for the next snapshot to say so.
+   */
+  stallDeadline: string | null
   /** Stable link to the versioned detail resource for this agent. */
   detailUrl: string
+}>
+
+/**
+ * One piece of finished work, as the console shows it. The runtime already had to know which
+ * issues had completed; it now keeps enough of each to answer "what did Symphony finish, and
+ * when" without the console inventing a session history of its own.
+ */
+export type CompletedEntry = Readonly<{
+  issueId: IssueId
+  identifier: string
+  title: string
+  url: string | null
+  outcome: 'merged'
+  finishedAt: Date
+  pullRequestUrl: string | null
+}>
+
+export type CompletedSnapshot = Readonly<{
+  issueId: IssueId
+  identifier: string
+  title: string
+  url: string | null
+  outcome: 'merged'
+  finishedAt: string
+  pullRequestUrl: string | null
 }>
 
 export type RetrySnapshot = Readonly<{
@@ -186,6 +217,8 @@ export type OrchestratorSnapshot = Readonly<{
   handoffs: readonly HandoffSnapshot[]
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
+  /** Finished work, newest first and bounded by {@link publishedCompletedWork}. */
+  completed: readonly CompletedSnapshot[]
   totals: TokenTotals
   rateLimits: JsonObject | null
 }>
@@ -242,11 +275,18 @@ export type PublishedDetail =
 /** How many finished agents keep their timeline for post-mortem inspection. */
 export const retainedCompletedDetails = 16
 
+/**
+ * How much finished work the snapshot publishes. The console scopes its Finished view to a time
+ * window, so the wire payload is bounded by recency rather than by however many issues a long
+ * session has merged.
+ */
+export const publishedCompletedWork = 50
+
 export type RuntimeState = {
   running: Map<IssueId, RunningEntry>
   claimed: Set<IssueId>
   retries: Map<IssueId, RetryEntry>
-  completed: Set<IssueId>
+  completed: Map<IssueId, CompletedEntry>
   pausedIssueNumbers: Set<number>
   handoffs: Map<IssueId, HandoffEntry>
   totals: TokenTotals
@@ -436,7 +476,7 @@ const initialState = (): RuntimeState => ({
   running: new Map(),
   claimed: new Set(),
   retries: new Map(),
-  completed: new Set(),
+  completed: new Map(),
   pausedIssueNumbers: new Set(),
   handoffs: new Map(),
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
@@ -1553,7 +1593,12 @@ export const runOrchestratorRuntime = (
   selectedWorkflowPath: string,
 ): Effect.Effect<void, WorkflowError, OrchestratorServices> =>
   Effect.scoped(
-    startOrchestratorRuntime(selectedWorkflowPath).pipe(
-      Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
+    // Workers are forked into this scope, and each one's interruption waits on a bounded agent
+    // teardown. Closing them concurrently keeps the cost of shutdown independent of how many
+    // agents were running, which is what lets the CLI's watchdog stay a last-resort path.
+    Effect.parallelFinalizers(
+      startOrchestratorRuntime(selectedWorkflowPath).pipe(
+        Effect.flatMap((orchestrator) => orchestrator.awaitTermination),
+      ),
     ),
   )

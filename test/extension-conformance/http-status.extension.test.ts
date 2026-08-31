@@ -22,6 +22,7 @@ const snapshot: OrchestratorSnapshot = {
   pollingIntervalMs: 30_000,
   maxConcurrentAgents: 1,
   counts: { running: 0, retrying: 0, completed: 0 },
+  completed: [],
   pausedIssueNumbers: [],
   handoffs: [],
   running: [],

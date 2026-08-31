@@ -1,7 +1,32 @@
 import { Effect } from 'effect'
 
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
-import type { AgentDetailLookup, OrchestratorContext, OrchestratorSnapshot } from './runtime.js'
+import {
+  publishedCompletedWork,
+  type AgentDetailLookup,
+  type CompletedEntry,
+  type CompletedSnapshot,
+  type OrchestratorContext,
+  type OrchestratorSnapshot,
+} from './runtime.js'
+
+/**
+ * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
+ * detection is off for that agent, which the console must be able to tell apart from a deadline
+ * that has not arrived yet.
+ */
+const stallDeadlineOf = (lastActiveAt: Date, stallTimeoutMs: number): string | null =>
+  stallTimeoutMs > 0 ? new Date(lastActiveAt.getTime() + stallTimeoutMs).toISOString() : null
+
+const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
+  issueId: entry.issueId,
+  identifier: entry.identifier,
+  title: entry.title,
+  url: entry.url,
+  outcome: entry.outcome,
+  finishedAt: entry.finishedAt.toISOString(),
+  pullRequestUrl: entry.pullRequestUrl,
+})
 
 export const publishDetails = (context: OrchestratorContext): void => {
   context.publishDetailsValue()
@@ -82,6 +107,10 @@ export const createSnapshot = (context: OrchestratorContext): OrchestratorSnapsh
       tokens: entry.tokens,
       lastReportedTokens: entry.lastReportedTokens,
       workerHost: 'local',
+      stallDeadline: stallDeadlineOf(
+        entry.lastEventAt ?? entry.startedAt,
+        entry.execution.stallTimeoutMs,
+      ),
       detailUrl: agentDetailPath(entry.issue.identifier),
     })),
     retrying: [...context.state.retries.values()].map((entry) => ({
@@ -95,6 +124,10 @@ export const createSnapshot = (context: OrchestratorContext): OrchestratorSnapsh
       workerHost: 'local',
       detailUrl: agentDetailPath(entry.issue.identifier),
     })),
+    completed: [...context.state.completed.values()]
+      .sort((left, right) => right.finishedAt.getTime() - left.finishedAt.getTime())
+      .slice(0, publishedCompletedWork)
+      .map(completedSnapshot),
     totals: {
       inputTokens: context.state.totals.inputTokens + activeTokens.inputTokens,
       outputTokens: context.state.totals.outputTokens + activeTokens.outputTokens,

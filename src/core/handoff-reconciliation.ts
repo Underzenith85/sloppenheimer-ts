@@ -4,7 +4,29 @@ import type { Issue } from '../domain/domain.js'
 import { classifyPullRequest } from '../domain/handoff.js'
 import { logInfo } from '../support/logging.js'
 import { dispatch } from './dispatch.js'
-import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, HandoffEntry, OrchestratorContext } from './runtime.js'
+import type { IssueId } from '../domain/domain.js'
+
+/**
+ * Files a merged handoff as finished work. The runtime already recorded that the issue completed;
+ * this keeps the title, link and instant alongside it so the console can answer what Symphony
+ * finished and when, instead of publishing a bare count.
+ */
+const recordCompleted = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+): void => {
+  context.state.completed.set(id, {
+    issueId: id,
+    identifier: handoff.issue.identifier,
+    title: handoff.issue.title,
+    url: handoff.issue.url,
+    outcome: 'merged',
+    finishedAt: new Date(),
+    pullRequestUrl: handoff.pullRequestUrl,
+  })
+}
 
 export const hydrateRestoredHandoffs = (context: OrchestratorContext): Effect.Effect<void> =>
   context.hydrateRestoredHandoffsEffect()
@@ -184,7 +206,7 @@ export const reconcileHandoffs = (
       if (disposition.state === 'merged') {
         context.noteHandoffOutcomeValue(id, handoff, 'merged')
         context.state.handoffs.delete(id)
-        context.state.completed.add(id)
+        recordCompleted(context, id, handoff)
         context.state.claimed.delete(id)
         continue
       }
@@ -210,7 +232,7 @@ export const reconcileHandoffs = (
         handoff.state = 'merged'
         context.noteHandoffOutcomeValue(id, handoff, 'merged')
         context.state.handoffs.delete(id)
-        context.state.completed.add(id)
+        recordCompleted(context, id, handoff)
         context.state.claimed.delete(id)
         yield* logInfo('pull request merged', {
           ...context.logContextValue(handoff.issue),

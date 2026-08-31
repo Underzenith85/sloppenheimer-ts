@@ -848,6 +848,16 @@ describe('restored pull request handoffs', (): void => {
     expect(inspections).toBe(1)
     expect(snapshot.handoffs).toEqual([])
     expect(snapshot.counts.completed).toBe(1)
+    // Finished work is published as described entries, not only as a count: the console scopes its
+    // Finished view to a time window and needs the instant each issue landed to do that.
+    expect(snapshot.completed).toHaveLength(1)
+    expect(snapshot.completed[0]).toMatchObject({
+      identifier: issue.identifier,
+      title: issue.title,
+      outcome: 'merged',
+      pullRequestUrl: 'https://github.test/example/symphony/pull/44',
+    })
+    expect(Number.isNaN(Date.parse(snapshot.completed[0]?.finishedAt ?? ''))).toBe(false)
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
     await rm(workspaceRoot, { force: true, recursive: true })
   })
@@ -3980,6 +3990,15 @@ describe('session telemetry accounting', (): void => {
             issueId: currentIssue.id,
             title: 'Updated while active',
           })
+          // The stall deadline is published absolutely so the console can decide the agent has
+          // gone quiet without waiting for a later snapshot to say so.
+          const deadline = snapshot.running[0]?.stallDeadline ?? ''
+          expect(Number.isNaN(Date.parse(deadline))).toBe(false)
+          expect(new Date(deadline).getTime()).toBe(
+            new Date(
+              snapshot.running[0]?.lastEventAt ?? snapshot.running[0]?.startedAt ?? '',
+            ).getTime() + workflow.config.codex.stallTimeoutMs,
+          )
         }),
       ),
     )

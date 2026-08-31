@@ -106,6 +106,7 @@ const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): Orchestrat
   pollingIntervalMs: 30_000,
   maxConcurrentAgents: 1,
   counts: { running: 0, retrying: 0, completed: 0 },
+  completed: [],
   pausedIssueNumbers,
   handoffs: [],
   running: [],
@@ -252,6 +253,41 @@ describe('operator dependency graph', (): void => {
       [4, 'blocked'],
       [5, 'ready'],
     ])
+  })
+
+  it('counts how much work each issue unblocks, transitively', (): void => {
+    const snapshot = buildBacklogSnapshot(
+      [
+        issue(1),
+        issue(2, [blocker(1)]),
+        issue(3, [blocker(1)]),
+        issue(4, [blocker(2), blocker(3)]),
+        issue(5),
+      ],
+      'symphony',
+      ['closed'],
+    )
+
+    const unlocks = new Map(snapshot.issues.map((entry) => [entry.number, entry.unlocks]))
+    // #1 unblocks #2 and #3 directly and #4 through both of them, counted once.
+    expect(unlocks.get(1)).toBe(3)
+    expect(unlocks.get(2)).toBe(1)
+    expect(unlocks.get(3)).toBe(1)
+    expect(unlocks.get(4)).toBe(0)
+    expect(unlocks.get(5)).toBe(0)
+  })
+
+  it('counts downstream work without diverging on a dependency cycle', (): void => {
+    const snapshot = buildBacklogSnapshot(
+      [issue(6, [blocker(7)]), issue(7, [blocker(6)]), issue(8, [blocker(6)])],
+      'symphony',
+      ['closed'],
+    )
+
+    const unlocks = new Map(snapshot.issues.map((entry) => [entry.number, entry.unlocks]))
+    expect(unlocks.get(6)).toBe(2)
+    expect(unlocks.get(7)).toBe(2)
+    expect(unlocks.get(8)).toBe(0)
   })
 
   it('exposes cycle diagnostics and completed external blockers', (): void => {

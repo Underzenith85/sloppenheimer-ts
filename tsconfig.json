@@ -23,5 +23,5 @@
     "verbatimModuleSyntax": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
-  "exclude": ["src/operator/ui/app.ts"]
+  "exclude": ["src/operator/ui/*.ts"]
 }
