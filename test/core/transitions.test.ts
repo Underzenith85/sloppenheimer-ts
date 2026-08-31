@@ -205,6 +205,7 @@ const agentEvent = (
   turnId: string | null,
   sessionId: string | null,
   turnCount: number,
+  overrides: Partial<AgentEvent> = {},
 ): AgentEvent => ({
   event: 'item/agentMessage',
   timestamp: new Date('2026-01-01T00:00:05.000Z'),
@@ -218,7 +219,16 @@ const agentEvent = (
   turnCount,
   turnStatus: null,
   payload: { kind: 'session' },
+  ...overrides,
 })
+
+/** The event that ends a turn, at a later instant than the activity that preceded it. */
+const turnCompleted = (turnId: string, sessionId: string, turnCount: number): AgentEvent =>
+  agentEvent(turnId, sessionId, turnCount, {
+    event: 'turn/completed',
+    turnStatus: 'completed',
+    timestamp: new Date('2026-01-01T00:00:08.000Z'),
+  })
 
 describe('turn identity', (): void => {
   it('adopts the composed session id of the turn an event belongs to', (): void => {
@@ -274,6 +284,12 @@ describe('turn identity', (): void => {
     expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1-turn-1'])
     expect(detail.sessions.at(-1)?.endedAt).toBeNull()
 
+    detail = recordAgentEvent(detail, turnCompleted('turn-1', 'thread-1-turn-1', 1))
+
+    // The turn's own completion ends its session, so the gap before the next turn starts — where a
+    // continuation decides whether to run again — belongs to no session.
+    expect(detail.sessions.at(-1)?.endedAt).toBe('2026-01-01T00:00:08.000Z')
+
     detail = recordAgentEvent(detail, agentEvent('turn-2', 'thread-1-turn-2', 2))
 
     // Each continuation turn is its own session, and the one it succeeds is closed rather than
@@ -282,26 +298,46 @@ describe('turn identity', (): void => {
       'thread-1-turn-1',
       'thread-1-turn-2',
     ])
-    expect(detail.sessions.at(0)?.endedAt).not.toBeNull()
+    expect(detail.sessions.at(0)?.endedAt).toBe('2026-01-01T00:00:08.000Z')
     expect(detail.sessions.at(-1)?.endedAt).toBeNull()
     expect(detail.sessions.every((session) => session.threadId === 'thread-1')).toBe(true)
     expect(detail.sessionId).toBe('thread-1-turn-2')
   })
 
-  it('does not reopen a session for a superseded turn reporting late', (): void => {
+  it('does not reopen or close a session for a superseded turn reporting late', (): void => {
     const issue = makeIssue('example/symphony#1')
-    const detail = recordAgentEvent(
-      recordAgentEvent(
-        recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
-        agentEvent('turn-2', 'thread-1-turn-2', 2),
-      ),
-      agentEvent('turn-1', 'thread-1-turn-1', 1),
+    const running = recordAgentEvent(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      agentEvent('turn-2', 'thread-1-turn-2', 2),
     )
 
+    const detail = recordAgentEvent(
+      recordAgentEvent(running, agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      turnCompleted('turn-1', 'thread-1-turn-1', 1),
+    )
+
+    // Turn one's late completion names a session that is already history; the one running now is
+    // still open.
     expect(detail.sessions.map((session) => session.sessionId)).toEqual([
       'thread-1-turn-1',
       'thread-1-turn-2',
     ])
+    expect(detail.sessions.at(-1)?.endedAt).toBeNull()
+  })
+
+  it('keeps one summary for a turn that reports activity after it completed', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const completed = recordAgentEvent(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      turnCompleted('turn-1', 'thread-1-turn-1', 1),
+    )
+
+    const detail = recordAgentEvent(completed, agentEvent('turn-1', 'thread-1-turn-1', 1))
+
+    // The history is keyed on the composed id, so a trailing event for a session that already
+    // ended does not start a second summary naming it.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1-turn-1'])
+    expect(detail.sessions.at(-1)?.endedAt).toBe('2026-01-01T00:00:08.000Z')
   })
 
   it('lets a new attempt start again at turn one after the count was reset', (): void => {

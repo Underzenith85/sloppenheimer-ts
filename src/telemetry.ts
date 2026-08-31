@@ -946,41 +946,67 @@ const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => 
   }
 }
 
+const replaceLastSession = (
+  record: AgentDetailRecord,
+  summary: AgentSessionSummary,
+): AgentDetailRecord => ({
+  ...record,
+  sessions: Object.freeze([...record.sessions.slice(0, -1), Object.freeze(summary)]),
+})
+
+/** Ends the open session summary, if one is still open. Closing an ended session changes nothing. */
+const closeSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  const open = record.sessions.at(-1)
+  return open === undefined || open.endedAt !== null
+    ? record
+    : replaceLastSession(record, { ...open, endedAt: at.toISOString() })
+}
+
 /**
  * Keeps the retained session history on the same identity the record reports. A session is one turn
- * on a thread, so each turn is its own retained session: when the composed id changes the open
- * summary is closed and a new one opened. The first turn on a thread is the exception — it
- * completes the summary `session_started` opened while only the thread was known, because there was
- * no session before that turn, only the thread that would run it.
+ * on a thread, so each turn is its own retained session, and the history is keyed on the composed
+ * id rather than on whether a summary is still open: an event for the session the last summary
+ * already names changes nothing, whether that summary is open or was ended by its turn.
+ *
+ * The first turn on a thread is the exception — it completes the summary `session_started` opened
+ * while only the thread was known, because there was no session before that turn, only the thread
+ * that would run it. Any other new identity ends whatever is still open and starts its own summary.
  */
 const alignSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
   if (record.threadId === null) {
     return record
   }
-  const open = record.sessions.at(-1)
-  if (open === undefined || open.endedAt !== null || open.threadId !== record.threadId) {
+  const last = record.sessions.at(-1)
+  if (last === undefined) {
     return openSession(record, at)
   }
-  if (open.sessionId === record.sessionId) {
+  if (last.threadId === record.threadId && last.sessionId === record.sessionId) {
     return record
   }
-  const replaceOpen = (summary: AgentSessionSummary): readonly AgentSessionSummary[] =>
-    Object.freeze([...record.sessions.slice(0, -1), Object.freeze(summary)])
-  if (open.sessionId === record.threadId) {
-    return {
-      ...record,
-      sessions: replaceOpen({
-        ...open,
-        sessionId: record.sessionId,
-        processId: record.processId,
-      }),
-    }
+  if (
+    last.endedAt === null &&
+    last.threadId === record.threadId &&
+    last.sessionId === record.threadId
+  ) {
+    return replaceLastSession(record, {
+      ...last,
+      sessionId: record.sessionId,
+      processId: record.processId,
+    })
   }
-  return openSession(
-    { ...record, sessions: replaceOpen({ ...open, endedAt: at.toISOString() }) },
-    at,
-  )
+  return openSession(closeSession(record, at), at)
 }
+
+/**
+ * Whether an event reports the end of the turn it names. A session is one turn, so its retained
+ * summary ends here rather than whenever the next turn happens to start or the attempt is torn
+ * down — the gap where a continuation decides whether to run again belongs to no session.
+ */
+const endsTurn = (event: AgentEvent): boolean =>
+  event.turnStatus !== null &&
+  (event.event === 'turn/completed' ||
+    event.event === 'turn/failed' ||
+    event.event === 'turn/terminated')
 
 const messageOperation = (text: string | null): string =>
   text === null || text.length === 0 ? 'Writing a reply' : `Replying: ${bound(text, 80).text}`
@@ -1035,7 +1061,13 @@ export const recordAgentEvent = (
   }
   // Every event, not only a session-scoped one: whichever event first reports a turn's identity
   // is the one the retained history has to follow, or the summaries drift from `identity`.
-  const observed = alignSession(reported, at)
+  const aligned = alignSession(reported, at)
+  // Only the turn the record is actually on: a superseded turn reporting its end late names a
+  // session that already closed, and must not end the one running now.
+  const observed =
+    endsTurn(event) && event.turnId !== null && event.turnId === aligned.turnId
+      ? closeSession(aligned, at)
+      : aligned
   const base = {
     sequence: nextSequence(observed),
     attempt: observed.attempt,
