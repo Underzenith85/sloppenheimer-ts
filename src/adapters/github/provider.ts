@@ -1,3 +1,5 @@
+import { Effect, Redacted } from 'effect'
+
 import {
   registerTrackerProvider,
   trackerProviderOf,
@@ -12,7 +14,12 @@ import { WorkflowError } from '../../errors.js'
 export type GitHubProviderConfig = Readonly<{
   owner: string
   repository: string
-  token: string
+  /**
+   * The resolved credential. `Config.redacted` keeps it wrapped from the moment it leaves the
+   * environment, so the provider record can be logged or serialized without spilling it; the value
+   * is unwrapped only where it is actually sent, in the client's `Authorization` header.
+   */
+  token: Redacted.Redacted<string>
   tokenEnvironmentName: string
   apiBaseUrl: string
   baseBranch: string
@@ -32,7 +39,6 @@ export const githubProviderDefaults = Object.freeze({
 const providerFields = [
   'owner',
   'repository',
-  'token',
   'tokenEnvironmentName',
   'apiBaseUrl',
   'baseBranch',
@@ -73,46 +79,79 @@ const absoluteHttpUrl = (value: string, key: string): string => {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
+type AuthoredFields = Readonly<{
+  owner: string
+  repository: string
+  token: string
+  apiBaseUrl: string
+  baseBranch: string
+}>
+
+/** The shape checks, which need nothing from the environment. */
+const authoredFields = (provider: JsonObject): Effect.Effect<AuthoredFields, WorkflowError> =>
+  Effect.try({
+    try: (): AuthoredFields => {
+      const owner = requiredString(provider, 'owner')
+      const repository = requiredString(provider, 'repository')
+      const token = requiredString(provider, 'token')
+      const apiBaseUrl = optionalString(provider, 'api_base_url')
+      const baseBranch = optionalString(provider, 'base_branch')
+      return {
+        owner,
+        repository,
+        token,
+        apiBaseUrl:
+          apiBaseUrl === undefined
+            ? githubProviderDefaults.apiBaseUrl
+            : absoluteHttpUrl(apiBaseUrl, 'api_base_url'),
+        baseBranch: baseBranch ?? githubProviderDefaults.baseBranch,
+      }
+    },
+    catch: (cause: unknown): WorkflowError =>
+      cause instanceof WorkflowError ? cause : invalid('tracker.provider is not a valid selection'),
+  })
+
 /**
  * The GitHub adapter owns this validation. `tracker.provider` reaches it as the exact JSON object
- * that was authored; only the declared secret field resolves `$VAR` indirection.
+ * that was authored; only the declared secret field resolves `$VAR` indirection, and it resolves
+ * through the calling fiber's `ConfigProvider`.
  */
 export const validateGitHubProvider = (
   provider: JsonObject,
-  environment: NodeJS.ProcessEnv,
-): GitHubProviderConfig => {
-  const owner = requiredString(provider, 'owner')
-  const repository = requiredString(provider, 'repository')
-  const token = resolveSecretReference(
-    requiredString(provider, 'token'),
-    'tracker.provider.token',
-    environment,
+): Effect.Effect<GitHubProviderConfig, WorkflowError> =>
+  authoredFields(provider).pipe(
+    Effect.flatMap((fields) =>
+      resolveSecretReference(fields.token, 'tracker.provider.token').pipe(
+        Effect.map((token): GitHubProviderConfig => ({
+          owner: fields.owner,
+          repository: fields.repository,
+          token: token.value,
+          tokenEnvironmentName: token.environmentName,
+          apiBaseUrl: fields.apiBaseUrl,
+          baseBranch: fields.baseBranch,
+        })),
+      ),
+    ),
   )
-  const apiBaseUrl = optionalString(provider, 'api_base_url')
-  const baseBranch = optionalString(provider, 'base_branch')
-  return {
-    owner,
-    repository,
-    token: token.value,
-    tokenEnvironmentName: token.environmentName,
-    apiBaseUrl:
-      apiBaseUrl === undefined
-        ? githubProviderDefaults.apiBaseUrl
-        : absoluteHttpUrl(apiBaseUrl, 'api_base_url'),
-    baseBranch: baseBranch ?? githubProviderDefaults.baseBranch,
-  }
-}
 
 const isGitHubProviderConfig = (value: unknown): value is GitHubProviderConfig => {
   if (typeof value !== 'object' || value === null) {
     return false
   }
   const candidate = value as Record<string, unknown>
-  return providerFields.every((field) => typeof candidate[field] === 'string')
+  const token = candidate['token']
+  return (
+    Redacted.isRedacted(token) &&
+    typeof Redacted.value(token) === 'string' &&
+    providerFields.every((field) => typeof candidate[field] === 'string')
+  )
 }
 
 const sameGitHubProvider = (left: GitHubProviderConfig, right: GitHubProviderConfig): boolean =>
-  providerFields.every((field) => left[field] === right[field])
+  providerFields.every((field) => left[field] === right[field]) &&
+  // A rotated credential is a different selection, so the values are compared rather than the
+  // wrappers, which are distinct objects on every validation.
+  Redacted.value(left.token) === Redacted.value(right.token)
 
 /** The token's own variable name plus the fallbacks GitHub tooling reads without being told to. */
 export const githubSecretEnvironmentNames = (provider: GitHubProviderConfig): readonly string[] => [

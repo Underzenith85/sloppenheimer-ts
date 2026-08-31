@@ -1,4 +1,4 @@
-import { Effect } from 'effect'
+import { Effect, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { makeGitHubPullRequestMonitor } from '../src/adapters/github/pull-requests.js'
@@ -11,7 +11,7 @@ import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
 const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
-  token: 'secret',
+  token: Redacted.make('secret'),
   tokenEnvironmentName: 'TEST_TOKEN',
   apiBaseUrl: 'https://api.github.test',
   baseBranch: 'main',

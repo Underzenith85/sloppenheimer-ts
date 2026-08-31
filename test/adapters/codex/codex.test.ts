@@ -8,9 +8,11 @@ import {
   boundedMessage,
   makeCodexEnvironment,
   runAgent,
+  sessionSecretValues,
   telemetryFrom,
   type AgentLaunch,
 } from '../../../src/adapters/codex/codex.js'
+import { runWithEnvironment } from '../../harness/environment.js'
 import { issueId, issueIdentifier, type Issue, type Workspace } from '../../../src/domain/domain.js'
 import type { CodexConfig } from '../../../src/config/workflow.js'
 import {
@@ -50,6 +52,42 @@ describe('Codex child environment', (): void => {
       OPENAI_API_KEY: 'openai-key',
       CODEX_ACCESS_TOKEN: 'codex-access-token',
     })
+  })
+})
+
+describe('Codex session secret values', (): void => {
+  /*
+   * Read through the calling fiber's `ConfigProvider`, which is the host environment — deliberately
+   * not the environment the subprocess is given, from which the tracker's own secret is stripped.
+   */
+  it('reads the tracker secret, the GitHub aliases, and Codex authentication from the host', (): void => {
+    const values = runWithEnvironment(
+      sessionSecretValues(['CUSTOM_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
+      {
+        CUSTOM_GITHUB_TOKEN: 'custom-tracker-secret',
+        GITHUB_TOKEN: 'github-token',
+        GH_TOKEN: 'gh-token',
+        OPENAI_API_KEY: 'openai-key',
+        CODEX_ACCESS_TOKEN: 'codex-access-token',
+        SAFE_VALUE: 'visible',
+      },
+    )
+
+    expect([...values].sort()).toEqual([
+      'codex-access-token',
+      'custom-tracker-secret',
+      'gh-token',
+      'github-token',
+      'openai-key',
+    ])
+  })
+
+  it('skips a name the environment does not set', (): void => {
+    const values = runWithEnvironment(sessionSecretValues(['CUSTOM_GITHUB_TOKEN']), {
+      GITHUB_TOKEN: 'github-token',
+    })
+
+    expect(values).toEqual(['github-token'])
   })
 })
 
