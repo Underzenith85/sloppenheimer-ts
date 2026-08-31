@@ -431,7 +431,17 @@ export const makeGitHubIssueControl = (
  * nothing else about the workflow reaches it.
  */
 export const gitHubIssueControlFactory: IssueControlFactoryPort = {
-  make: (provider) => Effect.succeed(makeGitHubIssueControl(githubProviderOf(provider))),
+  make: (provider) =>
+    Effect.try({
+      try: () => makeGitHubIssueControl(githubProviderOf(provider)),
+      catch: (cause) =>
+        new TrackerError({
+          category: 'unsupported_tracker_kind',
+          message: `tracker.kind ${provider.kind} does not supply GitHub's issue control`,
+          retryable: false,
+          cause,
+        }),
+    }),
   serves: sameTrackerProvider,
 }
 

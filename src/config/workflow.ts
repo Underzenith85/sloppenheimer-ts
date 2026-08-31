@@ -14,7 +14,6 @@ import type {
   TrackerProviderRegistry,
   ValidatedTrackerProvider,
 } from '../domain/tracker-provider.js'
-import { trackerProviders } from '../tracker-adapters.js'
 
 export type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
@@ -552,14 +551,15 @@ export const preflightWorkflow = (
 /**
  * Reads and validates a workflow definition.
  *
- * `providers` defaults to the composition root's registry, which is where a tracker kind is
- * registered; this layer knows only that some adapter owns each kind. The selection it returns
- * carries that adapter, so every later revalidation stays with the registry used here.
+ * `providers` is supplied by the caller rather than defaulted here: the registry names concrete
+ * adapters, and this layer must not reach up to the composition root to find them. The selection
+ * this returns carries the adapter that validated it, so every later revalidation stays with the
+ * registry used here.
  */
 export const loadWorkflow = (
-  path = resolve(process.cwd(), 'WORKFLOW.md'),
-  environment: NodeJS.ProcessEnv = process.env,
-  providers: TrackerProviderRegistry = trackerProviders,
+  path: string,
+  environment: NodeJS.ProcessEnv,
+  providers: TrackerProviderRegistry,
 ): Effect.Effect<Workflow, WorkflowError> =>
   Effect.tryPromise({
     try: async () => {
