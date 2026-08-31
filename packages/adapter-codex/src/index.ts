@@ -1,6 +1,9 @@
 /** The Codex agent runner, as the composition root binds it. */
+export { codexAgentRunner, layerCodexAgentRunner } from './agent-runner.js'
 export {
-  codexAgentEventSemantics,
-  codexAgentRunner,
-  layerCodexAgentRunner,
-} from './agent-runner.js'
+  codexAgentRunnerProvider,
+  codexSettingsOf,
+  codexSettingsDefaults,
+  validateCodexSettings,
+  type CodexSettings,
+} from './settings.js'

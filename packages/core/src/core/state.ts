@@ -30,6 +30,19 @@ import type { AgentDetailContext, AgentDetailRecord, AgentEvent } from '../telem
  * The mailbox actor loop remains the single writer. Immutability is what makes its writes
  * expressible as pure functions, not a defence against a second writer that does not exist.
  */
+/**
+ * The stages one poll pass performs, in the order `polling.ts` performs them. A pass whose
+ * credential or workflow validation failed stops before `dispatch`, so the stages a pass actually
+ * reached are reported rather than assumed.
+ */
+export type RefreshOperation =
+  | 'credential_revalidation'
+  | 'handoff_recovery'
+  | 'workflow_reload'
+  | 'handoff_reconciliation'
+  | 'issue_reconciliation'
+  | 'dispatch'
+
 export type RuntimeState = Readonly<{
   /** Sessions with a live worker fiber. */
   running: ReadonlyMap<IssueId, RunningEntry>
@@ -76,9 +89,13 @@ export type RuntimeState = Readonly<{
   followUpRequested: boolean
   pollTimer: Fiber.Fiber<void> | null
   nextRunId: number
-  /** Callers awaiting the poll now running, and callers awaiting the one after it. */
-  currentRefreshWaiters: readonly Deferred.Deferred<void>[]
-  nextRefreshWaiters: readonly Deferred.Deferred<void>[]
+  /**
+   * Callers awaiting the poll now running, and callers awaiting the one after it. Each is answered
+   * with what its pass performed, so an acknowledgement reports that pass rather than a pass in
+   * general.
+   */
+  currentRefreshWaiters: readonly Deferred.Deferred<readonly RefreshOperation[]>[]
+  nextRefreshWaiters: readonly Deferred.Deferred<readonly RefreshOperation[]>[]
 
   /** The workflow and ports in force: the last configuration that validated. */
   lastKnownGood: EffectiveWorkflow

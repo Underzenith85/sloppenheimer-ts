@@ -28,6 +28,7 @@ import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { githubProviderOf, type GitHubProviderConfig } from '@symphony/adapter-github'
+import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
 
 const temporaryDirectories: string[] = []
 
@@ -127,7 +128,11 @@ const fakeOrchestrator = (
   const paused = new Set<number>()
   return {
     snapshot: Effect.sync(() => orchestratorSnapshot([...paused])),
-    refresh: Effect.void,
+    refresh: Effect.succeed({
+      coalesced: false,
+      requestedAt: '2026-08-30T00:00:00.000Z',
+      operations: [],
+    }),
     agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
     setIssuePaused: (issueNumber, isPaused) =>
       Effect.sync(() => {
@@ -146,7 +151,8 @@ const gitHubIssueControl = layerCurrentIssueControl.pipe(Layer.provide(layerGitH
 
 /** The console reads the workflow through the loader the composition root binds. */
 const workflowLoader = layerWorkflowLoader({
-  load: (path) => loadWorkflow(path, trackerProviders).pipe(Effect.provide(hostFileSystem)),
+  load: (path) =>
+    loadWorkflow(path, workflowAdaptersFor(trackerProviders)).pipe(Effect.provide(hostFileSystem)),
   preflight: (workflow) => preflightWorkflow(workflow),
 })
 

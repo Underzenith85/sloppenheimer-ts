@@ -10,8 +10,8 @@ import type { AgentError } from '@symphony/core/domain/errors.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
 import { githubProviderDefaults } from '@symphony/adapter-github/provider.js'
-import type { CodexConfig } from '@symphony/core/config/workflow.js'
 import { hostFileSystem } from '../harness/filesystem.js'
+import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -113,15 +113,12 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
         createdAt: null,
         updatedAt: null,
       }
-      const config: CodexConfig = {
+      const config = codexRunnerConfig({
         command: environment['SYMPHONY_INTEGRATION_CODEX_COMMAND'] ?? 'codex app-server',
-        approvalPolicy: 'never',
-        threadSandbox: 'workspace-write',
-        turnSandboxPolicy: null,
         turnTimeoutMs: 90_000,
         readTimeoutMs: 10_000,
         stallTimeoutMs: 30_000,
-      }
+      })
       const result = yield* runAgentOnHost({
         issue,
         workspace: { path: workspacePath, key: identifier, createdNow: true },

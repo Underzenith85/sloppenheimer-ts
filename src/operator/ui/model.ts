@@ -3,13 +3,15 @@
 // what is ready, what is running, and what finished — without touching the DOM. Classification and
 // ranking live here so they can be reasoned about, and tested, apart from rendering.
 
-type OrchestratorSnapshot = import('@symphony/core').OrchestratorSnapshot
+// The console reads `/api/v1/state`, so it is written against the published document rather than
+// against the runtime's internal snapshot: the fields are the ones SPEC 13.7.2 names.
+type PublishedState = import('../api.js').PublishedState
 type BacklogSnapshot = import('../operator.js').BacklogSnapshot
 type BacklogIssue = BacklogSnapshot['issues'][number]
-type RunningEntry = OrchestratorSnapshot['running'][number]
-type RetryingEntry = OrchestratorSnapshot['retrying'][number]
-type HandoffEntry = OrchestratorSnapshot['handoffs'][number]
-type CompletedEntry = OrchestratorSnapshot['completed'][number]
+type RunningEntry = PublishedState['running'][number]
+type RetryingEntry = PublishedState['retrying'][number]
+type HandoffEntry = PublishedState['handoffs'][number]
+type CompletedEntry = PublishedState['completed'][number]
 
 /**
  * The primary placement of one piece of work. Every item has exactly one, and it is kept apart
@@ -290,19 +292,19 @@ const ineligibilityReason = (
  * The system-level exceptions. They belong to the host rather than to any one issue, so they are
  * reported alongside the attention queue instead of being attached to an arbitrary row.
  */
-const systemAlerts = (state: OrchestratorSnapshot | null): readonly SystemAlert[] => {
+const systemAlerts = (state: PublishedState | null): readonly SystemAlert[] => {
   if (state === null) {
     return []
   }
   const alerts: SystemAlert[] = []
-  if (state.workflowReloadError !== null) {
+  if (state.workflow_reload_error !== null) {
     alerts.push({
       key: 'workflow-reload',
       title: 'Workflow reload failed',
-      detail: state.workflowReloadError.message + ' — the last good workflow is still in force.',
+      detail: state.workflow_reload_error.message + ' — the last good workflow is still in force.',
     })
   }
-  const recovery = state.handoffRecovery
+  const recovery = state.handoff_recovery
   if (recovery.status === 'degraded' || recovery.failed > 0) {
     alerts.push({
       key: 'handoff-recovery',
@@ -312,7 +314,7 @@ const systemAlerts = (state: OrchestratorSnapshot | null): readonly SystemAlert[
         ' of ' +
         String(recovery.loaded) +
         ' stored handoffs could not be recovered' +
-        (recovery.storeError === null ? '.' : ': ' + recovery.storeError.message),
+        (recovery.store_error === null ? '.' : ': ' + recovery.store_error.message),
     })
   }
   return alerts
@@ -325,25 +327,25 @@ const runningItem = (
   inspectable: ReadonlySet<string>,
   now: number,
 ): WorkItem => {
-  const stalled = stalledNowAt(entry.stallDeadline, now)
+  const stalled = stalledNowAt(entry.stall_deadline, now)
   return {
-    identifier: entry.identifier,
-    issueNumber: issue?.number ?? issueNumberOf(entry.identifier),
+    identifier: entry.issue_identifier,
+    issueNumber: issue?.number ?? issueNumberOf(entry.issue_identifier),
     title: entry.title,
-    url: entry.url,
+    url: entry.issue_url,
     state: stalled ? 'attention' : 'progress',
     attention: stalled ? 'stalled' : null,
-    phase: entry.lastEvent === null ? 'starting' : 'running',
+    phase: entry.last_event === null ? 'starting' : 'running',
     eligibility: eligibilityOf(issue, paused),
     priority: issue?.priority ?? null,
     labels: issue?.labels ?? [],
     reason: stalled
       ? 'No protocol activity before the stall deadline.'
-      : (entry.lastEvent ?? 'Starting agent'),
+      : (entry.last_event ?? 'Starting agent'),
     ranking: stalled ? attentionRanking('stalled', issue?.priority ?? null) : null,
     blockers: [],
     unlocks: issue?.unlocks ?? 0,
-    hasDetail: inspectable.has(entry.identifier),
+    hasDetail: inspectable.has(entry.issue_identifier),
     queueReason: null,
     finishedAt: null,
     pullRequestUrl: null,
@@ -357,10 +359,10 @@ const retryingItem = (
   paused: ReadonlySet<number>,
   inspectable: ReadonlySet<string>,
 ): WorkItem => ({
-  identifier: entry.identifier,
-  issueNumber: issue?.number ?? issueNumberOf(entry.identifier),
+  identifier: entry.issue_identifier,
+  issueNumber: issue?.number ?? issueNumberOf(entry.issue_identifier),
   title: entry.title,
-  url: entry.url,
+  url: entry.issue_url,
   state: 'progress',
   attention: null,
   phase: 'retrying',
@@ -371,7 +373,7 @@ const retryingItem = (
   ranking: null,
   blockers: [],
   unlocks: issue?.unlocks ?? 0,
-  hasDetail: inspectable.has(entry.identifier),
+  hasDetail: inspectable.has(entry.issue_identifier),
   queueReason: null,
   finishedAt: null,
   pullRequestUrl: null,
@@ -400,11 +402,11 @@ const handoffItem = (
   const merged = phase === 'merged'
   const state: WorkState = attention !== null ? 'attention' : merged ? 'finished' : 'progress'
   const notDispatchable = ineligibilityReason(issue, paused)
-  const handoffReason = entry.reason ?? 'Head ' + (entry.headSha ?? 'pending')
+  const handoffReason = entry.reason ?? 'Head ' + (entry.head_sha ?? 'pending')
   return {
-    identifier: entry.identifier,
-    issueNumber: issueNumberOf(entry.identifier),
-    title: issue?.title ?? entry.identifier,
+    identifier: entry.issue_identifier,
+    issueNumber: issueNumberOf(entry.issue_identifier),
+    title: issue?.title ?? entry.issue_identifier,
     url: issue?.url ?? null,
     state,
     attention,
@@ -421,19 +423,19 @@ const handoffItem = (
     unlocks: issue?.unlocks ?? 0,
     // A handoff restored from the store after a restart has no agent session behind it, so it gets
     // its pull request and nothing to inspect.
-    hasDetail: inspectable.has(entry.identifier),
+    hasDetail: inspectable.has(entry.issue_identifier),
     queueReason: null,
     finishedAt: merged ? new Date(now).toISOString() : null,
-    pullRequestUrl: entry.pullRequestUrl,
+    pullRequestUrl: entry.pull_request_url,
     action: 'none',
   }
 }
 
 const completedItem = (entry: CompletedEntry, inspectable: ReadonlySet<string>): WorkItem => ({
-  identifier: entry.identifier,
-  issueNumber: issueNumberOf(entry.identifier),
+  identifier: entry.issue_identifier,
+  issueNumber: issueNumberOf(entry.issue_identifier),
   title: entry.title,
-  url: entry.url,
+  url: entry.issue_url,
   state: 'finished',
   attention: null,
   phase: 'merged',
@@ -446,10 +448,10 @@ const completedItem = (entry: CompletedEntry, inspectable: ReadonlySet<string>):
   unlocks: 0,
   // A session whose timeline is still retained answers with a post-mortem, and finished work is
   // exactly where an operator goes looking for one.
-  hasDetail: inspectable.has(entry.identifier),
+  hasDetail: inspectable.has(entry.issue_identifier),
   queueReason: null,
-  finishedAt: entry.finishedAt,
-  pullRequestUrl: entry.pullRequestUrl,
+  finishedAt: entry.finished_at,
+  pullRequestUrl: entry.pull_request_url,
   action: 'none',
 })
 
@@ -597,7 +599,7 @@ const emptyModel: WorkModel = {
  * identifier is claimed exactly once, so no row can appear in two queues.
  */
 const buildWorkModel = (
-  state: OrchestratorSnapshot | null,
+  state: PublishedState | null,
   backlog: BacklogSnapshot | null,
   now: number,
 ): WorkModel => {
@@ -615,23 +617,23 @@ const buildWorkModel = (
     items.push(item)
   }
   const running = state?.running ?? []
-  const limit = state?.maxConcurrentAgents ?? 0
+  const limit = state?.max_concurrent_agents ?? 0
   const capacityFull = limit > 0 && running.length >= limit
-  const paused = new Set(state?.pausedIssueNumbers ?? [])
-  const inspectable = new Set(state?.inspectableAgents ?? [])
-  const saturated = new Set(state?.saturatedStates ?? [])
+  const paused = new Set(state?.paused_issue_numbers ?? [])
+  const inspectable = new Set(state?.inspectable_agents ?? [])
+  const saturated = new Set(state?.saturated_states ?? [])
   const capacity = { running: running.length, limit, full: capacityFull, known: state !== null }
   for (const entry of running) {
-    claim(runningItem(entry, issues.get(entry.identifier), paused, inspectable, now))
+    claim(runningItem(entry, issues.get(entry.issue_identifier), paused, inspectable, now))
   }
   for (const entry of state?.retrying ?? []) {
-    claim(retryingItem(entry, issues.get(entry.identifier), paused, inspectable))
+    claim(retryingItem(entry, issues.get(entry.issue_identifier), paused, inspectable))
   }
   for (const entry of state?.handoffs ?? []) {
-    claim(handoffItem(entry, issues.get(entry.identifier), paused, inspectable, now))
+    claim(handoffItem(entry, issues.get(entry.issue_identifier), paused, inspectable, now))
   }
   for (const entry of state?.completed ?? []) {
-    if (now - new Date(entry.finishedAt).getTime() <= finishedWindowMs) {
+    if (now - new Date(entry.finished_at).getTime() <= finishedWindowMs) {
       claim(completedItem(entry, inspectable))
     }
   }

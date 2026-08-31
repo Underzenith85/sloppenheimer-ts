@@ -15,29 +15,45 @@ export const stateIsIn = (state: string, configured: readonly string[]): boolean
   return configured.some((candidate) => normalizeState(candidate) === normalized)
 }
 
-export const issueIsActive = (issue: Issue, workflow: Workflow): boolean =>
-  stateIsIn(issue.state, workflow.config.tracker.activeStates) &&
-  !stateIsIn(issue.state, workflow.config.tracker.terminalStates)
+/**
+ * What an issue's eligibility is judged against.
+ *
+ * The workflow in force and the snapshot a run captured are two sources for the same fields, and
+ * the predicates below need nothing else from either. Naming just those fields is what lets one
+ * implementation serve both: `TrackerConfig` and `ExecutionSnapshot` each satisfy these
+ * structurally, so a caller passes whichever it is holding and no adapter is needed.
+ *
+ * They are two types rather than one because the predicates ask separate questions: a caller that
+ * only has required labels to apply should not have to invent the state lists to say so.
+ */
+export type RoutingRules = Readonly<{ requiredLabels: readonly string[] }>
+export type ActivityRules = Readonly<{
+  activeStates: readonly string[]
+  terminalStates: readonly string[]
+}>
 
-export const issueIsRoutable = (issue: Issue, workflow: Workflow): boolean => {
+/**
+ * A label as it is compared: trimmed and lowercased, so matching is case- and whitespace-
+ * insensitive. Applied to *both* sides of the comparison — a required label is normalized here
+ * rather than assumed to have been normalized by whoever configured it, because the two sources of
+ * these rules do not agree on that. The workflow loader lowercases `required_labels` on the way in;
+ * an `ExecutionSnapshot` copies whatever it was given.
+ */
+const comparableLabel = (label: string): string => label.trim().toLowerCase()
+
+export const issueIsActive = (issue: Issue, rules: ActivityRules): boolean =>
+  stateIsIn(issue.state, rules.activeStates) && !stateIsIn(issue.state, rules.terminalStates)
+
+export const issueIsRoutable = (issue: Issue, rules: RoutingRules): boolean => {
   if (!issue.dispatchable) {
     return false
   }
-  const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-  return workflow.config.tracker.requiredLabels.every(
-    (label) => label.length > 0 && labels.has(label),
-  )
-}
-
-export const issueIsActiveInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean =>
-  stateIsIn(issue.state, snapshot.activeStates) && !stateIsIn(issue.state, snapshot.terminalStates)
-
-export const issueIsRoutableInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean => {
-  if (!issue.dispatchable) {
-    return false
-  }
-  const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-  return snapshot.requiredLabels.every((label) => label.length > 0 && labels.has(label))
+  const labels = new Set(issue.labels.map(comparableLabel))
+  // An empty required label is a misconfiguration no issue can satisfy, and it refuses the
+  // dispatch rather than being skipped: a gate that cannot be met must not read as met.
+  return rules.requiredLabels
+    .map(comparableLabel)
+    .every((label) => label.length > 0 && labels.has(label))
 }
 
 /**
@@ -101,10 +117,10 @@ export const dispatchAdmission = (
   ) {
     return { _tag: 'Refuse', reason: 'paused' }
   }
-  if (!issueIsActive(issue, workflow)) {
+  if (!issueIsActive(issue, workflow.config.tracker)) {
     return { _tag: 'Refuse', reason: 'inactive' }
   }
-  if (!issueIsRoutable(issue, workflow)) {
+  if (!issueIsRoutable(issue, workflow.config.tracker)) {
     return { _tag: 'Refuse', reason: 'unroutable' }
   }
   if (!hasSlot(state, issue, workflow)) {
@@ -135,9 +151,14 @@ export const captureExecutionSnapshot = (
   workspaces: effective.workspaces,
   workspaceRoot: effective.workflow.config.workspaceRoot,
   prompt,
-  agentRunner: { ...effective.workflow.config.codex },
+  // The neutral half comes from the configuration, the opaque half from the validated selection:
+  // together they are everything the launch hands the adapter that owns the kind.
+  agentRunner: {
+    ...effective.workflow.config.runner,
+    settings: effective.workflow.runner.settings,
+  },
   maxTurns: effective.workflow.config.agent.maxTurns,
-  stallTimeoutMs: effective.workflow.config.codex.stallTimeoutMs,
+  stallTimeoutMs: effective.workflow.config.runner.stallTimeoutMs,
 })
 
 export const sortIssues = (issues: readonly Issue[]): readonly Issue[] =>

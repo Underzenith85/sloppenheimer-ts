@@ -25,6 +25,7 @@ import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../d
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
+import { asSettled } from '../support/settled.js'
 import {
   createAgentDetailRecord,
   recordAttemptStarted,
@@ -50,7 +51,8 @@ import {
 import { eventLoop } from './polling.js'
 import {
   captureExecutionSnapshot,
-  issueIsActiveInSnapshot,
+  issueIsActive,
+  issueIsRoutable,
   logContext,
   sessionLogContext,
   stateIsIn,
@@ -62,6 +64,7 @@ import {
   initialState,
   type EffectiveWorkflow,
   type HandoffEntry,
+  type RefreshOperation,
   type RepairDisposition,
   type RunningEntry,
   type RuntimePorts,
@@ -87,6 +90,7 @@ export {
   type HandoffStoreError,
   type PendingRetirement,
   type PublishedDetail,
+  type RefreshOperation,
   type RetryEntry,
   type RunningEntry,
   type RuntimePorts,
@@ -100,6 +104,8 @@ export type RunningSnapshot = Readonly<{
   identifier: string
   title: string
   url: string | null
+  /** The issue state the tracker reported for this run, as the tracker spells it. */
+  state: string
   attempt: number | null
   startedAt: string
   lastEventAt: string | null
@@ -206,9 +212,27 @@ export type OrchestratorSnapshot = Readonly<{
   rateLimits: JsonObject | null
 }>
 
+/** What an accepted refresh request amounted to. */
+export type RefreshOutcome = Readonly<{
+  /**
+   * Whether the request joined a pass somebody else had already arranged, rather than bringing one
+   * into being. A burst of refreshes therefore costs one poll rather than one each, and the caller
+   * whose request created the pass is the one told so.
+   */
+  coalesced: boolean
+  /** When the host accepted the request. */
+  requestedAt: string
+  /** The stages the pass that answered this request actually reached, in order. */
+  operations: readonly RefreshOperation[]
+}>
+
 export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
-  refresh: Effect.Effect<void>
+  /**
+   * Requests a poll pass and completes when that pass has finished, so a caller that reads the
+   * snapshot afterwards sees the state the refresh produced.
+   */
+  refresh: Effect.Effect<RefreshOutcome>
   setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
   /**
    * Reads the published detail for one issue. The published index is built by the actor and is
@@ -651,12 +675,7 @@ export const startOrchestratorRuntime = (
         .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
           hydrateDependencies: false,
         })
-        .pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-          }),
-        )
+        .pipe(asSettled)
       if (fetched._tag === 'Failed') {
         const counts = yield* Ref.modify(state, (failing) => {
           const next = Transitions.noteRecovery(failing, { failed: 1 })
@@ -674,32 +693,23 @@ export const startOrchestratorRuntime = (
         return
       }
       let attemptFailed = false
-      for (const issue of fetched.issues) {
+      for (const issue of fetched.value) {
         if (!issue.dispatchable) {
           yield* Ref.update(state, (pass) =>
             Transitions.noteRecovery(Transitions.resolveRecovery(pass, issue.id), { skipped: 1 }),
           )
           continue
         }
-        const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-        const isLabeled = requiredLabels.every(
-          (label) => label.length > 0 && labels.has(label.trim().toLowerCase()),
-        )
         const pass = yield* Ref.get(state)
         if (
-          !isLabeled ||
+          !issueIsRoutable(issue, { requiredLabels }) ||
           pass.handoffs.has(issue.id) ||
           pass.pendingRestoredHandoffs.some((handoff) => handoff.issueId === issue.id) ||
           pass.recoveryResolved.has(issue.id)
         ) {
           continue
         }
-        const found = yield* capability.findExistingHandoff(issue).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
-          }),
-        )
+        const found = yield* capability.findExistingHandoff(issue).pipe(asSettled)
         if (found._tag === 'Failed') {
           attemptFailed = true
           yield* Ref.update(state, (failing) => Transitions.noteRecovery(failing, { failed: 1 }))
@@ -711,7 +721,7 @@ export const startOrchestratorRuntime = (
           })
           continue
         }
-        const foundResult = found.result
+        const foundResult = found.value
         if (foundResult._tag === 'NoBranch') {
           yield* Ref.update(state, (skipping) =>
             Transitions.noteRecovery(Transitions.resolveRecovery(skipping, issue.id), {
@@ -721,15 +731,12 @@ export const startOrchestratorRuntime = (
           continue
         }
         const observedAt = yield* currentInstant
-        const inspected = yield* capability.inspectPullRequest(foundResult.pullRequestNumber).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-          }),
-        )
+        const inspected = yield* capability
+          .inspectPullRequest(foundResult.pullRequestNumber)
+          .pipe(asSettled)
         const disposition =
           inspected._tag === 'Succeeded'
-            ? classifyPullRequest(inspected.observation)
+            ? classifyPullRequest(inspected.value)
             : { state: 'awaiting_checks' as const, reason: inspected.error.message }
         const opened = yield* detailRecord(issue, null, requiredLabels)
         const branchObserved = recordHandoff(opened, observedAt, {
@@ -761,7 +768,7 @@ export const startOrchestratorRuntime = (
             pullRequestUrl: foundResult.pullRequestUrl,
             branchName: foundResult.branchName,
             state: disposition.state,
-            headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
+            headSha: inspected._tag === 'Succeeded' ? inspected.value.headSha : null,
             reason: 'reason' in disposition ? disposition.reason : null,
             repairHeadShas: [],
             repairObservedHeadShas: [],
@@ -806,7 +813,8 @@ export const startOrchestratorRuntime = (
     ): Effect.Effect<RunningEntry> =>
       Effect.gen(function* () {
         const applied = Transitions.applyRunEvent(entry, update)
-        if (applied.sessionId !== null && update.event === 'session_started') {
+        const lifecycle = update.lifecycle
+        if (applied.sessionId !== null && lifecycle?.phase === 'session_started') {
           yield* logInfo('action=session outcome=started', {
             ...sessionLogContext(applied),
             action: 'session',
@@ -814,7 +822,7 @@ export const startOrchestratorRuntime = (
             error: null,
           })
         }
-        if (applied.sessionId !== null && update.event === 'turn_started') {
+        if (applied.sessionId !== null && lifecycle?.phase === 'turn_started') {
           yield* logInfo('action=turn outcome=started', {
             ...sessionLogContext(applied),
             action: 'turn',
@@ -823,21 +831,24 @@ export const startOrchestratorRuntime = (
           })
           return { ...applied, turnActive: true }
         }
-        if (
-          applied.sessionId !== null &&
-          (update.event === 'turn/completed' ||
-            update.event === 'turn/failed' ||
-            update.event === 'turn/terminated') &&
-          update.turnStatus !== null
-        ) {
-          const outcome = ports.agentRunner.semantics.turnOutcome(update.turnStatus)
+        if (applied.sessionId !== null && lifecycle?.phase === 'turn_settled') {
+          // The runner states the outcome on the settling event, so nothing here interprets one
+          // backend's status vocabulary. `turnStatus` survives only as the operator-facing detail.
+          const outcome = lifecycle.outcome
           const completed = outcome === 'completed'
           const cancelled = outcome === 'cancelled'
           yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
             ...sessionLogContext(applied),
             action: 'turn',
             outcome,
-            error: completed || cancelled ? null : `turn finished with status ${update.turnStatus}`,
+            // The outcome is the authoritative fact; a runner that reports no status string of
+            // its own must still produce a legible line rather than one naming `null`.
+            error:
+              completed || cancelled
+                ? null
+                : update.turnStatus === null
+                  ? `turn finished as ${outcome}`
+                  : `turn finished with status ${update.turnStatus}`,
           })
           return { ...applied, turnActive: false }
         }
@@ -926,20 +937,28 @@ export const startOrchestratorRuntime = (
         return Option.some(settled)
       })
 
-    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+    /** Requests a tick, and says whether this request is the one that scheduled the pass. */
+    const offerTick = (source: Transitions.TickSource): Effect.Effect<boolean> =>
       Ref.modify(state, (current) => Transitions.requestTick(current, source)).pipe(
         Effect.flatMap((decision) =>
           decision.enqueue
-            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.asVoid)
-            : Effect.void,
+            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.as(decision.scheduled))
+            : Effect.succeed(decision.scheduled),
         ),
       )
 
+    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+      Effect.asVoid(offerTick(source))
+
     const requestRefresh = Effect.gen(function* () {
-      const reply = yield* Deferred.make<void>()
+      const reply = yield* Deferred.make<readonly RefreshOperation[]>()
+      const requestedAt = yield* currentInstant
       yield* Ref.update(state, (current) => Transitions.awaitRefresh(current, reply))
-      yield* requestTick('change')
-      yield* Deferred.await(reply)
+      const scheduled = yield* offerTick('change')
+      // The pass answers with the stages it reached, so a validation failure that stopped it before
+      // dispatch is not acknowledged as a dispatch.
+      const operations = yield* Deferred.await(reply)
+      return { coalesced: !scheduled, requestedAt: requestedAt.toISOString(), operations }
     })
 
     const scheduleNextTick: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
@@ -1080,12 +1099,7 @@ export const startOrchestratorRuntime = (
         }
         for (const [id, entry] of refreshing.running) {
           const execution = entry.execution
-          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-            }),
-          )
+          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(asSettled)
           if (refreshResult._tag === 'Failed') {
             yield* logWarning('reconciliation failed; keeping worker running', {
               ...logContext(entry.issue),
@@ -1095,7 +1109,7 @@ export const startOrchestratorRuntime = (
             })
             continue
           }
-          const issue = refreshResult.issues.find((candidate) => candidate.id === id)
+          const issue = refreshResult.value.find((candidate) => candidate.id === id)
           if (issue === undefined) {
             // The handoff outlives the issue the tracker stopped reporting, so a head this worker
             // pushed is still the repair's to account for on the next inspection.
@@ -1103,7 +1117,7 @@ export const startOrchestratorRuntime = (
             continue
           }
           const terminal = stateIsIn(issue.state, execution.terminalStates)
-          if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
+          if (terminal || !issueIsActive(issue, execution)) {
             yield* cancelRunning(
               id,
               terminal,

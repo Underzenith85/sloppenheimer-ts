@@ -164,10 +164,10 @@ name, or label, and the `name` a thread reads back with is server-derived with n
 so Symphony sends none. `test/installed-codex.integration.test.ts` asserts that against the
 installed `codex app-server generate-json-schema` and fails as soon as such a field appears.
 
-Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
-`codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
+Three timeouts stay distinct. `runner.read_timeout_ms` bounds one request/response round trip.
+`runner.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
 re-arms it, so a long but active turn never expires while a genuinely silent one does.
-`codex.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
+`runner.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
 
 The App Server runs in its own process group. Shutdown, cancellation and interruption signal the
 whole tree — `SIGTERM`, then `SIGKILL` after a bounded grace — so tools the App Server itself
@@ -206,7 +206,7 @@ asks would let the agent negotiate the containment that verifying the workspace 
 exists to establish. Symphony answers in the shape the protocol requires — so the turn proceeds
 rather than stalling — while granting nothing beyond the sandbox already configured, and records a
 `permissions_grant_withheld` event. Widening is an operator decision made in `WORKFLOW.md` through
-`codex.turn_sandbox_policy`, where it is reviewable, not one made by the agent mid-turn.
+`runner.settings.turn_sandbox_policy`, where it is reviewable, not one made by the agent mid-turn.
 
 `test/fixtures/fake-app-server.ts` is a deterministic stand-in used by the protocol suite; a
 separate test compares the methods, policy values, and permission types this client sends against
@@ -276,11 +276,124 @@ dashboard. It is a structural audit rather than a browser-engine scan: happy-dom
 computed styles, so a contrast or overlap check there would be reporting on a page nobody sees.
 Those remain a manual review.
 
+## Operator HTTP API
+
+The console's own data comes from the same versioned API a script can call. Every response carries
+`Cache-Control: no-store` and the console's security headers, the server answers only loopback
+`Host` headers (`421` otherwise), an unknown path is `404`, a wrong method is `405` with `Allow`,
+and every refusal is the envelope `{"version":"v1","error":{"code","message"}}` with no backend
+detail in it.
+
+`GET /api/v1/state` publishes the SPEC 13.7.2 baseline document. That document is not the runtime's
+internal record: it is snake_case, and it names a running row's issue `issue_id`,
+`issue_identifier`, `issue_url` and `state`, and the aggregate counters `codex_totals` with
+`seconds_running`. `src/operator/api.ts` is the one place that mapping happens. The internal
+`OrchestratorSnapshot` keeps its own vocabulary, because the operator backend and the agent detail
+path read it too, and a published name has no business travelling back into the scheduler.
+
+| Baseline (13.7.2)                                                              | Symphony extension fields                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generated_at`, `counts`, `codex_totals`                                       | `workflow_path`, `effective_workflow`, `polling_interval_ms`, `max_concurrent_agents`, `rate_limits`                                                                                                                      |
+| `running[]` with `issue_id`, `issue_identifier`, `issue_url`, `title`, `state` | `attempt`, `started_at`, `last_event_at`, `last_event`, `last_message`, `process_id`, `thread_id`, `turn_id`, `session_id`, `turn_count`, `tokens`, `last_reported_tokens`, `worker_host`, `stall_deadline`, `detail_url` |
+| `retrying[]` with `attempt`, `due_at`, `error`                                 | the same identity, `worker_host` and `detail_url` as a running row                                                                                                                                                        |
+| —                                                                              | `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                                |
+
+The extension fields follow the baseline's convention, so a reader never has to know which half of
+the document they are in. `rate_limits` is the exception and is passed through exactly as the coding
+agent reported it: its keys belong to that protocol, not to this API.
+
+`POST /api/v1/refresh` answers `202` with the suggested body:
+
+```json
+{
+  "queued": true,
+  "coalesced": false,
+  "requested_at": "2026-08-31T09:00:00.000Z",
+  "operations": [
+    "credential_revalidation",
+    "handoff_recovery",
+    "workflow_reload",
+    "handoff_reconciliation",
+    "issue_reconciliation",
+    "dispatch"
+  ]
+}
+```
+
+`operations` is what the pass that answered this request actually reached, reported by the pass
+itself rather than restated by the HTTP layer: a pass whose credential or workflow validation failed
+stops before `dispatch`, and its acknowledgement stops there too. `coalesced` is `true` when the
+request joined a pass somebody else had already arranged, rather than bringing one into being, so a
+burst of refreshes costs one poll rather than one each and the request that caused the poll is the
+one told so. Symphony holds the response until that pass has finished — stronger than the `202` the
+SPEC suggests — so a caller that reads `/api/v1/state` next sees the state the refresh produced.
+
+`GET /api/v1/backlog` is the console's own endpoint rather than a SPEC route, and stays in the
+internal vocabulary its consumer is written against.
+
+### The two per-issue resources
+
+`GET /api/v1/<url-encoded issue identifier>` is the SPEC 13.7.2 per-issue baseline, in the field
+names the SPEC documents: `status`, `tracked`, `workspace.path`, `attempts.restart_count` and
+`attempts.current_retry_attempt`, `running`, `retry`, `logs`, `recent_events`, and `last_error`,
+with a `detail_url` pointing at the other one. Everything in it is sourced from the agent detail
+record the runtime already publishes, so the two resources cannot disagree.
+
+`GET /api/v1/agents/<url-encoded issue identifier>` is a documented **superset** rather than an
+alias: it publishes the whole `AgentDetailSnapshot` — the complete timeline, the attempt and session
+histories, per-category workspace and handoff detail — and it keeps the four distinguished outcomes
+described under "Live agent inspection". Collapsing the two would cost either the baseline's
+interoperability or the superset's precision, so both are published and `src/operator/api.ts` is the
+single place internal records are mapped onto published names.
+
+The two also differ on what counts as missing, deliberately. The baseline resource answers `404
+issue_not_found` only for an identifier unknown to the current in-memory state, so an issue whose
+work has moved to the pull-request handoff lifecycle resolves with `status: "handoff"` instead of
+being reported absent — the host can disprove that absence. The superset keeps its narrower reading,
+where an issue with no live agent session is `409 agent_not_active`, because that is the question an
+inspector is asking.
+
+Neither resource matches its identifier against a shape. `IssueIdentifier` is an unconstrained
+branded string and the port boundary is tracker-neutral, so a tracker is free to spell one `GH-7`;
+deciding syntactically which spellings are addressable would make both resources unreachable for a
+provider whose identifiers carry no `#`. Existence is the only question, and in-memory state answers
+it — which also keeps a published `detail_url` followable, since the link and its target read the
+identifier the same way.
+
+Three baseline fields are mapped rather than stored under those names. `workspace.path` publishes
+the deterministic workspace key, not the host absolute path: the path is a filesystem detail the
+console never needs, and the detail pipeline redacts it before retention, so there is no absolute
+path to publish. `logs` is timeline retention accounting — retained, dropped, the bound, and how
+many events this response carries — because Symphony retains a bounded, redacted event timeline
+rather than raw agent logs. `tracked` says the orchestrator holds this issue as live work (starting,
+running, retrying, or handed off) rather than as retained history.
+
+### Why a refresh needs the console's token
+
+`POST /api/v1/refresh` requires the `X-Symphony-CSRF` header, so the plain empty-body POST SPEC
+13.7.2 suggests receives `403 invalid_csrf_token`. **The requirement stands, as deliberate SPEC 15.5
+hardening.** The server listens on loopback with no authentication, which means every page in the
+operator's browser can reach it; a refresh is not a read — it spends tracker API quota and can
+dispatch agents — so it is protected exactly like the start and pause controls. Dropping the header
+for one mutating route would leave the console's other mutations defended and this one open.
+
+A non-browser caller is not locked out, and needs no credential: the token is served in the console
+page and is valid for the life of the process.
+
+```sh
+token=$(curl -s http://127.0.0.1:3000/ | sed -n 's/.*name="csrf-token" content="\([^"]*\)".*/\1/p')
+curl -s -X POST -H "X-Symphony-CSRF: $token" http://127.0.0.1:3000/api/v1/refresh
+```
+
+The token is a forgery defence, not authentication: it proves the caller could read the console
+page, which a cross-origin page cannot do. Anything that needs authentication belongs behind the
+host, not behind this token.
+
 ## Live agent inspection
 
 Every running and retrying agent has a detail resource at
 `GET /api/v1/agents/<url-encoded issue identifier>`, and each running and retrying entry in
-`/api/v1/state` carries that link as `detailUrl`, identical to the `self` link inside the detail
+`/api/v1/state` carries that link as `detail_url`, identical to the `self` link inside the detail
 itself. The console turns each live work card into an inspector: a phase header, elapsed time, last
 activity, the stall countdown, an aggregate workspace summary, handoff progress, and what the agent
 is expected to do next — which on a host that composes no code-review services says the continuation
@@ -303,6 +416,9 @@ agent_not_active` for an issue with no live session, `410 agent_session_complete
 session's timeline has aged out of retention, and `503 agent_detail_unavailable` while a dispatch is
 still starting. A finished session that is still retained answers `200` with `status: "completed"`,
 so a post-mortem is available for the most recent agents.
+
+`/api/v1/agents/<identifier>` is a documented superset of the SPEC per-issue resource rather than
+an alias of it; the Operator HTTP API section above says how the two divide.
 
 Handoff detail tracks the expected branch, whether the remote branch was found, whether the pull
 request was opened by this handoff or adopted from an existing one, its observed disposition through
@@ -350,32 +466,49 @@ rather than as the first exception a decoder happened to throw.
 
 ### Defaults
 
-| Key                           | Default                                     |
-| ----------------------------- | ------------------------------------------- |
-| `tracker.required_labels`     | `[]`                                        |
-| `tracker.active_states`       | `[open]`                                    |
-| `tracker.terminal_states`     | `[closed]`                                  |
-| `polling.interval_ms`         | `30000`                                     |
-| `workspace.root`              | `<tmpdir>/symphony_workspaces`              |
-| `hooks.timeout_ms`            | `60000`                                     |
-| `agent.max_concurrent_agents` | `10`                                        |
-| `agent.max_turns`             | `20`                                        |
-| `agent.max_retry_backoff_ms`  | `300000`                                    |
-| `codex.command`               | `codex app-server`                          |
-| `codex.approval_policy`       | `never`                                     |
-| `codex.thread_sandbox`        | `workspace-write`                           |
-| `codex.turn_sandbox_policy`   | unset (host-derived workspace-write policy) |
-| `codex.turn_timeout_ms`       | `3600000`                                   |
-| `codex.read_timeout_ms`       | `5000`                                      |
-| `codex.stall_timeout_ms`      | `300000` (`0` disables stall detection)     |
-| `server.port`                 | unset (no operator console)                 |
-| `handoff.enabled`             | `true` (pull-request handoff composed)      |
+| Key                           | Default                                  |
+| ----------------------------- | ---------------------------------------- |
+| `tracker.required_labels`     | `[]`                                     |
+| `tracker.active_states`       | `[open]`                                 |
+| `tracker.terminal_states`     | `[closed]`                               |
+| `polling.interval_ms`         | `30000`                                  |
+| `workspace.root`              | `<tmpdir>/symphony_workspaces`           |
+| `hooks.timeout_ms`            | `60000`                                  |
+| `agent.max_concurrent_agents` | `10`                                     |
+| `agent.max_turns`             | `20`                                     |
+| `agent.max_retry_backoff_ms`  | `300000`                                 |
+| `runner.kind`                 | `codex`                                  |
+| `runner.command`              | the selected runner's own default        |
+| `runner.turn_timeout_ms`      | `3600000`                                |
+| `runner.read_timeout_ms`      | `5000`                                   |
+| `runner.stall_timeout_ms`     | `300000` (`0` disables stall detection)  |
+| `runner.settings`             | `{}` (validated by the selected adapter) |
+| `server.port`                 | unset (no operator console)              |
+| `handoff.enabled`             | `true` (pull-request handoff composed)   |
 
-`codex.approval_policy` accepts `untrusted`, `on-request`, or `never`, and
-`codex.thread_sandbox` accepts `read-only`, `workspace-write`, or `danger-full-access`; both are
-Codex-owned values that must stay aligned with the generated App Server schemas.
-`codex.turn_sandbox_policy` is an escape hatch: when set, the map is passed to `turn/start` as
-`sandboxPolicy` verbatim instead of the host-derived workspace-write policy.
+### Selecting an agent runner
+
+`runner.kind` selects the coding agent, the same way `tracker.kind` selects the issue tracker. The
+four fields beside it are the ones the host consumes itself; `runner.settings` is preserved exactly
+as authored and validated only by the adapter that owns the kind, so the host never has to know what
+values a particular backend permits. `runner.command` defaults to that adapter's own launch command
+(`codex app-server` for `codex`), because naming an executable is the one part of the neutral
+configuration only the backend can supply.
+
+For `kind: codex`, `runner.settings` accepts `approval_policy` (`untrusted`, `on-request`, or
+`never`), `thread_sandbox` (`read-only`, `workspace-write`, or `danger-full-access`) — both
+Codex-owned values that must stay aligned with the generated App Server schemas — and
+`turn_sandbox_policy`, an escape hatch that is passed to `turn/start` as `sandboxPolicy` verbatim
+instead of the host-derived workspace-write policy.
+
+A top-level `codex:` block is the deprecated spelling of `runner: {kind: codex}`: its `command` and
+three timeouts are the runner's own fields, and every other key it carries becomes `runner.settings`.
+Every workflow written before `runner` existed therefore loads unchanged. Declaring both `runner`
+and `codex` is a configuration error rather than a merge.
+
+The runner is selected once, at startup. It holds no per-workflow state, so unlike the tracker it
+has no cell to be replaced through: a reload may change everything about how it is configured, but a
+reload that changes `runner.kind` is refused and the last known good workflow stays in force.
 
 ### Pull-request handoff
 
@@ -436,7 +569,7 @@ never left behind. Hook scripts are never written to the log, because they may e
 declared path field: it resolves a bare `$VAR` reference, expands a leading `~`, and resolves
 relative values against the workflow file's directory. Each tracker adapter declares its own secret
 fields; for GitHub that is `tracker.provider.token`, which must be a `$VAR` reference. Every other
-string — including `codex.command` and hook scripts — is used literally, so a `$VAR` inside a hook
+string — including `runner.command` and hook scripts — is used literally, so a `$VAR` inside a hook
 is expanded by the hook shell rather than by the loader.
 
 Every one of these reads goes through Effect's `Config`, resolved against the `ConfigProvider` the

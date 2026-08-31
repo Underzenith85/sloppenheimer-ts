@@ -26,6 +26,8 @@ import {
   WorkspaceManagerFactory,
   type AdapterServices,
 } from '@symphony/core'
+import { codexRunnerConfig } from '../harness/codex-runner-config.js'
+import { auroraRunner } from '../harness/alien-agent-runner.js'
 
 const hooks: HooksConfig = {
   afterCreate: null,
@@ -60,15 +62,15 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
       }),
   }),
   layerAgentRunner({
+    kind: 'stub',
     run: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-    semantics: { turnOutcome: () => 'completed' },
   }),
   layerWorkflowLoader({
     load: (path) =>
       Effect.fail(
         new WorkflowError({ category: 'missing_workflow_file', message: `no workflow: ${path}` }),
       ),
-    preflight: () => Effect.succeed(validated),
+    preflight: () => Effect.succeed({ tracker: validated, runner: auroraRunner() }),
   }),
   layerWorkflowWatcher({ changes: () => Effect.succeed(Stream.empty) }),
 )
@@ -103,15 +105,12 @@ describe('port layer composition', (): void => {
           },
           workspace,
           workspaceRoot: '/workspaces',
-          config: {
+          config: codexRunnerConfig({
             command: 'codex app-server',
-            approvalPolicy: 'never',
-            threadSandbox: 'workspace-write',
-            turnSandboxPolicy: null,
             turnTimeoutMs: 1_000,
             readTimeoutMs: 1_000,
             stallTimeoutMs: 1_000,
-          },
+          }),
           prompt: 'prompt',
           maxTurns: 1,
           secretEnvironmentNames: [],

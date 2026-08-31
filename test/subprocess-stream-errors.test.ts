@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
-import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { rm, writeFile } from 'node:fs/promises'
 import { Effect, Option } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -143,6 +144,41 @@ describe('a child output pipe that fails', (): void => {
 
     expect(error.category).toBe('prepare_failed')
     expect(error.worktreePreserved).toBe(false)
+  }, 30_000)
+
+  /*
+   * The classification reads git's diagnostics, not its data. `status --porcelain` writes the
+   * workspace's own file names to stdout, and a failure carries whatever of that had been read; a
+   * path — or, in the case above, a commit SHA — that happens to contain `403` is not an HTTP
+   * status, and must not turn a preparation failure into an authentication failure and a
+   * credential problem the operator does not have.
+   */
+  it('classifies a failure by git diagnostics rather than by output that looks like a status', async (): Promise<void> => {
+    const fixture = await makeGitRepository()
+    roots.push(fixture.root)
+    await writeFile(join(fixture.workspace, 'issue-403.ts'), 'untracked\n')
+    const sourceControl = makeGitSourceControl({
+      remoteUrl: fixture.remote,
+      baseBranch: 'main',
+      credential: Option.none(),
+    })
+
+    failPipeOnce({
+      matches: (command, args) => command === 'git' && args[0] === 'status',
+      pipe: 'stdout',
+    })
+
+    const error = await Effect.runPromise(
+      Effect.flip(
+        sourceControl.prepare(
+          issue,
+          { path: fixture.workspace, key: 'issue-403', createdNow: true },
+          { _tag: 'Normal', branchName: 'symphony/issue-403' },
+        ),
+      ),
+    )
+
+    expect(error.category).toBe('prepare_failed')
   }, 30_000)
 
   it('reports a hook diagnostic as truncated rather than failing the hook on it', async (): Promise<void> => {

@@ -17,16 +17,16 @@ import {
 } from 'effect'
 
 import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { codexAuthenticationEnvironmentNames } from '@symphony/core/config/env-reference.js'
 import { AgentError, type WorkspaceError } from '@symphony/core/domain/errors.js'
 import type {
   AgentLaunch,
   AgentResult,
   AgentRunnerConfig,
+  AgentTurnOutcome,
 } from '@symphony/core/ports/agent-runner.js'
 import { currentInstant } from '@symphony/core/support/clock.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from '@symphony/core/support/json.js'
-import { processGroupIsAlive } from '@symphony/core/support/subprocess.js'
+import { childProcessGroupIsAlive, signalChildGroup } from '@symphony/core/support/subprocess.js'
 import type { HostToolResult, HostToolSession } from '@symphony/core/domain/host-tools.js'
 import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
 import {
@@ -36,11 +36,12 @@ import {
   type Redactor,
 } from '@symphony/core/support/redaction.js'
 import {
-  clientPayload,
-  normalizePayload,
   type AgentEvent,
   type AgentEventPayload,
+  type AgentLifecycle,
 } from '@symphony/core/telemetry.js'
+import { clientPayload, normalizePayload } from './payload.js'
+import { codexAuthenticationEnvironmentNames, codexSettingsFrom } from './settings.js'
 import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
@@ -62,8 +63,9 @@ export const makeCodexEnvironment = (
   environment: NodeJS.ProcessEnv,
   secretEnvironmentNames: readonly string[],
 ): NodeJS.ProcessEnv => {
+  const preserved = new Set<string>(codexAuthenticationEnvironmentNames)
   const blockedEnvironmentNames = new Set(
-    secretEnvironmentNames.filter((name) => !codexAuthenticationEnvironmentNames.has(name)),
+    secretEnvironmentNames.filter((name) => !preserved.has(name)),
   )
   return Object.fromEntries(
     Object.entries(environment).filter(([name]) => !blockedEnvironmentNames.has(name)),
@@ -92,6 +94,13 @@ const diagnosticDrainDeadlineMs = 1_000
  */
 export const composeSessionId = (threadId: string, turnId: string | null): string =>
   turnId === null ? threadId : `${threadId}-${turnId}`
+
+/**
+ * Codex's own reading of its terminal turn statuses. It travels onto the event as
+ * {@link AgentLifecycle}, so the runtime never matches a status string itself.
+ */
+export const codexTurnOutcome = (status: string): AgentTurnOutcome =>
+  status === 'completed' ? 'completed' : isCancelledTurnStatus(status) ? 'cancelled' : 'failed'
 
 export const isCancelledTurnStatus = (status: string): boolean =>
   status === 'cancelled' || status === 'canceled' || status === 'interrupted'
@@ -409,11 +418,13 @@ class CodexConnection {
         sessionId: null,
         turnCount: 0,
         turnStatus: null,
+        lifecycle: null,
       })
+      const settings = codexSettingsFrom(config.settings)
       const baseThreadParams: JsonObject = {
         cwd,
-        approvalPolicy: config.approvalPolicy,
-        sandbox: config.threadSandbox,
+        approvalPolicy: settings.approvalPolicy,
+        sandbox: settings.threadSandbox,
         serviceName: 'symphony_ts',
       }
       const dynamicTools =
@@ -450,14 +461,15 @@ class CodexConnection {
     turnCount: number,
   ): Effect.Effect<string, AgentError> {
     return Effect.gen(this, function* () {
+      const settings = codexSettingsFrom(config.settings)
       const result = yield* this.#request(
         'turn/start',
         {
           threadId,
           input: [{ type: 'text', text: prompt }],
           cwd,
-          approvalPolicy: config.approvalPolicy,
-          sandboxPolicy: config.turnSandboxPolicy ?? {
+          approvalPolicy: settings.approvalPolicy,
+          sandboxPolicy: settings.turnSandboxPolicy ?? {
             type: 'workspaceWrite',
             writableRoots: [cwd],
             networkAccess: true,
@@ -554,7 +566,10 @@ class CodexConnection {
             : settlement.error.category === 'turn_timeout'
               ? 'timed_out'
               : 'failed'
-        return this.#emit('turn/terminated', null, { threadId: null, turnId }, status)
+        return this.#emit('turn/terminated', null, { threadId: null, turnId }, status, {
+          phase: 'turn_settled',
+          outcome: codexTurnOutcome(status),
+        })
       }),
       Effect.catchAll(() => Effect.succeed(false)),
     )
@@ -691,7 +706,7 @@ class CodexConnection {
       )
       yield* Fiber.interrupt(this.#stdout)
       this.#process.stdin.end()
-      this.#terminate('SIGTERM')
+      signalChildGroup(this.#process, 'SIGTERM')
       yield* this.#reapGroup()
       yield* this.#drainDiagnostics()
     })
@@ -735,9 +750,9 @@ class CodexConnection {
   #reapGroup(): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       const escalateAt = (yield* Clock.currentTimeMillis) + shutdownGraceMs
-      while (this.#processGroupIsAlive()) {
+      while (childProcessGroupIsAlive(this.#process)) {
         if ((yield* Clock.currentTimeMillis) >= escalateAt) {
-          this.#terminate('SIGKILL')
+          signalChildGroup(this.#process, 'SIGKILL')
           break
         }
         yield* Effect.sleep(groupReapPollMs)
@@ -746,37 +761,13 @@ class CodexConnection {
       // finalizer complete — and terminal reconciliation start removing the workspace — while a
       // descendant is still running in it.
       const deadline = (yield* Clock.currentTimeMillis) + groupReapDeadlineMs
-      while (this.#processGroupIsAlive() && (yield* Clock.currentTimeMillis) < deadline) {
+      while (
+        childProcessGroupIsAlive(this.#process) &&
+        (yield* Clock.currentTimeMillis) < deadline
+      ) {
         yield* Effect.sleep(groupReapPollMs)
       }
     })
-  }
-
-  /**
-   * Whether the App Server's process group still has a member that can run. Zombies left behind by
-   * a host that does not reap orphans are not members: counting them would keep a killed tree
-   * reporting alive and hold the reap loop open for its whole bound.
-   */
-  #processGroupIsAlive(): boolean {
-    const { pid } = this.#process
-    return pid !== undefined && processGroupIsAlive(pid)
-  }
-
-  /** Signals the whole App Server process group, not only the shell that started it. */
-  #terminate(signal: NodeJS.Signals): void {
-    const { pid } = this.#process
-    if (pid === undefined) {
-      return
-    }
-    try {
-      process.kill(-pid, signal)
-    } catch {
-      try {
-        this.#process.kill(signal)
-      } catch {
-        // The process tree is already gone.
-      }
-    }
   }
 
   static #turnFailure(turnId: string, status: string): AgentError {
@@ -960,7 +951,11 @@ class CodexConnection {
                       onNone: () => Effect.void,
                       onSome: () =>
                         this.#emit('thread_started', null).pipe(
-                          Effect.zipRight(this.#emit('session_started', null)),
+                          Effect.zipRight(
+                            this.#emit('session_started', null, undefined, null, {
+                              phase: 'session_started',
+                            }),
+                          ),
                         ),
                     })
                   : Effect.void
@@ -1053,7 +1048,15 @@ class CodexConnection {
     }).pipe(
       Effect.flatMap((started) =>
         started
-          ? this.#emit('turn_started', null, { threadId: Option.getOrNull(threadId), turnId })
+          ? this.#emit(
+              'turn_started',
+              null,
+              { threadId: Option.getOrNull(threadId), turnId },
+              null,
+              {
+                phase: 'turn_started',
+              },
+            )
           : Effect.void,
       ),
     )
@@ -1285,6 +1288,15 @@ class CodexConnection {
         }),
         turnStatus: Option.getOrNull(terminalStatus),
         payload: normalizePayload(method, message['params'], this.#redact),
+        // A turn settles when a terminal notification carries the status that says how. Reporting
+        // the outcome here is what lets the runtime react without reading Codex's vocabulary.
+        lifecycle: Option.match(isTerminal ? terminalStatus : Option.none<string>(), {
+          onNone: (): AgentLifecycle | null => null,
+          onSome: (status): AgentLifecycle => ({
+            phase: 'turn_settled',
+            outcome: codexTurnOutcome(status),
+          }),
+        }),
       })
       if (!isTerminal || Option.isNone(turn) || Option.isNone(reportedTurn)) {
         return
@@ -1315,6 +1327,7 @@ class CodexConnection {
     message: string | null,
     carried: ProtocolIdentity = { threadId: null, turnId: null },
     turnStatus: string | null = null,
+    lifecycle: AgentLifecycle | null = null,
   ): Effect.Effect<void> {
     const carriedThreadId = Option.fromNullable(carried.threadId)
     const carriedTurnId = Option.fromNullable(carried.turnId)
@@ -1344,6 +1357,7 @@ class CodexConnection {
               onSome: (id) => state.turnCounts.get(id) ?? state.turnCount,
             }),
             turnStatus,
+            lifecycle,
             payload,
           })
         }),
@@ -1410,7 +1424,16 @@ class CodexConnection {
               Deferred.fail(turn.settlement, error).pipe(
                 Effect.tap((won) =>
                   won
-                    ? this.#emit('turn/terminated', null, { threadId: null, turnId: id }, 'failed')
+                    ? this.#emit(
+                        'turn/terminated',
+                        null,
+                        { threadId: null, turnId: id },
+                        'failed',
+                        {
+                          phase: 'turn_settled',
+                          outcome: codexTurnOutcome('failed'),
+                        },
+                      )
                     : Effect.void,
                 ),
                 Effect.asVoid,

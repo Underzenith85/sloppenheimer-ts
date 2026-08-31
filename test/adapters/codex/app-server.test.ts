@@ -17,9 +17,10 @@ import {
 } from '@symphony/adapter-codex/codex.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import type { AgentError } from '@symphony/core/domain/errors.js'
-import type { CodexConfig } from '@symphony/core/config/workflow.js'
+import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
 import { processIsAlive } from '../../harness/processes.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
+import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -74,23 +75,20 @@ type RunOutcome = Readonly<{
 
 const runScenario = (
   scenario: string,
-  overrides: Partial<CodexConfig> = {},
+  overrides: Partial<AgentRunnerConfig> = {},
   maxTurns = 1,
   launchOverrides: Partial<Pick<AgentLaunch, 'refreshIssue' | 'isRoutable'>> = {},
 ): Effect.Effect<RunOutcome & Readonly<{ path: string }>> =>
   Effect.gen(function* () {
     const { root, path } = yield* makeWorkspace()
     const events: AgentEvent[] = []
-    const config: CodexConfig = {
+    const config = codexRunnerConfig({
       command: `node ${JSON.stringify(fakeAppServer)} ${scenario}`,
-      approvalPolicy: 'never',
-      threadSandbox: 'workspace-write',
-      turnSandboxPolicy: null,
       turnTimeoutMs: 4_000,
       readTimeoutMs: 2_000,
       stallTimeoutMs: 0,
       ...overrides,
-    }
+    })
     const launch: AgentLaunch = {
       issue,
       workspace: { path, key: 'issue-14', createdNow: false },
@@ -826,15 +824,12 @@ describe('App Server timeouts and shutdown', (): void => {
             issue,
             workspace: { path, key: 'issue-14', createdNow: false },
             workspaceRoot: root,
-            config: {
+            config: codexRunnerConfig({
               command: `node ${JSON.stringify(fakeAppServer)} immediate-completion`,
-              approvalPolicy: 'never',
-              threadSandbox: 'workspace-write',
-              turnSandboxPolicy: null,
               turnTimeoutMs: 60_000,
               readTimeoutMs: 5_000,
               stallTimeoutMs: 0,
-            },
+            }),
             prompt: 'do the work',
             maxTurns: 2,
             secretEnvironmentNames: [],
@@ -886,15 +881,12 @@ describe('App Server timeouts and shutdown', (): void => {
     () =>
       Effect.gen(function* () {
         const { root, path } = yield* makeWorkspace()
-        const config: CodexConfig = {
+        const config = codexRunnerConfig({
           command: `node ${JSON.stringify(fakeAppServer)} spawn-grandchild`,
-          approvalPolicy: 'never',
-          threadSandbox: 'workspace-write',
-          turnSandboxPolicy: null,
           turnTimeoutMs: 60_000,
           readTimeoutMs: 5_000,
           stallTimeoutMs: 0,
-        }
+        })
         const fiber = Effect.runFork(
           runAgentOnHost({
             issue,

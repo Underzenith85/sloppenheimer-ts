@@ -3,8 +3,10 @@ import { Liquid } from 'liquidjs'
 
 import type { Issue, JsonObject } from '../domain/domain.js'
 import { WorkflowError } from '../domain/errors.js'
+import type { ValidatedAgentRunner } from '../domain/agent-runner-provider.js'
 import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
+export type { ValidatedAgentRunner } from '../domain/agent-runner-provider.js'
 export type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
 export type TrackerConfig = Readonly<{
@@ -31,15 +33,17 @@ export type AgentConfig = Readonly<{
   maxConcurrentAgentsByState: ReadonlyMap<string, number>
 }>
 
-export type CodexConfig = Readonly<{
+/**
+ * The agent-runner section, split the way `tracker` is: the fields the core itself consumes, plus
+ * the authored settings the owning adapter validates and nothing above it reads.
+ */
+export type RunnerConfig = Readonly<{
   command: string
-  approvalPolicy: string
-  threadSandbox: string
-  /** Verbatim pass-through for the App Server turn sandbox policy. */
-  turnSandboxPolicy: JsonObject | null
   turnTimeoutMs: number
   readTimeoutMs: number
   stallTimeoutMs: number
+  /** Adapter-owned configuration, preserved exactly as authored until an adapter validates it. */
+  settings: JsonObject
 }>
 
 export type EffectiveConfig = Readonly<{
@@ -48,7 +52,7 @@ export type EffectiveConfig = Readonly<{
   workspaceRoot: string
   hooks: HooksConfig
   agent: AgentConfig
-  codex: CodexConfig
+  runner: RunnerConfig
   serverPort: number | null
   /**
    * Whether the pull-request handoff extension is composed. The composition root reads this once,
@@ -66,6 +70,8 @@ export type Workflow = Readonly<{
   config: EffectiveConfig
   /** The adapter-validated tracker selection for `config.tracker.kind`. */
   tracker: ValidatedTrackerProvider
+  /** The adapter-validated runner selection for the workflow's `runner.kind`. */
+  runner: ValidatedAgentRunner
   promptTemplate: string
 }>
 
@@ -76,9 +82,6 @@ export const workflowDefaults = Object.freeze({
   maxConcurrentAgents: 10,
   maxTurns: 20,
   maxRetryBackoffMs: 300_000,
-  codexCommand: 'codex app-server',
-  approvalPolicy: 'never',
-  threadSandbox: 'workspace-write',
   turnTimeoutMs: 3_600_000,
   readTimeoutMs: 5_000,
   stallTimeoutMs: 300_000,
@@ -89,13 +92,6 @@ export const workflowDefaults = Object.freeze({
   activeStates: ['open'] as readonly string[],
   terminalStates: ['closed'] as readonly string[],
 })
-
-/**
- * Codex-owned policy values, aligned with `codex app-server generate-json-schema`. The App Server's
- * `AskForApproval` also accepts a granular object form, which this host does not expose.
- */
-export const codexApprovalPolicies = ['untrusted', 'on-request', 'never'] as const
-export const codexSandboxModes = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
 const liquid = new Liquid({ strictFilters: true, strictVariables: true })
 const parseAndRender: (template: string, context: JsonObject) => Promise<unknown> =

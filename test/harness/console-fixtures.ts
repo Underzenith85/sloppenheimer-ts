@@ -38,6 +38,7 @@ const runningEntry = (
   identifier,
   title,
   url: `https://example.test/issues/${String(number)}`,
+  state: 'open',
   attempt: null,
   startedAt: new Date(Date.now() - 60_000).toISOString(),
   lastEventAt: new Date(Date.now() - 5_000).toISOString(),

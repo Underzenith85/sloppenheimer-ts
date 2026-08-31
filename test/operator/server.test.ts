@@ -55,6 +55,7 @@ const snapshot: OrchestratorSnapshot = {
       identifier: 'example/symphony#17',
       title: 'Operator console',
       url: 'https://github.com/example/symphony/issues/17',
+      state: 'open',
       attempt: null,
       startedAt: '2026-08-29T11:59:00.000Z',
       lastEventAt: null,
@@ -104,6 +105,7 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     sessionId: 'thread-1:turn-1',
     turnCount: 1,
     turnStatus: null,
+    lifecycle: null,
     payload: {
       kind: 'command',
       program: 'pnpm',
@@ -155,7 +157,11 @@ const detailLookups = new Map<string, AgentDetailLookup>([
 
 const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
   snapshot: Effect.succeed(snapshot),
-  refresh: Effect.void,
+  refresh: Effect.succeed({
+    coalesced: false,
+    requestedAt: '2026-08-29T12:00:00.000Z',
+    operations: ['issue_reconciliation', 'dispatch'],
+  }),
   agentDetail: (identifier) =>
     Effect.succeed(detailLookups.get(identifier) ?? { _tag: 'Unknown', identifier }),
   backlog: Effect.succeed({
@@ -228,20 +234,28 @@ describe('operator server', (): void => {
       expect(page.headers.get('content-security-policy')).toContain("default-src 'self'")
       expect(await page.text()).toContain('Work by state')
       expect(state.status).toBe(200)
-      expect(await state.json()).toMatchObject({ counts: { running: 1 }, maxConcurrentAgents: 2 })
+      expect(await state.json()).toMatchObject({
+        counts: { running: 1 },
+        max_concurrent_agents: 2,
+        running: [{ issue_identifier: 'example/symphony#17', state: 'open' }],
+      })
       expect(await backlog.json()).toMatchObject({
         nodes: [{ identifier: 'example/symphony#17', readiness: 'ready' }],
         edges: [],
         cycles: [],
       })
-      expect(await detail.json()).toMatchObject({ identifier: 'example/symphony#17' })
+      expect(await detail.json()).toMatchObject({
+        issue_identifier: 'example/symphony#17',
+        status: 'running',
+        detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+        retry: null,
+      })
       const source = await script.text()
       expect(source).toContain("'graph-node state-' + statusClass(status)")
       expect(source).toContain("awaiting_checks: 'Awaiting checks'")
       expect(source).toContain("closed_without_merge: 'Closed without merge'")
-      expect(source).toContain(
-        '(state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)',
-      )
+      expect(source).toContain('(state?.handoffs ?? []).find(')
+      expect(source).toContain('entry.issue_identifier === node.identifier')
       // The served bundle is the whole console, in dependency order: the view model, the shared
       // browser primitives, the detail overlay and the shell.
       expect(source).toContain("start: 'Start agent'")
@@ -283,7 +297,7 @@ describe('operator server', (): void => {
   )
 
   it.live(
-    'distinguishes retrying, completed, sessionless, unavailable, missing, and malformed detail requests',
+    'distinguishes retrying, completed, sessionless, unavailable, and missing detail requests',
     () =>
       withServer(makeBackend(), async (url) => {
         const detailFor = (identifier: string): Promise<Response> =>
@@ -316,11 +330,272 @@ describe('operator server', (): void => {
         })
         expect(missing.status).toBe(404)
         expect(await missing.json()).toMatchObject({ error: { code: 'agent_not_found' } })
-        expect(malformed.status).toBe(400)
-        expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_identifier' } })
+        // Nothing this session ran is spelled that way, which is what `agent_not_found` means.
+        expect(malformed.status).toBe(404)
+        expect(await malformed.json()).toMatchObject({ error: { code: 'agent_not_found' } })
         expect(longIdentifier.status).toBe(200)
         expect(wrongMethod.status).toBe(405)
       }),
+  )
+
+  it.live('serves the SPEC per-issue baseline for every issue in-memory state knows', () =>
+    withServer(makeBackend(), async (url) => {
+      const detailFor = (identifier: string): Promise<Response> =>
+        fetch(`${url}/api/v1/${encodeURIComponent(identifier)}`)
+      const running = await detailFor('example/symphony#17')
+      // The issue has left the agent for the pull-request lifecycle. It is as known to this host as
+      // a running one, and used to be reported as absent.
+      const handedOff = await detailFor('example/symphony#9')
+      const retrying = await detailFor('example/symphony#18')
+      const completed = await detailFor('example/symphony#19')
+      const starting = await detailFor('example/symphony#21')
+      const unknown = await detailFor('example/symphony#99')
+      const wrongMethod = await fetch(
+        `${url}/api/v1/${encodeURIComponent('example/symphony#17')}`,
+        { method: 'POST' },
+      )
+
+      expect(running.status).toBe(200)
+      expect(await running.json()).toMatchObject({
+        self: '/api/v1/example%2Fsymphony%2317',
+        issue_id: '17',
+        issue_identifier: 'example/symphony#17',
+        issue_url: 'https://github.com/example/symphony/issues/17',
+        title: 'Operator console',
+        status: 'running',
+        tracked: true,
+        workspace: { path: 'example_symphony_17' },
+        attempts: { restart_count: 0, current_retry_attempt: 0 },
+        running: {
+          started_at: '2026-08-29T11:59:00.000Z',
+          elapsed_ms: 60_000,
+          phase: 'running_command',
+          operation: 'Running pnpm',
+          session_id: 'thread-1:turn-1',
+          process_id: 42,
+          worker_host: 'local',
+          stalled: false,
+          tokens: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        },
+        retry: null,
+        logs: { retained: 1, dropped: 0, limit: 200, published: 1 },
+        recent_events: [{ sequence: 1, category: 'command', attempt: 0 }],
+        last_error: null,
+        detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+      })
+
+      expect(handedOff.status).toBe(200)
+      expect(await handedOff.json()).toMatchObject({
+        issue_identifier: 'example/symphony#9',
+        status: 'handoff',
+        tracked: true,
+        running: null,
+        workspace: { path: null },
+        logs: { retained: 0, dropped: 0, published: 0 },
+        recent_events: [],
+      })
+
+      expect(await retrying.json()).toMatchObject({ status: 'retrying', tracked: true })
+      // Retained history rather than live work: the session finished and aged out of retention.
+      expect(await completed.json()).toMatchObject({ status: 'completed', tracked: false })
+      expect(await starting.json()).toMatchObject({ status: 'starting', tracked: true })
+      expect(unknown.status).toBe(404)
+      expect(await unknown.json()).toMatchObject({
+        version: 'v1',
+        error: { code: 'issue_not_found' },
+      })
+      expect(wrongMethod.status).toBe(405)
+      expect(wrongMethod.headers.get('allow')).toBe('GET')
+    }),
+  )
+
+  /*
+   * The snapshot and the detail are two reads of the actor's state, so an agent that fails between
+   * them leaves a stale running row beside a fresh retrying detail. The response must be one
+   * source's reading rather than a blend: a `running` block beside a pending `retry`, under a
+   * status only one of them supports, is a state the host was never in.
+   */
+  it.live('never blends a stale snapshot row with a fresher detail record', () =>
+    Effect.gen(function* () {
+      const retryingDetail: AgentDetailSnapshot = {
+        ...makeDetail('example/symphony#17'),
+        status: 'retrying',
+        retry: { attempt: 2, dueAt: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
+      }
+      const skewed: OperatorBackend = {
+        ...makeBackend(),
+        // The row still says running; the detail read a moment later says the agent has failed.
+        agentDetail: () => Effect.succeed({ _tag: 'Found', detail: retryingDetail }),
+      }
+      yield* withServer(skewed, async (url) => {
+        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({
+          status: 'retrying',
+          tracked: true,
+          running: null,
+          retry: { attempt: 2, due_at: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
+        })
+      })
+    }),
+  )
+
+  /*
+   * A running row publishes its stall deadline rather than a flag, so that a reader can decide the
+   * deadline has passed without waiting for the next snapshot to say so. The fallback must make
+   * that decision rather than reporting an already-stalled agent as healthy beside the deadline
+   * that contradicts it.
+   */
+  it.live('derives the fallback stall flag from the deadline the row carries', () =>
+    Effect.gen(function* () {
+      const stalled: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          // The deadline passed a minute before this snapshot was taken.
+          generatedAt: '2026-08-29T12:05:00.000Z',
+        }),
+        // No detail record, so the running row stands in.
+        agentDetail: (identifier) =>
+          Effect.succeed({ _tag: 'Unavailable', identifier, reason: 'x' }),
+      }
+      yield* withServer(stalled, async (url) => {
+        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+        expect(await response.json()).toMatchObject({
+          status: 'running',
+          running: { stall_deadline: '2026-08-29T12:04:00.000Z', stalled: true },
+        })
+      })
+    }),
+  )
+
+  /*
+   * A queued retry is not a restart that happened. The runtime queues one as `(attempt ?? 0) + 1`,
+   * so a retrying row names the attempt scheduled next, while the detail record advances its
+   * counters only when an attempt actually starts. The fallback must answer on the record's terms,
+   * or the same issue reports a different history depending on whether a record was retained.
+   */
+  it.live('does not count a pending retry as a restart that already happened', () =>
+    Effect.gen(function* () {
+      const queued: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          running: [],
+          retrying: [
+            {
+              issueId: issueId('31'),
+              identifier: 'example/symphony#31',
+              title: 'Awaiting its first retry',
+              url: null,
+              // The first attempt failed; attempt 1 is scheduled and has not begun.
+              attempt: 1,
+              dueAt: '2026-08-29T12:01:00.000Z',
+              error: 'turn failed',
+              workerHost: 'local',
+              detailUrl: '/api/v1/agents/example%2Fsymphony%2331',
+            },
+          ],
+        }),
+        // Nothing retained for this issue, so the retrying row stands in.
+        agentDetail: (identifier) => Effect.succeed({ _tag: 'NoSession', identifier }),
+      }
+      yield* withServer(queued, async (url) => {
+        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#31')}`)
+        expect(await response.json()).toMatchObject({
+          status: 'retrying',
+          // No attempt beyond the first has started yet.
+          attempts: { restart_count: 0, current_retry_attempt: 0 },
+          // The attempt that is queued is published here, where it belongs.
+          retry: { attempt: 1, due_at: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
+        })
+      })
+    }),
+  )
+
+  /*
+   * `IssueIdentifier` is an unconstrained branded string and the port boundary is tracker-neutral,
+   * so the SPEC resource must answer for an identifier a provider spells its own way. Deciding on
+   * GitHub's behalf which shapes are addressable would make the resource unreachable for a tracker
+   * whose identifiers carry no `#`.
+   */
+  it.live('resolves an identifier that is not shaped like a GitHub one', () =>
+    Effect.gen(function* () {
+      const jiraLike: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          running: [],
+          handoffs: [
+            {
+              issueId: '7',
+              identifier: 'GH-7',
+              pullRequestUrl: 'https://example.test/pull/7',
+              branchName: 'symphony/gh-7',
+              state: 'awaiting_checks',
+              headSha: null,
+              reason: null,
+              repairAttempts: 0,
+              observedAt: '2026-08-29T12:00:00.000Z',
+            },
+          ],
+        }),
+        agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
+      }
+      yield* withServer(jiraLike, async (url) => {
+        const resolved = await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`)
+        expect(resolved.status).toBe(200)
+        expect(await resolved.json()).toMatchObject({
+          issue_identifier: 'GH-7',
+          issue_id: '7',
+          status: 'handoff',
+          tracked: true,
+        })
+
+        // Still unknown is still 404 — the lookup decides, not the spelling.
+        const missing = await fetch(`${url}/api/v1/${encodeURIComponent('GH-8')}`)
+        expect(missing.status).toBe(404)
+        expect(await missing.json()).toMatchObject({ error: { code: 'issue_not_found' } })
+
+        // The link a successful response advertises must be one its own target accepts. The agent
+        // route answers for this identifier on its own terms — no session ran for it — rather than
+        // refusing to read it at all.
+        const body: unknown = await (
+          await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`)
+        ).json()
+        const detailUrl =
+          typeof body === 'object' && body !== null && 'detail_url' in body
+            ? String((body as { detail_url: unknown }).detail_url)
+            : ''
+        expect(detailUrl).toBe('/api/v1/agents/GH-7')
+        const followed = await fetch(`${url}${detailUrl}`)
+        expect(followed.status).toBe(404)
+        expect(await followed.json()).toMatchObject({ error: { code: 'agent_not_found' } })
+      })
+    }),
+  )
+
+  it.live('acknowledges a refresh with what the request amounted to', () =>
+    withServer(makeBackend(), async (url) => {
+      const rejected = await fetch(`${url}/api/v1/refresh`, { method: 'POST' })
+      expect(rejected.status).toBe(403)
+      expect(await rejected.json()).toMatchObject({ error: { code: 'invalid_csrf_token' } })
+
+      const page = await (await fetch(url)).text()
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
+      const accepted = await fetch(`${url}/api/v1/refresh`, {
+        method: 'POST',
+        headers: { 'X-Symphony-CSRF': token },
+      })
+
+      expect(accepted.status).toBe(202)
+      expect(await accepted.json()).toEqual({
+        queued: true,
+        coalesced: false,
+        requested_at: '2026-08-29T12:00:00.000Z',
+        operations: ['issue_reconciliation', 'dispatch'],
+      })
+    }),
   )
 
   it.live('requires its page token before changing issue eligibility', () =>

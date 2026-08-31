@@ -2,11 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
 import { bound, commandSummary, makeRedactor, redact } from '@symphony/core/support/redaction.js'
+import { clientPayload, normalizePayload } from '@symphony/adapter-codex/payload.js'
 import {
   buildAgentDetail,
-  clientPayload,
   createAgentDetailRecord,
-  normalizePayload,
   qualityPhaseOf,
   recordAgentEvent,
   recordAttemptStarted,
@@ -48,6 +47,7 @@ const event = (payload: AgentEventPayload, overrides: Partial<AgentEvent> = {}):
   sessionId: 'thread-1:turn-1',
   turnCount: 1,
   turnStatus: null,
+  lifecycle: null,
   payload,
   ...overrides,
 })

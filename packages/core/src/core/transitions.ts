@@ -2,6 +2,13 @@ import { Option, type Deferred } from 'effect'
 
 import type { Issue, IssueId, JsonObject } from '../domain/domain.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
+import {
+  capped,
+  withEntry,
+  withMember,
+  withoutEntry,
+  withoutMember,
+} from '../support/collections.js'
 import { mergeSparseObject } from '../support/json.js'
 import {
   agentDetailPath,
@@ -20,6 +27,7 @@ import {
   type CompletedEntry,
   type PendingRetirement,
   type PublishedDetail,
+  type RefreshOperation,
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
@@ -37,51 +45,6 @@ import {
  * may find nothing answers with `Option`, because what it found is what decides the caller's next
  * branch — never with `null`, which this codebase keeps for data that is serialized.
  */
-
-const withEntry = <Key, Value>(
-  map: ReadonlyMap<Key, Value>,
-  key: Key,
-  value: Value,
-): ReadonlyMap<Key, Value> => new Map(map).set(key, value)
-
-const withoutEntry = <Key, Value>(
-  map: ReadonlyMap<Key, Value>,
-  key: Key,
-): ReadonlyMap<Key, Value> => {
-  if (!map.has(key)) {
-    return map
-  }
-  const next = new Map(map)
-  next.delete(key)
-  return next
-}
-
-const withMember = <Value>(set: ReadonlySet<Value>, value: Value): ReadonlySet<Value> =>
-  set.has(value) ? set : new Set(set).add(value)
-
-const withoutMember = <Value>(set: ReadonlySet<Value>, value: Value): ReadonlySet<Value> => {
-  if (!set.has(value)) {
-    return set
-  }
-  const next = new Set(set)
-  next.delete(value)
-  return next
-}
-
-/** Drops oldest-first until the collection is within its cap. Insertion order is the age order. */
-const capped = <Value>(set: ReadonlySet<Value>, limit: number): ReadonlySet<Value> => {
-  if (set.size <= limit) {
-    return set
-  }
-  const next = new Set(set)
-  for (const value of set) {
-    if (next.size <= limit) {
-      break
-    }
-    next.delete(value)
-  }
-  return next
-}
 
 // ---------------------------------------------------------------------------
 // Claim lifecycle
@@ -543,19 +506,26 @@ export type TickSource = 'startup' | 'timer' | 'change'
  * lands while a poll is running additionally owes that poll a follow-up pass, because the poll has
  * already read the state the change invalidated.
  *
- * `enqueue` is whether the caller must offer a `Tick` to the mailbox.
+ * `enqueue` is whether the caller must offer a `Tick` to the mailbox. `scheduled` is whether this
+ * request is the one that brought a pass into being — by enqueueing the tick, or by being the
+ * change that first asked the running poll for a follow-up. A request that only joins a pass
+ * somebody else already arranged is neither, and a refresh acknowledgement calls that coalesced.
  */
 export const requestTick = (
   state: RuntimeState,
   source: TickSource,
-): readonly [Readonly<{ enqueue: boolean }>, RuntimeState] => {
+): readonly [Readonly<{ enqueue: boolean; scheduled: boolean }>, RuntimeState] => {
   if (state.tickQueued) {
+    const owesFollowUp = state.pollRunning && source === 'change'
     return [
-      { enqueue: false },
-      state.pollRunning && source === 'change' ? { ...state, followUpRequested: true } : state,
+      { enqueue: false, scheduled: owesFollowUp && !state.followUpRequested },
+      owesFollowUp ? { ...state, followUpRequested: true } : state,
     ]
   }
-  return [{ enqueue: true }, { ...state, tickQueued: true }]
+  return [
+    { enqueue: true, scheduled: true },
+    { ...state, tickQueued: true },
+  ]
 }
 
 export const beginPoll = (state: RuntimeState): RuntimeState => ({ ...state, pollRunning: true })
@@ -577,7 +547,10 @@ export const finishPoll = (
  * Records a caller waiting on a refresh. A request that arrives while a poll is running waits for
  * the *next* poll: the running one has already read the state the caller wants re-read.
  */
-export const awaitRefresh = (state: RuntimeState, reply: Deferred.Deferred<void>): RuntimeState =>
+export const awaitRefresh = (
+  state: RuntimeState,
+  reply: Deferred.Deferred<readonly RefreshOperation[]>,
+): RuntimeState =>
   state.pollRunning
     ? { ...state, nextRefreshWaiters: [...state.nextRefreshWaiters, reply] }
     : { ...state, currentRefreshWaiters: [...state.currentRefreshWaiters, reply] }
@@ -585,7 +558,7 @@ export const awaitRefresh = (state: RuntimeState, reply: Deferred.Deferred<void>
 /** Takes the waiters the finished poll satisfied. */
 export const takeRefreshWaiters = (
   state: RuntimeState,
-): readonly [readonly Deferred.Deferred<void>[], RuntimeState] => [
+): readonly [readonly Deferred.Deferred<readonly RefreshOperation[]>[], RuntimeState] => [
   state.currentRefreshWaiters,
   { ...state, currentRefreshWaiters: [] },
 ]

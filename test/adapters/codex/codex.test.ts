@@ -25,12 +25,12 @@ import {
 import type { VerifiedWorkspace } from '@symphony/core/domain/workspace-containment.js'
 import type { AgentError, WorkspaceError } from '@symphony/core/domain/errors.js'
 import type { AgentResult } from '@symphony/core/ports/agent-runner.js'
-import type { CodexConfig } from '@symphony/core/config/workflow.js'
 import {
   assertWorkspaceIdentity as assertWorkspaceIdentityAgainstFileSystem,
   openVerifiedWorkspace as openVerifiedWorkspaceAgainstFileSystem,
   verifyWorkspaceForLaunch as verifyWorkspaceForLaunchAgainstFileSystem,
 } from '@symphony/adapter-node/workspace-identity.js'
+import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 
 /**
  * Launch verification reads real directories through `FileSystem`, so each entry point is bound to
@@ -254,15 +254,12 @@ afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { force: true, recursive: true })))
 })
 
-const codexConfig: CodexConfig = {
+const codexConfig = codexRunnerConfig({
   command: 'cat',
-  approvalPolicy: 'never',
-  threadSandbox: 'workspace-write',
-  turnSandboxPolicy: null,
   turnTimeoutMs: 1_000,
   readTimeoutMs: 200,
   stallTimeoutMs: 0,
-}
+})
 
 const launchIssue: Issue = {
   id: issueId('13'),
