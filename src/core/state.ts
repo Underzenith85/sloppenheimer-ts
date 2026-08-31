@@ -215,7 +215,7 @@ export type HandoffEntry = Readonly<{
 export type EffectiveWorkflow = Readonly<{
   workflow: Workflow
   tracker: TrackerPort
-  codeReview: CodeReviewPort | null
+  codeReview: Option.Option<CodeReviewPort>
   sourceControl: SourceControlPort | null
   workspaces: WorkspaceManagerPort
   loadedAt: Date
@@ -224,7 +224,7 @@ export type EffectiveWorkflow = Readonly<{
 export type ExecutionSnapshot = Readonly<{
   workflow: Workflow
   tracker: TrackerPort
-  codeReview: CodeReviewPort | null
+  codeReview: Option.Option<CodeReviewPort>
   sourceControl: SourceControlPort | null
   requiredLabels: readonly string[]
   activeStates: readonly string[]

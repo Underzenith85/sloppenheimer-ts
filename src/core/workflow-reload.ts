@@ -53,7 +53,7 @@ const handoffCapabilityMissing = (workflow: Workflow): WorkflowError =>
 const requireCapability = (
   workflow: Workflow,
   port: CodeReviewPort | null,
-): Effect.Effect<CodeReviewPort | null, WorkflowError> =>
+): Effect.Effect<CodeReviewPort, WorkflowError> =>
   port === null ? Effect.fail(handoffCapabilityMissing(workflow)) : Effect.succeed(port)
 
 const sourceControlCapabilityMissing = (workflow: Workflow): WorkflowError =>
@@ -111,13 +111,14 @@ const rebuildCodeReview = (
   ports: RuntimePorts,
   replaced: Replaced,
   workflow: Workflow,
-): Effect.Effect<CodeReviewPort | null, WorkflowError> =>
+): Effect.Effect<Option.Option<CodeReviewPort>, WorkflowError> =>
   Option.match(ports.codeReviewCell, {
-    onNone: () => Effect.succeed<CodeReviewPort | null>(null),
+    onNone: () => Effect.succeed(Option.none<CodeReviewPort>()),
     onSome: (cell) =>
       rebuildCell(cell, 'codeReview', replaced, workflow.tracker).pipe(
         Effect.mapError(portConfigurationError),
         Effect.flatMap((port) => requireCapability(workflow, port)),
+        Effect.map(Option.some),
       ),
   })
 
@@ -166,7 +167,7 @@ export const rebuildEffectiveWorkflow = (
         ports,
         replaced,
         workflow,
-        codeReview !== null,
+        Option.isSome(codeReview),
       )
       const workspaces = yield* rebuildCell(
         ports.workspaceCell,
@@ -219,7 +220,7 @@ export const revalidateCredentials = (
           context.ports,
           replaced,
           workflow,
-          codeReview !== null,
+          Option.isSome(codeReview),
         )
         return { ...effective, workflow, tracker, codeReview, sourceControl }
       }).pipe(
@@ -239,6 +240,11 @@ const heldInstances = (
 ): readonly unknown[] => [
   ...[...state.running.values()].map((entry) => select(entry.execution)),
   ...[...state.handoffs.values()].map((entry) => select(entry.execution)),
+]
+
+const heldCodeReviewInstances = (state: RuntimeState): readonly CodeReviewPort[] => [
+  ...[...state.running.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
+  ...[...state.handoffs.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
 ]
 
 /**
@@ -266,8 +272,10 @@ const stillHeld = (state: RuntimeState, retirement: PendingRetirement): boolean 
     }
     case 'codeReview': {
       return (
-        state.lastKnownGood.codeReview === retirement.instance ||
-        heldInstances(state, (execution) => execution.codeReview).includes(retirement.instance)
+        Option.exists(
+          state.lastKnownGood.codeReview,
+          (codeReview) => codeReview === retirement.instance,
+        ) || heldCodeReviewInstances(state).some((codeReview) => codeReview === retirement.instance)
       )
     }
     case 'sourceControl': {

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Effect, Redacted } from 'effect'
+import { Effect, Option, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent, type AgentEvent } from '../../src/adapters/codex/codex.js'
@@ -86,7 +86,7 @@ describe('GitHub provider-native tool extension', (): void => {
     ])
     expect(codeReview.toolSpecs.map((tool) => tool.name)).toEqual(['github_link_pull_request'])
 
-    const disabledSession = makeHostToolSession({ tracker, codeReview: null }, issue)
+    const disabledSession = makeHostToolSession({ tracker, codeReview: Option.none() }, issue)
     expect(disabledSession.specs.map((tool) => tool.name)).toEqual([
       'github_add_comment',
       'github_handoff_issue',
@@ -102,7 +102,10 @@ describe('GitHub provider-native tool extension', (): void => {
       error: { code: 'unsupported_tool', retryable: false },
     })
 
-    const enabledSession = makeHostToolSession({ tracker, codeReview }, issue)
+    const enabledSession = makeHostToolSession(
+      { tracker, codeReview: Option.some(codeReview) },
+      issue,
+    )
     expect(enabledSession.specs.map((tool) => tool.name)).toEqual([
       'github_add_comment',
       'github_handoff_issue',
@@ -226,7 +229,7 @@ describe('GitHub provider-native tool extension', (): void => {
     try {
       const tracker = makeGitHubTracker(provider)
       const codeReview = makeGitHubCodeReview(provider)
-      const hostTools = makeHostToolSession({ tracker, codeReview }, issue)
+      const hostTools = makeHostToolSession({ tracker, codeReview: Option.some(codeReview) }, issue)
       await expect(
         hostTools.execute('github_add_comment', { body: 'status update' }, toolContext),
       ).resolves.toMatchObject({ success: true })

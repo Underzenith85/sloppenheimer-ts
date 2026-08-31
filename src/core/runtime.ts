@@ -402,7 +402,7 @@ export const startOrchestratorRuntime = (
     // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
     // never be written back over it. A later handoff-enabled run still has to restore those
     // pull requests.
-    const handoffStoreDisabled = bootstrapWorkflow.codeReview === null
+    const handoffStoreDisabled = Option.isNone(bootstrapWorkflow.codeReview)
     const restored = yield* handoffStoreDisabled
       ? Effect.succeed({
           handoffs: [] as readonly HandoffSnapshot[],
@@ -615,10 +615,11 @@ export const startOrchestratorRuntime = (
       }
       const effective = opening.lastKnownGood
       const codeReview = effective.codeReview
-      if (codeReview === null) {
+      if (Option.isNone(codeReview)) {
         yield* Ref.update(state, Transitions.finishStartupRecovery)
         return
       }
+      const capability = codeReview.value
       const requiredLabels = effective.workflow.config.tracker.requiredLabels
       const fetched = yield* effective.tracker
         .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
@@ -667,7 +668,7 @@ export const startOrchestratorRuntime = (
         ) {
           continue
         }
-        const found = yield* codeReview.findExistingHandoff(issue).pipe(
+        const found = yield* capability.findExistingHandoff(issue).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
             onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
@@ -694,7 +695,7 @@ export const startOrchestratorRuntime = (
           continue
         }
         const observedAt = new Date()
-        const inspected = yield* codeReview.inspectPullRequest(foundResult.pullRequestNumber).pipe(
+        const inspected = yield* capability.inspectPullRequest(foundResult.pullRequestNumber).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
             onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),

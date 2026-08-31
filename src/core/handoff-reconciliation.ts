@@ -162,17 +162,18 @@ const perform = (
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const codeReview = handoff.execution.codeReview
-    if (codeReview === null) {
+    if (Option.isNone(codeReview)) {
       yield* writeHandoff(context, id, handoff)
       return
     }
+    const capability = codeReview.value
     switch (action._tag) {
       case 'None': {
         yield* writeHandoff(context, id, handoff)
         return
       }
       case 'RequestReview': {
-        const requested = yield* codeReview
+        const requested = yield* capability
           .requestPullRequestReview(handoff.pullRequestNumber, action.headSha)
           .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
         yield* writeHandoff(context, id, afterReviewRequested(handoff, action.headSha, requested))
@@ -189,7 +190,7 @@ const perform = (
         return
       }
       case 'ResolveThreads': {
-        const resolved = yield* codeReview
+        const resolved = yield* capability
           .resolveReviewThreads(action.threadIds)
           .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
         yield* writeHandoff(context, id, afterThreadsResolved(handoff, resolved))
@@ -211,7 +212,7 @@ const perform = (
       }
       case 'Merge': {
         yield* writeHandoff(context, id, handoff)
-        const merged = yield* codeReview
+        const merged = yield* capability
           .mergePullRequest(handoff.pullRequestNumber, action.headSha)
           .pipe(
             Effect.match({
@@ -336,7 +337,8 @@ export const reconcileHandoffs = (
     const opening = yield* Ref.get(context.state)
     const eligible = new Map(
       [...opening.handoffs].filter(
-        ([id, handoff]) => !skipped(opening, id, handoff) && handoff.execution.codeReview !== null,
+        ([id, handoff]) =>
+          !skipped(opening, id, handoff) && Option.isSome(handoff.execution.codeReview),
       ),
     )
     const refreshedIssues = yield* refreshHandoffIssues(eligible)
@@ -349,11 +351,11 @@ export const reconcileHandoffs = (
         continue
       }
       const codeReview = live.execution.codeReview
-      if (codeReview === null) {
+      if (Option.isNone(codeReview)) {
         continue
       }
       const observedAt = new Date()
-      const inspected = yield* codeReview.inspectPullRequest(live.pullRequestNumber).pipe(
+      const inspected = yield* codeReview.value.inspectPullRequest(live.pullRequestNumber).pipe(
         Effect.match({
           onFailure: (error) => ({ _tag: 'Failed' as const, error }),
           onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),

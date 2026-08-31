@@ -287,7 +287,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             break
           }
           const codeReview = settled.execution.codeReview
-          if (codeReview === null) {
+          if (Option.isNone(codeReview)) {
             yield* context.scheduleRetry(settled.issue, 1, null, true)
             break
           }
@@ -306,7 +306,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             ),
           )
           yield* context.publish
-          const handoff = yield* codeReview.handoffCompletedWork(settled.issue).pipe(
+          const handoff = yield* codeReview.value.handoffCompletedWork(settled.issue).pipe(
             Effect.match({
               onFailure: (error) => ({ _tag: 'Failed' as const, error }),
               onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
@@ -458,7 +458,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               break
             }
             const codeReview = entry.execution.codeReview
-            if (codeReview === null) {
+            if (Option.isNone(codeReview)) {
               yield* releaseHandoffRepair(context, event.issueId, repairHandoff)
               break
             }
@@ -477,12 +477,14 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 ),
               )
             }
-            const inspected = yield* codeReview.inspectPullRequest(entry.pullRequestNumber).pipe(
-              Effect.match({
-                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-              }),
-            )
+            const inspected = yield* codeReview.value
+              .inspectPullRequest(entry.pullRequestNumber)
+              .pipe(
+                Effect.match({
+                  onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                  onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+                }),
+              )
             if (inspected._tag === 'Failed') {
               const scheduled = yield* context.scheduleRetry(
                 repair.value.issue,

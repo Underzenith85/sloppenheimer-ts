@@ -90,7 +90,7 @@ const withAgentLimits = (
  */
 const unusedPorts = {
   tracker: { secretEnvironmentNames: [] },
-  codeReview: null,
+  codeReview: Option.none(),
   workspaces: {},
 } as unknown as Omit<EffectiveWorkflow, 'workflow' | 'loadedAt'>
 
@@ -112,7 +112,7 @@ const execution = {
   maxTurns: 1,
   stallTimeoutMs: 30_000,
   tracker: unusedPorts.tracker,
-  codeReview: null,
+  codeReview: Option.none(),
   workspaces: unusedPorts.workspaces,
 } as unknown as ExecutionSnapshot
 
@@ -146,7 +146,7 @@ const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
   execution,
   sessionPorts: MutableRef.make({
     tracker: execution.tracker,
-    codeReview: null,
+    codeReview: Option.none(),
     sourceControl: null,
   }),
   attempt: null,
