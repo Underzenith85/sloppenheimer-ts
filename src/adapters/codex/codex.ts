@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { FileSystem } from '@effect/platform'
 import * as NodeStream from '@effect/platform-node/NodeStream'
 import {
   Clock,
@@ -1416,14 +1417,19 @@ const rejectWorkspaceLaunch = (error: WorkspaceError): AgentError =>
 const runVerifiedAgent = (
   launch: AgentLaunch,
   verified: VerifiedWorkspace,
+  fileSystem: FileSystem.FileSystem,
 ): Effect.Effect<AgentResult, AgentError> => {
   /**
    * A path string is re-resolved by the kernel at every consumer, so the identity is re-bound at
    * each path-consuming boundary: after the process is created and before every turn. A directory
    * renamed and replaced by a symlink in between is rejected rather than followed.
+   *
+   * The filesystem is the one bound at launch rather than read from the calling fiber, so a rebind
+   * runs the same way from a forked reader as it does from the session's own fiber.
    */
   const rebind = (): Effect.Effect<void, AgentError> =>
     assertWorkspaceIdentity(launch.workspaceRoot, verified).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.mapError(rejectWorkspaceLaunch),
     )
 
@@ -1519,10 +1525,15 @@ const runVerifiedAgent = (
  * the verified directory's identity is re-bound after the process is created and before every
  * turn, so a stale, forged, or substituted workspace can never be entered.
  */
-export const runAgent = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
-  Effect.scoped(
-    openVerifiedWorkspace(launch.workspaceRoot, launch.workspace).pipe(
-      Effect.mapError(rejectWorkspaceLaunch),
-      Effect.flatMap((verified) => runVerifiedAgent(launch, verified)),
+export const runAgent = (
+  launch: AgentLaunch,
+): Effect.Effect<AgentResult, AgentError, FileSystem.FileSystem> =>
+  Effect.flatMap(FileSystem.FileSystem, (fileSystem) =>
+    Effect.scoped(
+      openVerifiedWorkspace(launch.workspaceRoot, launch.workspace).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.mapError(rejectWorkspaceLaunch),
+        Effect.flatMap((verified) => runVerifiedAgent(launch, verified, fileSystem)),
+      ),
     ),
   )

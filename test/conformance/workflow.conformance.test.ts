@@ -8,7 +8,13 @@ import { withEnvironment } from '../harness/environment.js'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
-import { loadWorkflow, renderPrompt } from '../../src/config/workflow.js'
+import { loadWorkflow, renderPrompt, type Workflow } from '../../src/config/workflow.js'
+import type { WorkflowError } from '../../src/errors.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** The workflow source is read through `FileSystem`; these tests read the files they wrote. */
+const loadHostWorkflow = (path: string): Effect.Effect<Workflow, WorkflowError> =>
+  loadWorkflow(path, trackerProviders).pipe(Effect.provide(hostFileSystem))
 
 const directories: string[] = []
 const writeWorkflow = async (source: string): Promise<string> => {
@@ -51,9 +57,7 @@ describe('Core Conformance workflow errors and strict parsing', (): void => {
     ],
   ] as const)('returns a typed error for %s', async (_name, source, category): Promise<void> => {
     const path = await writeWorkflow(source)
-    const error = await Effect.runPromise(
-      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
-    )
+    const error = await Effect.runPromise(Effect.flip(withEnvironment(loadHostWorkflow(path))))
     expect(error.category).toBe(category)
   })
 
@@ -76,7 +80,7 @@ codex:
 {{ issue.identifier }} {{ attempt }}
 `)
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' }),
     )
     expect(workflow.config.codex.command).toBe('printf "$UNCHANGED" | codex app-server')
     expect([...workflow.config.agent.maxConcurrentAgentsByState]).toEqual([['ready', 2]])
@@ -95,7 +99,7 @@ tracker:
 {{ unknown.value }}
 `)
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' }),
     )
     const error = await Effect.runPromise(Effect.flip(renderPrompt(workflow, issue, null)))
     expect(error.category).toBe('template_render_error')

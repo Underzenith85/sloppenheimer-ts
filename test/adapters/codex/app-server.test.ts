@@ -18,6 +18,11 @@ import { issueId, issueIdentifier, type Issue } from '../../../src/domain/domain
 import type { AgentError } from '../../../src/errors.js'
 import type { CodexConfig } from '../../../src/config/workflow.js'
 import { processIsAlive } from '../../harness/processes.js'
+import { hostFileSystem } from '../../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -97,7 +102,7 @@ const runScenario = async (
       events.push(event)
     },
   }
-  const exit = await Effect.runPromise(Effect.either(runAgent(launch)))
+  const exit = await Effect.runPromise(Effect.either(runAgentOnHost(launch)))
   return exit._tag === 'Right'
     ? { result: exit.right, error: null, events, path }
     : { result: null, error: exit.left, events, path }
@@ -569,7 +574,7 @@ describe('App Server timeouts and shutdown', (): void => {
     let refreshStarted = false
     let refreshReleased = false
     const fiber = Effect.runFork(
-      runAgent({
+      runAgentOnHost({
         issue,
         workspace: { path, key: 'issue-14', createdNow: false },
         workspaceRoot: root,
@@ -636,7 +641,7 @@ describe('App Server timeouts and shutdown', (): void => {
       stallTimeoutMs: 0,
     }
     const fiber = Effect.runFork(
-      runAgent({
+      runAgentOnHost({
         issue,
         workspace: { path, key: 'issue-14', createdNow: false },
         workspaceRoot: root,
