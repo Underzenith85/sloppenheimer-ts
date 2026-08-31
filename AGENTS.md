@@ -17,71 +17,48 @@ This convention is the architecture record for the boundary. Do not create a sep
 
 ## Process-tree liveness
 
-Accepted 2026-08-31, deciding [#158](https://github.com/Underzenith85/symphony-ts/issues/158):
-whether a signalled process tree still holds a process that can run is answered through a
-`ProcessSupervisor` port with two implementations — a cgroup v2 implementation that is exact, and
-the `/proc` scan that ships today, kept as the fallback with its residual accepted and bounded.
+Accepted 2026-08-31, closing [#158](https://github.com/Underzenith85/symphony-ts/issues/158): the
+`/proc` residual in `processGroupIsAlive` is accepted as it stands. No containment strategy is
+adopted, and `src/support/subprocess.ts` remains the record of how the probe behaves.
 
-The seam is at spawn, not at the liveness question. A cgroup is not a query but a container with a
-lifetime: it is created before the child is spawned, joined before the payload `exec`s, read while
-the tree runs, and removed with the tree. A port shaped as `isAlive(pid)` cannot express that
-without a hidden pid-to-path map fed by a side channel, so `ProcessSupervisor.supervise` returns a
-scoped `SupervisedProcess` that owns `isAlive`, `terminate` and its own removal. The `/proc`
-implementation's creation and removal steps are no-ops, and the three spawn sites stop hand-rolling
-`spawn(…, { detached: true })`.
+The bound being accepted: `processGroupIsAlive` reads the group's membership from `/proc`, and a
+dead verdict requires two consecutive passes that agree on the members they saw. The residual is a
+member that forks and then dies inside the window between a pass's listing and its reads, in both
+passes running, in a tree that has already been signalled to death. It is one-directional — the
+probe never reports a live tree dead through any other path, and it never reports unknown
+indefinitely, because passes that cannot agree within their bound read as alive and every caller
+re-probes on a poll. The consequence if it ever fired is workspace cleanup proceeding, or a hook's
+forceful escalation being cancelled, while a descendant still runs.
 
-The implementations do not carry the same guarantee, and the port states which one is in force
-rather than returning a bare boolean that erases the difference. The guarantee is a property of the
-selected implementation, read once at startup, written to the log and exposed to the operator — not
-a per-call flag that callers branch on.
+This is accepted rather than closed because the probe is strictly better than the signal probe it
+replaced, the failure needs a fork-and-die inside a roughly 2 ms window twice consecutively, and
+every remedy costs a host requirement Symphony does not otherwise have. Do not reopen this as a
+`/proc` refinement: requiring each pass to have read every process it listed was measured in #153
+and fails, because roughly a fifth of passes on a busy host see an unrelated process exit mid-pass,
+the passes never agree, and the escalation timer is never cleared.
 
-- `cgroup`: exact. The kernel maintains `cgroup.events`, and its `populated` key accounts for every
-  descendant, not only process-group members, so no fork can fall between two reads.
-- `proc`: sound against reporting a dead tree alive, with a bounded residual in the other
-  direction. A dead verdict requires two consecutive passes that agree on the members they saw; the
-  residual is a member that forks and then dies inside the window between a pass's listing and its
-  reads, in both passes running. It never reports unknown indefinitely — passes that cannot agree
-  within their bound read as alive, and every caller re-probes on a poll.
+If it is revisited, the direction is recorded in #158 and is not another probe. Preferred: a
+per-session transient systemd service (`systemd-run --pipe --wait --collect`), where
+`KillMode=control-group` means the unit going inactive already implies an emptied cgroup, so the
+question is removed rather than answered, and `RuntimeMaxSec` with `TimeoutStopSec` replaces the
+hand-rolled escalation. Second: a per-tree cgroup v2 cgroup read through `cgroup.events`, where a
+delegated writable subtree is available — an LXC system container with `Delegate=yes` supplies one,
+Docker does not without `--privileged` or a bind-mount recipe, and Kubernetes and Fargate cannot.
+Either way the seam belongs at spawn rather than at an `isAlive(pid)` probe, because a cgroup or a
+unit has a lifetime that a query signature cannot express.
 
-The invariant the tests pin in `cgroup` mode: a supervised tree whose cgroup reports `populated 0`
-holds no process, member or descendant, that can run. `proc` mode pins only the weaker contract —
-a tree that has emptied is eventually reported dead, and a tree with a running member is never
-reported dead in a single pass.
+Two strategies from #158 are rejected outright. Stopping the group with `SIGSTOP` and `SIGCONT`
+turns a read into a mutation at poll cadence, a crash between the two strands a stopped tree that no
+longer answers `SIGTERM`, and it does not close the window anyway: a member mid-`fork` when the group
+stop is delivered produces a child that was never a member at signal time and starts with an empty
+pending set. The netlink proc connector needs elevated privileges, drops messages under load —
+unsound exactly when the host is busy — and supplies events from which membership must be
+reconstructed, with a race at subscribe time.
 
-Host requirements for `cgroup` mode, all of which must hold or the implementation is not selectable:
-
-- The host runs the cgroup v2 unified hierarchy. A v1 or hybrid hierarchy has no `cgroup.events`,
-  and its analogue is host-global and root-only.
-- Symphony holds a delegated, writable cgroup subtree. The supported production shape is a systemd
-  unit inside an LXC system container with `Delegate=yes`, which leaves `cgroup.subtree_control` and
-  everything below the delegation point to the service and, with `User=`, chowns the subtree so an
-  unprivileged process can create children below it.
-- Only bare child cgroups are created and no controller is enabled in Symphony's own
-  `cgroup.subtree_control`. Controller delegation is the part of cgroup v2 that is unreliable in
-  unprivileged containers, and reading `populated` needs none of it. Enabling one would also put
-  Symphony's own processes in conflict with the no-internal-processes rule.
-- Docker is not a default target for this mode: it mounts `/sys/fs/cgroup` read-only, and making it
-  writable costs either `--privileged` or `CAP_SYS_ADMIN`, neither acceptable for a process that
-  runs agent-authored hook scripts. A documented `--cgroup-parent` plus a read-write bind mount of
-  that subtree is the only supported Docker recipe. Kubernetes, ECS and Fargate expose no
-  per-workload delegation and are `proc` hosts.
-
-Selection is `auto`, `cgroup` or `proc`, and is pinnable rather than only detected. A deployment
-that pins `cgroup` fails fast at startup when the capability probe does not pass, so losing
-`Delegate=yes` from a unit or landing on a hybrid hierarchy is a refusal to start rather than a
-silent downgrade of the guarantee. `auto` prefers `cgroup` and is what development hosts and macOS
-run.
-
-Two strategies considered in #158 are rejected and should not be reintroduced behind this port.
-Stopping the group with `SIGSTOP` and `SIGCONT` turns a read into a mutation at poll cadence, a
-crash between the two strands a stopped tree that no longer answers `SIGTERM`, and it does not even
-close the window: a member mid-`fork` when the group stop is delivered produces a child that was
-never a member at signal time and starts with an empty pending set. The netlink proc connector needs
-elevated privileges, drops messages under load — unsound exactly when the host is busy — and
-supplies fork and exit events from which membership must be reconstructed, with a race at subscribe
-time. The port takes two implementations, not four.
-
-`docs/process-liveness-plan.md` carries the implementation plan and is removed when #158 lands.
+Independent of all of the above, workspace removal is worth making safe against a straggler rather
+than dependent on the verdict: rename the workspace to a sibling trash path before deleting it, so
+the canonical path is free for reuse immediately and a surviving process cannot corrupt the next
+attempt. That would make this residual cost disk rather than correctness.
 
 ## Repository structure
 
