@@ -234,6 +234,138 @@
           }
         ]
       }
+    },
+
+    // Module and function size limits (#211).
+    //
+    // 100 lines per function rather than ESLint's 50: an `Effect.gen` pipeline is vertically
+    // expensive, because each `Effect.matchEffect` branch costs six to eight lines of structure
+    // around one decision.  A 50-line bar flags idiomatic Effect code that is not complex; 100
+    // catches the real outliers without fighting the idiom.
+    //
+    // Scoped to source rather than to the repository, because `max-lines-per-function` counts a
+    // `describe` callback as a function, and applying it to `test/` would flag suite structure
+    // instead of complexity.
+    {
+      "files": ["src/**", "packages/*/src/**"],
+      "rules": {
+        "max-lines": ["error", { "max": 500, "skipBlankLines": false, "skipComments": false }],
+        "max-lines-per-function": [
+          "error",
+          { "max": 100, "skipBlankLines": false, "skipComments": false }
+        ]
+      }
+    },
+
+    // Burn-down.  Each entry below is removed by the issue named beside it, which brings that file
+    // under the bar by extraction.  The rule is on today and the remaining work is visible, rather
+    // than deferred behind a threshold raised to accommodate the worst file.  Do not add an entry
+    // for new code: a module written after #211 is expected to comply.
+    {
+      // #224 — the Codex adapter: the file, `handleNotification`, the client constructor, and
+      // `runVerifiedAgent`.
+      "files": ["packages/adapter-codex/src/codex.ts"],
+      "rules": {
+        "max-lines": "off",
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #224 — `makeGitHubPullRequestMonitor` and the inline `inspect` it holds.
+      "files": ["packages/adapter-github/src/pull-requests.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #224 — the Git source-control adapter.
+      "files": ["packages/adapter-node/src/source-control.ts"],
+      "rules": {
+        "max-lines": "off"
+      }
+    },
+    {
+      // #224 — `runHookProcess`.
+      "files": ["packages/adapter-node/src/workspace-hooks.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #225 — the telemetry record and `recordAgentEvent`.  #98 places this module in a layer;
+      // the two are the same module and should be taken together.
+      "files": ["packages/core/src/telemetry.ts"],
+      "rules": {
+        "max-lines": "off",
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #227 — the file, `eventLoop`, and `poll`.  `eventLoop` is the same shape of work #211 did
+      // on the factory: one function holding a branch per mailbox event.
+      "files": ["packages/core/src/core/polling.ts"],
+      "rules": {
+        "max-lines": "off",
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #227 — a flat list of pure transitions, so the file limit is a grouping question.
+      "files": ["packages/core/src/core/transitions.ts"],
+      "rules": {
+        "max-lines": "off"
+      }
+    },
+    {
+      // #227 — `dispatch`.
+      "files": ["packages/core/src/core/dispatch.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #227 — `perform`.
+      "files": ["packages/core/src/core/handoff-reconciliation.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #227 — `createSnapshot`.
+      "files": ["packages/core/src/core/snapshot.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #227 — the workflow-definition loader at the composition root.
+      "files": ["src/config/workflow.ts"],
+      "rules": {
+        "max-lines": "off"
+      }
+    },
+    {
+      // #226 — the file and the detail projection.
+      "files": ["src/operator/api.ts"],
+      "rules": {
+        "max-lines": "off",
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #226 — `makeRouter`.
+      "files": ["src/operator/server.ts"],
+      "rules": {
+        "max-lines-per-function": "off"
+      }
+    },
+    {
+      // #226 — the console's browser sources.  Splitting one of these means splitting a classic
+      // script that shares a global scope with its siblings, not extracting a module.
+      "files": ["src/operator/ui/app.ts", "src/operator/ui/detail.ts", "src/operator/ui/model.ts"],
+      "rules": {
+        "max-lines": "off"
+      }
     }
   ]
 }

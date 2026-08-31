@@ -389,3 +389,22 @@ export const adoptPorts = (
     ),
     Effect.zipRight(drainRetirements(context)),
   )
+
+/**
+ * Rebuilds every port against a workflow the orchestrator has adopted, holding whatever the
+ * rebuild displaced for the drain that retires it.
+ */
+export const makeEffectiveWorkflow = (
+  context: OrchestratorContext,
+  workflow: Workflow,
+): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
+  rebuildEffectiveWorkflow(context.ports, workflow).pipe(
+    // Recorded before the outcome is raised: a rebuild that refused partway through has still
+    // displaced whatever the cells it did reach were holding.
+    Effect.tap((rebuilt) =>
+      Ref.update(context.state, (current) =>
+        Transitions.holdRetirements(current, rebuilt.retirements),
+      ),
+    ),
+    Effect.flatMap((rebuilt) => rebuilt.value),
+  )
