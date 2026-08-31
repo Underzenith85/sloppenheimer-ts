@@ -1,3 +1,4 @@
+import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
@@ -9,12 +10,13 @@ import type {
 import {
   afterMerge,
   afterRepairDispatched,
+  attributeRepairHead,
   afterReviewRequested,
   afterThreadsResolved,
   observeHandoff,
   repairLimit,
 } from '../../src/core/handoff-decision.js'
-import type { ExecutionSnapshot, HandoffEntry } from '../../src/core/state.js'
+import type { ExecutionSnapshot, HandoffEntry, RepairEntry } from '../../src/core/state.js'
 
 /**
  * Handoff reconciliation, exercised as what it is: a function from one observation of a pull
@@ -45,6 +47,17 @@ const issue: Issue = {
 /** Never called: the decision is pure, so the ports only have to be of the right shape. */
 const execution = { codeReview: {}, workflow: {} } as unknown as ExecutionSnapshot
 
+/**
+ * A repair that owns `startedHeadSha`. `workerStarted` false is a dispatch refused before launch,
+ * and `inFlight` false is a baseline nothing is driving any more -- restored from the store, or
+ * left by a settled cancellation.
+ */
+const repairing = (
+  startedHeadSha: string,
+  overrides: Partial<RepairEntry> = {},
+): Option.Option<RepairEntry> =>
+  Option.some({ issue, startedHeadSha, inFlight: true, workerStarted: true, ...overrides })
+
 const handoff = (overrides: Partial<HandoffEntry> = {}): HandoffEntry => ({
   issue,
   execution,
@@ -56,8 +69,7 @@ const handoff = (overrides: Partial<HandoffEntry> = {}): HandoffEntry => ({
   reason: null,
   repairHeadShas: [],
   repairObservedHeadShas: [],
-  repairStartedHeadSha: null,
-  repairBaselineRestored: false,
+  repair: Option.none(),
   reviewRequestedHeadSha: null,
   reviewCompletedHeadSha: null,
   observedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -244,7 +256,7 @@ describe('dispositions', (): void => {
 
 describe('repair attribution', (): void => {
   const dispatched = handoff({
-    repairStartedHeadSha: 'head-0',
+    repair: repairing('head-0'),
     repairObservedHeadShas: ['head-0'],
     reviewRequestedHeadSha: 'head-1',
     reviewCompletedHeadSha: 'head-1',
@@ -255,12 +267,12 @@ describe('repair attribution', (): void => {
 
     expect(decision.handoff.repairHeadShas).toEqual(['head-1'])
     expect(decision.handoff.repairObservedHeadShas).toEqual(['head-0', 'head-1'])
-    expect(decision.handoff.repairStartedHeadSha).toBeNull()
+    expect(Option.isNone(decision.handoff.repair)).toBe(true)
   })
 
   it('escalates when a repair returns the pull request to a head already seen', (): void => {
     const cycling = handoff({
-      repairStartedHeadSha: 'head-0',
+      repair: repairing('head-0'),
       repairObservedHeadShas: ['head-0', 'head-1'],
     })
 
@@ -275,7 +287,7 @@ describe('repair attribution', (): void => {
 
   it('escalates when a repair changed nothing and the head still needs one', (): void => {
     const unchanged = handoff({
-      repairStartedHeadSha: 'head-1',
+      repair: repairing('head-1'),
       repairObservedHeadShas: ['head-1'],
     })
 
@@ -295,9 +307,8 @@ describe('repair attribution', (): void => {
 
   it('treats an unchanged head from a restored baseline as an interrupted repair', (): void => {
     const restored = handoff({
-      repairStartedHeadSha: 'head-1',
+      repair: repairing('head-1', { inFlight: false }),
       repairObservedHeadShas: ['head-1'],
-      repairBaselineRestored: true,
       reviewRequestedHeadSha: 'head-1',
       reviewCompletedHeadSha: 'head-1',
     })
@@ -313,20 +324,100 @@ describe('repair attribution', (): void => {
 
     // The budget is untouched, and the normal repair path gets to try again.
     expect(decision.handoff.repairHeadShas).toEqual([])
-    expect(decision.handoff.repairBaselineRestored).toBe(false)
+    expect(Option.isNone(decision.handoff.repair)).toBe(true)
     expect(decision.action).toMatchObject({ _tag: 'Repair', attempt: 1 })
   })
 
-  it('records the baseline only once a repair session really started', (): void => {
+  it('spends one of the budget for a head a repair produced', (): void => {
+    const before = handoff({
+      repair: repairing('head-0'),
+      repairHeadShas: [],
+      repairObservedHeadShas: ['head-0'],
+    })
+
+    const attribution = attributeRepairHead(before, 'head-1')
+
+    expect(attribution._tag).toBe('Attributed')
+    expect(attribution.handoff.repairHeadShas).toEqual(['head-1'])
+    expect(attribution.handoff.repairObservedHeadShas).toEqual(['head-0', 'head-1'])
+    // The head is accounted for, so the repair that produced it is over.
+    expect(Option.isNone(attribution.handoff.repair)).toBe(true)
+  })
+
+  it('escalates rather than spending the budget when a head has been seen before', (): void => {
+    const before = handoff({
+      repair: repairing('head-0'),
+      repairHeadShas: [],
+      repairObservedHeadShas: ['head-0', 'head-1'],
+    })
+
+    const attribution = attributeRepairHead(before, 'head-1')
+
+    expect(attribution._tag).toBe('Cycled')
+    expect(attribution.handoff.state).toBe('intervention_required')
+    expect(attribution.handoff.headSha).toBe('head-1')
+    expect(attribution.handoff.reason).toBe(
+      'Repair agent returned the pull request to an already observed repair head.',
+    )
+    // No further repair can improve on a head already seen, so nothing is spent on this one.
+    expect(attribution.handoff.repairHeadShas).toEqual([])
+    expect(Option.isNone(attribution.handoff.repair)).toBe(true)
+  })
+
+  it('keeps the baseline for a refused dispatch, without spending the budget', (): void => {
     const before = handoff({ repairObservedHeadShas: [] })
+    const dispatchIssue = { ...issue, description: 'repair me' }
 
-    const refused = afterRepairDispatched(before, false, 'head-1', 'because')
-    const started = afterRepairDispatched(before, true, 'head-1', 'because')
+    const refused = afterRepairDispatched(before, false, dispatchIssue, 'head-1', 'because')
+    const started = afterRepairDispatched(before, true, dispatchIssue, 'head-1', 'because')
 
-    expect(refused).toBe(before)
-    expect(started.repairStartedHeadSha).toBe('head-1')
+    // The retry has to render the same repair, so the identity outlives the refusal; the budget is
+    // spent by an observed head, which is why neither of these touches repairHeadShas.
+    expect(refused.repair).toEqual(
+      Option.some({
+        issue: dispatchIssue,
+        startedHeadSha: 'head-1',
+        inFlight: true,
+        workerStarted: false,
+      }),
+    )
+    expect(refused.repairHeadShas).toEqual([])
+    expect(refused.reason).toBe('Repair agent waiting to retry. because')
+
+    expect(started.repair).toEqual(
+      Option.some({
+        issue: dispatchIssue,
+        startedHeadSha: 'head-1',
+        inFlight: true,
+        workerStarted: true,
+      }),
+    )
     expect(started.repairObservedHeadShas).toEqual(['head-1'])
     expect(started.reason).toBe('Repair agent running. because')
+  })
+
+  it('does not attribute a head to a restored repair whose worker never started', (): void => {
+    // A dispatch refused before any worker started, whose queued retry did not outlive the
+    // process. The head moved while nothing was running, so it belongs to nobody.
+    const refused = handoff({
+      repair: repairing('head-0', { inFlight: false, workerStarted: false }),
+      repairObservedHeadShas: ['head-0'],
+      reviewRequestedHeadSha: 'head-1',
+      reviewCompletedHeadSha: 'head-1',
+    })
+
+    const decision = observeHandoff(
+      refused,
+      open({
+        codexReview: reviewed,
+        checks: [{ name: 'quality', status: 'completed', conclusion: 'failure', url: null }],
+      }),
+      observedAt,
+    )
+
+    expect(decision.handoff.repairHeadShas).toEqual([])
+    expect(Option.isNone(decision.handoff.repair)).toBe(true)
+    expect(decision.action).toMatchObject({ _tag: 'Repair', attempt: 1 })
   })
 })
 

@@ -158,6 +158,34 @@ export type RetryEntry = Readonly<{
   fiber: Fiber.Fiber<void>
 }>
 
+/**
+ * A repair that owns a pull request head, from the decision to repair until the head it produced
+ * has been attributed. It outlives a refused dispatch and the retry that follows one, so the
+ * retry renders the same repair rather than the bare tracker issue.
+ */
+export type RepairEntry = Readonly<{
+  /** The repair-shaped issue, retained so a refused dispatch can render the same repair on retry. */
+  issue: Issue
+  /** Pull-request head this repair was started from. */
+  startedHeadSha: string
+  /** False once nothing continues this repair: a restored baseline, or a settled cancellation. */
+  inFlight: boolean
+  /** Whether a worker actually started, as opposed to a dispatch refused before launch. */
+  workerStarted: boolean
+}>
+
+/**
+ * What a cancelled run does with the repair identity it was carrying.
+ *
+ * - `release`: the repair is over, so the identity goes with it.
+ * - `retain`: leave the identity exactly as it stands, because something else still resolves it --
+ *   a retry that continues this repair, or the next pull-request inspection, which is what reaches
+ *   the verdict on a repair that changed nothing.
+ * - `settle`: nothing continues it, but the worker may have pushed before it was cancelled, so the
+ *   baseline outlives it for exactly one handoff inspection to attribute that head.
+ */
+export type RepairDisposition = 'release' | 'retain' | 'settle'
+
 export type HandoffEntry = Readonly<{
   issue: Issue
   execution: ExecutionSnapshot
@@ -175,14 +203,8 @@ export type HandoffEntry = Readonly<{
    * repair started from.
    */
   repairObservedHeadShas: readonly string[]
-  /** Head observed when the in-flight repair was dispatched, or null when no repair is running. */
-  repairStartedHeadSha: string | null
-  /**
-   * Whether repairStartedHeadSha came back from the store rather than from a dispatch in this
-   * process. Not persisted: a restored baseline proves a repair started, never that it finished,
-   * so an unchanged head means the repair was interrupted rather than a no-op.
-   */
-  repairBaselineRestored: boolean
+  /** The repair currently running or waiting to retry; None for ordinary worker continuations. */
+  repair: Option.Option<RepairEntry>
   reviewRequestedHeadSha: string | null
   reviewCompletedHeadSha: string | null
   observedAt: Date

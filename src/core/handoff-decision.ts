@@ -2,7 +2,7 @@ import { Option } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import { classifyPullRequest, type PullRequestObservation } from '../domain/handoff.js'
-import type { HandoffEntry } from './state.js'
+import type { HandoffEntry, RepairEntry } from './state.js'
 
 /** An observation of a pull request that is still open, and so has a head to reason about. */
 type OpenPullRequest = Extract<PullRequestObservation, Readonly<{ state: 'open' }>>
@@ -70,54 +70,92 @@ const repairedHeadIsVerified = (
  * Returns the handoff to carry forward, or a decision when the observation is conclusive on its
  * own — a repair that cycled back to a head already seen, or one that changed nothing.
  */
+/**
+ * What a head a repair produced does to that repair's accounting.
+ *
+ * `Cycled` is a repair that returned the pull request to a head already seen, which no further
+ * repair can improve on; `Attributed` spends one of the budget and adds the head to the set cycle
+ * detection reads. Both end the repair, so both release its identity.
+ */
+export type RepairAttribution =
+  | Readonly<{ _tag: 'Attributed'; handoff: HandoffEntry }>
+  | Readonly<{ _tag: 'Cycled'; handoff: HandoffEntry }>
+
+/**
+ * Records a head as a repair's output. Stated once because two paths attribute heads -- the
+ * reconciliation pass, and a queued repair retry settling the attempt that queued it -- and they
+ * have to spend the budget and populate the cycle set identically or the accounting drifts.
+ *
+ * The caller decides whether the head is this repair's output at all; this decides what that
+ * costs.
+ */
+export const attributeRepairHead = (
+  handoff: HandoffEntry,
+  observedHeadSha: string,
+): RepairAttribution =>
+  handoff.repairObservedHeadShas.includes(observedHeadSha)
+    ? {
+        _tag: 'Cycled',
+        handoff: {
+          ...releaseRepair(handoff),
+          state: 'intervention_required',
+          headSha: observedHeadSha,
+          reason: 'Repair agent returned the pull request to an already observed repair head.',
+        },
+      }
+    : {
+        _tag: 'Attributed',
+        handoff: {
+          ...releaseRepair(handoff),
+          repairHeadShas: [...handoff.repairHeadShas, observedHeadSha],
+          repairObservedHeadShas: [...handoff.repairObservedHeadShas, observedHeadSha],
+        },
+      }
+
 const attributeRepair = (
   handoff: HandoffEntry,
   observation: OpenPullRequest,
+  repair: RepairEntry,
 ): HandoffEntry | HandoffDecision => {
   const repairedHeadSha = observation.headSha
-  if (repairedHeadSha !== handoff.repairStartedHeadSha) {
-    if (handoff.repairObservedHeadShas.includes(repairedHeadSha)) {
-      return decided({
-        ...handoff,
-        repairStartedHeadSha: null,
-        repairBaselineRestored: false,
-        state: 'intervention_required',
-        headSha: repairedHeadSha,
-        reason: 'Repair agent returned the pull request to an already observed repair head.',
-      })
-    }
-    return {
-      ...handoff,
-      repairHeadShas: [...handoff.repairHeadShas, repairedHeadSha],
-      repairObservedHeadShas: [...handoff.repairObservedHeadShas, repairedHeadSha],
-      repairStartedHeadSha: null,
-      repairBaselineRestored: false,
-    }
+  const released = releaseRepair(handoff)
+  if (!repair.inFlight && !repair.workerStarted) {
+    // A dispatch refused before any worker started, whose queued retry did not outlive the process
+    // that held it. Nothing ran, so whatever the head is now belongs to nobody: drop the identity
+    // and let this same pass decide the repair again from scratch.
+    return released
   }
-  if (handoff.repairBaselineRestored) {
-    // The baseline outlived the process that dispatched the repair, so an unchanged head is an
-    // interrupted repair, not a completed no-op. Drop the baseline and let the normal repair path
-    // retry; no head was observed, so the budget is untouched.
-    return { ...handoff, repairStartedHeadSha: null, repairBaselineRestored: false }
+  if (repairedHeadSha !== repair.startedHeadSha) {
+    const attribution = attributeRepairHead(handoff, repairedHeadSha)
+    return attribution._tag === 'Cycled' ? decided(attribution.handoff) : attribution.handoff
+  }
+  if (!repair.inFlight) {
+    // The baseline outlived whatever was driving the repair, so an unchanged head is an interrupted
+    // repair, not a completed no-op. Drop the baseline and let the normal repair path retry; no
+    // head was observed, so the budget is untouched.
+    return released
   }
   const unchanged = classifyPullRequest(observation)
-  const cleared: HandoffEntry = { ...handoff, repairStartedHeadSha: null }
   if (unchanged.state === 'repair_needed') {
     return decided({
-      ...cleared,
+      ...released,
       state: 'intervention_required',
       headSha: repairedHeadSha,
       reason: `Repair agent completed without changing the pull request head. ${unchanged.reason}`,
     })
   }
-  return cleared
+  return released
 }
 
 /**
  * The review gate for an open pull request: every head is reviewed once, and nothing is merged
  * until the review for the head in hand has completed and settled.
+ *
+ * Exported because a repair is gated on it too. A head that has not been reviewed yet has no
+ * review feedback to repair against, so repairing it would spend one of the budget on a guess.
+ * `None` means the head is settled and the disposition decides what happens to it.
  */
-const gateReview = (
+export const gateReview = (
   handoff: HandoffEntry,
   observation: OpenPullRequest,
 ): Option.Option<HandoffDecision> => {
@@ -210,8 +248,9 @@ export const observeHandoff = (
     return decided(observed)
   }
   let next = observed
-  if (observation.state === 'open' && next.repairStartedHeadSha !== null) {
-    const attributed = attributeRepair(next, observation)
+  const inFlightRepair = next.repair
+  if (observation.state === 'open' && Option.isSome(inFlightRepair)) {
+    const attributed = attributeRepair(next, observation, inFlightRepair.value)
     if ('action' in attributed) {
       return attributed
     }
@@ -312,14 +351,21 @@ export const afterMerge = (handoff: HandoffEntry, failure: string | null): Hando
     ? { ...handoff, state: 'merged' }
     : { ...handoff, state: 'awaiting_checks', reason: failure }
 
-/** The issue a repair agent is dispatched against: the original, plus what it has to fix. */
+/**
+ * The issue a repair agent is dispatched against: a tracker record, plus what it has to fix.
+ *
+ * The record is passed in rather than read from the handoff, because a queued retry has refetched
+ * the issue since the handoff stored it. Dispatching the stale one would hand the worker stale
+ * fields and bucket the run by a state the issue has left, which is how admission counts it.
+ */
 export const repairIssue = (
   handoff: HandoffEntry,
+  issue: Issue,
   headSha: string | null,
   reason: string,
 ): Issue => ({
-  ...handoff.issue,
-  description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${headSha}\n\n${reason}`,
+  ...issue,
+  description: `${issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${headSha}\n\n${reason}`,
 })
 
 export const awaitingSlot = (handoff: HandoffEntry, reason: string): HandoffEntry => ({
@@ -328,24 +374,42 @@ export const awaitingSlot = (handoff: HandoffEntry, reason: string): HandoffEntr
 })
 
 /**
- * The budget is spent by an observed head, not by dispatching: the baseline is recorded only once a
- * session really started, so a refused dispatch costs nothing.
+ * A repair owns its baseline from the decision to repair, including a dispatch that was refused and
+ * the retry that follows it: the retry has to render the same repair rather than the bare tracker
+ * issue. The budget is still spent only by an observed new head, never by dispatching.
  */
 export const afterRepairDispatched = (
   handoff: HandoffEntry,
   started: boolean,
-  headSha: string | null,
+  issue: Issue,
+  headSha: string,
   reason: string,
-): HandoffEntry =>
-  started
-    ? {
-        ...handoff,
-        repairStartedHeadSha: headSha,
-        repairObservedHeadShas:
-          headSha === null || handoff.repairObservedHeadShas.includes(headSha)
-            ? handoff.repairObservedHeadShas
-            : [...handoff.repairObservedHeadShas, headSha],
-        repairBaselineRestored: false,
-        reason: `Repair agent running. ${reason}`,
-      }
-    : handoff
+): HandoffEntry => ({
+  ...handoff,
+  repair: Option.some({ issue, startedHeadSha: headSha, inFlight: true, workerStarted: started }),
+  repairObservedHeadShas: handoff.repairObservedHeadShas.includes(headSha)
+    ? handoff.repairObservedHeadShas
+    : [...handoff.repairObservedHeadShas, headSha],
+  reason: started ? `Repair agent running. ${reason}` : `Repair agent waiting to retry. ${reason}`,
+})
+
+/**
+ * Keeps a repair's baseline across an interruption that is not the repair ending.
+ *
+ * A worker that started may have pushed immediately before it stopped, and this baseline is the
+ * only thing that can attribute that head to the repair rather than to nobody; the next handoff
+ * inspection attributes it and drops the baseline. A dispatch refused before any worker started
+ * produced nothing, so it has no output to keep.
+ */
+export const settleRepair = (handoff: HandoffEntry): HandoffEntry =>
+  Option.match(handoff.repair, {
+    onNone: () => handoff,
+    onSome: (repair) => ({
+      ...handoff,
+      repair: repair.workerStarted ? Option.some({ ...repair, inFlight: false }) : Option.none(),
+    }),
+  })
+
+/** The repair is over: whatever it was carrying goes with it. */
+export const releaseRepair = (handoff: HandoffEntry): HandoffEntry =>
+  Option.isNone(handoff.repair) ? handoff : { ...handoff, repair: Option.none() }

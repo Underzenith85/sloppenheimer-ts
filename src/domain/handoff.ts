@@ -140,6 +140,13 @@ export type HandoffSnapshot = Readonly<{
   /** Every head this handoff has been observed at, including repair baselines. */
   repairObservedHeadShas?: readonly string[]
   repairStartedHeadSha?: string | null
+  /**
+   * Whether a worker actually started from `repairStartedHeadSha`. A dispatch refused before any
+   * worker launched keeps its baseline while its retry is queued, and a head that changes in the
+   * meantime is nobody's output. Absent in snapshots written before this was recorded, which only
+   * ever persisted a baseline once a worker had started.
+   */
+  repairWorkerStarted?: boolean
   reviewRequestedHeadSha?: string | null
   reviewCompletedHeadSha?: string | null
   observedAt: string

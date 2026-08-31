@@ -41,12 +41,14 @@ import {
   sessionLogContext,
   stateIsIn,
 } from './policy.js'
+import { releaseRepair, settleRepair } from './handoff-decision.js'
 import { agentRetryDelay, trackerRetryDelay } from './retry.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 import {
   initialState,
   type EffectiveWorkflow,
   type HandoffEntry,
+  type RepairDisposition,
   type RunningEntry,
   type RuntimePorts,
   type RuntimeState,
@@ -259,7 +261,7 @@ export type OrchestratorContext = Readonly<{
     error: string | null,
     continuation: boolean,
     trackerError?: TrackerError,
-  ) => Effect.Effect<void, never, Scope.Scope>
+  ) => Effect.Effect<boolean, never, Scope.Scope>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
   cancelRunning: (
@@ -582,8 +584,17 @@ export const startOrchestratorRuntime = (
             ],
             // Preserved rather than cleared: a repair may have pushed a new head just before the
             // restart, and the first observation after recovery needs this baseline to attribute it.
-            repairStartedHeadSha: restored.repairStartedHeadSha ?? null,
-            repairBaselineRestored: (restored.repairStartedHeadSha ?? null) !== null,
+            repair:
+              restored.repairStartedHeadSha === undefined || restored.repairStartedHeadSha === null
+                ? Option.none()
+                : Option.some({
+                    issue,
+                    startedHeadSha: restored.repairStartedHeadSha,
+                    inFlight: false,
+                    // Snapshots written before the flag existed recorded a baseline only once a
+                    // worker had started, so their absence is a started worker.
+                    workerStarted: restored.repairWorkerStarted ?? true,
+                  }),
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
@@ -725,8 +736,7 @@ export const startOrchestratorRuntime = (
             reason: 'reason' in disposition ? disposition.reason : null,
             repairHeadShas: [],
             repairObservedHeadShas: [],
-            repairStartedHeadSha: null,
-            repairBaselineRestored: false,
+            repair: Option.none(),
             reviewRequestedHeadSha: null,
             reviewCompletedHeadSha: null,
             observedAt,
@@ -810,6 +820,7 @@ export const startOrchestratorRuntime = (
       id: IssueId,
       cleanupWorkspace: boolean,
       reason = 'the orchestrator cancelled the run',
+      repairDisposition: RepairDisposition = 'release',
     ): Effect.Effect<Option.Option<RunningEntry>> =>
       Effect.gen(function* () {
         const before = yield* Ref.get(state)
@@ -842,13 +853,28 @@ export const startOrchestratorRuntime = (
         yield* Ref.update(state, (current) => {
           const [, ended] = Transitions.endRun(current, id, null)
           const accounted = Transitions.accountEndedRun(ended, settled, endedAt.getTime())
+          const handoff = accounted.handoffs.get(id)
+          // `retain` leaves the identity for the retry that continues this repair; `settle` keeps
+          // the baseline with nothing behind it, so one inspection can still attribute a head the
+          // worker pushed before it stopped; `release` ends the repair outright.
+          const disposed =
+            handoff === undefined || repairDisposition === 'retain'
+              ? accounted
+              : Transitions.putHandoff(
+                  accounted,
+                  id,
+                  repairDisposition === 'release' ? releaseRepair(handoff) : settleRepair(handoff),
+                )
           return Transitions.releaseClaim(
-            Transitions.updateDetail(accounted, id, (record) =>
+            Transitions.updateDetail(disposed, id, (record) =>
               recordCancellation(record, endedAt, reason),
             ),
             id,
           )
         })
+        if (repairDisposition !== 'retain') {
+          yield* persistHandoffs
+        }
         if (settled.sessionId !== null) {
           yield* logInfo('action=session outcome=cancelled', {
             ...sessionLogContext(settled),
@@ -906,7 +932,7 @@ export const startOrchestratorRuntime = (
       error: string | null,
       continuation: boolean,
       trackerError?: TrackerError,
-    ): Effect.Effect<void, never, Scope.Scope> =>
+    ): Effect.Effect<boolean, never, Scope.Scope> =>
       Effect.gen(function* () {
         const current = yield* Ref.get(state)
         const maximumMs = current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs
@@ -933,7 +959,7 @@ export const startOrchestratorRuntime = (
             attempt,
             error,
           })
-          return
+          return false
         }
         const delay = delayOption.value
         const dueAt = Date.now() + delay
@@ -964,6 +990,7 @@ export const startOrchestratorRuntime = (
           due_at: new Date(dueAt).toISOString(),
           error,
         })
+        return true
       })
 
     const noteHandoffOutcome = (
@@ -1005,6 +1032,8 @@ export const startOrchestratorRuntime = (
             id,
             false,
             `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
+            // The retry scheduled just below continues this repair from the same baseline.
+            'retain',
           )
           if (Option.isSome(ended)) {
             yield* scheduleRetry(
@@ -1039,7 +1068,9 @@ export const startOrchestratorRuntime = (
         }
         const issue = refreshResult.issues.find((candidate) => candidate.id === id)
         if (issue === undefined) {
-          yield* cancelRunning(id, false, 'the tracker no longer reports the issue')
+          // The handoff outlives the issue the tracker stopped reporting, so a head this worker
+          // pushed is still the repair's to account for on the next inspection.
+          yield* cancelRunning(id, false, 'the tracker no longer reports the issue', 'settle')
           continue
         }
         const terminal = stateIsIn(issue.state, execution.terminalStates)
@@ -1050,6 +1081,11 @@ export const startOrchestratorRuntime = (
             terminal
               ? `the issue reached the terminal state ${issue.state}`
               : `the issue left its active states as ${issue.state}`,
+            // A worker may have pushed immediately before its issue stopped qualifying, and
+            // nothing continues it: keep the baseline for one inspection so that head is
+            // attributed. A terminal issue keeps its baseline untouched, so the next inspection
+            // still reaches the verdict for a repair that changed nothing.
+            terminal ? 'retain' : 'settle',
           )
         } else {
           yield* Ref.update(state, (current) =>

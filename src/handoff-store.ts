@@ -37,6 +37,7 @@ const handoffSnapshot = Schema.Struct({
   repairHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
   repairObservedHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
   repairStartedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  repairWorkerStarted: Schema.optionalWith(Schema.Boolean, { exact: true }),
   reviewRequestedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
   reviewCompletedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
   observedAt,

@@ -1,12 +1,17 @@
 import { Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
 
 import { cyclicIssueIdentifiers } from '../domain/dependencies.js'
-import type { Issue } from '../domain/domain.js'
+import type { Issue, IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
 import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetry.js'
 import { dispatch } from './dispatch.js'
-import { reconcileHandoffs } from './handoff-reconciliation.js'
+import { releaseRepair, settleRepair } from './handoff-decision.js'
+import {
+  applyHandoffObservation,
+  reconcileHandoffs,
+  repairPermission,
+} from './handoff-reconciliation.js'
 import {
   dispatchAdmission,
   hasSlot,
@@ -19,12 +24,35 @@ import {
   stateIsIn,
 } from './policy.js'
 import type { OrchestratorContext } from './runtime.js'
+import type { HandoffEntry } from './state.js'
 import * as Transitions from './transitions.js'
 import {
   drainRetirements,
   installEffectiveWorkflow,
   revalidateCredentials,
 } from './workflow-reload.js'
+
+/** One handoff write, in the shape every repair-identity change in this module needs. */
+const writeHandoff = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+): Effect.Effect<void> =>
+  Ref.update(context.state, (current) => Transitions.putHandoff(current, id, handoff)).pipe(
+    Effect.zipRight(context.persistHandoffs),
+  )
+
+/** Ends a repair: whatever identity it was carrying goes with it. */
+const releaseHandoffRepair = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: Option.Option<HandoffEntry>,
+): Effect.Effect<void> =>
+  Option.match(handoff, {
+    onNone: () => Effect.void,
+    onSome: (entry) =>
+      Option.isNone(entry.repair) ? Effect.void : writeHandoff(context, id, releaseRepair(entry)),
+  })
 
 export const poll = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
@@ -350,8 +378,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               reason: 'Awaiting the first protected-branch observation',
               repairHeadShas: existing?.repairHeadShas ?? [],
               repairObservedHeadShas: existing?.repairObservedHeadShas ?? [],
-              repairStartedHeadSha: existing?.repairStartedHeadSha ?? null,
-              repairBaselineRestored: existing?.repairBaselineRestored ?? false,
+              repair: existing === undefined ? Option.none() : existing.repair,
               reviewRequestedHeadSha: existing?.reviewRequestedHeadSha ?? null,
               reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
               observedAt: handedOffAt,
@@ -377,34 +404,105 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           }
           const current = yield* Ref.get(context.state)
           const effective = current.lastKnownGood
-          const refreshResult = yield* effective.tracker.fetchIssuesByIds([event.issueId]).pipe(
+          const handoff = Option.fromNullable(current.handoffs.get(event.issueId))
+          const repairHandoff = Option.filter(handoff, (entry) =>
+            Option.exists(entry.repair, (repair) => repair.inFlight),
+          )
+          const refreshTracker = Option.match(repairHandoff, {
+            onNone: () => effective.tracker,
+            onSome: (entry) => entry.execution.tracker,
+          })
+          const refreshResult = yield* refreshTracker.fetchIssuesByIds([event.issueId]).pipe(
             Effect.match({
               onFailure: (error) => ({ _tag: 'Failed' as const, error }),
               onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
             }),
           )
           if (refreshResult._tag === 'Failed') {
-            yield* context.scheduleRetry(
+            const scheduled = yield* context.scheduleRetry(
               due.value.issue,
               event.attempt + 1,
               `retry refresh failed: ${refreshResult.error.message}`,
               false,
               refreshResult.error,
             )
+            if (!scheduled && Option.isSome(repairHandoff)) {
+              yield* writeHandoff(context, event.issueId, settleRepair(repairHandoff.value))
+            }
             break
           }
-          const issue = refreshResult.issues.find((candidate) => candidate.id === event.issueId)
-          if (issue === undefined) {
+          const issue = Option.fromNullable(
+            refreshResult.issues.find((candidate) => candidate.id === event.issueId),
+          )
+          if (Option.isSome(repairHandoff)) {
+            const entry = repairHandoff.value
+            const repair = entry.repair
+            if (Option.isNone(repair)) {
+              break
+            }
+            const codeReview = entry.execution.codeReview
+            if (codeReview === null) {
+              yield* releaseHandoffRepair(context, event.issueId, repairHandoff)
+              break
+            }
+            const terminalIssue = Option.filter(issue, (record) =>
+              stateIsIn(record.state, entry.execution.workflow.config.tracker.terminalStates),
+            )
+            if (Option.isSome(terminalIssue)) {
+              yield* entry.execution.workspaces.remove(terminalIssue.value.identifier).pipe(
+                Effect.catchAll((error) =>
+                  logWarning('terminal workspace cleanup failed', {
+                    ...logContext(terminalIssue.value),
+                    action: 'workspace_cleanup',
+                    outcome: 'failed',
+                    error: error.message,
+                  }),
+                ),
+              )
+            }
+            const inspected = yield* codeReview.inspectPullRequest(entry.pullRequestNumber).pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+              }),
+            )
+            if (inspected._tag === 'Failed') {
+              const scheduled = yield* context.scheduleRetry(
+                repair.value.issue,
+                event.attempt + 1,
+                `repair baseline refresh failed: ${inspected.error.message}`,
+                false,
+                inspected.error,
+              )
+              if (!scheduled) {
+                yield* writeHandoff(context, event.issueId, settleRepair(entry))
+              }
+              break
+            }
+            const settled = settleRepair(entry)
+            yield* applyHandoffObservation(
+              context,
+              event.issueId,
+              settled,
+              inspected.observation,
+              new Date(),
+              repairPermission(settled, { _tag: 'Succeeded', issue }),
+              Option.some(event.attempt),
+            )
+            yield* context.persistHandoffs
+            break
+          }
+          if (Option.isNone(issue)) {
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),
             )
             break
           }
-          if (stateIsIn(issue.state, effective.workflow.config.tracker.terminalStates)) {
-            yield* effective.workspaces.remove(issue.identifier).pipe(
+          if (stateIsIn(issue.value.state, effective.workflow.config.tracker.terminalStates)) {
+            yield* effective.workspaces.remove(issue.value.identifier).pipe(
               Effect.catchAll((error) =>
                 logWarning('terminal workspace cleanup failed', {
-                  ...logContext(issue),
+                  ...logContext(issue.value),
                   action: 'workspace_cleanup',
                   outcome: 'failed',
                   error: error.message,
@@ -417,27 +515,25 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             break
           }
           if (
-            !issueIsActive(issue, effective.workflow) ||
-            !issueIsRoutable(issue, effective.workflow)
+            !issueIsActive(issue.value, effective.workflow) ||
+            !issueIsRoutable(issue.value, effective.workflow)
           ) {
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),
             )
             break
           }
-          if (!hasSlot(current, issue, effective.workflow)) {
+          const admitting = yield* Ref.get(context.state)
+          if (!hasSlot(admitting, issue.value, effective.workflow)) {
             yield* context.scheduleRetry(
-              issue,
+              issue.value,
               event.attempt + 1,
               'no available orchestrator slots',
               false,
             )
             break
           }
-          // A worker retry is a continuation, not a repair, so it establishes no repair baseline.
-          // Repairs are baselined only where they are dispatched as repairs, in reconciliation,
-          // from a head observed in the same pass.
-          yield* dispatch(context, issue, event.attempt)
+          yield* dispatch(context, issue.value, event.attempt)
           break
         }
         case 'SetIssuePaused': {
@@ -458,6 +554,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 continue
               }
               yield* Fiber.interrupt(retry.value.fiber)
+              // An operator pause is a decision to stop, not an interruption to recover from:
+              // the repair identity goes with the run the operator ended.
+              yield* releaseHandoffRepair(
+                context,
+                id,
+                Option.fromNullable(retrying.handoffs.get(id)),
+              )
               // Dropping the queued retry ends the agent, so its detail has to say so: without
               // this the record would publish as completed while still claiming to be waiting
               // to retry, and the retry it pointed at would never arrive.

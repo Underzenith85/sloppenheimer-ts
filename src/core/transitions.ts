@@ -374,14 +374,10 @@ export const resumeIssueNumber = (state: RuntimeState, issueNumber: number): Run
 // Handoffs
 // ---------------------------------------------------------------------------
 
-export const putHandoff = (
-  state: RuntimeState,
-  id: IssueId,
-  entry: HandoffEntry,
-): RuntimeState => ({
-  ...state,
-  handoffs: withEntry(state.handoffs, id, entry),
-})
+export const putHandoff = (state: RuntimeState, id: IssueId, entry: HandoffEntry): RuntimeState => {
+  const claimed = claimIssue(state, entry.issue)
+  return { ...claimed, handoffs: withEntry(claimed.handoffs, id, entry) }
+}
 
 export const removeHandoff = (state: RuntimeState, id: IssueId): RuntimeState => ({
   ...state,
@@ -412,7 +408,16 @@ export const handoffSnapshots = (state: RuntimeState): readonly HandoffSnapshot[
     repairAttempts: handoff.repairHeadShas.length,
     repairHeadShas: [...handoff.repairHeadShas],
     repairObservedHeadShas: [...handoff.repairObservedHeadShas],
-    repairStartedHeadSha: handoff.repairStartedHeadSha,
+    repairStartedHeadSha: Option.match(handoff.repair, {
+      onNone: () => null,
+      onSome: (repair) => repair.startedHeadSha,
+    }),
+    // Persisted beside the baseline: a refused dispatch owns a baseline without ever having run,
+    // so recovery must not read the next head change as that repair's output.
+    repairWorkerStarted: Option.match(handoff.repair, {
+      onNone: () => false,
+      onSome: (repair) => repair.workerStarted,
+    }),
     reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
     reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
     observedAt: handoff.observedAt.toISOString(),
