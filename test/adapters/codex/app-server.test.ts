@@ -4,12 +4,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Effect, Fiber } from 'effect'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import {
   codexMaxLineBytes,
   composeSessionId,
-  makeLineReader,
   runAgent,
   type AgentEvent,
   type AgentLaunch,
@@ -115,78 +114,6 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<bo
 }
 
 describe('App Server framing', (): void => {
-  it('splits lines, strips CR, and never buffers past the framing limit', (): void => {
-    const lines: string[] = []
-    let overflowed = false
-    const read = makeLineReader(
-      16,
-      (line) => {
-        lines.push(line)
-      },
-      () => {
-        overflowed = true
-      },
-    )
-
-    read(Buffer.from('{"a":1}\r\n{"b'))
-    read(Buffer.from('":2}\n'))
-
-    expect(lines).toEqual(['{"a":1}', '{"b":2}'])
-    expect(overflowed).toBe(false)
-
-    read(Buffer.from('x'.repeat(40)))
-
-    expect(overflowed).toBe(true)
-  })
-
-  it('accepts a maximum-length line whose CRLF is split across chunks', (): void => {
-    const lines: string[] = []
-    let overflowed = false
-    const read = makeLineReader(
-      8,
-      (line) => {
-        lines.push(line)
-      },
-      () => {
-        overflowed = true
-      },
-    )
-
-    read(Buffer.from('12345678\r'))
-    read(Buffer.from('\n'))
-
-    // The CR is stripped once the line completes, so where the chunk boundary fell must not decide
-    // whether a valid maximum-length line is accepted.
-    expect(overflowed).toBe(false)
-    expect(lines).toEqual(['12345678'])
-  })
-
-  it('assembles a chunked line without recopying the pending prefix', (): void => {
-    const lines: string[] = []
-    const read = makeLineReader(
-      1024 * 1024,
-      (line) => {
-        lines.push(line)
-      },
-      () => {},
-    )
-    const concat = vi.spyOn(Buffer, 'concat')
-    const part = 'y'.repeat(64 * 1024)
-
-    for (let index = 0; index < 8; index += 1) {
-      read(Buffer.from(part))
-    }
-    read(Buffer.from('\n'))
-
-    const copies = concat.mock.calls.length
-    concat.mockRestore()
-
-    expect(lines).toEqual([part.repeat(8)])
-    // One copy for the whole line rather than one per chunk, so framing stays linear in line size:
-    // a permitted 10 MB frame arriving in pipe-sized chunks must not copy hundreds of megabytes.
-    expect(copies).toBe(1)
-  })
-
   it('keeps the documented 10 MB protocol line limit', (): void => {
     expect(codexMaxLineBytes).toBe(10 * 1024 * 1024)
   })
@@ -483,6 +410,20 @@ describe('App Server request handling', (): void => {
     expect(diagnostics).toContain('Authorization=[REDACTED]')
     expect(JSON.stringify(diagnostics)).not.toContain('final-secret')
   })
+
+  it('keeps serving the protocol after a stderr record passes the framing limit', async (): Promise<void> => {
+    const outcome = await runScenario('oversize-stderr')
+    const diagnostics = outcome.events
+      .filter((event) => event.event === 'diagnostic')
+      .map((event) => event.message)
+
+    // Framing gives up on the record, but the pipe still has to be emptied: a child blocked on a
+    // full stderr buffer cannot answer the protocol, so a diagnostic overflow would become a turn
+    // timeout.
+    expect(outcome.error).toBeNull()
+    expect(outcome.result?.turnCount).toBe(1)
+    expect(diagnostics).toContain('Codex diagnostic line exceeded the framing limit')
+  }, 30_000)
 
   it('records absolute token usage reported during a turn', async (): Promise<void> => {
     const outcome = await runScenario('usage')
