@@ -2202,6 +2202,9 @@ describe('restored pull request handoffs', (): void => {
       repairAttempts: 0,
       repairStartedHeadSha: head,
     })
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: true }),
+    ])
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
@@ -2323,7 +2326,12 @@ describe('restored pull request handoffs', (): void => {
           }
           // The tracker record moves on while the repair retry waits: still active and routable,
           // but re-titled and re-prioritised.
-          currentIssue = { ...issue, title: 'renamed upstream', priority: 5 }
+          currentIssue = {
+            ...issue,
+            title: 'renamed upstream',
+            description: 'new repair requirements from the tracker',
+            priority: 5,
+          }
           yield* TestClock.adjust('30 seconds')
           while (launched.length < 2) {
             yield* Effect.yieldNow()
@@ -2337,6 +2345,7 @@ describe('restored pull request handoffs', (): void => {
     // the handoff captured before any of this.
     expect(launched[1]?.title).toBe('renamed upstream')
     expect(launched[1]?.priority).toBe(5)
+    expect(launched[1]?.description).toContain('new repair requirements from the tracker')
     expect(launched[1]?.description).toContain('## Pull request repair')
     await rm(workspaceRoot, { force: true, recursive: true })
   })

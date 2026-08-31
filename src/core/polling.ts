@@ -481,6 +481,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               repairPermission(settled, { _tag: 'Succeeded', issue }),
               Option.some(event.attempt),
             )
+            yield* context.persistHandoffs
             break
           }
           if (Option.isNone(issue)) {

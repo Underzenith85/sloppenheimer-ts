@@ -365,7 +365,7 @@ export const repairIssue = (
   reason: string,
 ): Issue => ({
   ...issue,
-  description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${headSha}\n\n${reason}`,
+  description: `${issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${headSha}\n\n${reason}`,
 })
 
 export const awaitingSlot = (handoff: HandoffEntry, reason: string): HandoffEntry => ({
