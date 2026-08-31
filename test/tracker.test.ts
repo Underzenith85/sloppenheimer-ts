@@ -2,7 +2,7 @@ import { Effect, Logger, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, type JsonObject } from '../src/domain/domain.js'
-import { makeGitHubTracker } from '../src/adapters/github/issues.js'
+import { makeGitHubIssueControl, makeGitHubTracker } from '../src/adapters/github/issues.js'
 import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
 
 const provider: GitHubProviderConfig = {
@@ -217,10 +217,12 @@ describe('GitHub native issue dependencies', (): void => {
     vi.stubGlobal('fetch', fetchMock)
     const tracker = makeGitHubTracker(provider)
 
-    await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
+    const [initial] = await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
     const [refreshed] = await Effect.runPromise(tracker.fetchIssuesByIds([issueId('2')]))
 
+    expect(initial?.dispatchable).toBe(true)
     expect(refreshed?.blockedBy[0]?.state).toBe('open')
+    expect(refreshed?.dispatchable).toBe(false)
     expect(dependencyFetches).toBe(2)
   })
 
@@ -262,6 +264,31 @@ describe('GitHub native issue dependencies', (): void => {
         url: 'https://example.test/issues/4',
       },
     ])
+    expect(issue?.dispatchable).toBe(false)
+  })
+
+  it('derives cycle eligibility in the adapter while returning every state-list record', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = requestUrl(input)
+      if (url.includes('/issues/1/dependencies/blocked_by')) {
+        return Response.json([githubDependency(2)])
+      }
+      if (url.includes('/issues/2/dependencies/blocked_by')) {
+        return Response.json([githubDependency(1)])
+      }
+      return Response.json([githubIssue(1), githubIssue(2)])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(
+      makeGitHubTracker(provider).fetchIssuesByStates(['open'], null),
+    )
+
+    expect(issues.map((issue) => [issue.id, issue.dispatchable])).toEqual([
+      ['1', false],
+      ['2', false],
+    ])
+    expect(issues.every((issue) => issue.blockedBy.length === 1)).toBe(true)
   })
 
   it.each([
@@ -359,6 +386,28 @@ describe('GitHub tracker state-list contract', (): void => {
     ).toEqual([
       'https://api.example.test/repos/example/symphony/issues/1/dependencies/blocked_by?per_page=100',
     ])
+  })
+
+  it('keeps blocked issues in the operator backlog while excluding pull requests', async (): Promise<void> => {
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = requestUrl(input)
+      if (url.includes('/issues/1/dependencies/blocked_by')) {
+        return Response.json([githubDependency(2)])
+      }
+      if (url.includes('/dependencies/blocked_by')) {
+        return Response.json([])
+      }
+      return Response.json([githubIssue(1), githubIssue(2), githubPullRequest(3)])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const issues = await Effect.runPromise(makeGitHubIssueControl(provider).listOpenIssues())
+
+    expect(issues.map((issue) => [issue.id, issue.dispatchable])).toEqual([
+      ['1', false],
+      ['2', true],
+    ])
+    expect(issues[0]?.blockedBy).toHaveLength(1)
   })
 
   it('keeps valid records and logs malformed ones from a mixed page', async (): Promise<void> => {
