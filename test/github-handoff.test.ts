@@ -397,6 +397,19 @@ describe('GitHub pull request monitor', (): void => {
                       ],
                     },
                   },
+                  {
+                    id: 'thread-2',
+                    isResolved: false,
+                    comments: {
+                      nodes: [
+                        {
+                          body: 'Outdated comment',
+                          url: 'https://github.test/comment/2',
+                          commit: null,
+                        },
+                      ],
+                    },
+                  },
                 ],
               },
             },
@@ -416,8 +429,47 @@ describe('GitHub pull request monitor', (): void => {
       body: 'Fix this',
       commentHeadSha: 'reviewed-head',
     })
+    expect(result.reviewThreads[1]).toMatchObject({
+      id: 'thread-2',
+      commentHeadSha: null,
+    })
     expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
     expect(fetchMock).toHaveBeenCalledTimes(5)
+  })
+
+  it('keeps malformed comment pagination in the typed failure channel', async (): Promise<void> => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request): Promise<Response> => {
+        const url = requestUrl(input)
+        if (url.endsWith('/pulls/41')) {
+          return Response.json({
+            state: 'open',
+            html_url: 'https://github.test/example/symphony/pull/41',
+            head: { sha: 'head-1' },
+            merged: false,
+            merge_commit_sha: null,
+            mergeable: true,
+            mergeable_state: 'clean',
+          })
+        }
+        if (url.includes('/check-runs')) {
+          return Response.json({ check_runs: [] })
+        }
+        return Response.json([], {
+          headers: { Link: '<https://attacker.example.test/comments?page=2>; rel="next"' },
+        })
+      }),
+    )
+
+    const error = await Effect.runPromise(
+      Effect.flip(makeGitHubPullRequestMonitor(provider).inspect(41)),
+    )
+
+    expect(error).toMatchObject({
+      category: 'tracker_pagination',
+      retryable: false,
+    })
   })
 
   it('requests Codex review only after verifying the current pull request head', async (): Promise<void> => {
