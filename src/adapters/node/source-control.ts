@@ -33,6 +33,12 @@ type GitFailure = Readonly<{
 }>
 
 const outputLimit = 1024 * 1024
+const gitIdentity: NodeJS.ProcessEnv = {
+  GIT_AUTHOR_NAME: 'Symphony',
+  GIT_AUTHOR_EMAIL: 'symphony@localhost',
+  GIT_COMMITTER_NAME: 'Symphony',
+  GIT_COMMITTER_EMAIL: 'symphony@localhost',
+}
 const askPassScript = `#!/bin/sh
 case "$1" in
   *sername*) printf '%s\\n' "$SYMPHONY_GIT_USERNAME" ;;
@@ -339,10 +345,7 @@ const publishRepository = async (
       prepared.workspace.path,
       ['commit', '-m', `symphony: ${issue.identifier} ${issue.title}`],
       {
-        GIT_AUTHOR_NAME: 'Symphony',
-        GIT_AUTHOR_EMAIL: 'symphony@localhost',
-        GIT_COMMITTER_NAME: 'Symphony',
-        GIT_COMMITTER_EMAIL: 'symphony@localhost',
+        ...gitIdentity,
         GIT_AUTHOR_DATE: commitDate.trim(),
         GIT_COMMITTER_DATE: commitDate.trim(),
       },
@@ -364,10 +367,12 @@ const publishRepository = async (
     `+refs/heads/${prepared.baseBranch}:refs/remotes/origin/${prepared.baseBranch}`,
   ])
   try {
-    await runGit(settings, prepared.workspace.path, [
-      'rebase',
-      `refs/remotes/origin/${prepared.baseBranch}`,
-    ])
+    await runGit(
+      settings,
+      prepared.workspace.path,
+      ['rebase', '--committer-date-is-author-date', `refs/remotes/origin/${prepared.baseBranch}`],
+      gitIdentity,
+    )
   } catch (cause: unknown) {
     try {
       await runGit(settings, prepared.workspace.path, ['rebase', '--abort'])
