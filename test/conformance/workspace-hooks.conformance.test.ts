@@ -1,8 +1,9 @@
 import { access, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier } from '../../src/domain/domain.js'
 import type { HooksConfig } from '../../src/config/workflow.js'
@@ -10,9 +11,13 @@ import { makeWorkspaceManager } from '../../src/adapters/node/workspace-manager.
 import type { WorkspaceManagerPort } from '../../src/ports/workspace.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
-/** Built against the host filesystem, the way the composition root builds it. */
-const workspaceManager = (root: string, hooks: HooksConfig): WorkspaceManagerPort =>
-  Effect.runSync(makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem)))
+/**
+ * Built against the host filesystem, the way the composition root builds it. Returned as an
+ * effect rather than run here: the tests are effects now, so the port is acquired in the same
+ * fiber that uses it.
+ */
+const workspaceManager = (root: string, hooks: HooksConfig): Effect.Effect<WorkspaceManagerPort> =>
+  makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem))
 
 const directories: string[] = []
 const makeRoot = async (): Promise<string> => {
@@ -34,28 +39,41 @@ const hooks = (overrides: Partial<HooksConfig>): HooksConfig => ({
   ...overrides,
 })
 
+// `live` throughout: these hooks are real child processes on real timers, so the suite needs the
+// wall clock rather than the virtual one `it.effect` installs.
+// `live` throughout: these hooks are real child processes on real timers, so the suite needs the
+// wall clock rather than the virtual one `it.effect` installs.
 describe('Core Conformance workspace hook lifecycle', (): void => {
-  it('aborts an attempt when before_run fails or times out', async (): Promise<void> => {
-    const root = await makeRoot()
-    const identifier = issueIdentifier('owner/repository#19')
-    const failed = workspaceManager(root, hooks({ beforeRun: 'exit 7' }))
-    const failedWorkspace = await Effect.runPromise(failed.create(identifier))
-    await expect(Effect.runPromise(failed.beforeRun(failedWorkspace))).rejects.toThrow(
-      'hook exited with 7',
-    )
+  it.live('aborts an attempt when before_run fails or times out', () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.promise(makeRoot)
+      const identifier = issueIdentifier('owner/repository#19')
+      const failed = yield* workspaceManager(root, hooks({ beforeRun: 'exit 7' }))
+      const failedWorkspace = yield* failed.create(identifier)
+      const rejected = yield* Effect.flip(failed.beforeRun(failedWorkspace))
+      expect(rejected.message).toContain('hook exited with 7')
 
-    const timedOut = workspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
-    const reused = await Effect.runPromise(timedOut.create(identifier))
-    await expect(Effect.runPromise(timedOut.beforeRun(reused))).rejects.toThrow('hook timed out')
-  })
+      const timedOut = yield* workspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
+      const reused = yield* timedOut.create(identifier)
+      const expired = yield* Effect.flip(timedOut.beforeRun(reused))
+      expect(expired.message).toContain('hook timed out')
+    }),
+  )
 
-  it('ignores after_run and before_remove failures while completing lifecycle', async (): Promise<void> => {
-    const root = await makeRoot()
-    const identifier = issueIdentifier('owner/repository#20')
-    const manager = workspaceManager(root, hooks({ afterRun: 'exit 8', beforeRemove: 'exit 9' }))
-    const workspace = await Effect.runPromise(manager.create(identifier))
-    await Effect.runPromise(manager.afterRun(workspace))
-    await Effect.runPromise(manager.remove(identifier))
-    await expect(access(workspace.path)).rejects.toMatchObject({ code: 'ENOENT' })
-  })
+  it.live('ignores after_run and before_remove failures while completing lifecycle', () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.promise(makeRoot)
+      const identifier = issueIdentifier('owner/repository#20')
+      const manager = yield* workspaceManager(
+        root,
+        hooks({ afterRun: 'exit 8', beforeRemove: 'exit 9' }),
+      )
+      const workspace = yield* manager.create(identifier)
+      yield* manager.afterRun(workspace)
+      yield* manager.remove(identifier)
+      yield* Effect.promise(() =>
+        expect(access(workspace.path)).rejects.toMatchObject({ code: 'ENOENT' }),
+      )
+    }),
+  )
 })

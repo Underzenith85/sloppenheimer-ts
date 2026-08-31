@@ -1,5 +1,6 @@
+import { it } from '@effect/vitest'
 import { Effect, Layer, Option, Stream } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import type { HooksConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
@@ -73,178 +74,162 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
 )
 
 describe('port layer composition', (): void => {
-  it('builds every port from the adapter layers and the workflow configuration', async (): Promise<void> => {
-    const resolved = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const currentTracker = yield* tracker
-          const currentWorkspaces = yield* workspaces
-          const runner = yield* AgentRunner
-          const loader = yield* WorkflowLoader
-          const watcher = yield* WorkflowWatcher
-          const workspace = yield* currentWorkspaces.create(issueIdentifier('example/symphony#1'))
-          const result = yield* runner.run({
-            issue: {
-              id: issueId('1'),
-              nativeRef: null,
-              identifier: issueIdentifier('example/symphony#1'),
-              title: 'title',
-              description: null,
-              priority: null,
-              state: 'open',
-              branchName: null,
-              url: null,
-              assigneeId: null,
-              labels: [],
-              blockedBy: [],
-              dispatchable: true,
-              createdAt: null,
-              updatedAt: null,
-            },
-            workspace,
-            workspaceRoot: '/workspaces',
-            config: {
-              command: 'codex app-server',
-              approvalPolicy: 'never',
-              threadSandbox: 'workspace-write',
-              turnSandboxPolicy: null,
-              turnTimeoutMs: 1_000,
-              readTimeoutMs: 1_000,
-              stallTimeoutMs: 1_000,
-            },
-            prompt: 'prompt',
-            maxTurns: 1,
-            secretEnvironmentNames: [],
-            refreshIssue: () => Effect.succeed(null),
-            isRoutable: () => true,
-            onEvent: () => {},
-          })
-          yield* Stream.runDrain(yield* watcher.changes('WORKFLOW.md'))
-          const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
-          return {
-            secretEnvironmentNames: currentTracker.secretEnvironmentNames,
-            workspacePath: workspace.path,
-            threadId: result.threadId,
-            loadFailed,
-          }
-        }).pipe(
-          Effect.provide(
-            layerPorts(
-              { tracker: validated, workspaces: { root: '/workspaces', hooks } },
-              adapters,
-            ),
-          ),
+  it.scoped('builds every port from the adapter layers and the workflow configuration', () =>
+    Effect.gen(function* () {
+      const resolved = yield* Effect.gen(function* () {
+        const currentTracker = yield* tracker
+        const currentWorkspaces = yield* workspaces
+        const runner = yield* AgentRunner
+        const loader = yield* WorkflowLoader
+        const watcher = yield* WorkflowWatcher
+        const workspace = yield* currentWorkspaces.create(issueIdentifier('example/symphony#1'))
+        const result = yield* runner.run({
+          issue: {
+            id: issueId('1'),
+            nativeRef: null,
+            identifier: issueIdentifier('example/symphony#1'),
+            title: 'title',
+            description: null,
+            priority: null,
+            state: 'open',
+            branchName: null,
+            url: null,
+            assigneeId: null,
+            labels: [],
+            blockedBy: [],
+            dispatchable: true,
+            createdAt: null,
+            updatedAt: null,
+          },
+          workspace,
+          workspaceRoot: '/workspaces',
+          config: {
+            command: 'codex app-server',
+            approvalPolicy: 'never',
+            threadSandbox: 'workspace-write',
+            turnSandboxPolicy: null,
+            turnTimeoutMs: 1_000,
+            readTimeoutMs: 1_000,
+            stallTimeoutMs: 1_000,
+          },
+          prompt: 'prompt',
+          maxTurns: 1,
+          secretEnvironmentNames: [],
+          refreshIssue: () => Effect.succeed(null),
+          isRoutable: () => true,
+          onEvent: () => {},
+        })
+        yield* Stream.runDrain(yield* watcher.changes('WORKFLOW.md'))
+        const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
+        return {
+          secretEnvironmentNames: currentTracker.secretEnvironmentNames,
+          workspacePath: workspace.path,
+          threadId: result.threadId,
+          loadFailed,
+        }
+      }).pipe(
+        Effect.provide(
+          layerPorts({ tracker: validated, workspaces: { root: '/workspaces', hooks } }, adapters),
         ),
+      )
+
+      expect(resolved.secretEnvironmentNames).toEqual(['GITHUB_TOKEN'])
+      expect(resolved.workspacePath).toBe('/workspaces')
+      expect(resolved.threadId).toBe('thread')
+      expect(resolved.loadFailed).toBe(true)
+    }),
+  )
+
+  it.scoped('reports the absence marker as a provider that supplies no code review', () =>
+    Effect.gen(function* () {
+      const absent = yield* codeReview
+
+      expect(absent).toBeNull()
+    }).pipe(
+      Effect.provide(
+        layerCodeReviewPorts({ tracker: validated, workspaces: { root: '/workspaces', hooks } }),
       ),
-    )
+    ),
+  )
 
-    expect(resolved.secretEnvironmentNames).toEqual(['GITHUB_TOKEN'])
-    expect(resolved.workspacePath).toBe('/workspaces')
-    expect(resolved.threadId).toBe('thread')
-    expect(resolved.loadFailed).toBe(true)
-  })
-
-  it('reports the absence marker as a provider that supplies no code review', async (): Promise<void> => {
-    const absent = await Effect.runPromise(
-      Effect.scoped(
-        codeReview.pipe(
-          Effect.provide(
-            layerCodeReviewPorts({
-              tracker: validated,
-              workspaces: { root: '/workspaces', hooks },
-            }),
-          ),
+  it.effect('composes source control independently from tracker and code review', () =>
+    Effect.gen(function* () {
+      const absent = yield* sourceControl.pipe(
+        Effect.scoped,
+        Effect.provide(
+          layerSourceControlPorts({
+            tracker: validated,
+            workspaces: { root: '/workspaces', hooks },
+          }),
         ),
-      ),
-    )
+      )
+      expect(absent).toBeNull()
 
-    expect(absent).toBeNull()
-  })
-
-  it('composes source control independently from tracker and code review', async (): Promise<void> => {
-    const absent = await Effect.runPromise(
-      Effect.scoped(
-        sourceControl.pipe(
-          Effect.provide(
-            layerSourceControlPorts({
-              tracker: validated,
-              workspaces: { root: '/workspaces', hooks },
-            }),
-          ),
-        ),
-      ),
-    )
-    expect(absent).toBeNull()
-
-    const supplied = await Effect.runPromise(
-      Effect.scoped(
-        sourceControl.pipe(
-          Effect.provide(
-            layerSourceControlPorts(
-              { tracker: validated, workspaces: { root: '/workspaces', hooks } },
-              Layer.succeed(SourceControlFactory, {
-                make: () =>
-                  Effect.succeed({
-                    prepare: (_issue, workspace, target) =>
-                      Effect.succeed({
-                        workspace,
-                        target,
-                        baseBranch: 'main',
-                        baseSha: 'base',
-                        baselineSha: 'base',
-                        expectedRemoteHead: Option.none(),
-                      }),
-                    publish: (_issue, prepared) =>
-                      Effect.succeed({
-                        _tag: 'NoChanges',
-                        branchName: prepared.target.branchName,
-                        baselineSha: prepared.baselineSha,
-                      }),
-                  }),
-              }),
-            ),
-          ),
-        ),
-      ),
-    )
-    expect(supplied).not.toBeNull()
-  })
-
-  it('keeps a supplied code-review factory in place of the absence marker', async (): Promise<void> => {
-    const reviewed = await Effect.runPromise(
-      Effect.scoped(
-        codeReview.pipe(
-          Effect.provide(
-            layerCodeReviewPorts(
-              { tracker: validated, workspaces: { root: '/workspaces', hooks } },
-              Layer.succeed(CodeReviewFactory, {
-                make: () =>
-                  Effect.succeed({
-                    toolSpecs: [],
-                    executeTool: async (name) => ({
-                      success: false,
-                      error: {
-                        code: 'unsupported_tool' as const,
-                        message: `Unsupported host tool: ${name}`,
-                        retryable: false,
-                      },
+      const supplied = yield* sourceControl.pipe(
+        Effect.scoped,
+        Effect.provide(
+          layerSourceControlPorts(
+            { tracker: validated, workspaces: { root: '/workspaces', hooks } },
+            Layer.succeed(SourceControlFactory, {
+              make: () =>
+                Effect.succeed({
+                  prepare: (_issue, workspace, target) =>
+                    Effect.succeed({
+                      workspace,
+                      target,
+                      baseBranch: 'main',
+                      baseSha: 'base',
+                      baselineSha: 'base',
+                      expectedRemoteHead: Option.none(),
                     }),
-                    handoffCompletedWork: () =>
-                      Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
-                    findExistingHandoff: () =>
-                      Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
-                    inspectPullRequest: () => Effect.die('unused'),
-                    mergePullRequest: () => Effect.die('unused'),
-                    requestPullRequestReview: () => Effect.void,
-                    resolveReviewThreads: () => Effect.void,
-                  }),
-              }),
-            ),
+                  publish: (_issue, prepared) =>
+                    Effect.succeed({
+                      _tag: 'NoChanges',
+                      branchName: prepared.target.branchName,
+                      baselineSha: prepared.baselineSha,
+                    }),
+                }),
+            }),
           ),
         ),
-      ),
-    )
+      )
+      expect(supplied).not.toBeNull()
+    }),
+  )
 
-    expect(reviewed).not.toBeNull()
-  })
+  it.scoped('keeps a supplied code-review factory in place of the absence marker', () =>
+    Effect.gen(function* () {
+      const reviewed = yield* codeReview
+
+      expect(reviewed).not.toBeNull()
+    }).pipe(
+      Effect.provide(
+        layerCodeReviewPorts(
+          { tracker: validated, workspaces: { root: '/workspaces', hooks } },
+          Layer.succeed(CodeReviewFactory, {
+            make: () =>
+              Effect.succeed({
+                toolSpecs: [],
+                executeTool: async (name) => ({
+                  success: false,
+                  error: {
+                    code: 'unsupported_tool' as const,
+                    message: `Unsupported host tool: ${name}`,
+                    retryable: false,
+                  },
+                }),
+                handoffCompletedWork: () =>
+                  Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
+                findExistingHandoff: () =>
+                  Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
+                inspectPullRequest: () => Effect.die('unused'),
+                mergePullRequest: () => Effect.die('unused'),
+                requestPullRequestReview: () => Effect.void,
+                resolveReviewThreads: () => Effect.void,
+              }),
+          }),
+        ),
+      ),
+    ),
+  )
 })

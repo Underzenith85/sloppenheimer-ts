@@ -2,3 +2,13 @@ allowBuilds:
   '@parcel/watcher': false
   esbuild: true
   msgpackr-extract: false
+
+# `@effect/vitest` declares `vitest: ^3.2.0`, and this repository runs Vitest 4. The releases that
+# do declare Vitest 4 require the `effect@4` pre-release line, so no published pair satisfies both
+# ranges while the source is on `effect@3`. The combination is exercised by the whole suite, so the
+# mismatch is recorded here rather than left to pnpm's default leniency: without this entry a
+# `--strict-peer-dependencies` resolve fails outright. Remove it once an `@effect/vitest` release
+# supports Vitest 4 on `effect@3`.
+peerDependencyRules:
+  allowedVersions:
+    '@effect/vitest>vitest': '4'

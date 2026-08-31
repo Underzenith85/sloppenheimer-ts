@@ -1,11 +1,12 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { withEnvironment } from '../harness/environment.js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { loadWorkflow, renderPrompt, type Workflow } from '../../src/config/workflow.js'
@@ -48,21 +49,25 @@ afterEach(async (): Promise<void> => {
 })
 
 describe('Core Conformance workflow errors and strict parsing', (): void => {
-  it.each([
+  it.effect.each([
     ['invalid YAML', '---\ntracker: [unterminated\n---\nprompt', 'workflow_parse_error'],
     [
       'non-map front matter',
       '---\n- not\n- a\n- map\n---\nprompt',
       'workflow_front_matter_not_a_map',
     ],
-  ] as const)('returns a typed error for %s', async (_name, source, category): Promise<void> => {
-    const path = await writeWorkflow(source)
-    const error = await Effect.runPromise(Effect.flip(withEnvironment(loadHostWorkflow(path))))
-    expect(error.category).toBe(category)
-  })
+  ] as const)('returns a typed error for %s', ([, source, category]) =>
+    Effect.gen(function* () {
+      const path = yield* Effect.promise(() => writeWorkflow(source))
+      const error = yield* Effect.flip(withEnvironment(loadHostWorkflow(path)))
+      expect(error.category).toBe(category)
+    }),
+  )
 
-  it('preserves shell commands and normalizes only valid per-state limits', async (): Promise<void> => {
-    const path = await writeWorkflow(`---
+  it.effect('preserves shell commands and normalizes only valid per-state limits', () =>
+    Effect.gen(function* () {
+      const path = yield* Effect.promise(() =>
+        writeWorkflow(`---
 tracker:
   kind: github
   provider:
@@ -78,17 +83,19 @@ codex:
   command: 'printf "$UNCHANGED" | codex app-server'
 ---
 {{ issue.identifier }} {{ attempt }}
-`)
-    const workflow = await Effect.runPromise(
-      withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' }),
-    )
-    expect(workflow.config.codex.command).toBe('printf "$UNCHANGED" | codex app-server')
-    expect([...workflow.config.agent.maxConcurrentAgentsByState]).toEqual([['ready', 2]])
-    expect(await Effect.runPromise(renderPrompt(workflow, issue, 4))).toBe('owner/repository#19 4')
-  })
+`),
+      )
+      const workflow = yield* withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' })
+      expect(workflow.config.codex.command).toBe('printf "$UNCHANGED" | codex app-server')
+      expect([...workflow.config.agent.maxConcurrentAgentsByState]).toEqual([['ready', 2]])
+      expect(yield* renderPrompt(workflow, issue, 4)).toBe('owner/repository#19 4')
+    }),
+  )
 
-  it('fails strict prompt rendering for an unknown variable', async (): Promise<void> => {
-    const path = await writeWorkflow(`---
+  it.effect('fails strict prompt rendering for an unknown variable', () =>
+    Effect.gen(function* () {
+      const path = yield* Effect.promise(() =>
+        writeWorkflow(`---
 tracker:
   kind: github
   provider:
@@ -97,11 +104,11 @@ tracker:
     token: $TRACKER_TOKEN
 ---
 {{ unknown.value }}
-`)
-    const workflow = await Effect.runPromise(
-      withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' }),
-    )
-    const error = await Effect.runPromise(Effect.flip(renderPrompt(workflow, issue, null)))
-    expect(error.category).toBe('template_render_error')
-  })
+`),
+      )
+      const workflow = yield* withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' })
+      const error = yield* Effect.flip(renderPrompt(workflow, issue, null))
+      expect(error.category).toBe('template_render_error')
+    }),
+  )
 })

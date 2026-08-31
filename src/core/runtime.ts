@@ -93,7 +93,7 @@ export {
   type RuntimeState,
   type WorkflowReloadError,
 } from './state.js'
-export { issueIsRoutable, retryDelayMs, sortIssues } from './policy.js'
+export { issueIsRoutable, sortIssues } from './policy.js'
 
 export type RunningSnapshot = Readonly<{
   issueId: IssueId

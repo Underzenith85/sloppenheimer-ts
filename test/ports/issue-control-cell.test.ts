@@ -1,5 +1,6 @@
-import { Effect, Fiber } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { it } from '@effect/vitest'
+import { Effect, Fiber, TestClock } from 'effect'
+import { describe, expect } from 'vitest'
 
 import type { ValidatedTrackerProvider } from '../../src/config/workflow.js'
 import type { TrackerError } from '../../src/errors.js'
@@ -20,19 +21,18 @@ const stub: IssueControlPort = {
   addLabel: () => Effect.void,
 }
 
+/** Provides the cell and its factory once, so a test states only the program it cares about. */
 const withCell = <Value>(
   factory: IssueControlFactoryPort,
   program: Effect.Effect<Value, TrackerError, CurrentIssueControl>,
-): Promise<Value> =>
-  Effect.runPromise(
-    program.pipe(
-      Effect.provide(layerCurrentIssueControl),
-      Effect.provide(layerIssueControlFactory(factory)),
-    ),
+): Effect.Effect<Value, TrackerError> =>
+  program.pipe(
+    Effect.provide(layerCurrentIssueControl),
+    Effect.provide(layerIssueControlFactory(factory)),
   )
 
 describe('issue-control cell', (): void => {
-  it('keeps the instance in force until the provider no longer serves', async (): Promise<void> => {
+  it.effect('keeps the instance in force until the provider no longer serves', () => {
     const tokens: string[] = []
     const factory: IssueControlFactoryPort = {
       make: (candidate) =>
@@ -43,41 +43,50 @@ describe('issue-control cell', (): void => {
       serves: (left, right) => stubProviderToken(left) === stubProviderToken(right),
     }
 
-    const instances = await withCell(
-      factory,
-      Effect.all([
-        issueControlFor(provider('first')),
-        issueControlFor(provider('first')),
-        issueControlFor(provider('second')),
-      ]),
-    )
+    return Effect.gen(function* () {
+      const instances = yield* withCell(
+        factory,
+        Effect.all([
+          issueControlFor(provider('first')),
+          issueControlFor(provider('first')),
+          issueControlFor(provider('second')),
+        ]),
+      )
 
-    expect(tokens).toEqual(['first', 'second'])
-    expect(instances[0]).toBe(instances[1])
-    expect(instances[2]).not.toBe(instances[0])
+      expect(tokens).toEqual(['first', 'second'])
+      expect(instances[0]).toBe(instances[1])
+      expect(instances[2]).not.toBe(instances[0])
+    })
   })
 
-  it('builds the instance once for concurrent readers', async (): Promise<void> => {
+  it.effect('builds the instance once for concurrent readers', () => {
     let builds = 0
-    const built = await withCell(
-      {
-        make: () =>
-          Effect.sync((): IssueControlPort => {
-            builds += 1
-            return stub
-          }).pipe(Effect.delay('10 millis')),
-        serves: () => true,
-      },
-      Effect.gen(function* () {
-        const readers = yield* Effect.forkAll([
-          issueControlFor(provider('first')),
-          issueControlFor(provider('first')),
-        ])
-        return yield* Fiber.join(readers)
-      }),
-    )
+    return Effect.gen(function* () {
+      const reading = yield* Effect.fork(
+        withCell(
+          {
+            make: () =>
+              Effect.sync((): IssueControlPort => {
+                builds += 1
+                return stub
+              }).pipe(Effect.delay('10 millis')),
+            serves: () => true,
+          },
+          Effect.gen(function* () {
+            const readers = yield* Effect.forkAll([
+              issueControlFor(provider('first')),
+              issueControlFor(provider('first')),
+            ])
+            return yield* Fiber.join(readers)
+          }),
+        ),
+      )
+      // The construction delay is virtual: both readers are already waiting on the one build.
+      yield* TestClock.adjust('10 millis')
+      const built = yield* Fiber.join(reading)
 
-    expect(builds).toBe(1)
-    expect(built[0]).toBe(built[1])
+      expect(builds).toBe(1)
+      expect(built[0]).toBe(built[1])
+    })
   })
 })

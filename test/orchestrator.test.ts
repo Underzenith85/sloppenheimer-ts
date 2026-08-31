@@ -2,6 +2,7 @@ import type { FileSystem } from '@effect/platform'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { it } from '@effect/vitest'
 import {
   Clock,
   Effect,
@@ -16,7 +17,7 @@ import {
   TestClock,
   TestContext,
 } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
 import { githubProviderOf, githubTrackerProvider } from '../src/adapters/github/index.js'
@@ -42,6 +43,7 @@ import {
   loadHandoffs as loadHandoffsAgainstFileSystem,
   saveHandoffs as saveHandoffsAgainstFileSystem,
 } from '../src/handoff-store.js'
+import { agentRetryDelay } from '../src/core/retry.js'
 import type {
   CodexReviewObservation,
   HandoffSnapshot,
@@ -50,7 +52,6 @@ import type {
 import {
   issueIsRoutable,
   retainedCompletedDetails,
-  retryDelayMs,
   sortIssues,
   startOrchestrator,
   type AgentDetailLookup,
@@ -198,11 +199,13 @@ describe('orchestrator policies', (): void => {
     expect(sortIssues(issues).map((issue) => issue.identifier)).toEqual(['GH-1', 'GH-2', 'GH-3'])
   })
 
-  it('caps exponential retry backoff', (): void => {
-    expect(retryDelayMs(1, 300_000)).toBe(10_000)
-    expect(retryDelayMs(3, 300_000)).toBe(40_000)
-    expect(retryDelayMs(99, 300_000)).toBe(300_000)
-  })
+  it.effect('caps exponential retry backoff', () =>
+    Effect.gen(function* () {
+      expect(yield* agentRetryDelay(1, 300_000)).toBe(10_000)
+      expect(yield* agentRetryDelay(3, 300_000)).toBe(40_000)
+      expect(yield* agentRetryDelay(99, 300_000)).toBe(300_000)
+    }),
+  )
 
   it('matches required labels case-insensitively', (): void => {
     expect(issueIsRoutable(makeIssue('GH-1', 1, null, ['Ready', 'SYMPHONY']), workflow)).toBe(true)
