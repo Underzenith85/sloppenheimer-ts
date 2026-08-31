@@ -3,6 +3,7 @@ import { Effect, Option, Ref, type Scope } from 'effect'
 import type { Issue, IssueId } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
 import { logInfo } from '../support/logging.js'
+import { asSettled } from '../support/settled.js'
 import { dispatch } from './dispatch.js'
 import {
   afterInspectionFailed,
@@ -106,7 +107,10 @@ export const repairPermission = (
   if (stateIsIn(issue.state, workflow.config.tracker.terminalStates)) {
     return { _tag: 'Denied', reason: 'Repair paused because the issue is terminal.' }
   }
-  if (!issueIsActive(issue, workflow) || !issueIsRoutable(issue, workflow)) {
+  if (
+    !issueIsActive(issue, workflow.config.tracker) ||
+    !issueIsRoutable(issue, workflow.config.tracker)
+  ) {
     return {
       _tag: 'Denied',
       reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
@@ -216,12 +220,7 @@ const perform = (
         yield* writeHandoff(context, id, handoff)
         const merged = yield* capability
           .mergePullRequest(handoff.pullRequestNumber, action.headSha)
-          .pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (sha) => ({ _tag: 'Succeeded' as const, sha }),
-            }),
-          )
+          .pipe(asSettled)
         const settled = afterMerge(handoff, merged._tag === 'Failed' ? merged.error.message : null)
         yield* writeHandoff(context, id, settled)
         if (merged._tag === 'Failed') {
@@ -239,7 +238,7 @@ const perform = (
           outcome: 'completed',
           error: null,
           pull_request_url: handoff.pullRequestUrl,
-          merge_commit_sha: merged.sha,
+          merge_commit_sha: merged.value,
         })
         return
       }
@@ -365,12 +364,9 @@ export const reconcileHandoffs = (
         continue
       }
       const observedAt = yield* currentInstant
-      const inspected = yield* codeReview.value.inspectPullRequest(live.pullRequestNumber).pipe(
-        Effect.match({
-          onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-          onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-        }),
-      )
+      const inspected = yield* codeReview.value
+        .inspectPullRequest(live.pullRequestNumber)
+        .pipe(asSettled)
       if (inspected._tag === 'Failed') {
         yield* writeHandoff(
           context,
@@ -389,7 +385,7 @@ export const reconcileHandoffs = (
         context,
         id,
         live,
-        inspected.observation,
+        inspected.value,
         observedAt,
         repairPermission(live, refresh),
         Option.none(),

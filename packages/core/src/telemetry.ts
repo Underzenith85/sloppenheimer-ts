@@ -12,6 +12,7 @@
 import { Schema } from 'effect'
 
 import type { IssueId, IssueIdentifier, JsonObject, JsonValue } from './domain/domain.js'
+import { withEntry } from './support/collections.js'
 import {
   decodeOrNull,
   finiteNumber,
@@ -907,7 +908,8 @@ const noteChangedPath = (
   const truncated = existing === undefined && record.changedPaths.size >= changedPathLimit
   const changedPaths = truncated
     ? record.changedPaths
-    : new Map(record.changedPaths).set(
+    : withEntry(
+        record.changedPaths,
         path,
         Object.freeze({
           addedLines: (existing?.addedLines ?? 0) + (addedLines ?? 0),
