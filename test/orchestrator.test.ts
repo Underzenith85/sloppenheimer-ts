@@ -2155,6 +2155,56 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('advances the execution attempt when a repair retry fails again', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-attempt-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [issue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      runAgent: () =>
+        Effect.fail(
+          new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+        ),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying[0]?.attempt !== 2) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('20 seconds')
+          while (current.retrying[0]?.attempt !== 3) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      ),
+    )
+
+    expect(snapshot.retrying[0]).toMatchObject({ issueId: issue.id, attempt: 3 })
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 0,
+      repairStartedHeadSha: head,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('admits a repair retry against the workflow it will be dispatched under', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-admission-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')

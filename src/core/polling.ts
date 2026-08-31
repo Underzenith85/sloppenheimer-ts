@@ -479,6 +479,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               inspected.observation,
               new Date(),
               repairPermission(settled, { _tag: 'Succeeded', issue }),
+              Option.some(event.attempt),
             )
             break
           }

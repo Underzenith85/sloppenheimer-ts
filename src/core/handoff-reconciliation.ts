@@ -170,6 +170,7 @@ const perform = (
   handoff: HandoffEntry,
   action: HandoffAction,
   permission: RepairPermission,
+  executionAttempt: Option.Option<number>,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const codeReview = handoff.execution.codeReview
@@ -281,7 +282,8 @@ const perform = (
           workspaces: handoff.execution.workspaces,
           loadedAt: handoff.observedAt,
         }
-        const started = yield* dispatch(context, issue, action.attempt, effective)
+        const attempt = Option.getOrElse(executionAttempt, () => action.attempt)
+        const started = yield* dispatch(context, issue, attempt, effective)
         yield* writeHandoff(
           context,
           id,
@@ -300,9 +302,10 @@ export const applyHandoffObservation = (
   observation: Parameters<typeof observeHandoff>[1],
   observedAt: Date,
   permission: RepairPermission,
+  executionAttempt: Option.Option<number>,
 ): Effect.Effect<void, never, Scope.Scope> => {
   const decision = observeHandoff(handoff, observation, observedAt)
-  return perform(context, id, decision.handoff, decision.action, permission)
+  return perform(context, id, decision.handoff, decision.action, permission, executionAttempt)
 }
 
 export const reconcileHandoffs = (
@@ -351,6 +354,7 @@ export const reconcileHandoffs = (
         inspected.observation,
         observedAt,
         repairPermission(live, refresh),
+        Option.none(),
       )
     }
     // One timeline entry per observed transition, not one per poll: an unchanged disposition is
