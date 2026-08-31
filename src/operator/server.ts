@@ -258,11 +258,12 @@ const makeRouter = (
       '/api/v1/:identifier',
       withMethod(
         'GET',
+        // The identifier is not matched against a shape. `IssueIdentifier` is an unconstrained
+        // branded string, and a tracker is free to spell one `GH-7`; a syntactic guard here would
+        // decide on GitHub's behalf which providers may reach a SPEC resource. Existence is the
+        // only question, and in-memory state is what answers it.
         Effect.flatMap(HttpRouter.params, (params) => {
           const identifier = params['identifier'] ?? ''
-          if (!isIssueIdentifier(identifier)) {
-            return unknownIssue
-          }
           return Effect.flatMap(runBackend(backend.snapshot), (result) => {
             if (HttpServerResponse.isServerResponse(result)) {
               return result

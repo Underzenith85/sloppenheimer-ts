@@ -512,6 +512,53 @@ describe('operator server', (): void => {
     }),
   )
 
+  /*
+   * `IssueIdentifier` is an unconstrained branded string and the port boundary is tracker-neutral,
+   * so the SPEC resource must answer for an identifier a provider spells its own way. Deciding on
+   * GitHub's behalf which shapes are addressable would make the resource unreachable for a tracker
+   * whose identifiers carry no `#`.
+   */
+  it.live('resolves an identifier that is not shaped like a GitHub one', () =>
+    Effect.gen(function* () {
+      const jiraLike: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          running: [],
+          handoffs: [
+            {
+              issueId: '7',
+              identifier: 'GH-7',
+              pullRequestUrl: 'https://example.test/pull/7',
+              branchName: 'symphony/gh-7',
+              state: 'awaiting_checks',
+              headSha: null,
+              reason: null,
+              repairAttempts: 0,
+              observedAt: '2026-08-29T12:00:00.000Z',
+            },
+          ],
+        }),
+        agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
+      }
+      yield* withServer(jiraLike, async (url) => {
+        const resolved = await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`)
+        expect(resolved.status).toBe(200)
+        expect(await resolved.json()).toMatchObject({
+          issue_identifier: 'GH-7',
+          issue_id: '7',
+          status: 'handoff',
+          tracked: true,
+        })
+
+        // Still unknown is still 404 — the lookup decides, not the spelling.
+        const missing = await fetch(`${url}/api/v1/${encodeURIComponent('GH-8')}`)
+        expect(missing.status).toBe(404)
+        expect(await missing.json()).toMatchObject({ error: { code: 'issue_not_found' } })
+      })
+    }),
+  )
+
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {
       const rejected = await fetch(`${url}/api/v1/refresh`, { method: 'POST' })
