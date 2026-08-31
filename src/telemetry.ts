@@ -896,6 +896,32 @@ const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => 
 const messageOperation = (text: string | null): string =>
   text === null || text.length === 0 ? 'Writing a reply' : `Replying: ${bound(text, 80).text}`
 
+/** The turn half of a session identity, held by both the runtime snapshot and the agent detail. */
+export type TurnIdentity = Readonly<{
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
+}>
+
+/**
+ * The turn identity a holder should carry after one event. A session id names a turn, so both
+ * halves move together: an event from a turn the run has already moved past restores neither, and
+ * the runtime snapshot and the agent detail can never disagree about which turn is current. The one
+ * event carrying no turn at all is `session_started`, and it precedes every turn on the thread.
+ *
+ * Both holders reset the count when a new attempt opens its own connection, so a fresh session
+ * starting again at turn one is never held back by the count the previous one reached.
+ */
+export const foldTurnIdentity = (held: TurnIdentity, event: AgentEvent): TurnIdentity => {
+  const supersedes = event.turnId !== null && event.turnCount >= held.turnCount
+  return {
+    turnId: supersedes ? event.turnId : held.turnId,
+    sessionId:
+      supersedes || event.turnId === null ? (event.sessionId ?? held.sessionId) : held.sessionId,
+    turnCount: Math.max(held.turnCount, event.turnCount),
+  }
+}
+
 /**
  * Folds one normalized agent event into the record and returns the result. Every retained string
  * arrived already redacted and bounded from the parser; nothing here widens it.
@@ -914,9 +940,7 @@ export const recordAgentEvent = (
     lastActivityAt: at,
     processId: event.processId ?? record.processId,
     threadId: event.threadId ?? record.threadId,
-    turnId: event.turnId ?? record.turnId,
-    sessionId: event.sessionId ?? record.sessionId,
-    turnCount: Math.max(record.turnCount, event.turnCount),
+    ...foldTurnIdentity(record, event),
     tokens: event.usage === null ? record.tokens : Object.freeze({ ...event.usage }),
     rateLimits: event.rateLimits === null ? record.rateLimits : decodeRateLimits(event.rateLimits),
   }

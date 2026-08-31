@@ -3,7 +3,12 @@ import { Option, type Deferred } from 'effect'
 import type { Issue, IssueId, JsonObject } from '../domain/domain.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
 import { mergeSparseObject } from '../support/json.js'
-import { agentDetailPath, type AgentDetailRecord, type AgentDetailStatus } from '../telemetry.js'
+import {
+  agentDetailPath,
+  foldTurnIdentity,
+  type AgentDetailRecord,
+  type AgentDetailStatus,
+} from '../telemetry.js'
 import type { AgentEvent } from '../telemetry.js'
 import {
   rememberedIdentifiers,
@@ -186,26 +191,17 @@ export const accountEndedRun = (
  * Applies one protocol event to the run it belongs to. Pure in the entry alone: the logging the
  * event also deserves is the caller's, because what to say depends on what changed here.
  */
-export const applyRunEvent = (entry: RunningEntry, update: AgentEvent): RunningEntry => {
-  // A session id names a turn, so the two identities move together or neither does: an event from
-  // a turn the run has already moved past must not reinstate that turn's session id either. Only
-  // `session_started` carries no turn at all, and it precedes every turn on the thread.
-  const supersedes = update.turnId !== null && update.turnCount >= entry.turnCount
-  return {
-    ...entry,
-    lastEvent: update.event,
-    lastEventAt: update.timestamp,
-    lastMessage: update.message ?? entry.lastMessage,
-    processId: update.processId,
-    threadId: update.threadId ?? entry.threadId,
-    turnId: supersedes ? update.turnId : entry.turnId,
-    sessionId:
-      supersedes || update.turnId === null
-        ? (update.sessionId ?? entry.sessionId)
-        : entry.sessionId,
-    turnCount: Math.max(entry.turnCount, update.turnCount),
-  }
-}
+export const applyRunEvent = (entry: RunningEntry, update: AgentEvent): RunningEntry => ({
+  ...entry,
+  lastEvent: update.event,
+  lastEventAt: update.timestamp,
+  lastMessage: update.message ?? entry.lastMessage,
+  processId: update.processId,
+  threadId: update.threadId ?? entry.threadId,
+  // Shared with the agent detail, so a late event from a superseded turn can never leave the two
+  // surfaces reporting different turns — or an older turn's session id beside a newer turn number.
+  ...foldTurnIdentity(entry, update),
+})
 
 /**
  * Settles the telemetry the runner's callback buffered for a run that is ending. The usage counters
