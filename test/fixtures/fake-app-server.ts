@@ -25,6 +25,8 @@ type StartupPhase = 'initialize' | 'initialized' | 'rate-limits' | 'thread' | 't
 let startupPhase: StartupPhase = 'initialize'
 let startupViolation: string | null = null
 let workspaceCwd: string | null = null
+/** How many turns the `continuation` scenario has served, so each one gets a distinct turn id. */
+let turnsStarted = 0
 
 const isJsonRecord = (value: unknown): value is JsonRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -212,7 +214,10 @@ const handleThreadStart = (id: unknown, params: unknown): void => {
 }
 
 const handleTurnStart = (id: unknown, params: unknown): void => {
-  if (!requirePhase('turn', id)) {
+  // A continuation turn runs on the same live thread, so this server keeps accepting `turn/start`
+  // after startup is complete instead of treating the second one as an out-of-order request.
+  const continuing = scenario === 'continuation' && startupPhase === 'ready'
+  if (!continuing && !requirePhase('turn', id)) {
     return
   }
   if (!hasTurnPayload(params)) {
@@ -222,6 +227,13 @@ const handleTurnStart = (id: unknown, params: unknown): void => {
   }
   startupPhase = 'ready'
   switch (scenario) {
+    case 'continuation': {
+      turnsStarted += 1
+      const continuationTurn = { id: `turn-${String(turnsStarted)}`, status: 'completed' }
+      send({ id, result: { turn: continuationTurn } })
+      send({ method: 'turn/completed', params: { turn: continuationTurn } })
+      return
+    }
     case 'immediate-completion': {
       // The completion is written before the response: the ordering race that must not lose a turn.
       completeTurn()

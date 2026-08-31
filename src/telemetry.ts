@@ -925,7 +925,7 @@ const noteChangedPath = (
   }
 }
 
-/** Opens a session summary for the thread the agent has just identified itself with. */
+/** Opens a session summary for the identity the agent has just reported. */
 const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
   const sessions = [
     ...record.sessions,
@@ -946,8 +946,96 @@ const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => 
   }
 }
 
+const replaceLastSession = (
+  record: AgentDetailRecord,
+  summary: AgentSessionSummary,
+): AgentDetailRecord => ({
+  ...record,
+  sessions: Object.freeze([...record.sessions.slice(0, -1), Object.freeze(summary)]),
+})
+
+/** Ends the open session summary, if one is still open. Closing an ended session changes nothing. */
+const closeSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  const open = record.sessions.at(-1)
+  return open === undefined || open.endedAt !== null
+    ? record
+    : replaceLastSession(record, { ...open, endedAt: at.toISOString() })
+}
+
+/**
+ * Keeps the retained session history on the same identity the record reports. A session is one turn
+ * on a thread, so each turn is its own retained session, and the history is keyed on the composed
+ * id rather than on whether a summary is still open: an event for the session the last summary
+ * already names changes nothing, whether that summary is open or was ended by its turn.
+ *
+ * The first turn on a thread is the exception — it completes the summary `session_started` opened
+ * while only the thread was known, because there was no session before that turn, only the thread
+ * that would run it. Any other new identity ends whatever is still open and starts its own summary.
+ */
+const alignSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  if (record.threadId === null) {
+    return record
+  }
+  const last = record.sessions.at(-1)
+  if (last === undefined) {
+    return openSession(record, at)
+  }
+  if (last.threadId === record.threadId && last.sessionId === record.sessionId) {
+    return record
+  }
+  if (
+    last.endedAt === null &&
+    last.threadId === record.threadId &&
+    last.sessionId === record.threadId
+  ) {
+    return replaceLastSession(record, {
+      ...last,
+      sessionId: record.sessionId,
+      processId: record.processId,
+    })
+  }
+  return openSession(closeSession(record, at), at)
+}
+
+/**
+ * Whether an event reports the end of the turn it names. A session is one turn, so its retained
+ * summary ends here rather than whenever the next turn happens to start or the attempt is torn
+ * down — the gap where a continuation decides whether to run again belongs to no session.
+ */
+const endsTurn = (event: AgentEvent): boolean =>
+  event.turnStatus !== null &&
+  (event.event === 'turn/completed' ||
+    event.event === 'turn/failed' ||
+    event.event === 'turn/terminated')
+
 const messageOperation = (text: string | null): string =>
   text === null || text.length === 0 ? 'Writing a reply' : `Replying: ${bound(text, 80).text}`
+
+/** The turn half of a session identity, held by both the runtime snapshot and the agent detail. */
+export type TurnIdentity = Readonly<{
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
+}>
+
+/**
+ * The turn identity a holder should carry after one event. A session id names a turn, so both
+ * halves move together: an event from a turn the run has already moved past restores neither, and
+ * the runtime snapshot and the agent detail can never disagree about which turn is current. The one
+ * event carrying no turn at all is `session_started`, and it precedes every turn on the thread.
+ *
+ * Both holders reset the count when a new attempt opens its own connection, so a fresh session
+ * starting again at turn one is never held back by the count the previous one reached.
+ */
+export const foldTurnIdentity = (held: TurnIdentity, event: AgentEvent): TurnIdentity => {
+  const supersedes = event.turnId !== null && event.turnCount >= held.turnCount
+  return {
+    turnId: supersedes ? event.turnId : held.turnId,
+    sessionId:
+      supersedes || event.turnId === null ? (event.sessionId ?? held.sessionId) : held.sessionId,
+    turnCount: Math.max(held.turnCount, event.turnCount),
+  }
+}
 
 /**
  * Folds one normalized agent event into the record and returns the result. Every retained string
@@ -962,17 +1050,24 @@ export const recordAgentEvent = (
   // consumes them rather than deriving its own. The same token counts reach the record and the
   // usage timeline event, and a timeline event is only frozen shallowly, so the object they share
   // is frozen here rather than left reachable through `events[i].tokens`.
-  const observed: AgentDetailRecord = {
+  const reported: AgentDetailRecord = {
     ...record,
     lastActivityAt: at,
     processId: event.processId ?? record.processId,
     threadId: event.threadId ?? record.threadId,
-    turnId: event.turnId ?? record.turnId,
-    sessionId: event.sessionId ?? record.sessionId,
-    turnCount: Math.max(record.turnCount, event.turnCount),
+    ...foldTurnIdentity(record, event),
     tokens: event.usage === null ? record.tokens : Object.freeze({ ...event.usage }),
     rateLimits: event.rateLimits === null ? record.rateLimits : decodeRateLimits(event.rateLimits),
   }
+  // Every event, not only a session-scoped one: whichever event first reports a turn's identity
+  // is the one the retained history has to follow, or the summaries drift from `identity`.
+  const aligned = alignSession(reported, at)
+  // Only the turn the record is actually on: a superseded turn reporting its end late names a
+  // session that already closed, and must not end the one running now.
+  const observed =
+    endsTurn(event) && event.turnId !== null && event.turnId === aligned.turnId
+      ? closeSession(aligned, at)
+      : aligned
   const base = {
     sequence: nextSequence(observed),
     attempt: observed.attempt,
@@ -992,22 +1087,23 @@ export const recordAgentEvent = (
   }
   switch (payload.kind) {
     case 'session': {
-      const sessioned =
-        observed.threadId !== null && observed.sessions.at(-1)?.threadId !== observed.threadId
-          ? openSession(observed, at)
-          : observed
       const next =
-        sessioned.phase === 'starting'
-          ? setPhase(sessioned, 'awaiting_model', 'Waiting for the model', at)
-          : sessioned
+        observed.phase === 'starting'
+          ? setPhase(observed, 'awaiting_model', 'Waiting for the model', at)
+          : observed
       return push(next, {
         ...base,
         operation: next.operation,
         category: 'session',
-        threadId: next.threadId,
-        turnId: next.turnId,
-        sessionId: next.sessionId,
-        turnNumber: next.turnCount,
+        // The timeline is a log of what arrived, so an entry names the turn its own event belongs
+        // to. Only the record's current identity is folded forward: a superseded turn reporting
+        // late is still recorded here against the turn that produced it, rather than being
+        // relabelled as the turn running now. An event that carries no identity of its own — the
+        // client's own session-level notices — takes the record's.
+        threadId: event.threadId ?? next.threadId,
+        turnId: event.turnId ?? next.turnId,
+        sessionId: event.sessionId ?? next.sessionId,
+        turnNumber: event.turnId === null ? next.turnCount : event.turnCount,
         processId: next.processId,
       })
     }

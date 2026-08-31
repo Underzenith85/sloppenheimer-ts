@@ -142,6 +142,20 @@ describe('App Server framing', (): void => {
   )
 })
 
+describe('session identity', (): void => {
+  it('composes the session id from the thread and turn ids', (): void => {
+    expect(composeSessionId('thread-1', 'turn-1')).toBe('thread-1-turn-1')
+  })
+
+  it('keeps the thread id while a continuation turn changes the session id', (): void => {
+    expect(composeSessionId('thread-1', 'turn-2')).toBe('thread-1-turn-2')
+  })
+
+  it('names only the thread before a turn identity exists', (): void => {
+    expect(composeSessionId('thread-1', null)).toBe('thread-1')
+  })
+})
+
 describe('App Server session lifecycle', (): void => {
   it.live('completes a normal turn and reports thread, turn and session identity', () =>
     Effect.gen(function* () {
@@ -152,7 +166,7 @@ describe('App Server session lifecycle', (): void => {
       const started = outcome.events.find((event) => event.event === 'session_started')
       expect(started?.threadId).toBe('thread-1')
       expect(started?.turnId).toBeNull()
-      expect(started?.sessionId).toBe(composeSessionId('thread-1', null))
+      expect(started?.sessionId).toBe('thread-1')
       expect(started?.message).toBeNull()
       const turnStartedIndex = outcome.events.findIndex((event) => event.event === 'turn_started')
       const turnCompletedIndex = outcome.events.findIndex(
@@ -163,6 +177,28 @@ describe('App Server session lifecycle', (): void => {
       expect(outcome.events[turnStartedIndex]?.turnCount).toBe(1)
       expect(outcome.events[turnCompletedIndex]?.turnCount).toBe(1)
     }),
+  )
+
+  it.live(
+    'gives every continuation turn its own session id on the one thread',
+    () =>
+      Effect.gen(function* () {
+        const outcome = yield* runScenario('continuation', { turnTimeoutMs: 60_000 }, 2, {
+          refreshIssue: () => Effect.succeed(issue),
+          isRoutable: () => true,
+        })
+
+        expect(outcome.error).toBeNull()
+        expect(outcome.result).toEqual({ threadId: 'thread-1', turnId: 'turn-2', turnCount: 2 })
+        const turnStarts = outcome.events.filter((event) => event.event === 'turn_started')
+        // The thread the App Server issued is reused; the session id names the turn running on it.
+        expect(turnStarts.map((event) => event.threadId)).toEqual(['thread-1', 'thread-1'])
+        expect(turnStarts.map((event) => event.sessionId)).toEqual([
+          'thread-1-turn-1',
+          'thread-1-turn-2',
+        ])
+      }),
+    30_000,
   )
 
   it.live(
@@ -238,7 +274,7 @@ describe('App Server session lifecycle', (): void => {
         const started = outcome.events.find((event) => event.event === 'item/started')
         expect(started?.threadId).toBe('thread-1')
         expect(started?.turnId).toBe('turn-1')
-        expect(started?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
+        expect(started?.sessionId).toBe('thread-1-turn-1')
       }),
     30_000,
   )
@@ -253,7 +289,7 @@ describe('App Server session lifecycle', (): void => {
         const approved = outcome.events.find((event) => event.event === 'approval_auto_approved')
         expect(approved?.threadId).toBe('thread-1')
         expect(approved?.turnId).toBe('turn-1')
-        expect(approved?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
+        expect(approved?.sessionId).toBe('thread-1-turn-1')
       }),
     30_000,
   )
@@ -357,7 +393,7 @@ describe('App Server session lifecycle', (): void => {
         expect(outcome.error).toBeNull()
         const message = outcome.events.find((event) => event.event === 'item/agentMessage')
         expect(message?.turnId).toBe('turn-1')
-        expect(message?.sessionId).toBe(composeSessionId('thread-1', 'turn-1'))
+        expect(message?.sessionId).toBe('thread-1-turn-1')
       }),
     30_000,
   )
