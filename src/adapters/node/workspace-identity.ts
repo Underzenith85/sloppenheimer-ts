@@ -1,7 +1,6 @@
-import type { Stats } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
+import { FileSystem } from '@effect/platform'
 import { resolve } from 'node:path'
-import { Effect, type Scope } from 'effect'
+import { Effect, Option, type Scope } from 'effect'
 
 import type { Workspace } from '../../domain/domain.js'
 import {
@@ -11,39 +10,78 @@ import {
   assertVerifiedRoot,
   declaredWorkspacePath,
   rejectWorkspace,
+  type DirectoryIdentity,
   type VerifiedWorkspace,
 } from '../../domain/workspace-containment.js'
 import { WorkspaceError } from '../../errors.js'
+import { isSymbolicLink } from './filesystem.js'
 
 /**
  * The filesystem half of workspace containment. Every rule and every rejection message lives in
- * `domain/workspace-containment.ts`; this module only asks the questions the rules compare —
- * `lstat`, `realpath`, and an open directory handle — and sequences them.
+ * `domain/workspace-containment.ts`; this module only asks the questions the rules compare — the
+ * directory's own identity, its canonical path, and an open handle on it — and sequences them.
  */
 
-const directoryIdentity = async (path: string): Promise<Stats> => {
-  let info: Stats
-  try {
-    info = await lstat(path)
-  } catch {
-    throw rejectWorkspace(`workspace directory is not present: ${path}`)
-  }
-  if (info.isSymbolicLink()) {
-    throw rejectWorkspace(`workspace path is a symbolic link: ${path}`)
-  }
-  if (!info.isDirectory()) {
-    throw rejectWorkspace(`workspace path is not a directory: ${path}`)
-  }
-  return info
-}
+/**
+ * Every rejection carries its own message, so a rule that rejected already says what is wrong and
+ * travels unchanged. Anything else — a platform failure, or a defect from a rule that rejects by
+ * throwing — becomes the one rejection the step is entitled to report.
+ */
+const rejectedAs =
+  (message: string) =>
+  <Value, Error, Requirements>(
+    effect: Effect.Effect<Value, Error, Requirements>,
+  ): Effect.Effect<Value, WorkspaceError, Requirements> =>
+    effect.pipe(
+      Effect.mapError((cause: unknown) =>
+        cause instanceof WorkspaceError ? cause : rejectWorkspace(message),
+      ),
+      Effect.catchAllDefect((defect: unknown) =>
+        Effect.fail(defect instanceof WorkspaceError ? defect : rejectWorkspace(message)),
+      ),
+    )
 
-const canonicalRoot = async (root: string): Promise<string> => {
-  try {
-    return await realpath(resolve(root))
-  } catch {
-    throw rejectWorkspace(`configured workspace root is not present: ${resolve(root)}`)
-  }
-}
+/**
+ * The device and inode a rule compares. `File.Info` reports the inode optionally, because not every
+ * platform backend has one to report; a directory whose inode cannot be read can never be re-bound,
+ * so it is rejected here rather than verified against a value that is not there.
+ */
+const directoryIdentityOf = (
+  path: string,
+  info: FileSystem.File.Info,
+): Effect.Effect<DirectoryIdentity, WorkspaceError> =>
+  Option.match(info.ino, {
+    onNone: () =>
+      Effect.fail(rejectWorkspace(`workspace directory identity is unavailable: ${path}`)),
+    onSome: (inode) => Effect.succeed({ deviceId: info.dev, inode }),
+  })
+
+/**
+ * What the path is, without following it: a symbolic link and a non-directory are each rejected on
+ * their own terms, and a path the filesystem cannot describe at all is reported as absent.
+ */
+const directoryIdentity = (
+  path: string,
+): Effect.Effect<DirectoryIdentity, WorkspaceError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
+    if (yield* isSymbolicLink(fileSystem, path)) {
+      return yield* Effect.fail(rejectWorkspace(`workspace path is a symbolic link: ${path}`))
+    }
+    const info = yield* fileSystem.stat(path)
+    if (info.type !== 'Directory') {
+      return yield* Effect.fail(rejectWorkspace(`workspace path is not a directory: ${path}`))
+    }
+    return yield* directoryIdentityOf(path, info)
+  }).pipe(rejectedAs(`workspace directory is not present: ${path}`))
+
+const canonicalRoot = (
+  root: string,
+): Effect.Effect<string, WorkspaceError, FileSystem.FileSystem> =>
+  FileSystem.FileSystem.pipe(
+    Effect.flatMap((fileSystem) => fileSystem.realPath(resolve(root))),
+    rejectedAs(`configured workspace root is not present: ${resolve(root)}`),
+  )
 
 /**
  * The single containment invariant every executor must satisfy immediately before launching an
@@ -56,22 +94,22 @@ const canonicalRoot = async (root: string): Promise<string> => {
 export const verifyWorkspaceForLaunch = (
   root: string,
   workspace: Workspace,
-): Effect.Effect<VerifiedWorkspace, WorkspaceError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const { normalizedRoot, declaredPath } = declaredWorkspacePath(root, workspace)
-      await directoryIdentity(declaredPath)
-      const rootPath = await canonicalRoot(normalizedRoot)
-      const realWorkspace = await realpath(declaredPath)
-      assertResolvedWithinRoot(rootPath, realWorkspace)
-      const resolved = await directoryIdentity(realWorkspace)
-      return { path: realWorkspace, rootPath, deviceId: resolved.dev, inode: resolved.ino }
-    },
-    catch: (cause: unknown) =>
-      cause instanceof WorkspaceError
-        ? cause
-        : rejectWorkspace('workspace containment could not be verified'),
-  })
+): Effect.Effect<VerifiedWorkspace, WorkspaceError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
+    const { normalizedRoot, declaredPath } = declaredWorkspacePath(root, workspace)
+    yield* directoryIdentity(declaredPath)
+    const rootPath = yield* canonicalRoot(normalizedRoot)
+    const realWorkspace = yield* fileSystem.realPath(declaredPath)
+    assertResolvedWithinRoot(rootPath, realWorkspace)
+    const resolved = yield* directoryIdentity(realWorkspace)
+    return {
+      path: realWorkspace,
+      rootPath,
+      deviceId: resolved.deviceId,
+      inode: resolved.inode,
+    }
+  }).pipe(rejectedAs('workspace containment could not be verified'))
 
 /**
  * Re-binds a verified workspace at a path-consuming boundary. Both the root and the workspace are
@@ -82,54 +120,42 @@ export const verifyWorkspaceForLaunch = (
 export const assertWorkspaceIdentity = (
   root: string,
   verified: VerifiedWorkspace,
-): Effect.Effect<void, WorkspaceError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const rootPath = await canonicalRoot(root)
-      assertVerifiedRoot(verified, rootPath)
-      const resolved = await directoryIdentity(verified.path)
-      const current = await realpath(verified.path)
-      assertVerifiedDirectory(verified, current, { deviceId: resolved.dev, inode: resolved.ino })
-    },
-    catch: (cause: unknown) =>
-      cause instanceof WorkspaceError
-        ? cause
-        : rejectWorkspace('workspace identity could not be confirmed'),
-  })
+): Effect.Effect<void, WorkspaceError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
+    const rootPath = yield* canonicalRoot(root)
+    assertVerifiedRoot(verified, rootPath)
+    const resolved = yield* directoryIdentity(verified.path)
+    const current = yield* fileSystem.realPath(verified.path)
+    assertVerifiedDirectory(verified, current, resolved)
+  }).pipe(rejectedAs('workspace identity could not be confirmed'))
 
 /**
  * Verifies containment and then holds an open handle on the verified directory for the caller's
  * scope. Holding the handle keeps the inode allocated, so a directory deleted and recreated at the
  * same path is guaranteed a different inode and cannot pass the identity check.
+ *
+ * `FileSystem.open` is scoped, so the handle is released with the caller's scope rather than
+ * through a release this module has to write and swallow the failure of.
  */
 export const openVerifiedWorkspace = (
   root: string,
   workspace: Workspace,
-): Effect.Effect<VerifiedWorkspace, WorkspaceError, Scope.Scope> =>
+): Effect.Effect<VerifiedWorkspace, WorkspaceError, FileSystem.FileSystem | Scope.Scope> =>
   verifyWorkspaceForLaunch(root, workspace).pipe(
     Effect.flatMap((verified) =>
-      Effect.acquireRelease(
-        Effect.tryPromise({
-          try: () => open(verified.path, 'r'),
-          catch: (cause: unknown) =>
-            cause instanceof WorkspaceError
-              ? cause
-              : rejectWorkspace(`workspace directory could not be held open: ${verified.path}`),
-        }),
-        (handle) => Effect.promise(() => handle.close().catch(() => undefined)),
-      ).pipe(
+      FileSystem.FileSystem.pipe(
+        Effect.flatMap((fileSystem) => fileSystem.open(verified.path, { flag: 'r' })),
+        rejectedAs(`workspace directory could not be held open: ${verified.path}`),
         Effect.flatMap((handle) =>
-          Effect.tryPromise({
-            try: async () => {
-              const held = await handle.stat()
-              assertVerifiedHandle(verified, { deviceId: held.dev, inode: held.ino })
+          handle.stat.pipe(
+            Effect.flatMap((held) => directoryIdentityOf(verified.path, held)),
+            Effect.map((identity) => {
+              assertVerifiedHandle(verified, identity)
               return verified
-            },
-            catch: (cause: unknown) =>
-              cause instanceof WorkspaceError
-                ? cause
-                : rejectWorkspace(`workspace handle could not be confirmed: ${verified.path}`),
-          }),
+            }),
+            rejectedAs(`workspace handle could not be confirmed: ${verified.path}`),
+          ),
         ),
       ),
     ),

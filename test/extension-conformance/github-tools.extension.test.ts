@@ -5,14 +5,26 @@ import { fileURLToPath } from 'node:url'
 import { Effect, Option, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { runAgent, type AgentEvent } from '../../src/adapters/codex/codex.js'
+import {
+  runAgent,
+  type AgentEvent,
+  type AgentLaunch,
+  type AgentResult,
+} from '../../src/adapters/codex/codex.js'
+import type { AgentError } from '../../src/errors.js'
 import { makeHostToolSession } from '../../src/core/dispatch.js'
 import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
 import { makeGitHubCodeReview } from '../../src/adapters/github/code-review.js'
 import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
+import type { TrackerPort } from '../../src/ports/tracker.js'
 import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -75,9 +87,13 @@ const configFor = (scenario: string, dynamicTools: readonly JsonValue[]): CodexC
   stallTimeoutMs: 0,
 })
 
+/** Tracker construction is an effect only because it allocates the dependency cache `Ref`. */
+const trackerOf = (config: GitHubProviderConfig): TrackerPort =>
+  Effect.runSync(makeGitHubTracker(config))
+
 describe('GitHub provider-native tool extension', (): void => {
   it('publishes capability-scoped profiles and rejects disabled code-review tools', async (): Promise<void> => {
-    const tracker = makeGitHubTracker(provider)
+    const tracker = trackerOf(provider)
     const codeReview = makeGitHubCodeReview(provider)
 
     expect(tracker.toolSpecs.map((tool) => tool.name)).toEqual([
@@ -137,7 +153,7 @@ describe('GitHub provider-native tool extension', (): void => {
       argumentsValue: { add_labels: ['Ready'], remove_labels: ['ready'] },
     },
   ])('rejects $name', async ({ argumentsValue }): Promise<void> => {
-    const tracker = makeGitHubTracker(provider)
+    const tracker = trackerOf(provider)
 
     await expect(
       tracker.executeTool('github_handoff_issue', argumentsValue, toolContext),
@@ -148,7 +164,7 @@ describe('GitHub provider-native tool extension', (): void => {
   })
 
   it('maps auth, authorization, rate-limit, and transport errors to structured failures', async (): Promise<void> => {
-    const missingAuth = makeGitHubTracker({ ...provider, token: Redacted.make('') })
+    const missingAuth = trackerOf({ ...provider, token: Redacted.make('') })
     await expect(
       missingAuth.executeTool('github_add_comment', { body: 'hello' }, toolContext),
     ).resolves.toMatchObject({ success: false, error: { code: 'missing_auth' } })
@@ -161,11 +177,7 @@ describe('GitHub provider-native tool extension', (): void => {
           headers: { 'retry-after': '2' },
         })
       await expect(
-        makeGitHubTracker(provider).executeTool(
-          'github_add_comment',
-          { body: 'hello' },
-          toolContext,
-        ),
+        trackerOf(provider).executeTool('github_add_comment', { body: 'hello' }, toolContext),
       ).resolves.toMatchObject({
         success: false,
         error: { code: 'rate_limited', retryable: true, retryAfterMs: 2_000 },
@@ -173,11 +185,7 @@ describe('GitHub provider-native tool extension', (): void => {
 
       globalThis.fetch = async (): Promise<Response> => new Response(null, { status: 403 })
       await expect(
-        makeGitHubTracker(provider).executeTool(
-          'github_add_comment',
-          { body: 'hello' },
-          toolContext,
-        ),
+        trackerOf(provider).executeTool('github_add_comment', { body: 'hello' }, toolContext),
       ).resolves.toMatchObject({
         success: false,
         error: { code: 'authorization_failed', retryable: false },
@@ -187,11 +195,7 @@ describe('GitHub provider-native tool extension', (): void => {
         throw new TypeError('offline')
       }
       await expect(
-        makeGitHubTracker(provider).executeTool(
-          'github_add_comment',
-          { body: 'hello' },
-          toolContext,
-        ),
+        trackerOf(provider).executeTool('github_add_comment', { body: 'hello' }, toolContext),
       ).resolves.toMatchObject({
         success: false,
         error: { code: 'transport_error', retryable: true },
@@ -227,7 +231,7 @@ describe('GitHub provider-native tool extension', (): void => {
       return Response.json({ ok: true })
     }
     try {
-      const tracker = makeGitHubTracker(provider)
+      const tracker = trackerOf(provider)
       const codeReview = makeGitHubCodeReview(provider)
       const hostTools = makeHostToolSession({ tracker, codeReview: Option.some(codeReview) }, issue)
       await expect(
@@ -287,7 +291,7 @@ describe('GitHub provider-native tool extension', (): void => {
     process.env['SYMPHONY_HOST_TOOL_TOKEN'] = 'host-only-secret-value'
     try {
       const result = await Effect.runPromise(
-        runAgent({
+        runAgentOnHost({
           issue,
           workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
           workspaceRoot,
@@ -342,7 +346,7 @@ describe('GitHub provider-native tool extension', (): void => {
     }
     try {
       const result = await Effect.runPromise(
-        runAgent({
+        runAgentOnHost({
           issue,
           workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
           workspaceRoot,

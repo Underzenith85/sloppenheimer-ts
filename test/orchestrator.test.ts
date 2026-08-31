@@ -1,3 +1,4 @@
+import type { FileSystem } from '@effect/platform'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,10 +37,18 @@ import {
   TrackerError,
   WorkflowError,
   WorkspaceError,
+  type HandoffStoreError,
 } from '../src/errors.js'
-import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
+import {
+  loadHandoffs as loadHandoffsAgainstFileSystem,
+  saveHandoffs as saveHandoffsAgainstFileSystem,
+} from '../src/handoff-store.js'
 import { agentRetryDelay } from '../src/core/retry.js'
-import type { CodexReviewObservation, PullRequestObservation } from '../src/domain/handoff.js'
+import type {
+  CodexReviewObservation,
+  HandoffSnapshot,
+  PullRequestObservation,
+} from '../src/domain/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -78,6 +87,25 @@ import {
 import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
+import { hostFileSystem } from './harness/filesystem.js'
+
+/**
+ * The handoff store reads and writes through `FileSystem`. Every assertion below inspects the real
+ * store the orchestrator wrote, so the host's is bound here the way the composition root binds it.
+ */
+const onHostFileSystem = <Value, Error, Requirements>(
+  effect: Effect.Effect<Value, Error, Requirements>,
+): Effect.Effect<Value, Error, Exclude<Requirements, FileSystem.FileSystem>> =>
+  Effect.provide(effect, hostFileSystem)
+
+const loadHandoffs = (path: string): Effect.Effect<readonly HandoffSnapshot[], HandoffStoreError> =>
+  onHostFileSystem(loadHandoffsAgainstFileSystem(path))
+
+const saveHandoffs = (
+  path: string,
+  handoffs: readonly HandoffSnapshot[],
+): Effect.Effect<void, HandoffStoreError> =>
+  onHostFileSystem(saveHandoffsAgainstFileSystem(path, handoffs))
 import type { HostToolSession } from '../src/host-tools.js'
 import type { ValidatedTrackerProvider } from '../src/domain/tracker-provider.js'
 
@@ -334,7 +362,12 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
 const layerTestPorts = (
   ports: TestPorts,
 ): Layer.Layer<OrchestratorServices, TrackerError | SourceControlError> => {
-  const base = layerPorts(ports.configuration, layerTestAdapters(ports))
+  // The orchestrator reads and writes the handoff store through `FileSystem`; the harness binds the
+  // host's, so a test drives real files exactly as the composition root does.
+  const base = Layer.mergeAll(
+    layerPorts(ports.configuration, layerTestAdapters(ports)),
+    hostFileSystem,
+  )
   const makeCodeReview = ports.makeCodeReview
   if (makeCodeReview === undefined) {
     return base

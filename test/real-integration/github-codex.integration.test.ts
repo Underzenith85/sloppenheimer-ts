@@ -4,11 +4,17 @@ import { join } from 'node:path'
 import { Effect, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { runAgent } from '../../src/adapters/codex/codex.js'
+import { runAgent, type AgentLaunch, type AgentResult } from '../../src/adapters/codex/codex.js'
+import type { AgentError } from '../../src/errors.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
 import { githubProviderDefaults } from '../../src/adapters/github/provider.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const environment = process.env
 const nonEmptyEnvironmentValue = (name: string): string | undefined => {
@@ -66,14 +72,16 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       const repositoryName = repositoryParts[1] ?? ''
       expect(owner.length).toBeGreaterThan(0)
       expect(repositoryName.length).toBeGreaterThan(0)
-      const tracker = makeGitHubTracker({
-        owner,
-        repository: repositoryName,
-        token: Redacted.make(token),
-        tokenEnvironmentName: 'GITHUB_TOKEN',
-        apiBaseUrl: githubProviderDefaults.apiBaseUrl,
-        baseBranch: githubProviderDefaults.baseBranch,
-      })
+      const tracker = Effect.runSync(
+        makeGitHubTracker({
+          owner,
+          repository: repositoryName,
+          token: Redacted.make(token),
+          tokenEnvironmentName: 'GITHUB_TOKEN',
+          apiBaseUrl: githubProviderDefaults.apiBaseUrl,
+          baseBranch: githubProviderDefaults.baseBranch,
+        }),
+      )
       const issues = await Effect.runPromise(
         tracker.fetchIssuesByStates(['open'], null, { hydrateDependencies: false }),
       )
@@ -116,7 +124,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       }
       try {
         const result = await Effect.runPromise(
-          runAgent({
+          runAgentOnHost({
             issue,
             workspace: { path: workspacePath, key: identifier, createdNow: true },
             workspaceRoot,

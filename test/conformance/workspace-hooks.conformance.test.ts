@@ -8,6 +8,16 @@ import { afterEach, describe, expect } from 'vitest'
 import { issueIdentifier } from '../../src/domain/domain.js'
 import type { HooksConfig } from '../../src/config/workflow.js'
 import { makeWorkspaceManager } from '../../src/adapters/node/workspace-manager.js'
+import type { WorkspaceManagerPort } from '../../src/ports/workspace.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/**
+ * Built against the host filesystem, the way the composition root builds it. Returned as an
+ * effect rather than run here: the tests are effects now, so the port is acquired in the same
+ * fiber that uses it.
+ */
+const workspaceManager = (root: string, hooks: HooksConfig): Effect.Effect<WorkspaceManagerPort> =>
+  makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem))
 
 const directories: string[] = []
 const makeRoot = async (): Promise<string> => {
@@ -31,17 +41,19 @@ const hooks = (overrides: Partial<HooksConfig>): HooksConfig => ({
 
 // `live` throughout: these hooks are real child processes on real timers, so the suite needs the
 // wall clock rather than the virtual one `it.effect` installs.
+// `live` throughout: these hooks are real child processes on real timers, so the suite needs the
+// wall clock rather than the virtual one `it.effect` installs.
 describe('Core Conformance workspace hook lifecycle', (): void => {
   it.live('aborts an attempt when before_run fails or times out', () =>
     Effect.gen(function* () {
       const root = yield* Effect.promise(makeRoot)
       const identifier = issueIdentifier('owner/repository#19')
-      const failed = makeWorkspaceManager(root, hooks({ beforeRun: 'exit 7' }))
+      const failed = yield* workspaceManager(root, hooks({ beforeRun: 'exit 7' }))
       const failedWorkspace = yield* failed.create(identifier)
       const rejected = yield* Effect.flip(failed.beforeRun(failedWorkspace))
       expect(rejected.message).toContain('hook exited with 7')
 
-      const timedOut = makeWorkspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
+      const timedOut = yield* workspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
       const reused = yield* timedOut.create(identifier)
       const expired = yield* Effect.flip(timedOut.beforeRun(reused))
       expect(expired.message).toContain('hook timed out')
@@ -52,7 +64,7 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
     Effect.gen(function* () {
       const root = yield* Effect.promise(makeRoot)
       const identifier = issueIdentifier('owner/repository#20')
-      const manager = makeWorkspaceManager(
+      const manager = yield* workspaceManager(
         root,
         hooks({ afterRun: 'exit 8', beforeRemove: 'exit 9' }),
       )

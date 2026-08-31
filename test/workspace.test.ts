@@ -8,7 +8,17 @@ import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
 import type { HooksConfig } from '../src/config/workflow.js'
 import { makeWorkspaceManager } from '../src/adapters/node/workspace-manager.js'
 import { containedWorkspacePath, workspaceKey } from '../src/domain/workspace-containment.js'
+import type { WorkspaceManagerPort } from '../src/ports/workspace.js'
+import { hostFileSystem } from './harness/filesystem.js'
 import { processIsAlive } from './harness/processes.js'
+
+/**
+ * The manager is built against the host filesystem, the way the composition root builds it. It
+ * takes the filesystem from the layer, so building it is an effect; nothing about it is
+ * asynchronous.
+ */
+const workspaceManager = (root: string, hooks: HooksConfig): WorkspaceManagerPort =>
+  Effect.runSync(makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem)))
 
 const roots: string[] = []
 
@@ -34,7 +44,7 @@ describe('workspace safety', (): void => {
   it('runs after_create once and reuses the directory', async (): Promise<void> => {
     const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
     roots.push(root)
-    const manager = makeWorkspaceManager(root, {
+    const manager = workspaceManager(root, {
       afterCreate: 'printf created > marker.txt',
       beforeRun: null,
       afterRun: null,
@@ -86,7 +96,7 @@ const workspaceFor = (root: string, key: string): Workspace => ({
 describe('hook process hardening', (): void => {
   it('drains a hook that writes far more than the capture limit', async (): Promise<void> => {
     const root = makeRoot()
-    const manager = makeWorkspaceManager(
+    const manager = workspaceManager(
       root,
       hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'a'` }),
     )
@@ -98,7 +108,7 @@ describe('hook process hardening', (): void => {
 
   it('truncates captured diagnostics in a hook failure', async (): Promise<void> => {
     const root = makeRoot()
-    const manager = makeWorkspaceManager(
+    const manager = workspaceManager(
       root,
       hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'b' >&2; exit 3` }),
     )
@@ -113,8 +123,8 @@ describe('hook process hardening', (): void => {
 
   it('reports a nonzero exit with the hook phase', async (): Promise<void> => {
     const root = makeRoot()
-    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-102')))
-    const manager = makeWorkspaceManager(root, hooks({ beforeRun: 'echo "boom" >&2; exit 7' }))
+    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-102')))
+    const manager = workspaceManager(root, hooks({ beforeRun: 'echo "boom" >&2; exit 7' }))
 
     const error = await Effect.runPromise(
       Effect.flip(manager.beforeRun(workspaceFor(root, 'GH-102'))),
@@ -127,9 +137,9 @@ describe('hook process hardening', (): void => {
 
   it('terminates the whole hook process tree on timeout', async (): Promise<void> => {
     const root = makeRoot()
-    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-103')))
+    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-103')))
     const workspace = workspaceFor(root, 'GH-103')
-    const manager = makeWorkspaceManager(
+    const manager = workspaceManager(
       root,
       hooks({
         beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait',
@@ -149,9 +159,9 @@ describe('hook process hardening', (): void => {
 
   it('still forces termination when a descendant ignores SIGTERM after the shell closes', async (): Promise<void> => {
     const root = makeRoot()
-    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-109')))
+    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-109')))
     const workspace = workspaceFor(root, 'GH-109')
-    const manager = makeWorkspaceManager(
+    const manager = workspaceManager(
       root,
       hooks({
         // The descendant redirects its inherited pipes, so the shell's `close` fires while the
@@ -173,9 +183,9 @@ describe('hook process hardening', (): void => {
 
   it('terminates the hook process tree when the effect is interrupted', async (): Promise<void> => {
     const root = makeRoot()
-    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-104')))
+    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-104')))
     const workspace = workspaceFor(root, 'GH-104')
-    const manager = makeWorkspaceManager(
+    const manager = workspaceManager(
       root,
       hooks({ beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait' }),
     )
@@ -195,7 +205,7 @@ describe('hook process hardening', (): void => {
 describe('hook phase semantics', (): void => {
   it('treats after_create as fatal for the workspace', async (): Promise<void> => {
     const root = makeRoot()
-    const manager = makeWorkspaceManager(root, hooks({ afterCreate: 'exit 1' }))
+    const manager = workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
 
     const error = await Effect.runPromise(Effect.flip(manager.create(issueIdentifier('GH-105'))))
 
@@ -205,8 +215,8 @@ describe('hook phase semantics', (): void => {
 
   it('treats after_run as best effort', async (): Promise<void> => {
     const root = makeRoot()
-    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-106')))
-    const manager = makeWorkspaceManager(root, hooks({ afterRun: 'exit 1' }))
+    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-106')))
+    const manager = workspaceManager(root, hooks({ afterRun: 'exit 1' }))
 
     await expect(
       Effect.runPromise(manager.afterRun(workspaceFor(root, 'GH-106'))),
@@ -216,9 +226,9 @@ describe('hook phase semantics', (): void => {
   it('removes the workspace even when before_remove fails', async (): Promise<void> => {
     const root = makeRoot()
     const created = await Effect.runPromise(
-      makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-107')),
+      workspaceManager(root, hooks()).create(issueIdentifier('GH-107')),
     )
-    const manager = makeWorkspaceManager(root, hooks({ beforeRemove: 'exit 1' }))
+    const manager = workspaceManager(root, hooks({ beforeRemove: 'exit 1' }))
 
     await Effect.runPromise(manager.remove(issueIdentifier('GH-107')))
 
@@ -228,7 +238,7 @@ describe('hook phase semantics', (): void => {
   it('runs before_remove only when the workspace directory exists', async (): Promise<void> => {
     const root = makeRoot()
     const marker = join(root, 'before-remove-ran')
-    const manager = makeWorkspaceManager(
+    const manager = workspaceManager(
       root,
       hooks({ beforeRemove: `printf ran > ${JSON.stringify(marker)}` }),
     )
@@ -236,7 +246,7 @@ describe('hook phase semantics', (): void => {
     await Effect.runPromise(manager.remove(issueIdentifier('GH-108')))
     expect(existsSync(marker)).toBe(false)
 
-    await Effect.runPromise(makeWorkspaceManager(root, hooks()).create(issueIdentifier('GH-108')))
+    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-108')))
     await Effect.runPromise(manager.remove(issueIdentifier('GH-108')))
     expect(existsSync(marker)).toBe(true)
   })
@@ -246,7 +256,7 @@ describe('workspace inspection and cleanup', (): void => {
   it('removes a missing workspace without running before_remove', async (): Promise<void> => {
     const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
     roots.push(root)
-    const manager = makeWorkspaceManager(root, {
+    const manager = workspaceManager(root, {
       afterCreate: null,
       beforeRun: null,
       afterRun: null,
@@ -262,7 +272,7 @@ describe('workspace inspection and cleanup', (): void => {
   it('reports whether a contained workspace exists', async (): Promise<void> => {
     const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
     roots.push(root)
-    const manager = makeWorkspaceManager(root, {
+    const manager = workspaceManager(root, {
       afterCreate: null,
       beforeRun: null,
       afterRun: null,
@@ -284,7 +294,7 @@ describe('workspace inspection and cleanup', (): void => {
     await mkdir(outside)
     const identifier = issueIdentifier('GH-12')
     await symlink(outside, join(root, workspaceKey(identifier)), 'dir')
-    const manager = makeWorkspaceManager(root, {
+    const manager = workspaceManager(root, {
       afterCreate: null,
       beforeRun: null,
       afterRun: null,
@@ -300,7 +310,7 @@ describe('workspace inspection and cleanup', (): void => {
   it('logs and ignores before_remove failure while deleting the workspace', async (): Promise<void> => {
     const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
     roots.push(root)
-    const manager = makeWorkspaceManager(root, {
+    const manager = workspaceManager(root, {
       afterCreate: null,
       beforeRun: null,
       afterRun: null,

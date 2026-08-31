@@ -1,11 +1,18 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { FileSystem } from '@effect/platform'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
 import type { HandoffSnapshot } from '../src/domain/handoff.js'
+import { hostFileSystem } from './harness/filesystem.js'
+
+/** The store reads and writes through `FileSystem`; these tests exercise it against real files. */
+const onHost = <Value, Error>(
+  effect: Effect.Effect<Value, Error, FileSystem.FileSystem>,
+): Effect.Effect<Value, Error> => Effect.provide(effect, hostFileSystem)
 
 const directories: string[] = []
 
@@ -35,18 +42,18 @@ describe('handoff persistence', (): void => {
       observedAt: '2026-08-29T00:00:00.000Z',
     }
 
-    await Effect.runPromise(saveHandoffs(path, [snapshot]))
+    await Effect.runPromise(onHost(saveHandoffs(path, [snapshot])))
 
-    await expect(Effect.runPromise(loadHandoffs(path))).resolves.toEqual([snapshot])
+    await expect(Effect.runPromise(onHost(loadHandoffs(path)))).resolves.toEqual([snapshot])
     expect(await readFile(path, 'utf8')).toContain('"version": 1')
   })
 
   it('treats missing state as an empty recovery set', async (): Promise<void> => {
     const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
     directories.push(directory)
-    await expect(Effect.runPromise(loadHandoffs(join(directory, 'missing.json')))).resolves.toEqual(
-      [],
-    )
+    await expect(
+      Effect.runPromise(onHost(loadHandoffs(join(directory, 'missing.json')))),
+    ).resolves.toEqual([])
   })
 
   it('surfaces a failing write instead of silently discarding it', async (): Promise<void> => {
@@ -55,7 +62,7 @@ describe('handoff persistence', (): void => {
     const path = join(directory, 'handoffs.json')
     await mkdir(`${path}.tmp`)
 
-    const result = await Effect.runPromise(Effect.either(saveHandoffs(path, [])))
+    const result = await Effect.runPromise(Effect.either(onHost(saveHandoffs(path, []))))
     expect(result._tag).toBe('Left')
     if (result._tag === 'Left') {
       expect(result.left.operation).toBe('write')
@@ -78,7 +85,7 @@ describe('handoff persistence', (): void => {
     const path = join(directory, 'handoffs.json')
     await writeFile(path, contents)
 
-    const result = await Effect.runPromise(Effect.either(loadHandoffs(path)))
+    const result = await Effect.runPromise(Effect.either(onHost(loadHandoffs(path))))
     expect(result._tag).toBe('Left')
     if (result._tag === 'Left') {
       expect(result.left.operation).toBe('read')

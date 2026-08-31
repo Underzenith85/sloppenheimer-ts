@@ -9,7 +9,13 @@ import { withEnvironment } from '../harness/environment.js'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
-import { loadWorkflow, renderPrompt } from '../../src/config/workflow.js'
+import { loadWorkflow, renderPrompt, type Workflow } from '../../src/config/workflow.js'
+import type { WorkflowError } from '../../src/errors.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** The workflow source is read through `FileSystem`; these tests read the files they wrote. */
+const loadHostWorkflow = (path: string): Effect.Effect<Workflow, WorkflowError> =>
+  loadWorkflow(path, trackerProviders).pipe(Effect.provide(hostFileSystem))
 
 const directories: string[] = []
 const writeWorkflow = async (source: string): Promise<string> => {
@@ -53,7 +59,7 @@ describe('Core Conformance workflow errors and strict parsing', (): void => {
   ] as const)('returns a typed error for %s', ([, source, category]) =>
     Effect.gen(function* () {
       const path = yield* Effect.promise(() => writeWorkflow(source))
-      const error = yield* Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders)))
+      const error = yield* Effect.flip(withEnvironment(loadHostWorkflow(path)))
       expect(error.category).toBe(category)
     }),
   )
@@ -79,9 +85,7 @@ codex:
 {{ issue.identifier }} {{ attempt }}
 `),
       )
-      const workflow = yield* withEnvironment(loadWorkflow(path, trackerProviders), {
-        TRACKER_TOKEN: 'secret',
-      })
+      const workflow = yield* withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' })
       expect(workflow.config.codex.command).toBe('printf "$UNCHANGED" | codex app-server')
       expect([...workflow.config.agent.maxConcurrentAgentsByState]).toEqual([['ready', 2]])
       expect(yield* renderPrompt(workflow, issue, 4)).toBe('owner/repository#19 4')
@@ -102,9 +106,7 @@ tracker:
 {{ unknown.value }}
 `),
       )
-      const workflow = yield* withEnvironment(loadWorkflow(path, trackerProviders), {
-        TRACKER_TOKEN: 'secret',
-      })
+      const workflow = yield* withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' })
       const error = yield* Effect.flip(renderPrompt(workflow, issue, null))
       expect(error.category).toBe('template_render_error')
     }),

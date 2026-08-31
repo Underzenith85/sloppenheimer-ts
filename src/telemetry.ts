@@ -9,8 +9,17 @@
  * {@link AgentDetailSnapshot} values built from it.
  */
 
+import { Schema } from 'effect'
+
 import type { IssueId, IssueIdentifier, JsonObject, JsonValue } from './domain/domain.js'
-import { isJsonArray, isJsonObject } from './support/json.js'
+import {
+  decodeOrNull,
+  finiteNumber,
+  nonEmptyString,
+  protocolRecord,
+  protocolStruct,
+  tolerant,
+} from './support/schema.js'
 import {
   bound,
   boundRedacted,
@@ -131,34 +140,95 @@ export type AgentEvent = Readonly<{
 
 const noPayload: AgentEventPayload = Object.freeze({ kind: 'none' })
 
-const numberOf = (value: JsonValue | undefined): number | null =>
-  typeof value === 'number' && Number.isFinite(value) ? value : null
+/**
+ * The protocol shapes this module reads. Every field is tolerant and every record is normalized to
+ * one casing by {@link protocolStruct}, so the App Server's habit of reporting the same value as
+ * `used_percent` on one notification and `usedPercent` on the next is answered here rather than at
+ * each field read. Alternatives that are genuinely different names, not different casings, stay
+ * visible as the fields they are and are chosen between where they are read.
+ *
+ * These schemas decode the *protocol* shape only. Redaction and bounding stay in the payload
+ * builders below, so no retained value is ever constructed before the redactor has seen it.
+ */
+const rateLimitWindowSource = protocolStruct({
+  usedPercent: tolerant(finiteNumber),
+  windowMinutes: tolerant(finiteNumber),
+  resetsInSeconds: tolerant(finiteNumber),
+})
 
-const stringOf = (value: JsonValue | undefined): string | null =>
-  typeof value === 'string' && value.length > 0 ? value : null
+/** A command is reported either as one line or as its already-split words. */
+const commandSource = Schema.Union(
+  nonEmptyString,
+  Schema.transform(Schema.Array(Schema.Unknown), Schema.String, {
+    strict: false,
+    decode: (parts: readonly unknown[]) =>
+      parts.filter((part) => typeof part === 'string').join(' '),
+    encode: (text: string) => [text],
+  }).pipe(Schema.filter((text) => text.length > 0)),
+)
 
-const firstNumber = (source: JsonObject, keys: readonly string[]): number | null => {
-  for (const key of keys) {
-    const value = numberOf(source[key])
-    if (value !== null) {
-      return value
-    }
-  }
-  return null
-}
+/**
+ * One protocol item, in the union of every shape the App Server reports. The type word decides
+ * which fields the payload below reads; the rest are simply absent.
+ *
+ * `input`, `arguments`, `args`, `output`, and `result` are deliberately left unread: only their
+ * serialized size is retained, so the values reach {@link byteLength} as they arrived.
+ */
+const itemSource = protocolStruct({
+  type: tolerant(nonEmptyString),
+  itemType: tolerant(nonEmptyString),
+  status: tolerant(nonEmptyString),
+  state: tolerant(nonEmptyString),
+  text: tolerant(nonEmptyString),
+  content: tolerant(nonEmptyString),
+  message: tolerant(nonEmptyString),
+  error: tolerant(nonEmptyString),
+  code: tolerant(nonEmptyString),
+  name: tolerant(nonEmptyString),
+  tool: tolerant(nonEmptyString),
+  server: tolerant(nonEmptyString),
+  command: tolerant(commandSource),
+  commandLine: tolerant(commandSource),
+  exitCode: tolerant(finiteNumber),
+  durationMs: tolerant(finiteNumber),
+  changes: tolerant(Schema.Array(Schema.Unknown)),
+  input: Schema.optional(Schema.Unknown),
+  arguments: Schema.optional(Schema.Unknown),
+  args: Schema.optional(Schema.Unknown),
+  output: Schema.optional(Schema.Unknown),
+  result: Schema.optional(Schema.Unknown),
+})
 
-const firstString = (source: JsonObject, keys: readonly string[]): string | null => {
-  for (const key of keys) {
-    const value = stringOf(source[key])
-    if (value !== null) {
-      return value
-    }
-  }
-  return null
-}
+/** The file an item reports changing, either as the item itself or as its first listed change. */
+const fileTargetSource = protocolStruct({
+  path: tolerant(nonEmptyString),
+  file: tolerant(nonEmptyString),
+  filePath: tolerant(nonEmptyString),
+  kind: tolerant(nonEmptyString),
+  type: tolerant(nonEmptyString),
+  change: tolerant(nonEmptyString),
+  changeKind: tolerant(nonEmptyString),
+  addedLines: tolerant(finiteNumber),
+  additions: tolerant(finiteNumber),
+  deletedLines: tolerant(finiteNumber),
+  deletions: tolerant(finiteNumber),
+})
+
+/** A notification's parameters, as far as the retained payload is concerned. */
+const notificationSource = protocolStruct({
+  item: Schema.optional(Schema.Unknown),
+  text: tolerant(nonEmptyString),
+  message: tolerant(nonEmptyString),
+})
+
+const decodeRateLimitWindow = decodeOrNull(rateLimitWindowSource)
+const decodeRateLimitReport = decodeOrNull(protocolRecord)
+const decodeItem = decodeOrNull(itemSource)
+const decodeFileTarget = decodeOrNull(fileTargetSource)
+const decodeNotification = decodeOrNull(notificationSource)
 
 /** The size of a payload we deliberately do not retain, so an operator still sees its scale. */
-const byteLength = (value: JsonValue | undefined): number | null => {
+const byteLength = (value: unknown): number | null => {
   if (value === undefined) {
     return null
   }
@@ -179,32 +249,20 @@ export const qualityPhaseOf = (command: string): QualityPhase | null => {
   )
 }
 
-const commandText = (value: JsonValue | undefined): string | null => {
-  if (typeof value === 'string') {
-    return value
-  }
-  if (isJsonArray(value)) {
-    const parts = value.filter((part): part is string => typeof part === 'string')
-    return parts.length === 0 ? null : parts.join(' ')
-  }
-  return null
-}
-
 export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLimitWindow[] => {
-  if (!isJsonObject(value)) {
+  const report = decodeRateLimitReport(value)
+  if (report === null) {
     return []
   }
   const windows: RateLimitWindow[] = []
-  for (const [name, window] of Object.entries(value)) {
-    if (!isJsonObject(window)) {
+  // The report's own keys name the windows, so they are not casing-normalized: a window is
+  // whatever the server called it.
+  for (const [name, window] of Object.entries(report)) {
+    const decoded = decodeRateLimitWindow(window)
+    if (decoded === null) {
       continue
     }
-    windows.push({
-      name: bound(redact(name), 40).text,
-      usedPercent: firstNumber(window, ['usedPercent', 'used_percent']),
-      windowMinutes: firstNumber(window, ['windowMinutes', 'window_minutes']),
-      resetsInSeconds: firstNumber(window, ['resetsInSeconds', 'resets_in_seconds']),
-    })
+    windows.push({ name: bound(redact(name), 40).text, ...decoded })
   }
   // Frozen on construction, so the copies a timeline event and a published snapshot each hold
   // cannot be edited into the actor's own reading.
@@ -215,12 +273,12 @@ export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLim
   )
 }
 
-const itemState = (method: string, item: JsonObject): ToolState => {
-  const status = firstString(item, ['status', 'state'])?.toLowerCase() ?? null
-  if (status === 'failed' || status === 'error') {
+const itemState = (method: string, status: string | null): ToolState => {
+  const reported = status?.toLowerCase() ?? null
+  if (reported === 'failed' || reported === 'error') {
     return 'failed'
   }
-  if (status === 'completed' || status === 'succeeded' || method.endsWith('/completed')) {
+  if (reported === 'completed' || reported === 'succeeded' || method.endsWith('/completed')) {
     return 'completed'
   }
   return 'started'
@@ -244,30 +302,24 @@ const fileChangeKinds = new Map<string, FileChangeKind>([
 const changeKind = (value: string | null): FileChangeKind =>
   fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
 
-const fileTarget = (item: JsonObject): JsonObject => {
-  const changes = item['changes']
-  if (isJsonArray(changes)) {
-    const first = changes[0]
-    if (isJsonObject(first)) {
-      return first
-    }
-  }
-  return item
-}
-
 const itemPayload = (
   method: string,
-  item: JsonObject,
+  source: unknown,
   redactor: Redactor,
 ): AgentEventPayload | null => {
-  const type = (firstString(item, ['type', 'itemType', 'item_type']) ?? '').toLowerCase()
+  const item = decodeItem(source)
+  if (item === null) {
+    return null
+  }
+  const type = (item.type ?? item.itemType ?? '').toLowerCase()
+  const status = item.status ?? item.state
   if (type.includes('reasoning')) {
     // Private reasoning is never retained, not even truncated: the fact that the agent is thinking
     // is the whole of the signal an operator is entitled to.
     return { kind: 'reasoning' }
   }
   if (type.includes('message')) {
-    const raw = firstString(item, ['text', 'content', 'message'])
+    const raw = item.text ?? item.content ?? item.message
     const summary = raw === null ? null : boundRedacted(raw, redactor)
     return {
       kind: 'message',
@@ -277,46 +329,50 @@ const itemPayload = (
     }
   }
   if (type.includes('command') || type.includes('exec') || type.includes('shell')) {
-    const raw = commandText(item['command'] ?? item['commandLine'])
+    const raw = item.command ?? item.commandLine
     const summary = commandSummary(raw ?? 'unknown', redactor)
     return {
       kind: 'command',
       program: summary.program,
       argumentCount: summary.argumentCount,
       quality: raw === null ? null : qualityPhaseOf(raw),
-      state: itemState(method, item),
-      exitCode: firstNumber(item, ['exitCode', 'exit_code']),
-      durationMs: firstNumber(item, ['durationMs', 'duration_ms']),
+      state: itemState(method, status),
+      exitCode: item.exitCode,
+      durationMs: item.durationMs,
     }
   }
   if (type.includes('file') || type.includes('patch') || type.includes('diff')) {
-    const target = fileTarget(item)
-    const path = firstString(target, ['path', 'file', 'filePath', 'file_path'])
+    // The change list is authoritative when it carries one; an item that reports the file inline
+    // is read directly.
+    const target = decodeFileTarget(item.changes?.[0]) ?? decodeFileTarget(source)
+    const path = target?.path ?? target?.file ?? target?.filePath ?? null
     return {
       kind: 'file',
       path: path === null ? 'unknown' : pathKey(redactor(path)),
-      change: changeKind(firstString(target, ['kind', 'type', 'change', 'changeKind'])),
-      addedLines: firstNumber(target, ['addedLines', 'added_lines', 'additions']),
-      deletedLines: firstNumber(target, ['deletedLines', 'deleted_lines', 'deletions']),
+      change: changeKind(
+        target?.kind ?? target?.type ?? target?.change ?? target?.changeKind ?? null,
+      ),
+      addedLines: target?.addedLines ?? target?.additions ?? null,
+      deletedLines: target?.deletedLines ?? target?.deletions ?? null,
     }
   }
   if (type.includes('tool') || type.includes('search') || type.includes('mcp')) {
     return {
       kind: 'tool',
-      name: bound(redactor(firstString(item, ['name', 'tool', 'server']) ?? 'tool'), 80).text,
-      state: itemState(method, item),
+      name: bound(redactor(item.name ?? item.tool ?? item.server ?? 'tool'), 80).text,
+      state: itemState(method, status),
       // Tool arguments and results routinely carry file contents and credentials, so only their
       // scale is kept.
-      inputBytes: byteLength(item['input'] ?? item['arguments'] ?? item['args']),
-      outputBytes: byteLength(item['output'] ?? item['result']),
+      inputBytes: byteLength(item.input ?? item.arguments ?? item.args),
+      outputBytes: byteLength(item.output ?? item.result),
     }
   }
   if (type.includes('error')) {
-    const summary = boundRedacted(firstString(item, ['message', 'error']) ?? method, redactor)
+    const summary = boundRedacted(item.message ?? item.error ?? method, redactor)
     return {
       kind: 'error',
       severity: 'error',
-      code: firstString(item, ['code']),
+      code: item.code,
       message: summary.text,
       truncated: summary.truncated,
     }
@@ -334,16 +390,13 @@ export const normalizePayload = (
   params: JsonValue | undefined,
   redactor: Redactor = redact,
 ): AgentEventPayload => {
-  const source = isJsonObject(params) ? params : null
+  const source = decodeNotification(params)
   if (source !== null) {
-    const item = source['item']
-    if (isJsonObject(item)) {
-      const payload = itemPayload(method, item, redactor)
-      if (payload !== null) {
-        return payload
-      }
+    const payload = itemPayload(method, source.item, redactor)
+    if (payload !== null) {
+      return payload
     }
-    const text = stringOf(source['text'] ?? source['message'])
+    const text = source.text ?? source.message
     if (text !== null && /message/iu.test(method)) {
       const summary = boundRedacted(text, redactor)
       return {
