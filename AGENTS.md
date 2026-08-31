@@ -1,5 +1,89 @@
 # Repository conventions
 
+This file describes how the code is written. `README.md` describes what the service does; the two
+answer different questions, and neither substitutes for the other.
+
+Every rule here is one the tree already follows. Where a rule is enforced, the enforcement is named,
+so a reader knows which are checked and which are conventions held by hand.
+
+## Toolchain
+
+Node 24 and native TypeScript 7 only. `package.json` declares `engines.node >= 24` and pins
+`typescript@7`, and nothing in the tree carries a TypeScript 6 compatibility shim: do not add one,
+and do not reintroduce a construct only to keep an older compiler happy.
+
+`tsconfig.base.json` is strict beyond `strict: true` — among others `exactOptionalPropertyTypes`,
+`noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`, `noImplicitReturns`,
+`useUnknownInCatchVariables`, and `verbatimModuleSyntax`. An optional property therefore means
+absent, not `undefined`, and an index read is `T | undefined` until it is narrowed. Write to the
+compiler rather than around it: a cast that defeats one of these flags is the defect the flag exists
+to find.
+
+## How the code is written
+
+- **Arrow consts, not `function` declarations.** Every top-level binding is an arrow const with an
+  explicit type. The tree contains no `function` declaration at all; the keyword appears only as
+  the generator `Effect.gen(function* () {...})` takes, which has no arrow form. `class` is
+  reserved for the two places Effect asks for one — `Context.Tag` service tags and `Data.TaggedError` — plus the
+  Codex connection, which owns a live subprocess and its pending requests.
+- **Explicit return types on everything**, enforced by `typescript/explicit-function-return-type`.
+  The signature is the contract; inference is for call sites, not for exports.
+- **`Readonly<{...}>` on exported object types, `readonly` on their array members.** A domain value
+  is a value: it is replaced, never mutated. `packages/core/src/support/json.ts` deep-freezes JSON
+  conversion for the same reason, so a wire payload cannot be edited after it is built.
+- **Tagged errors, never a bare `Error` for a domain failure.** Every failure is a
+  `Data.TaggedError` in `packages/core/src/domain/errors.ts` carrying a closed `category` string
+  union, and often a `retryable` flag. The closed union is what lets a caller match every case and
+  the compiler notice when a new one appears; a `string` category would make that silent. The one
+  `extends Error` in the tree, `JsonConversionError`, is not a counter-example: it marks a value the
+  code should never have tried to convert, which is a defect rather than a typed failure.
+- **Branded primitives for identifiers.** `IssueId` and `IssueIdentifier` are
+  `Brand<string, ...>` and are constructed only through `issueId` and `issueIdentifier` in
+  `packages/core/src/domain/domain.ts`. Do not cast a raw string into one anywhere else — the smart
+  constructor is the only place the assertion is allowed to be made.
+- **No `any`, braces around every control-flow body, `===`, no non-null assertion, exhaustive
+  `switch`.** All five are oxlint errors, so `pnpm check` fails on them rather than a reviewer
+  catching them.
+- **Module and function size limits.** `max-lines` 500 and `max-lines-per-function` 100, on
+  `src/**` and `packages/*/src/**`. The threshold is 100 rather than ESLint's default 50 because an
+  `Effect.gen` pipeline is vertically expensive: each `Effect.matchEffect` branch costs six to eight
+  lines of structure around one decision. `test/` is exempt, because the rule counts a `describe`
+  callback as a function and would flag suite structure instead of complexity. Files that predate
+  the rule are exempted one at a time in `.oxlintrc.json`, each entry naming the issue that removes
+  it; new code is expected to comply.
+
+## Tests
+
+- **Real in-memory fakes, not mocking frameworks.** `test/harness/` holds fakes that implement the
+  production interface — `fake-tracker.ts`, `fake-app-server.ts`, `fake-workspace-process.ts`, and
+  the rest — and record the calls they receive so a test can assert against them. A fake that
+  implements the port is checked by the compiler when the port changes; a mock is not.
+- The two exceptions are honest ones: `test/subprocess-stream-errors.test.ts` and
+  `test/adapters/codex/codex.test.ts` wrap `node:child_process` to inject a stream fault or observe
+  a spawn, and both still call through to the real implementation. Reach for that only where a
+  fault cannot be produced through the interface.
+- **Effect tests run through `@effect/vitest`** — `it.effect` and `TestClock` — so a test drives the
+  clock the orchestrator's `Effect.sleep` and `Schedule` already run against rather than waiting on
+  the wall clock.
+- Three profiles select by test path against one suite: `pnpm test` (everything but
+  `test/real-integration/`), `pnpm test:conformance` (the SPEC subset), and
+  `pnpm test:real-integration`. The tests live in the root `test/` tree and run once against the
+  whole workspace, so a package split does not change which tests a profile runs.
+
+## The `pnpm check` gate
+
+`pnpm check` is `format:check && lint && typecheck && test && build`:
+
+- `oxfmt --check .` — formatting is not a review topic; run `pnpm format` and move on.
+- `oxlint --type-aware --deny-warnings` — a single warning fails the gate, so a rule cannot be
+  added before the code complies with it.
+- `tsc --noEmit` for the workspace, and again for `tsconfig.browser.json`, which typechecks the
+  operator console's classic scripts as one program.
+- `vitest run`.
+- `tsc -b tsconfig.build.json`, the browser build, and the operator-console copy.
+
+It is the whole gate: a change is finished when `pnpm check` passes, and CI runs the same command.
+
 ## Architecture and ports
 
 The following port boundary was accepted in the 2026-08-30 architecture review:
