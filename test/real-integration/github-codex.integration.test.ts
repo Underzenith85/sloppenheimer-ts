@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { it } from '@effect/vitest'
 import { Effect, Redacted } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import { runAgent, type AgentLaunch, type AgentResult } from '../../src/adapters/codex/codex.js'
 import type { AgentError } from '../../src/errors.js'
@@ -35,8 +36,9 @@ const codexMissing = [
   codexToken === undefined ? 'OPENAI_API_KEY or CODEX_ACCESS_TOKEN' : null,
 ].filter((name): name is string => name !== null)
 
-const githubIntegration = githubMissing.length === 0 ? it : it.skip
-const codexIntegration = codexMissing.length === 0 ? it : it.skip
+// `live`: both cases talk to real services on real timeouts.
+const githubIntegration = githubMissing.length === 0 ? it.live : it.live.skip
+const codexIntegration = codexMissing.length === 0 ? it.live : it.live.skip
 
 describe('Real GitHub/Codex Integration Profile', (): void => {
   if (enabledInCi && githubMissing.length > 0) {
@@ -61,9 +63,8 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
     it.skip(`Codex credentials unavailable: ${codexMissing.join(', ')}`, (): void => {})
   }
 
-  githubIntegration(
-    'authenticates against the isolated GitHub repository scope',
-    async (): Promise<void> => {
+  githubIntegration('authenticates against the isolated GitHub repository scope', () =>
+    Effect.gen(function* () {
       const selectedRepository = repository ?? ''
       const token = githubToken ?? ''
       const repositoryParts = selectedRepository.split('/')
@@ -72,30 +73,29 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       const repositoryName = repositoryParts[1] ?? ''
       expect(owner.length).toBeGreaterThan(0)
       expect(repositoryName.length).toBeGreaterThan(0)
-      const tracker = Effect.runSync(
-        makeGitHubTracker({
-          owner,
-          repository: repositoryName,
-          token: Redacted.make(token),
-          tokenEnvironmentName: 'GITHUB_TOKEN',
-          apiBaseUrl: githubProviderDefaults.apiBaseUrl,
-          baseBranch: githubProviderDefaults.baseBranch,
-        }),
-      )
-      const issues = await Effect.runPromise(
-        tracker.fetchIssuesByStates(['open'], null, { hydrateDependencies: false }),
-      )
+      const tracker = yield* makeGitHubTracker({
+        owner,
+        repository: repositoryName,
+        token: Redacted.make(token),
+        tokenEnvironmentName: 'GITHUB_TOKEN',
+        apiBaseUrl: githubProviderDefaults.apiBaseUrl,
+        baseBranch: githubProviderDefaults.baseBranch,
+      })
+      const issues = yield* tracker.fetchIssuesByStates(['open'], null, {
+        hydrateDependencies: false,
+      })
       expect(Array.isArray(issues)).toBe(true)
-    },
+    }),
   )
 
-  codexIntegration(
-    'runs Codex in a disposable isolated workspace and always cleans it',
-    async (): Promise<void> => {
-      const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-real-integration-'))
+  codexIntegration('runs Codex in a disposable isolated workspace and always cleans it', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), 'symphony-real-integration-')),
+      )
       const identifier = `real-integration-${process.pid}-${Date.now().toString(36)}`
       const workspacePath = join(workspaceRoot, identifier)
-      await mkdir(workspacePath)
+      yield* Effect.promise(() => mkdir(workspacePath))
       const issue: Issue = {
         id: issueId(identifier),
         nativeRef: null,
@@ -122,26 +122,24 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
         readTimeoutMs: 10_000,
         stallTimeoutMs: 30_000,
       }
-      try {
-        const result = await Effect.runPromise(
-          runAgentOnHost({
-            issue,
-            workspace: { path: workspacePath, key: identifier, createdNow: true },
-            workspaceRoot,
-            config,
-            prompt: 'This is an integration smoke test. Reply briefly without changing files.',
-            maxTurns: 1,
-            secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
-            refreshIssue: () => Effect.succeed(null),
-            isRoutable: () => false,
-            onEvent: () => {},
-          }),
-        )
-        expect(result.threadId.length).toBeGreaterThan(0)
-        expect(result.turnId.length).toBeGreaterThan(0)
-      } finally {
-        await rm(workspaceRoot, { recursive: true, force: true })
-      }
-    },
+      const result = yield* runAgentOnHost({
+        issue,
+        workspace: { path: workspacePath, key: identifier, createdNow: true },
+        workspaceRoot,
+        config,
+        prompt: 'This is an integration smoke test. Reply briefly without changing files.',
+        maxTurns: 1,
+        secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
+        refreshIssue: () => Effect.succeed(null),
+        isRoutable: () => false,
+        onEvent: () => {},
+      }).pipe(
+        // The `finally` this replaces: the disposable workspace goes however the run ends.
+        Effect.ensuring(Effect.promise(() => rm(workspaceRoot, { recursive: true, force: true }))),
+      )
+
+      expect(result.threadId.length).toBeGreaterThan(0)
+      expect(result.turnId.length).toBeGreaterThan(0)
+    }),
   )
 })

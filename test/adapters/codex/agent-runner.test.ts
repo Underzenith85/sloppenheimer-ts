@@ -1,5 +1,6 @@
+import { it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import {
   codexAgentEventSemantics,
@@ -54,8 +55,8 @@ const uncontainedLaunch: AgentLaunch = {
   onEvent: () => undefined,
 }
 
-const buildRunner = (): Promise<AgentRunnerPort> =>
-  Effect.runPromise(codexAgentRunner.pipe(Effect.provide(hostFileSystem)))
+const buildRunner = (): Effect.Effect<AgentRunnerPort> =>
+  codexAgentRunner.pipe(Effect.provide(hostFileSystem))
 
 describe('Codex agent runner adapter', (): void => {
   /*
@@ -63,25 +64,27 @@ describe('Codex agent runner adapter', (): void => {
    * signature carries no such requirement. What `run` does before anything else is that
    * verification, which is what this asserts it still reaches.
    */
-  it('satisfies the port with the App Server session', async (): Promise<void> => {
-    const runner = await buildRunner()
+  it.effect('satisfies the port with the App Server session', () =>
+    Effect.gen(function* () {
+      const runner = yield* buildRunner()
 
-    const error = await Effect.runPromise(Effect.flip(runner.run(uncontainedLaunch)))
+      const error = yield* Effect.flip(runner.run(uncontainedLaunch))
 
-    expect(error.category).toBe('workspace_rejected')
-    expect(runner.semantics).toBe(codexAgentEventSemantics)
-  })
+      expect(error.category).toBe('workspace_rejected')
+      expect(runner.semantics).toBe(codexAgentEventSemantics)
+    }),
+  )
 
-  it('provides the agent runner tag from its layer', async (): Promise<void> => {
-    const provided = await Effect.runPromise(
-      AgentRunner.pipe(Effect.provide(layerCodexAgentRunner), Effect.provide(hostFileSystem)),
-    )
+  it.effect('provides the agent runner tag from its layer', () =>
+    Effect.gen(function* () {
+      const provided = yield* AgentRunner
 
-    const error = await Effect.runPromise(Effect.flip(provided.run(uncontainedLaunch)))
+      const error = yield* Effect.flip(provided.run(uncontainedLaunch))
 
-    expect(error.category).toBe('workspace_rejected')
-    expect(provided.semantics).toBe(codexAgentEventSemantics)
-  })
+      expect(error.category).toBe('workspace_rejected')
+      expect(provided.semantics).toBe(codexAgentEventSemantics)
+    }).pipe(Effect.provide(layerCodexAgentRunner), Effect.provide(hostFileSystem)),
+  )
 
   it('reads Codex turn statuses as port outcomes', (): void => {
     const { turnOutcome } = codexAgentEventSemantics
