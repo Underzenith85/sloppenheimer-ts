@@ -62,6 +62,7 @@ const snapshotOf = (
     status: 'running',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
+    handoffEnabled: true,
     branch: 'symphony/issue-34',
     retry: null,
   })

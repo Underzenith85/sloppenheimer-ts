@@ -299,6 +299,9 @@ export const makeGitHubPullRequestMonitor = (
                 headSha,
                 merged: true,
                 mergeCommitSha,
+                // GitHub reports when the merge happened; keeping it lets a handoff observed after
+                // a restart report the time it actually completed rather than the time we noticed.
+                mergedAt: typeof pull['merged_at'] === 'string' ? pull['merged_at'] : null,
                 mergeable:
                   pull['mergeable'] === null || typeof pull['mergeable'] === 'boolean'
                     ? pull['mergeable']

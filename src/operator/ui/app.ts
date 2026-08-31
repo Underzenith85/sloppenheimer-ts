@@ -1,649 +1,666 @@
-type OrchestratorSnapshot = import('../../core/orchestrator.js').OrchestratorSnapshot
-type BacklogSnapshot = import('../operator.js').BacklogSnapshot
-type AgentDetailSnapshot = import('../../telemetry.js').AgentDetailSnapshot
-type AgentTimelineCategory = import('../../telemetry.js').AgentTimelineCategory
-type AgentTimelineEvent = import('../../telemetry.js').AgentTimelineEvent
+// The operator console shell. It is organised around the four questions an operator asks — what
+// needs attention, what is ready, what is running, what finished — and keeps planning detail,
+// which is large and rarely the next action, behind a secondary view.
 
-type RunningEntry = OrchestratorSnapshot['running'][number]
-type RetryingEntry = OrchestratorSnapshot['retrying'][number]
-type HandoffEntry = OrchestratorSnapshot['handoffs'][number]
-type RuntimeNode = BacklogSnapshot['nodes'][number] | BacklogSnapshot['issues'][number]
-type DetailPayload = Readonly<{
-  detail?: AgentDetailSnapshot
-  error?: Readonly<{ message?: string }>
+type WorkView = 'attention' | 'ready' | 'progress' | 'finished'
+
+/** What a row is currently reporting about a mutation the operator asked for. */
+type RowFeedback = Readonly<{
+  tone: 'pending' | 'success' | 'failure'
+  message: string
+  /** Set for a failure so the row can offer the same action again. */
+  retry: (() => void) | null
 }>
 
-declare const timelineCategories: readonly AgentTimelineCategory[]
+/**
+ * Below this width the console lays work out as cards rather than as rows. It is read from
+ * `innerWidth` rather than from a media query so the rendered DOM — not only its styling — differs,
+ * which is what lets the small-screen contract be asserted.
+ */
+const compactWidth = 768
 
-const element = <ElementType extends HTMLElement = HTMLElement>(selector: string): ElementType => {
-  const match = document.querySelector<ElementType>(selector)
-  if (match === null) {
-    throw new Error('Missing UI element: ' + selector)
-  }
-  return match
-}
+const views: readonly WorkView[] = ['attention', 'ready', 'progress', 'finished']
 
-const csrf = element('meta[name="csrf-token"]').getAttribute('content') ?? ''
-const notice = element('#notice')
 let state: OrchestratorSnapshot | null = null
 let backlog: BacklogSnapshot | null = null
+let model: WorkModel = buildWorkModel(null, null, Date.now())
+let activeView: WorkView = 'ready'
+/** Whether the operator has chosen a view. Until they do, the default follows the work. */
+let viewPinned = false
+let planOpen = false
+let planFocus = ''
+let searchTerm = ''
+const stateFilters = new Set<WorkState>()
+const rowFeedback = new Map<string, RowFeedback>()
+const inFlight = new Set<string>()
 
-const text = <Tag extends keyof HTMLElementTagNameMap>(
-  tag: Tag,
-  className: string,
-  value: string,
-): HTMLElementTagNameMap[Tag] => {
-  const node = document.createElement(tag)
-  node.className = className
-  node.textContent = value
+const layoutMode = (): 'compact' | 'regular' =>
+  window.innerWidth < compactWidth ? 'compact' : 'regular'
+
+const identifierKey = (identifier: string): string => statusClass(identifier)
+
+const stateChip = (item: WorkItem): HTMLElement =>
+  chip('state-' + item.state, workStateLabels[item.state])
+
+const phaseChip = (item: WorkItem): HTMLElement =>
+  chip('phase-' + item.phase, phaseLabels[item.phase])
+
+const eligibilityChip = (item: WorkItem): HTMLElement =>
+  chip('eligibility-' + item.eligibility, eligibilityLabels[item.eligibility])
+
+const actionLabels: Readonly<Record<ActionKind, string>> = {
+  start: 'Start agent',
+  queue: 'Queue issue',
+  pause: 'Pause',
+  blockers: 'View blockers',
+  none: '',
+}
+
+/**
+ * What each control actually does, spelled out for the operator rather than left to a `title`
+ * attribute. These are the descriptions the row's action is labelled by.
+ */
+const actionDescriptions: Readonly<Record<ActionKind, string>> = {
+  start: 'Makes the issue eligible and asks Symphony to reselect; a free slot starts it now.',
+  queue: 'Makes the issue eligible. Symphony starts it as soon as a dispatch slot is free.',
+  pause:
+    'Removes the issue from orchestration, cancels its running agent, and drops queued retries.',
+  blockers: 'Lists the unresolved dependencies that are holding this issue back.',
+  none: '',
+}
+
+const setFeedback = (identifier: string, feedback: RowFeedback | null): void => {
+  if (feedback === null) {
+    rowFeedback.delete(identifier)
+  } else {
+    rowFeedback.set(identifier, feedback)
+  }
+  render()
+}
+
+/**
+ * A poll must not silently erase what the operator was just told. A pending note is kept until its
+ * request settles; a settled note is superseded only once the runtime shows the state it promised.
+ */
+const reconcileFeedback = (next: WorkModel): void => {
+  const byIdentifier = new Map<string, WorkItem>()
+  for (const item of [
+    ...next.attention,
+    ...next.ready,
+    ...next.blocked,
+    ...next.progress,
+    ...next.finished,
+  ]) {
+    byIdentifier.set(item.identifier, item)
+  }
+  for (const [identifier, feedback] of [...rowFeedback]) {
+    if (feedback.tone !== 'success') {
+      continue
+    }
+    const item = byIdentifier.get(identifier)
+    if (item !== undefined && item.state === 'progress') {
+      rowFeedback.delete(identifier)
+    }
+  }
+}
+
+const blockerDisclosure = (item: WorkItem): HTMLElement => {
+  const wrapper = document.createElement('details')
+  wrapper.className = 'blockers'
+  const summary = document.createElement('summary')
+  summary.textContent = 'View blockers (' + String(item.blockers.length) + ')'
+  summary.setAttribute('aria-label', 'View the blockers of ' + item.identifier + ': ' + item.title)
+  wrapper.append(summary)
+  const list = document.createElement('ul')
+  for (const blocker of item.blockers) {
+    const entry = document.createElement('li')
+    if (blocker.url === null) {
+      entry.textContent = blocker.identifier
+    } else {
+      const link = text('a', '', blocker.identifier)
+      link.href = blocker.url
+      entry.append(link)
+    }
+    list.append(entry)
+  }
+  if (item.blockers.length === 0) {
+    list.append(text('li', '', 'No unresolved blockers are recorded.'))
+  }
+  const plan = text('button', 'link-button', 'Show in the dependency plan')
+  plan.type = 'button'
+  plan.addEventListener('click', () => {
+    planFocus = item.identifier
+    openPlan()
+  })
+  wrapper.append(list, plan)
+  return wrapper
+}
+
+const confirmPause = (item: WorkItem): boolean => {
+  const interrupts =
+    item.phase === 'running' || item.phase === 'starting' || item.phase === 'retrying'
+  if (!interrupts) {
+    return true
+  }
+  return window.confirm(
+    'Pausing ' +
+      item.identifier +
+      ' cancels the agent that is running for it and drops any queued retry. Continue?',
+  )
+}
+
+const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
+  const issueNumber = item.issueNumber
+  if (issueNumber === null || inFlight.has(item.identifier)) {
+    return
+  }
+  inFlight.add(item.identifier)
+  setFeedback(item.identifier, {
+    tone: 'pending',
+    message: enable ? 'Requesting orchestration…' : 'Pausing…',
+    retry: null,
+  })
+  try {
+    await post('/api/v1/issues/' + String(issueNumber) + '/' + (enable ? 'start' : 'pause'))
+    await post('/api/v1/refresh')
+    await Promise.all([loadState(), loadBacklog()])
+    setFeedback(item.identifier, {
+      tone: 'success',
+      message: enable
+        ? item.queueReason === null
+          ? 'Eligible. Symphony is selecting work and will start it shortly.'
+          : 'Queued: ' + item.queueReason + '. It starts when a slot frees.'
+        : 'Paused. Symphony will not select this issue.',
+      retry: null,
+    })
+  } catch (error) {
+    setFeedback(item.identifier, {
+      tone: 'failure',
+      message: error instanceof Error ? error.message : 'The action failed.',
+      retry: () => {
+        void runAction(item, enable)
+      },
+    })
+  } finally {
+    inFlight.delete(item.identifier)
+  }
+}
+
+const actionControl = (item: WorkItem, scope: string): HTMLElement | null => {
+  if (item.action === 'none') {
+    return null
+  }
+  if (item.action === 'blockers') {
+    return blockerDisclosure(item)
+  }
+  const button = text('button', 'action action-' + item.action, actionLabels[item.action])
+  button.type = 'button'
+  // The same item is rendered in more than one list — a state view and the complete work list —
+  // so the description's id is scoped to the list it belongs to rather than to the issue alone.
+  const describedBy = scope + '-action-help-' + identifierKey(item.identifier)
+  button.setAttribute('aria-describedby', describedBy)
+  button.setAttribute(
+    'aria-label',
+    actionLabels[item.action] + ' for ' + item.identifier + ': ' + item.title,
+  )
+  const busy = inFlight.has(item.identifier)
+  button.disabled = busy
+  button.setAttribute('aria-busy', String(busy))
+  button.addEventListener('click', () => {
+    if (item.action === 'pause' && !confirmPause(item)) {
+      return
+    }
+    void runAction(item, item.action !== 'pause')
+  })
+  const wrapper = document.createElement('div')
+  wrapper.className = 'action-cell'
+  const help = text('span', 'action-help', actionDescriptions[item.action])
+  help.id = describedBy
+  wrapper.append(button, help)
+  return wrapper
+}
+
+const feedbackNode = (item: WorkItem): HTMLElement | null => {
+  const feedback = rowFeedback.get(item.identifier)
+  if (feedback === undefined) {
+    return null
+  }
+  const node = text('p', 'row-feedback tone-' + feedback.tone, feedback.message)
+  node.setAttribute('role', 'status')
+  if (feedback.retry !== null) {
+    const retry = text('button', 'link-button', 'Try again')
+    retry.type = 'button'
+    retry.addEventListener('click', feedback.retry)
+    node.append(' ', retry)
+  }
   return node
 }
 
-const request = async <Value>(path: string, options: RequestInit = {}): Promise<Value> => {
-  const response = await fetch(path, options)
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as DetailPayload | null
-    const message = payload?.error?.message ?? 'Request failed with HTTP ' + String(response.status)
-    throw new Error(message)
-  }
-  return response.json() as Promise<Value>
-}
-
-const formatDuration = (seconds: number): string => {
-  if (seconds < 60) {
-    return Math.round(seconds) + 's runtime'
-  }
-  const minutes = Math.floor(seconds / 60)
-  return minutes + 'm ' + Math.round(seconds % 60) + 's runtime'
-}
-
-const formatTime = (value: string): string =>
-  new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date(value))
-
-const detailPanel = element('#agent-detail')
-const detailStatus = element('#detail-status')
-const detailTimeline = element('#detail-timeline')
-const detailFacts = element('#detail-facts')
-const detailFilters = element('#detail-filters')
-const detailTitle = element('#detail-title')
-
-const telemetryLabel = (value: string): string =>
-  value
-    .split('_')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
-
-const activeCategories = new Set(timelineCategories)
-let detail: AgentDetailSnapshot | null = null
-let detailIdentifier: string | null = null
-let detailTrigger: HTMLElement | null = null
-let detailNotice = ''
-let announcedStatus = ''
-// Detail requests can outlive the polling interval, so responses are matched to the request that
-// asked for them: an older one finishing late must not walk the panel backwards.
-let detailRequest = 0
-
-const formatClock = (milliseconds: number): string => {
-  const total = Math.max(Math.round(milliseconds / 1000), 0)
-  const minutes = Math.floor(total / 60)
-  if (minutes === 0) {
-    return String(total) + 's'
-  }
-  return String(minutes) + 'm ' + String(total % 60).padStart(2, '0') + 's'
-}
-
-const deepLink = (identifier: string): string => '#/agents/' + encodeURIComponent(identifier)
-
-const identifierFromHash = (): string | null => {
-  const raw = window.location.hash
-  if (!raw.startsWith('#/agents/')) {
-    return null
-  }
-  try {
-    const decoded = decodeURIComponent(raw.slice('#/agents/'.length))
-    return decoded.length === 0 ? null : decoded
-  } catch {
-    return null
-  }
-}
-
-const requestStatus = async (
-  path: string,
-): Promise<
-  Readonly<{
-    ok: boolean
-    status: number
-    payload: DetailPayload
-  }>
-> => {
-  const response = await fetch(path)
-  const payload = (await response.json().catch(() => ({}))) as DetailPayload
-  return { ok: response.ok, status: response.status, payload }
-}
-
-const describeEvent = (event: AgentTimelineEvent): string => {
-  if (event.category === 'message') {
-    const who = event.role === 'user' ? 'User message' : 'Agent message'
-    return event.text === null ? who : who + ': ' + event.text + (event.truncated ? '…' : '')
-  }
-  if (event.category === 'reasoning') {
-    return 'Thinking (private reasoning is never retained)'
-  }
-  if (event.category === 'tool') {
-    const bytes =
-      event.outputBytes === null ? '' : ' · ' + String(event.outputBytes) + ' output bytes'
-    return 'Tool ' + event.name + ' · ' + event.state + bytes
-  }
-  if (event.category === 'command') {
-    const exit = event.exitCode === null ? '' : ' · exit ' + String(event.exitCode)
-    const quality = event.quality === null ? '' : ' · ' + event.quality
-    return (
-      'Command ' +
-      event.program +
-      ' (' +
-      String(event.argumentCount) +
-      ' arguments)' +
-      quality +
-      ' · ' +
-      event.state +
-      exit
-    )
-  }
-  if (event.category === 'file') {
-    const added = event.addedLines === null ? 0 : event.addedLines
-    const deleted = event.deletedLines === null ? 0 : event.deletedLines
-    return event.change + ' ' + event.path + ' (+' + String(added) + ' / −' + String(deleted) + ')'
-  }
-  if (event.category === 'usage') {
-    const tokens =
-      event.tokens === null ? 'no token totals' : String(event.tokens.totalTokens) + ' tokens'
-    const limits = event.rateLimits
-      .map((window) => window.name + ' ' + String(window.usedPercent ?? 0) + '%')
-      .join(', ')
-    return 'Usage · ' + tokens + (limits.length === 0 ? '' : ' · ' + limits)
-  }
-  if (event.category === 'retry') {
-    const due = event.dueAt === null ? '' : ' · due ' + formatTime(event.dueAt)
-    return (
-      'Retry attempt ' +
-      String(event.attemptNumber) +
-      due +
-      (event.reason === null ? '' : ' · ' + event.reason)
-    )
-  }
-  if (event.category === 'error') {
-    return (
-      event.severity + (event.code === null ? '' : ' [' + event.code + ']') + ': ' + event.message
-    )
-  }
-  if (event.category === 'cancellation') {
-    return 'Cancelled: ' + event.reason
-  }
-  if (event.category === 'handoff') {
-    return (
-      'Handoff ' +
-      event.step.replaceAll('_', ' ') +
-      ' · ' +
-      event.status +
-      (event.message === null ? '' : ' · ' + event.message)
-    )
-  }
-  return event.event + (event.turnNumber === undefined ? '' : ' · turn ' + String(event.turnNumber))
-}
-
-// The published snapshot carries absolute timestamps, so the console decides for itself whether the
-// deadline has passed since the last fetch rather than waiting for the next one to say so.
-const stalledNow = (snapshot: AgentDetailSnapshot): boolean => {
-  if (snapshot.activity.stalled) {
-    return true
-  }
-  return (
-    snapshot.activity.stallDeadline !== null &&
-    new Date(snapshot.activity.stallDeadline).getTime() <= Date.now()
-  )
-}
-
-const idleNow = (snapshot: AgentDetailSnapshot): number => {
-  if (snapshot.activity.lastActivityAt === null) {
-    return Date.now() - new Date(snapshot.activity.startedAt).getTime()
-  }
-  return Date.now() - new Date(snapshot.activity.lastActivityAt).getTime()
-}
-
-const waitingExplanation = (snapshot: AgentDetailSnapshot): string => {
-  if (snapshot.status === 'retrying' && snapshot.retry !== null) {
-    const remaining = new Date(snapshot.retry.dueAt).getTime() - Date.now()
-    const because =
-      snapshot.retry.reason === null ? 'the attempt did not complete' : snapshot.retry.reason
-    return (
-      'Retrying because ' +
-      because +
-      '. Attempt ' +
-      String(snapshot.retry.attempt) +
-      ' starts in ' +
-      formatClock(remaining) +
-      '.'
-    )
-  }
-  if (snapshot.status === 'completed') {
-    return (
-      'The agent session has ended. ' + (snapshot.handoff.reason ?? 'No further work is scheduled.')
-    )
-  }
-  if (stalledNow(snapshot)) {
-    return 'Stalled: no protocol activity for ' + formatClock(idleNow(snapshot)) + '.'
-  }
-  if (snapshot.activity.stallDeadline === null) {
-    return (
-      (snapshot.phase.operation ?? telemetryLabel(snapshot.phase.phase)) +
-      '. Stall detection is disabled.'
-    )
-  }
-  const remaining = new Date(snapshot.activity.stallDeadline).getTime() - Date.now()
-  return (
-    (snapshot.phase.operation ?? telemetryLabel(snapshot.phase.phase)) +
-    '. Considered stalled in ' +
-    formatClock(remaining) +
-    '.'
-  )
-}
-
-const renderDetailStatus = (): void => {
-  if (detailNotice.length > 0) {
-    detailStatus.textContent = detailNotice
-    detailPanel.dataset['state'] = 'error'
-    return
-  }
-  if (detail === null) {
-    detailStatus.textContent = 'Loading agent detail…'
-    return
-  }
-  const stalled = stalledNow(detail)
-  const phase = stalled ? 'stalled' : detail.phase.phase
-  element('#detail-phase').textContent = telemetryLabel(phase) + ' · ' + detail.status
-  const elapsed = Date.now() - new Date(detail.activity.startedAt).getTime()
-  const message = waitingExplanation(detail) + ' Running for ' + formatClock(elapsed) + '.'
-  // Only a changed message is written, so a screen reader is not told the same thing every second.
-  if (message !== announcedStatus) {
-    announcedStatus = message
-    detailStatus.textContent = message
-  }
-  detailPanel.dataset['state'] = stalled ? 'stalled' : detail.status
-}
-
-const fact = (list: HTMLDListElement, term: string, value: string, href?: string | null): void => {
-  list.append(text('dt', '', term))
-  const definition = document.createElement('dd')
-  if (href === undefined || href === null) {
-    definition.textContent = value
+const workCard = (item: WorkItem, scope: string): HTMLElement => {
+  const card = document.createElement('article')
+  card.className = 'work-card'
+  card.dataset['identifier'] = item.identifier
+  card.dataset['state'] = item.state
+  const heading = document.createElement('div')
+  heading.className = 'work-heading'
+  const title = document.createElement('h3')
+  if (item.url === null) {
+    title.textContent = item.title
   } else {
-    const link = text('a', '', value)
-    link.href = href
-    definition.append(link)
+    const link = text('a', 'issue-link', item.title)
+    link.href = item.url
+    title.append(link)
   }
-  list.append(definition)
+  heading.append(title)
+  const chips = document.createElement('div')
+  chips.className = 'work-chips'
+  chips.append(stateChip(item), phaseChip(item), eligibilityChip(item))
+  if (item.attention !== null) {
+    chips.append(chip('attention-' + item.attention, attentionLabels[item.attention]))
+  }
+  chips.append(
+    chip('priority', item.priority === null ? 'No priority' : 'P' + String(item.priority)),
+  )
+  heading.append(chips)
+  card.append(heading)
+  card.append(text('p', 'work-identifier', item.identifier))
+  if (item.reason !== null) {
+    card.append(text('p', 'work-reason', item.reason))
+  }
+  if (item.ranking !== null) {
+    card.append(text('p', 'work-ranking', item.ranking))
+  }
+  if (item.finishedAt !== null) {
+    card.append(text('p', 'work-finished', 'Finished ' + formatAgo(item.finishedAt, Date.now())))
+  }
+  if (item.labels.length > 0) {
+    const labels = document.createElement('details')
+    labels.className = 'work-labels'
+    const summary = document.createElement('summary')
+    summary.textContent = 'Labels'
+    labels.append(summary, text('p', '', item.labels.join(' · ')))
+    card.append(labels)
+  }
+  const controls = document.createElement('div')
+  controls.className = 'work-controls'
+  if (item.hasDetail) {
+    const inspect = text('button', 'inspect', 'Inspect agent')
+    inspect.type = 'button'
+    inspect.dataset['identifier'] = item.identifier
+    inspect.dataset['detailTrigger'] = 'true'
+    inspect.setAttribute('aria-controls', 'agent-detail')
+    inspect.setAttribute('aria-expanded', 'false')
+    inspect.setAttribute('aria-label', 'Inspect the agent for ' + item.identifier)
+    inspect.addEventListener('click', () => openDetail(item.identifier, inspect))
+    controls.append(inspect)
+  }
+  if (item.pullRequestUrl !== null) {
+    const link = text('a', 'link-button', 'Open pull request')
+    link.href = item.pullRequestUrl
+    controls.append(link)
+  }
+  const action = actionControl(item, scope)
+  if (action !== null) {
+    controls.append(action)
+  }
+  card.append(controls)
+  const feedback = feedbackNode(item)
+  if (feedback !== null) {
+    card.append(feedback)
+  }
+  return card
 }
 
-const renderDetailFacts = (): void => {
-  const list = document.createElement('dl')
-  list.className = 'detail-facts'
-  if (detail === null) {
-    detailFacts.replaceChildren()
+const renderList = (container: HTMLElement, items: readonly WorkItem[], empty: string): void => {
+  container.dataset['layout'] = layoutMode()
+  if (items.length === 0) {
+    container.replaceChildren(text('p', 'empty', empty))
     return
   }
-  const identity = detail.identity
-  fact(list, 'Issue', detail.identifier, detail.url)
-  fact(
-    list,
-    'Attempt',
-    String(detail.attempt.current) + ' · ' + String(detail.attempt.retries) + ' retries',
-  )
-  fact(list, 'Session', identity.sessionId ?? 'not started')
-  fact(list, 'Thread', identity.threadId ?? '—')
-  fact(list, 'Turn', (identity.turnId ?? '—') + ' · #' + String(identity.turnNumber))
-  fact(list, 'Process', identity.processId === null ? '—' : String(identity.processId))
-  fact(list, 'Worker', identity.workerHost)
-  fact(
-    list,
-    'Tokens',
-    new Intl.NumberFormat().format(detail.usage.totalTokens) +
-      ' (' +
-      String(detail.usage.inputTokens) +
-      ' in / ' +
-      String(detail.usage.outputTokens) +
-      ' out)',
-  )
-  fact(
-    list,
-    'Rate limits',
-    detail.rateLimits.length === 0
-      ? 'none reported'
-      : detail.rateLimits
-          .map((window) => window.name + ' ' + String(window.usedPercent ?? 0) + '%')
-          .join(' · '),
-  )
-  fact(
-    list,
-    'Last activity',
-    detail.activity.lastActivityAt === null
-      ? 'no events yet'
-      : formatTime(detail.activity.lastActivityAt),
-  )
-  fact(
-    list,
-    'Workspace',
-    detail.workspace.pathKey +
-      ' · ' +
-      String(detail.workspace.dirtyFileCount) +
-      ' files (+' +
-      String(detail.workspace.addedLines) +
-      ' / −' +
-      String(detail.workspace.deletedLines) +
-      ')',
-  )
-  fact(
-    list,
-    'Quality command',
-    detail.workspace.qualityPhase === null
-      ? 'not observed'
-      : detail.workspace.qualityPhase + ' · ' + (detail.workspace.qualityCommandState ?? 'unknown'),
-  )
-  fact(list, 'Expected branch', detail.handoff.expectedBranch ?? '—')
-  fact(
-    list,
-    'Remote branch',
-    detail.handoff.remoteBranch.status +
-      (detail.handoff.remoteBranch.name === null ? '' : ' · ' + detail.handoff.remoteBranch.name),
-  )
-  if (detail.handoff.pullRequest.url === null) {
-    fact(list, 'Pull request', detail.handoff.pullRequest.status)
-  } else {
-    fact(
-      list,
-      'Pull request',
-      detail.handoff.pullRequest.status + ' · #' + String(detail.handoff.pullRequest.number),
-      detail.handoff.pullRequest.url,
-    )
-  }
-  fact(
-    list,
-    'Dispatch labels',
-    detail.handoff.dispatchLabels.labels.join(', ') + ' · ' + detail.handoff.dispatchLabels.status,
-  )
-  fact(list, 'Handoff outcome', detail.handoff.outcome.replaceAll('_', ' '))
-  detailFacts.replaceChildren(...list.childNodes)
+  container.replaceChildren(...items.map((item) => workCard(item, container.id)))
 }
 
-const renderTimeline = (): void => {
-  if (detail === null) {
-    detailTimeline.replaceChildren(
-      text('li', 'empty', detailNotice.length > 0 ? detailNotice : 'No events yet.'),
-    )
-    return
-  }
-  const events = detail.timeline.events.filter((event) => activeCategories.has(event.category))
-  if (events.length === 0) {
-    detailTimeline.replaceChildren(text('li', 'empty', 'No events match the selected filters.'))
-    return
-  }
-  const items = events.map((event) => {
-    const item = document.createElement('li')
-    item.className = 'timeline-event category-' + event.category
-    item.append(text('span', 'timeline-time', formatTime(event.at)))
-    item.append(text('span', 'timeline-category', telemetryLabel(event.category)))
-    item.append(text('span', 'timeline-body', describeEvent(event)))
-    item.append(
-      text(
-        'small',
-        'timeline-meta',
-        'attempt ' + String(event.attempt) + ' · #' + String(event.sequence),
-      ),
-    )
-    return item
-  })
-  if (detail.timeline.dropped > 0) {
-    items.unshift(
-      text(
-        'li',
-        'timeline-dropped',
-        String(detail.timeline.dropped) + ' earlier events were dropped to keep retention bounded.',
-      ),
-    )
-  }
-  detailTimeline.replaceChildren(...items)
-}
-
-const renderDetail = (): void => {
-  detailTitle.textContent = detail === null ? (detailIdentifier ?? 'Agent detail') : detail.title
-  element('#detail-operation').textContent = detail === null ? '' : (detail.phase.operation ?? '')
-  renderDetailStatus()
-  renderDetailFacts()
-  renderTimeline()
-}
-
-const loadDetail = async (): Promise<void> => {
-  if (detailIdentifier === null) {
-    return
-  }
-  const target = detailIdentifier
-  detailRequest += 1
-  const generation = detailRequest
-  try {
-    const result = await requestStatus('/api/v1/agents/' + encodeURIComponent(target))
-    if (target !== detailIdentifier || generation !== detailRequest) {
-      return
-    }
-    if (result.ok) {
-      detail = result.payload.detail ?? null
-      detailNotice = ''
-    } else {
-      detail = null
-      detailNotice =
-        result.payload?.error?.message ?? 'Detail request failed with HTTP ' + String(result.status)
-    }
-  } catch {
-    if (target !== detailIdentifier || generation !== detailRequest) {
-      return
-    }
-    // A transport failure keeps the last known detail on screen and retries on the next tick.
-    detailNotice = 'Agent detail is temporarily unreachable. Retrying…'
-  }
-  renderDetail()
-}
-
-const buildFilters = (): void => {
-  const controls = timelineCategories.map((category) => {
-    const label = document.createElement('label')
-    label.className = 'filter'
-    const input = document.createElement('input')
-    input.type = 'checkbox'
-    input.checked = true
-    input.value = category
-    input.addEventListener('change', () => {
-      if (input.checked) {
-        activeCategories.add(category)
-      } else {
-        activeCategories.delete(category)
-      }
-      renderTimeline()
-    })
-    label.append(input, text('span', '', telemetryLabel(category)))
-    return label
-  })
-  detailFilters.replaceChildren(...controls)
-}
-
-const openDetail = (identifier: string, trigger: HTMLElement | null): void => {
-  if (trigger !== undefined && trigger !== null) {
-    detailTrigger = trigger
-  }
-  const changed = detailIdentifier !== identifier
-  detailIdentifier = identifier
-  if (changed) {
-    detail = null
-    detailNotice = ''
-    announcedStatus = ''
-  }
-  detailPanel.hidden = false
-  if (window.location.hash !== deepLink(identifier)) {
-    window.location.hash = deepLink(identifier)
-  }
-  for (const card of document.querySelectorAll<HTMLElement>('.work-card')) {
-    card.setAttribute('aria-expanded', String(card.dataset['identifier'] === identifier))
-  }
-  renderDetail()
-  if (changed) {
-    detailTitle.focus()
-  }
-  loadDetail().catch(() => undefined)
-}
-
-const closeDetail = (): void => {
-  detailIdentifier = null
-  detail = null
-  detailNotice = ''
-  announcedStatus = ''
-  detailPanel.hidden = true
-  for (const card of document.querySelectorAll<HTMLElement>('.work-card')) {
-    card.setAttribute('aria-expanded', 'false')
-  }
-  if (window.location.hash.startsWith('#/agents/')) {
-    window.location.hash = ''
-  }
-  if (detailTrigger !== null && document.contains(detailTrigger)) {
-    detailTrigger.focus()
-  }
-  detailTrigger = null
-}
-
-const syncFromHash = (): void => {
-  const identifier = identifierFromHash()
-  if (identifier === null) {
-    if (detailIdentifier !== null) {
-      closeDetail()
-    }
-    return
-  }
-  if (identifier !== detailIdentifier) {
-    openDetail(identifier, null)
-  }
-}
-
-const renderWork = (
-  container: HTMLElement,
-  entries: readonly (RunningEntry | RetryingEntry)[],
-  retrying: boolean,
-): void => {
-  if (entries.length === 0) {
-    container.replaceChildren(
-      text('p', 'empty', retrying ? 'No retries are scheduled.' : 'No agents are running.'),
-    )
-    return
-  }
-  const cards = entries.map((entry) => {
-    const card = document.createElement('button')
-    card.type = 'button'
-    card.className = 'work-card'
-    card.dataset['identifier'] = entry.identifier
-    card.setAttribute('aria-controls', 'agent-detail')
-    card.setAttribute('aria-expanded', String(detailIdentifier === entry.identifier))
-    const copy = document.createElement('div')
-    copy.append(text('strong', '', entry.title), text('span', '', entry.identifier))
-    const summary =
-      'error' in entry
-        ? 'Attempt ' + String(entry.attempt) + ' · ' + (entry.error ?? 'continuing')
-        : ('lastEvent' in entry ? (entry.lastEvent ?? 'Starting agent') : 'Starting agent') +
-          ' · ' +
-          formatTime(entry.startedAt)
-    card.append(copy, text('small', '', summary))
-    card.setAttribute(
-      'aria-label',
-      'Inspect ' + entry.identifier + ': ' + entry.title + '. ' + summary,
-    )
-    card.addEventListener('click', () => openDetail(entry.identifier, card))
-    return card
-  })
-  container.replaceChildren(...cards)
-}
-
-const renderHandoffs = (entries: readonly HandoffEntry[]): void => {
-  const container = element('#handoff-list')
-  if (entries.length === 0) {
-    container.replaceChildren(text('p', 'empty', 'No pull requests are being monitored.'))
+const renderAlerts = (): void => {
+  const container = element('#attention-alerts')
+  if (model.alerts.length === 0) {
+    container.replaceChildren()
     return
   }
   container.replaceChildren(
-    ...entries.map((entry) => {
-      const card = document.createElement('a')
-      card.className = 'work-card'
-      card.href = entry.pullRequestUrl
-      const copy = document.createElement('div')
-      copy.append(text('strong', '', entry.identifier), text('span', '', handoffStatus(entry)))
-      card.append(copy, text('small', '', entry.reason ?? 'Head ' + (entry.headSha ?? 'pending')))
+    ...model.alerts.map((alert) => {
+      const card = document.createElement('article')
+      card.className = 'work-card alert-card'
+      card.append(text('h3', '', alert.title), text('p', 'work-reason', alert.detail))
       return card
     }),
   )
 }
 
-const renderState = (snapshot: OrchestratorSnapshot): void => {
-  state = snapshot
-  element('#running-count').textContent = String(snapshot.counts.running)
-  element('#retrying-count').textContent = String(snapshot.counts.retrying)
-  element('#completed-count').textContent = String(snapshot.counts.completed)
-  element('#capacity').textContent = 'of ' + String(snapshot.maxConcurrentAgents) + ' agents'
-  element('#token-count').textContent = new Intl.NumberFormat().format(snapshot.totals.totalTokens)
-  element('#runtime').textContent = formatDuration(snapshot.totals.secondsRunning)
-  element('#updated-at').textContent = 'Updated ' + formatTime(snapshot.generatedAt)
-  renderWork(element('#running-list'), snapshot.running, false)
-  renderWork(element('#retry-list'), snapshot.retrying, true)
-  renderHandoffs(snapshot.handoffs)
-  if (backlog !== null) {
-    renderGraph(backlog)
+const renderBlockedSummary = (): void => {
+  const container = element('#blocked-summary')
+  const blocked = model.blocked
+  if (blocked.length === 0) {
+    container.replaceChildren(text('p', 'empty', 'Nothing is waiting on a dependency.'))
+    return
+  }
+  const heading = text(
+    'p',
+    'summary-line',
+    String(blocked.length) +
+      ' issues are waiting on a dependency. The most blocking are ' +
+      blocked
+        .slice(0, 3)
+        .map((item) => item.identifier)
+        .join(', ') +
+      '.',
+  )
+  const open = text('button', 'link-button', 'Open dependency plan')
+  open.type = 'button'
+  open.addEventListener('click', () => {
+    planFocus = ''
+    openPlan()
+  })
+  container.replaceChildren(heading, open)
+}
+
+const renderSystemHealth = (): void => {
+  const summary = element('#system-health')
+  if (state === null) {
+    summary.textContent = 'Waiting for the first runtime snapshot…'
+    return
+  }
+  const parts = [
+    String(model.capacity.running) + ' of ' + String(model.capacity.limit) + ' agents busy',
+    new Intl.NumberFormat().format(state.totals.totalTokens) + ' tokens',
+    formatDuration(state.totals.secondsRunning),
+    'updated ' + formatTime(state.generatedAt),
+  ]
+  summary.textContent = parts.join(' · ')
+}
+
+const renderCounts = (): void => {
+  element('#count-attention').textContent = String(model.counts.attention)
+  element('#count-ready').textContent = String(model.counts.ready)
+  element('#count-progress').textContent = String(model.counts.progress)
+  element('#count-finished').textContent = String(model.counts.finished)
+}
+
+const selectView = (view: WorkView, pin: boolean): void => {
+  activeView = view
+  element('#work').dataset['view'] = activeView
+  if (pin) {
+    viewPinned = true
+  }
+  for (const candidate of views) {
+    const tab = element('#tab-' + candidate)
+    const panel = element('#view-' + candidate)
+    const selected = candidate === view
+    tab.setAttribute('aria-selected', String(selected))
+    tab.tabIndex = selected ? 0 : -1
+    panel.hidden = !selected
   }
 }
 
-const handoffStatus = (handoff: HandoffEntry): string => {
-  const labels: Readonly<Record<string, string>> = {
-    awaiting_checks: 'Awaiting checks',
-    repair_needed: 'Repair needed',
-    ready_to_merge: 'Ready to merge',
-    merging: 'Merging',
-    closed_without_merge: 'Closed without merge',
-    intervention_required: 'Needs intervention',
-    merged: 'Merged',
-  }
-  return labels[handoff.state] ?? 'PR handoff'
+const renderViews = (): void => {
+  renderAlerts()
+  renderList(
+    element('#attention-list'),
+    model.attention,
+    'Nothing needs attention. Symphony is running unattended.',
+  )
+  renderList(
+    element('#ready-list'),
+    model.ready,
+    'No dependency-cleared work is waiting to be dispatched.',
+  )
+  renderBlockedSummary()
+  renderList(element('#progress-list'), model.progress, 'No agents or handoffs are in flight.')
+  renderList(
+    element('#finished-list'),
+    model.finished,
+    'Nothing finished in the ' + finishedWindowLabel + '.',
+  )
+  element('#finished-scope').textContent = 'Scope: ' + finishedScopeLabel + '.'
 }
 
-const runtimeStatus = (node: RuntimeNode): string => {
-  if (node.readiness === 'cyclic') {
-    return 'Cyclic'
+/**
+ * The compact system-health summary that stands in for the four queues when there is nothing in
+ * any of them, so an idle host is one line rather than four empty panels.
+ */
+const renderIdleState = (): void => {
+  const total =
+    model.counts.attention + model.counts.ready + model.counts.progress + model.counts.finished
+  element('#work').dataset['idle'] = String(total === 0)
+  const idle = element('#idle-summary')
+  idle.hidden = total !== 0
+  if (total === 0) {
+    idle.textContent =
+      state === null
+        ? 'Waiting for the first runtime snapshot…'
+        : 'Nothing to do: no exceptions, no dispatchable work, no agents in flight, and nothing finished in the ' +
+          finishedWindowLabel +
+          '.'
   }
-  if ((state?.running ?? []).some((entry) => entry.identifier === node.identifier)) {
-    return 'Running'
-  }
-  if ((state?.retrying ?? []).some((entry) => entry.identifier === node.identifier)) {
-    return 'Retrying'
-  }
-  const handoff = (state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)
-  if (handoff !== undefined) {
-    return handoffStatus(handoff)
-  }
-  if (node.readiness === 'completed') {
-    return 'Completed'
-  }
-  return node.readiness === 'blocked' ? 'Blocked' : 'Ready'
 }
 
-const statusClass = (status: string): string =>
-  status
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/g, '-')
-    .replaceAll(/(^-|-$)/g, '')
+const matchesFilters = (item: WorkItem): boolean => {
+  if (stateFilters.size > 0 && !stateFilters.has(item.state)) {
+    return false
+  }
+  if (searchTerm.length === 0) {
+    return true
+  }
+  const haystack = (item.identifier + ' ' + item.title + ' ' + item.labels.join(' ')).toLowerCase()
+  return haystack.includes(searchTerm)
+}
+
+const allWork = (): readonly WorkItem[] => [
+  ...model.attention,
+  ...model.ready,
+  ...model.progress,
+  ...model.blocked,
+  ...model.finished,
+]
+
+const renderAllWork = (): void => {
+  const matches = allWork().filter(matchesFilters)
+  element('#all-work-count').textContent =
+    String(matches.length) + ' of ' + String(allWork().length) + ' items'
+  renderList(element('#all-work-list'), matches, 'No work matches the current filters.')
+}
+
+const renderPlanList = (snapshot: BacklogSnapshot, focus: string): void => {
+  const list = element('#plan-list')
+  const relevant = snapshot.edges.filter(
+    (edge) => focus === '' || edge.blocker === focus || edge.dependent === focus,
+  )
+  if (relevant.length === 0) {
+    list.replaceChildren(
+      text(
+        'li',
+        'empty',
+        focus === ''
+          ? 'No dependency relationships are recorded.'
+          : focus + ' has no blockers and no dependents.',
+      ),
+    )
+    return
+  }
+  list.replaceChildren(
+    ...relevant.map((edge) => text('li', '', edge.blocker + ' blocks ' + edge.dependent)),
+  )
+}
+
+const renderPlanFocusOptions = (snapshot: BacklogSnapshot): void => {
+  const select = element<HTMLSelectElement>('#plan-focus')
+  const everyIssue = text('option', '', 'Every issue')
+  everyIssue.value = ''
+  const options = [everyIssue]
+  for (const node of snapshot.nodes) {
+    const option = text('option', '', node.identifier + ' — ' + node.title)
+    option.value = node.identifier
+    options.push(option)
+  }
+  select.replaceChildren(...options)
+  select.value = planFocus
+}
+
+const renderPlan = (): void => {
+  const snapshot = backlog
+  if (snapshot === null) {
+    return
+  }
+  renderPlanFocusOptions(snapshot)
+  const diagnostics = element('#cycle-diagnostics')
+  diagnostics.replaceChildren(...snapshot.cycles.map((cycle) => text('p', '', cycle.message)))
+  renderPlanList(snapshot, planFocus)
+  const graph = element('#dependency-graph')
+  // The graph is drawn only when the plan is open and only where there is room for it. Small
+  // screens get the list equivalent, which carries every relationship the graph does.
+  if (!planOpen || layoutMode() === 'compact') {
+    graph.replaceChildren()
+    return
+  }
+  renderGraph(focusedSnapshot(snapshot, planFocus))
+}
+
+/** The plan restricted to one issue, its direct blockers and its direct dependents. */
+const focusedSnapshot = (snapshot: BacklogSnapshot, focus: string): BacklogSnapshot => {
+  if (focus === '') {
+    return snapshot
+  }
+  const keep = new Set<string>([focus])
+  for (const edge of snapshot.edges) {
+    if (edge.blocker === focus) {
+      keep.add(edge.dependent)
+    }
+    if (edge.dependent === focus) {
+      keep.add(edge.blocker)
+    }
+  }
+  return {
+    ...snapshot,
+    nodes: snapshot.nodes.filter((node) => keep.has(node.identifier)),
+    edges: snapshot.edges.filter((edge) => keep.has(edge.blocker) && keep.has(edge.dependent)),
+  }
+}
+
+const openPlan = (): void => {
+  planOpen = true
+  const plan = element('#plan')
+  plan.hidden = false
+  element('#plan-toggle').setAttribute('aria-expanded', 'true')
+  renderPlan()
+  element('#plan-heading').focus()
+}
+
+const closePlan = (): void => {
+  planOpen = false
+  element('#plan').hidden = true
+  element('#plan-toggle').setAttribute('aria-expanded', 'false')
+  element('#dependency-graph').replaceChildren()
+}
+
+const render = (): void => {
+  renderCounts()
+  renderSystemHealth()
+  renderViews()
+  renderIdleState()
+  renderAllWork()
+  if (planOpen) {
+    renderPlan()
+  }
+  markExpandedTrigger(detailIdentifier)
+}
+
+const applyModel = (): void => {
+  const next = buildWorkModel(state, backlog, Date.now())
+  reconcileFeedback(next)
+  model = next
+  if (!viewPinned) {
+    selectView(defaultWorkView(model) === 'attention' ? 'attention' : 'ready', false)
+  }
+  render()
+}
+
+const loadState = async (): Promise<void> => {
+  state = await request<OrchestratorSnapshot>('/api/v1/state')
+  applyModel()
+}
+
+const loadBacklog = async (): Promise<void> => {
+  backlog = await request<BacklogSnapshot>('/api/v1/backlog')
+  element('#label-note').textContent =
+    'Orchestration is controlled by the “' + backlog.controlLabel + '” label'
+  applyModel()
+}
+
+const refresh = async (): Promise<void> => {
+  setNotice('Refreshing Symphony…')
+  try {
+    await post('/api/v1/refresh')
+    await Promise.all([loadState(), loadBacklog()])
+    setNotice('State refreshed.')
+  } catch (error) {
+    setNotice(error instanceof Error ? error.message : 'Refresh failed')
+  }
+}
+
+const installNavigation = (): void => {
+  for (const view of views) {
+    const tab = element('#tab-' + view)
+    tab.addEventListener('click', () => selectView(view, true))
+    tab.addEventListener('keydown', (event) => {
+      const key = (event as KeyboardEvent).key
+      if (key !== 'ArrowRight' && key !== 'ArrowLeft') {
+        return
+      }
+      event.preventDefault()
+      const index = views.indexOf(view)
+      const next = views[(index + (key === 'ArrowRight' ? 1 : views.length - 1)) % views.length]
+      if (next !== undefined) {
+        selectView(next, true)
+        element('#tab-' + next).focus()
+      }
+    })
+  }
+  element('#refresh').addEventListener('click', () => {
+    void refresh()
+  })
+  element('#plan-toggle').addEventListener('click', () => {
+    if (planOpen) {
+      closePlan()
+    } else {
+      openPlan()
+    }
+  })
+  element('#plan-close').addEventListener('click', () => {
+    closePlan()
+    element('#plan-toggle').focus()
+  })
+  element<HTMLSelectElement>('#plan-focus').addEventListener('change', (event) => {
+    planFocus = (event.target as HTMLSelectElement).value
+    renderPlan()
+  })
+  element<HTMLInputElement>('#work-search').addEventListener('input', (event) => {
+    searchTerm = (event.target as HTMLInputElement).value.trim().toLowerCase()
+    renderAllWork()
+  })
+  for (const input of document.querySelectorAll<HTMLInputElement>('#work-filters input')) {
+    input.addEventListener('change', () => {
+      const value = input.value as WorkState
+      if (input.checked) {
+        stateFilters.add(value)
+      } else {
+        stateFilters.delete(value)
+      }
+      renderAllWork()
+    })
+  }
+  window.addEventListener('resize', () => {
+    render()
+  })
+}
 
 const graphLayout = (
   snapshot: BacklogSnapshot,
@@ -653,13 +670,15 @@ const graphLayout = (
   height: number
 }> => {
   const identifiers = snapshot.nodes.map((node) => node.identifier).sort()
+  const present = new Set(identifiers)
+  const edges = snapshot.edges.filter(
+    (edge) => present.has(edge.blocker) && present.has(edge.dependent),
+  )
   const indegree = new Map(identifiers.map((identifier) => [identifier, 0]))
   const outgoing = new Map<string, string[]>(identifiers.map((identifier) => [identifier, []]))
-  for (const edge of snapshot.edges) {
-    if (indegree.has(edge.blocker) && indegree.has(edge.dependent)) {
-      indegree.set(edge.dependent, (indegree.get(edge.dependent) ?? 0) + 1)
-      outgoing.get(edge.blocker)?.push(edge.dependent)
-    }
+  for (const edge of edges) {
+    indegree.set(edge.dependent, (indegree.get(edge.dependent) ?? 0) + 1)
+    outgoing.get(edge.blocker)?.push(edge.dependent)
   }
   for (const targets of outgoing.values()) {
     targets.sort()
@@ -710,14 +729,33 @@ const graphLayout = (
   }
 }
 
+const runtimeStatus = (node: BacklogSnapshot['nodes'][number]): string => {
+  if (node.readiness === 'cyclic') {
+    return 'Cyclic'
+  }
+  if ((state?.running ?? []).some((entry) => entry.identifier === node.identifier)) {
+    return 'Running'
+  }
+  if ((state?.retrying ?? []).some((entry) => entry.identifier === node.identifier)) {
+    return 'Retrying'
+  }
+  const handoff = (state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)
+  if (handoff !== undefined) {
+    return phaseLabels[handoffPhases[handoff.state] ?? 'handing_off']
+  }
+  if (node.readiness === 'completed') {
+    return 'Completed'
+  }
+  return node.readiness === 'blocked' ? 'Blocked' : 'Ready'
+}
+
+/**
+ * Draws the plan inside a bounded, scrollable stage. The stage's own size is whatever the layout
+ * needs, but it lives inside a viewport with a capped height, so a large graph pans rather than
+ * stretching the document.
+ */
 const renderGraph = (snapshot: BacklogSnapshot): void => {
   const graph = element('#dependency-graph')
-  const diagnostics = element('#cycle-diagnostics')
-  if (snapshot.cycles.length === 0) {
-    diagnostics.replaceChildren()
-  } else {
-    diagnostics.replaceChildren(...snapshot.cycles.map((cycle) => text('p', '', cycle.message)))
-  }
   if (snapshot.nodes.length === 0) {
     graph.replaceChildren(text('p', 'empty', 'There are no dependency nodes.'))
     return
@@ -798,153 +836,14 @@ const renderGraph = (snapshot: BacklogSnapshot): void => {
   graph.replaceChildren(stage)
 }
 
-const action = async (
-  issueNumber: number,
-  enabled: boolean,
-  button: HTMLButtonElement,
-): Promise<void> => {
-  button.disabled = true
-  notice.textContent = enabled ? 'Adding issue to the score…' : 'Pausing issue…'
-  try {
-    await request<unknown>(
-      '/api/v1/issues/' + String(issueNumber) + '/' + (enabled ? 'start' : 'pause'),
-      {
-        method: 'POST',
-        headers: { 'X-Symphony-CSRF': csrf },
-      },
-    )
-    await request<unknown>('/api/v1/refresh', {
-      method: 'POST',
-      headers: { 'X-Symphony-CSRF': csrf },
-    })
-    await Promise.all([loadState(), loadBacklog()])
-    notice.textContent = enabled ? 'Issue enabled. Symphony is selecting work.' : 'Issue paused.'
-  } catch (error) {
-    notice.textContent = error instanceof Error ? error.message : 'The action failed'
-  } finally {
-    button.disabled = false
-  }
-}
-
-const renderBacklog = (snapshot: BacklogSnapshot): void => {
-  backlog = snapshot
-  element('#label-note').textContent = 'Controlled by the “' + snapshot.controlLabel + '” label'
-  const body = element('#backlog')
-  if (snapshot.issues.length === 0) {
-    const row = document.createElement('tr')
-    const cell = text('td', 'empty', 'There are no open issues.')
-    cell.colSpan = 5
-    row.append(cell)
-    body.replaceChildren(row)
-    return
-  }
-  renderGraph(snapshot)
-  const rows = snapshot.issues.map((issue) => {
-    const row = document.createElement('tr')
-    const issueCell = document.createElement('td')
-    const link = text('a', 'issue-link', '#' + String(issue.number) + ' ' + issue.title)
-    link.href = issue.url ?? '#'
-    issueCell.append(link)
-    if (issue.blockedBy.length > 0) {
-      const blockers = document.createElement('span')
-      blockers.className = 'blocker-links'
-      blockers.append('Blocked by ')
-      issue.blockedBy.forEach((blocker, index) => {
-        const blockerLink = text('a', '', blocker.identifier)
-        blockerLink.href = blocker.url
-        blockers.append(index === 0 ? '' : ', ', blockerLink)
-      })
-      issueCell.append(blockers)
-    }
-    const priority = text('td', '', issue.priority === null ? '—' : 'P' + String(issue.priority))
-    const labels = text(
-      'td',
-      'labels',
-      issue.labels.filter((label) => label !== snapshot.controlLabel).join(' · ') || '—',
-    )
-    const graphNode = snapshot.nodes.find((node) => node.identifier === issue.identifier)
-    const stateName = runtimeStatus(graphNode ?? issue)
-    const status = text('td', '', stateName)
-    status.append(text('span', 'status-dot state-' + statusClass(stateName), ''))
-    if (issue.reason !== null) {
-      status.append(text('small', 'status-reason', issue.reason))
-    }
-    const actionCell = document.createElement('td')
-    const button = text(
-      'button',
-      issue.enabled ? 'action pause' : 'action start',
-      issue.enabled ? 'Pause' : 'Start',
-    )
-    button.type = 'button'
-    button.disabled = !issue.enabled && issue.readiness !== 'ready'
-    if (button.disabled) {
-      button.title = issue.reason ?? 'Issue is not ready'
-    }
-    button.addEventListener('click', () => {
-      void action(issue.number, !issue.enabled, button)
-    })
-    actionCell.append(button)
-    row.append(issueCell, priority, labels, status, actionCell)
-    return row
-  })
-  body.replaceChildren(...rows)
-}
-
-const loadState = async (): Promise<void> =>
-  renderState(await request<OrchestratorSnapshot>('/api/v1/state'))
-const loadBacklog = async (): Promise<void> =>
-  renderBacklog(await request<BacklogSnapshot>('/api/v1/backlog'))
-
-const refresh = async (): Promise<void> => {
-  notice.textContent = 'Refreshing Symphony…'
-  try {
-    await request<unknown>('/api/v1/refresh', {
-      method: 'POST',
-      headers: { 'X-Symphony-CSRF': csrf },
-    })
-    await Promise.all([loadState(), loadBacklog()])
-    notice.textContent = 'State refreshed.'
-  } catch (error) {
-    notice.textContent = error instanceof Error ? error.message : 'Refresh failed'
-  }
-}
-
-element('#refresh').addEventListener('click', () => {
-  void refresh()
-})
-
-element('#detail-close').addEventListener('click', () => closeDetail())
-
-const copyDetailLink = async (): Promise<void> => {
-  if (detailIdentifier === null) {
-    return
-  }
-  const link = window.location.origin + window.location.pathname + deepLink(detailIdentifier)
-  try {
-    await navigator.clipboard.writeText(link)
-    notice.textContent = 'Deep link copied.'
-  } catch {
-    notice.textContent = 'Copy the link from the address bar: ' + link
-  }
-}
-
-element('#detail-copy').addEventListener('click', () => {
-  void copyDetailLink()
-})
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && detailIdentifier !== null) {
-    closeDetail()
-  }
-})
-
-window.addEventListener('hashchange', syncFromHash)
-
-buildFilters()
+installNavigation()
+installDetailControls()
+selectView('ready', false)
+render()
 syncFromHash()
 
-Promise.all([loadState(), loadBacklog()]).catch((error) => {
-  notice.textContent = error instanceof Error ? error.message : 'Could not load operator state'
+Promise.all([loadState(), loadBacklog()]).catch((error: unknown) => {
+  setNotice(error instanceof Error ? error.message : 'Could not load operator state')
 })
 setInterval(() => {
   void loadState().catch(() => undefined)

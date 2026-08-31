@@ -4,7 +4,34 @@ import type { Issue } from '../domain/domain.js'
 import { classifyPullRequest } from '../domain/handoff.js'
 import { logInfo } from '../support/logging.js'
 import { dispatch } from './dispatch.js'
-import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, HandoffEntry, OrchestratorContext } from './runtime.js'
+import type { IssueId } from '../domain/domain.js'
+
+/**
+ * Files a merged handoff as finished work. The runtime already recorded that the issue completed;
+ * this keeps the title, link and instant alongside it so the console can answer what Symphony
+ * finished and when, instead of publishing a bare count.
+ */
+const recordCompleted = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+  mergedAt: string | null | undefined,
+): void => {
+  const reported = mergedAt === null || mergedAt === undefined ? null : new Date(mergedAt)
+  context.state.completed.set(id, {
+    issueId: id,
+    identifier: handoff.issue.identifier,
+    title: handoff.issue.title,
+    url: handoff.issue.url,
+    outcome: 'merged',
+    // The provider's merge time when it reports one. A handoff read back from the store after a
+    // restart is observed now but may have merged long before, and dating it now would put
+    // finished work back into the console's recent-activity window.
+    finishedAt: reported === null || Number.isNaN(reported.getTime()) ? new Date() : reported,
+    pullRequestUrl: handoff.pullRequestUrl,
+  })
+}
 
 export const hydrateRestoredHandoffs = (context: OrchestratorContext): Effect.Effect<void> =>
   context.hydrateRestoredHandoffsEffect()
@@ -184,7 +211,7 @@ export const reconcileHandoffs = (
       if (disposition.state === 'merged') {
         context.noteHandoffOutcomeValue(id, handoff, 'merged')
         context.state.handoffs.delete(id)
-        context.state.completed.add(id)
+        recordCompleted(context, id, handoff, inspected.observation.mergedAt)
         context.state.claimed.delete(id)
         continue
       }
@@ -210,7 +237,8 @@ export const reconcileHandoffs = (
         handoff.state = 'merged'
         context.noteHandoffOutcomeValue(id, handoff, 'merged')
         context.state.handoffs.delete(id)
-        context.state.completed.add(id)
+        // This host performed the merge just now, so the instant is its own.
+        recordCompleted(context, id, handoff, null)
         context.state.claimed.delete(id)
         yield* logInfo('pull request merged', {
           ...context.logContextValue(handoff.issue),
