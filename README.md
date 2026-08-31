@@ -271,11 +271,85 @@ dashboard. It is a structural audit rather than a browser-engine scan: happy-dom
 computed styles, so a contrast or overlap check there would be reporting on a page nobody sees.
 Those remain a manual review.
 
+## Operator HTTP API
+
+The console's own data comes from the same versioned API a script can call. Every response carries
+`Cache-Control: no-store` and the console's security headers, the server answers only loopback
+`Host` headers (`421` otherwise), an unknown path is `404`, a wrong method is `405` with `Allow`,
+and every refusal is the envelope `{"version":"v1","error":{"code","message"}}` with no backend
+detail in it.
+
+`GET /api/v1/state` publishes the SPEC 13.7.2 baseline document. That document is not the runtime's
+internal record: it is snake_case, and it names a running row's issue `issue_id`,
+`issue_identifier`, `issue_url` and `state`, and the aggregate counters `codex_totals` with
+`seconds_running`. `src/operator/api.ts` is the one place that mapping happens. The internal
+`OrchestratorSnapshot` keeps its own vocabulary, because the operator backend and the agent detail
+path read it too, and a published name has no business travelling back into the scheduler.
+
+| Baseline (13.7.2)                                                              | Symphony extension fields                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generated_at`, `counts`, `codex_totals`                                       | `workflow_path`, `effective_workflow`, `polling_interval_ms`, `max_concurrent_agents`, `rate_limits`                                                                                                                      |
+| `running[]` with `issue_id`, `issue_identifier`, `issue_url`, `title`, `state` | `attempt`, `started_at`, `last_event_at`, `last_event`, `last_message`, `process_id`, `thread_id`, `turn_id`, `session_id`, `turn_count`, `tokens`, `last_reported_tokens`, `worker_host`, `stall_deadline`, `detail_url` |
+| `retrying[]` with `attempt`, `due_at`, `error`                                 | the same identity, `worker_host` and `detail_url` as a running row                                                                                                                                                        |
+| —                                                                              | `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                                |
+
+The extension fields follow the baseline's convention, so a reader never has to know which half of
+the document they are in. `rate_limits` is the exception and is passed through exactly as the coding
+agent reported it: its keys belong to that protocol, not to this API.
+
+`POST /api/v1/refresh` answers `202` with the suggested body:
+
+```json
+{
+  "queued": true,
+  "coalesced": false,
+  "requested_at": "2026-08-31T09:00:00.000Z",
+  "operations": [
+    "credential_revalidation",
+    "handoff_recovery",
+    "workflow_reload",
+    "handoff_reconciliation",
+    "issue_reconciliation",
+    "dispatch"
+  ]
+}
+```
+
+`operations` is what the pass performs, stated by the runtime rather than restated by the HTTP
+layer. `coalesced` is `true` when the request joined a pass that was already queued or running
+instead of scheduling one of its own, so a burst of refreshes costs one poll rather than one each.
+Symphony holds the response until that pass has finished — stronger than the `202` the SPEC
+suggests — so a caller that reads `/api/v1/state` next sees the state the refresh produced.
+
+`GET /api/v1/backlog` is the console's own endpoint rather than a SPEC route, and stays in the
+internal vocabulary its consumer is written against.
+
+### Why a refresh needs the console's token
+
+`POST /api/v1/refresh` requires the `X-Symphony-CSRF` header, so the plain empty-body POST SPEC
+13.7.2 suggests receives `403 invalid_csrf_token`. **The requirement stands, as deliberate SPEC 15.5
+hardening.** The server listens on loopback with no authentication, which means every page in the
+operator's browser can reach it; a refresh is not a read — it spends tracker API quota and can
+dispatch agents — so it is protected exactly like the start and pause controls. Dropping the header
+for one mutating route would leave the console's other mutations defended and this one open.
+
+A non-browser caller is not locked out, and needs no credential: the token is served in the console
+page and is valid for the life of the process.
+
+```sh
+token=$(curl -s http://127.0.0.1:3000/ | sed -n 's/.*name="csrf-token" content="\([^"]*\)".*/\1/p')
+curl -s -X POST -H "X-Symphony-CSRF: $token" http://127.0.0.1:3000/api/v1/refresh
+```
+
+The token is a forgery defence, not authentication: it proves the caller could read the console
+page, which a cross-origin page cannot do. Anything that needs authentication belongs behind the
+host, not behind this token.
+
 ## Live agent inspection
 
 Every running and retrying agent has a detail resource at
 `GET /api/v1/agents/<url-encoded issue identifier>`, and each running and retrying entry in
-`/api/v1/state` carries that link as `detailUrl`, identical to the `self` link inside the detail
+`/api/v1/state` carries that link as `detail_url`, identical to the `self` link inside the detail
 itself. The console turns each live work card into an inspector: a phase header, elapsed time, last
 activity, the stall countdown, an aggregate workspace summary, handoff progress, and what the agent
 is expected to do next — which on a host that composes no code-review services says the continuation

@@ -100,6 +100,8 @@ export type RunningSnapshot = Readonly<{
   identifier: string
   title: string
   url: string | null
+  /** The issue state the tracker reported for this run, as the tracker spells it. */
+  state: string
   attempt: number | null
   startedAt: string
   lastEventAt: string | null
@@ -206,9 +208,43 @@ export type OrchestratorSnapshot = Readonly<{
   rateLimits: JsonObject | null
 }>
 
+/**
+ * What one refresh pass does, in the order the poll in `polling.ts` does it. A caller that asks for
+ * a refresh is told what it asked for rather than only that the request was accepted, and the list
+ * is stated here — beside the loop that performs it — rather than restated by the HTTP layer.
+ *
+ * Every pass runs the first five; dispatch is skipped for a pass whose workflow or credential
+ * validation failed, which the snapshot reports as `workflowReloadError`.
+ */
+export const refreshOperations: readonly string[] = [
+  'credential_revalidation',
+  'handoff_recovery',
+  'workflow_reload',
+  'handoff_reconciliation',
+  'issue_reconciliation',
+  'dispatch',
+]
+
+/** What an accepted refresh request amounted to. */
+export type RefreshOutcome = Readonly<{
+  /**
+   * Whether the request joined a pass that was already queued or running instead of scheduling one
+   * of its own. Concurrent requests therefore cost one poll rather than one each.
+   */
+  coalesced: boolean
+  /** When the host accepted the request. */
+  requestedAt: string
+  /** The operations the pass the request joined performs. */
+  operations: readonly string[]
+}>
+
 export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
-  refresh: Effect.Effect<void>
+  /**
+   * Requests a poll pass and completes when that pass has finished, so a caller that reads the
+   * snapshot afterwards sees the state the refresh produced.
+   */
+  refresh: Effect.Effect<RefreshOutcome>
   setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
   /**
    * Reads the published detail for one issue. The published index is built by the actor and is
@@ -926,20 +962,30 @@ export const startOrchestratorRuntime = (
         return Option.some(settled)
       })
 
-    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+    /** Requests a tick, and says whether this request is the one that scheduled the pass. */
+    const offerTick = (source: Transitions.TickSource): Effect.Effect<boolean> =>
       Ref.modify(state, (current) => Transitions.requestTick(current, source)).pipe(
         Effect.flatMap((decision) =>
           decision.enqueue
-            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.asVoid)
-            : Effect.void,
+            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.as(true))
+            : Effect.succeed(false),
         ),
       )
 
+    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+      Effect.asVoid(offerTick(source))
+
     const requestRefresh = Effect.gen(function* () {
       const reply = yield* Deferred.make<void>()
+      const requestedAt = yield* currentInstant
       yield* Ref.update(state, (current) => Transitions.awaitRefresh(current, reply))
-      yield* requestTick('change')
+      const scheduled = yield* offerTick('change')
       yield* Deferred.await(reply)
+      return {
+        coalesced: !scheduled,
+        requestedAt: requestedAt.toISOString(),
+        operations: refreshOperations,
+      }
     })
 
     const scheduleNextTick: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {

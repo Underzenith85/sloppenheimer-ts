@@ -4112,7 +4112,12 @@ describe('operator snapshots', (): void => {
           const lateRefresh = yield* Effect.forkScoped(control.refresh)
           pollShouldBlock = false
           releasePoll()
-          yield* Fiber.join(lateRefresh)
+          const outcome = yield* Fiber.join(lateRefresh)
+          // The late request joined the follow-up pass rather than scheduling one of its own, and
+          // says so: that is what the acknowledgement's `coalesced` reports to an API caller.
+          expect(outcome.coalesced).toBe(true)
+          expect(outcome.operations).toContain('dispatch')
+          expect(Number.isNaN(Date.parse(outcome.requestedAt))).toBe(false)
           return yield* control.snapshot
         }),
       )
@@ -4131,10 +4136,12 @@ describe('operator snapshots', (): void => {
           yield* control.refresh
           const before = harness.stateFetches()
           const consecutiveRefreshes = yield* Effect.forkScoped(
-            control.refresh.pipe(Effect.zipRight(control.refresh)),
+            Effect.all([control.refresh, control.refresh]),
           )
-          yield* Fiber.join(consecutiveRefreshes)
+          const [first, second] = yield* Fiber.join(consecutiveRefreshes)
           expect(harness.stateFetches()).toBe(before + 2)
+          // Each request scheduled the pass it waited for, so neither was coalesced into the other.
+          expect([first.coalesced, second.coalesced]).toEqual([false, false])
         }),
       )
     }),
@@ -6488,6 +6495,8 @@ describe('session telemetry accounting', (): void => {
           expect(snapshot.running[0]).toMatchObject({
             issueId: currentIssue.id,
             title: 'Updated while active',
+            // The issue state travels with the row: SPEC 13.7.2 requires it on a running entry.
+            state: 'open',
           })
           // The stall deadline is published absolutely so the console can decide the agent has
           // gone quiet without waiting for a later snapshot to say so.
