@@ -271,12 +271,38 @@ describe('operator dependency graph', (): void => {
     )
 
     const unlocks = new Map(snapshot.issues.map((entry) => [entry.number, entry.unlocks]))
-    // #1 unblocks #2 and #3 directly and #4 through both of them, counted once.
+    // #1 frees #2 and #3, and #4 only because finishing #1 clears both of its blockers at once.
     expect(unlocks.get(1)).toBe(3)
-    expect(unlocks.get(2)).toBe(1)
-    expect(unlocks.get(3)).toBe(1)
+    // #4 is blocked by both #2 and #3, so neither of them frees it on its own.
+    expect(unlocks.get(2)).toBe(0)
+    expect(unlocks.get(3)).toBe(0)
     expect(unlocks.get(4)).toBe(0)
     expect(unlocks.get(5)).toBe(0)
+  })
+
+  it('does not credit an issue with unlocking work another blocker still holds', (): void => {
+    const snapshot = buildBacklogSnapshot(
+      // #12 is blocked by #10 and by #11; #13 waits on #12.
+      [issue(10), issue(11), issue(12, [blocker(10), blocker(11)]), issue(13, [blocker(12)])],
+      'symphony',
+      ['closed'],
+    )
+
+    const unlocks = new Map(snapshot.issues.map((entry) => [entry.number, entry.unlocks]))
+    expect(unlocks.get(10)).toBe(0)
+    expect(unlocks.get(11)).toBe(0)
+    expect(unlocks.get(12)).toBe(1)
+  })
+
+  it('ignores a blocker that is already in a terminal state', (): void => {
+    const snapshot = buildBacklogSnapshot(
+      // #21 is closed, so it is not holding #22 back and #20 alone frees it.
+      [issue(20), issue(22, [blocker(20), blocker(21, 'closed')])],
+      'symphony',
+      ['closed'],
+    )
+
+    expect(snapshot.issues.find(({ number }) => number === 20)?.unlocks).toBe(1)
   })
 
   it('counts downstream work without diverging on a dependency cycle', (): void => {

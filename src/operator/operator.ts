@@ -105,14 +105,26 @@ const issueNumber = (identifier: string): number | null => {
 }
 
 /**
- * How many open issues each issue unblocks, counted transitively. A cycle cannot make the walk
- * diverge: each issue is expanded once per traversal and its own identifier is never counted as
- * one of its dependents.
+ * How many open issues each issue unblocks, counted transitively.
+ *
+ * An issue is unlocked only once *every* one of its unresolved blockers is accounted for, so an
+ * issue held by two blockers is credited to neither of them alone. The walk is a cascade rather
+ * than plain reachability: completing the issue frees whatever it was the last blocker of, and
+ * those in turn free whatever they were the last blocker of. A member of a dependency cycle can
+ * never have all its blockers satisfied, so the cascade stops there rather than diverging.
+ *
+ * Blockers already in a terminal state are excluded, because they are not holding anything back.
  */
-const downstreamCounts = (openIssues: readonly Issue[]): ReadonlyMap<string, number> => {
+const downstreamCounts = (
+  openIssues: readonly Issue[],
+  terminalStates: readonly string[],
+): ReadonlyMap<string, number> => {
+  const blockers = new Map<string, ReadonlySet<string>>()
   const dependents = new Map<string, string[]>()
   for (const issue of openIssues) {
-    for (const blocker of issue.blockedBy) {
+    const unresolved = unresolvedBlockers(issue, terminalStates)
+    blockers.set(issue.identifier, new Set(unresolved.map((blocker) => blocker.identifier)))
+    for (const blocker of unresolved) {
       const existing = dependents.get(blocker.identifier)
       if (existing === undefined) {
         dependents.set(blocker.identifier, [issue.identifier])
@@ -123,17 +135,25 @@ const downstreamCounts = (openIssues: readonly Issue[]): ReadonlyMap<string, num
   }
   const counts = new Map<string, number>()
   for (const issue of openIssues) {
-    const seen = new Set<string>([issue.identifier])
-    const queue = [...(dependents.get(issue.identifier) ?? [])]
-    while (queue.length > 0) {
-      const next = queue.pop()
-      if (next === undefined || seen.has(next)) {
+    const cleared = new Set<string>([issue.identifier])
+    const frontier: string[] = [issue.identifier]
+    while (frontier.length > 0) {
+      const finished = frontier.pop()
+      if (finished === undefined) {
         continue
       }
-      seen.add(next)
-      queue.push(...(dependents.get(next) ?? []))
+      for (const dependent of dependents.get(finished) ?? []) {
+        if (cleared.has(dependent)) {
+          continue
+        }
+        const remaining = blockers.get(dependent) ?? new Set<string>()
+        if ([...remaining].every((blocker) => cleared.has(blocker))) {
+          cleared.add(dependent)
+          frontier.push(dependent)
+        }
+      }
     }
-    counts.set(issue.identifier, seen.size - 1)
+    counts.set(issue.identifier, cleared.size - 1)
   }
   return counts
 }
@@ -146,7 +166,7 @@ export const buildBacklogSnapshot = (
 ): BacklogSnapshot => {
   const cycles = findDependencyCycles(openIssues)
   const cyclic = new Set(cycles.flatMap((cycle) => cycle.members))
-  const unlocks = downstreamCounts(openIssues)
+  const unlocks = downstreamCounts(openIssues, terminalStates)
   const issues = openIssues.map((issue): BacklogIssue => {
     const blockers = unresolvedBlockers(issue, terminalStates)
     const isCyclic = cyclic.has(issue.identifier)

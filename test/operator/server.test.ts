@@ -118,6 +118,7 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     status: 'running',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
+    handoffEnabled: true,
     branch: 'symphony/issue-17',
     retry: null,
   })

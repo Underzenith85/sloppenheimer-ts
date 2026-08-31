@@ -692,6 +692,7 @@ describe('operator console workflows', (): void => {
               title: 'Operator console',
               url: 'https://example.test/issues/17',
               status: 'running',
+              handoffEnabled: true,
               identity: {
                 threadId: 'thread-1',
                 turnId: 'turn-1',

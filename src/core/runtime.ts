@@ -794,6 +794,9 @@ export const startOrchestratorRuntime = (
             status,
             stallTimeoutMs: running?.execution.stallTimeoutMs ?? 0,
             workerHost: 'local',
+            // Read from the execution the agent is running under, falling back to the workflow in
+            // force: composing no code-review services at all is what "handoff disabled" means.
+            handoffEnabled: (running?.execution.codeReview ?? lastKnownGood.codeReview) !== null,
             branch: record.handoff.expectedBranch,
             retry:
               retry === undefined

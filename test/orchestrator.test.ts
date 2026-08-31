@@ -825,6 +825,8 @@ describe('restored pull request handoffs', (): void => {
               headSha: null,
               merged: true as const,
               mergeCommitSha: null,
+              // The merge happened long before this host came back up.
+              mergedAt: '2026-08-20T09:00:00.000Z',
               mergeable: null,
               mergeState: 'unknown',
               checks: [],
@@ -856,8 +858,10 @@ describe('restored pull request handoffs', (): void => {
       title: issue.title,
       outcome: 'merged',
       pullRequestUrl: 'https://github.test/example/symphony/pull/44',
+      // The provider's merge time, not the instant this host noticed it. Dating it now would put
+      // work merged days ago back into the console's recent-activity window.
+      finishedAt: '2026-08-20T09:00:00.000Z',
     })
-    expect(Number.isNaN(Date.parse(snapshot.completed[0]?.finishedAt ?? ''))).toBe(false)
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([])
     await rm(workspaceRoot, { force: true, recursive: true })
   })

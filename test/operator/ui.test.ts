@@ -98,13 +98,18 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
   return record
 }
 
-const runningDetail = (withHandoff = true, stallTimeoutMs = 300_000): AgentDetailSnapshot =>
+const runningDetail = (
+  withHandoff = true,
+  stallTimeoutMs = 300_000,
+  handoffEnabled = true,
+): AgentDetailSnapshot =>
   buildAgentDetail(populated(withHandoff), {
     self: '/api/v1/agents/example%2Fsymphony%2317',
     now: new Date(),
     status: 'running',
     stallTimeoutMs,
     workerHost: 'local',
+    handoffEnabled,
     branch: 'symphony/issue-17',
     retry: null,
   })
@@ -130,6 +135,7 @@ const retryingDetail = (): AgentDetailSnapshot => {
     status: 'retrying',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
+    handoffEnabled: true,
     branch: 'symphony/issue-18',
     retry: { attempt: 1, dueAt, reason: 'turn failed' },
   })
@@ -197,6 +203,19 @@ describe('operator console agent detail', (): void => {
     // Identity facts are still available, but they are not what the panel opens with.
     expect(summary).not.toContain('thread-1')
     expect(page.text('#detail-outcome')).toContain('pull request')
+  })
+
+  it('does not promise a pull request on a host that composes no code review', async (): Promise<void> => {
+    details.set(runningIdentifier, {
+      status: 200,
+      body: { version: 'v1', detail: runningDetail(false, 300_000, false) },
+    })
+    await boot()
+    await openAgent(runningIdentifier)
+
+    const outcome = page.text('#detail-outcome')
+    expect(outcome).toContain('Handoff is disabled on this host')
+    expect(outcome).not.toContain('pull request for review')
   })
 
   it('keeps process and protocol identity in a Diagnostics disclosure', async (): Promise<void> => {

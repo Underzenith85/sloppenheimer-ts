@@ -204,6 +204,12 @@ const waitingExplanation = (snapshot: AgentDetailSnapshot): string => {
 /** What the operator should expect to happen next, in one sentence. */
 const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
   const handoff = snapshot.handoff
+  if (!snapshot.handoffEnabled) {
+    // This host composes no code-review services, so no pull request will be opened for the work.
+    return snapshot.status === 'retrying'
+      ? 'Handoff is disabled on this host. The next attempt runs on schedule and continues the issue.'
+      : 'Handoff is disabled on this host. Symphony continues the issue itself rather than opening a pull request.'
+  }
   if (handoff.outcome === 'merged') {
     return 'Merged. Nothing further is scheduled for this issue.'
   }

@@ -190,12 +190,12 @@ machine-specific schema is committed.
 
 The console answers four questions, and its navigation is the four answers with their counts:
 
-| View                | What is in it                                                                                                                                                                                |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked. |
-| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                               |
-| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                      |
-| **Finished**        | Work merged and closed out in the last 24 hours. The window is stated on the view.                                                                                                           |
+| View                | What is in it                                                                                                                                                                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                |
+| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                              |
+| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                     |
+| **Finished**        | Work merged and closed out in the last 24 hours. The window is stated on the view, and an item is dated by the provider's merge time rather than by when Symphony noticed it, so a pull request merged while the host was down does not reappear as recent. |
 
 Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
 agent** control appears only where the detail resource will answer: a handoff restored from the
@@ -209,8 +209,10 @@ on Needs attention while an exception is live and on Ready otherwise, and an idl
 one system-health line rather than four empty panels.
 
 Each Ready row says why it is ranked where it is — `P1 · unlocks 8 issues · ranked first`. The
-`unlocks` count is computed by the backend from the dependency graph and counts the open issues that
-stop being blocked, transitively, once the issue is finished.
+`unlocks` count is computed by the backend from the dependency graph. It is a cascade, not plain
+reachability: an issue is credited only with work whose _every_ unresolved blocker it clears, so work
+held by two blockers counts for neither of them alone, and blockers already in a terminal state are
+ignored.
 
 Actions are named after what the backend does. Making an issue eligible adds the configured
 orchestration label and asks Symphony to reselect, so the control reads **Start agent** when a
@@ -251,7 +253,8 @@ Every running and retrying agent has a detail resource at
 `/api/v1/state` carries that link as `detailUrl`, identical to the `self` link inside the detail
 itself. The console turns each live work card into an inspector: a phase header, elapsed time, last
 activity, the stall countdown, an aggregate workspace summary, handoff progress, and what the agent
-is expected to do next. Process and worker identity, thread/turn/session identity, attempt and retry
+is expected to do next — which on a host that composes no code-review services says the continuation
+lifecycle will run rather than promising a pull request that will never be opened. Process and worker identity, thread/turn/session identity, attempt and retry
 timing, token totals and raw rate limits are one **Diagnostics** disclosure below that, available
 without being the first thing an operator reads. The timeline has three presets — **Summary**, which
 drops session handshakes, private reasoning, chat turns, individual tool calls and usage accounting
