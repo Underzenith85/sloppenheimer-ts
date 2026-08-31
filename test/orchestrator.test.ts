@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Fiber, Layer, TestClock, TestContext, type Scope } from 'effect'
+import { Effect, Exit, Fiber, Layer, Queue, Scope, Stream, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
@@ -248,6 +248,8 @@ type TestPorts = Readonly<{
   agentEventSemantics: AgentEventSemantics
   watchWorkflow: (path: string, onChange: () => void) => void
   environment: NodeJS.ProcessEnv
+  /** Observes the watcher's own teardown, which the stream's scope owns. */
+  onWatchReleased?: (path: string) => void
   onTrackerReleased?: (provider: ValidatedTrackerProvider) => void
   onWorkspacesReleased?: (settings: WorkspaceSettings) => void
 }>
@@ -276,7 +278,20 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
       preflight: (workflow) => preflightWorkflow(workflow, ports.environment),
     }),
     layerWorkflowWatcher({
-      watch: (path, onChange) => Effect.sync(() => ports.watchWorkflow(path, onChange)),
+      // The harness pushes into the stream exactly as the chokidar adapter does, so a test drives
+      // the same path the composition root binds rather than a callback seam of its own.
+      changes: (path) =>
+        Effect.gen(function* () {
+          const changes = yield* Effect.acquireRelease(Queue.unbounded<void>(), (queue) =>
+            Queue.shutdown(queue).pipe(
+              Effect.zipRight(Effect.sync(() => ports.onWatchReleased?.(path))),
+            ),
+          )
+          ports.watchWorkflow(path, () => {
+            Queue.unsafeOffer(changes, undefined)
+          })
+          return Stream.fromQueue(changes)
+        }),
     }),
   )
 
@@ -2447,6 +2462,115 @@ describe('workflow hot reload', (): void => {
     )
   })
 
+  it('reloads the workflow when the watcher reports a change', async (): Promise<void> => {
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+
+    const fingerprint = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          harness.setWorkflow(changedWorkflow({ fingerprint: 'watched' }))
+          // A change that arrives while a tick is already queued is coalesced into it by design,
+          // so the edit is signalled until the reload it asks for has actually been observed.
+          let snapshot = yield* control.snapshot
+          while (snapshot.effectiveWorkflow.fingerprint !== 'watched') {
+            harness.notifyChanged()
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          return snapshot.effectiveWorkflow.fingerprint
+        }),
+      ),
+    )
+
+    expect(fingerprint).toBe('watched')
+  })
+
+  it('installs the workflow watcher before startup returns', async (): Promise<void> => {
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+    let watchedPath: string | null = null
+    const ports: TestPorts = {
+      ...harness.ports,
+      watchWorkflow: (path, onChange) => {
+        watchedPath = path
+        harness.ports.watchWorkflow(path, onChange)
+      },
+    }
+
+    const observed = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          // Read before yielding: an edit made the instant startup returns has to find the watcher
+          // already in place, not a subscription still waiting on a fiber to be scheduled.
+          return watchedPath
+        }),
+      ),
+    )
+
+    expect(observed).toBe('/tmp/WORKFLOW.md')
+  })
+
+  it('interrupts a watcher-triggered tick when the orchestrator shuts down', async (): Promise<void> => {
+    let pollShouldBlock = false
+    let pollBlocked = false
+    let pollInterrupted = false
+    let watchReleased = false
+    const harness = makeHarness(
+      changedWorkflow({ fingerprint: 'initial' }),
+      () => [],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open') || !pollShouldBlock) {
+          return Effect.succeed([])
+        }
+        return Effect.sync(() => {
+          pollBlocked = true
+        }).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              pollInterrupted = true
+            }),
+          ),
+        )
+      },
+    )
+    const ports: TestPorts = {
+      ...harness.ports,
+      onWatchReleased: () => {
+        watchReleased = true
+      },
+    }
+
+    const loads = await runWithTestClock(
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const control = yield* Scope.extend(startTestOrchestrator('/tmp/WORKFLOW.md', ports), scope)
+        yield* control.refresh
+        pollShouldBlock = true
+        // A change that arrives while a tick is already queued is coalesced into it by design, so
+        // the edit is signalled until the poll it asks for is genuinely in flight.
+        while (!pollBlocked) {
+          harness.notifyChanged()
+          yield* Effect.yieldNow()
+        }
+        expect(pollInterrupted).toBe(false)
+        // Closing the scope is what shutdown does. It returns only once every fiber the scope owns
+        // has finished being interrupted, so the poll cannot still be running afterwards.
+        yield* Scope.close(scope, Exit.void)
+        const atShutdown = harness.loads()
+        harness.notifyChanged()
+        yield* Effect.yieldNow()
+        return { atShutdown, afterShutdown: harness.loads() }
+      }),
+    )
+
+    expect(pollInterrupted).toBe(true)
+    expect(watchReleased).toBe(true)
+    expect(loads.afterShutdown).toBe(loads.atShutdown)
+  })
+
   it('uses the provider returned by dispatch preflight', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
     const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
@@ -3316,6 +3440,43 @@ describe('live agent detail', (): void => {
     expect(detail.timeline.events.at(-1)).toMatchObject({ category: 'handoff', status: 'pending' })
     blockHandoff = false
     await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('applies an agent update reported in the same turn the worker settles', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#21'),
+          )
+          // The offer the runner's callback makes has to be in the mailbox by the time the callback
+          // returns. If it were only scheduled, the worker's own exit could overtake it and the
+          // event loop would drop the update as belonging to a run that has already ended.
+          agent.notify('item/completed', { item: { type: 'reasoning' } })
+          agent.settle('completed')
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#21',
+              (candidate) => candidate.status !== 'running',
+              'the settled record',
+            ),
+          )
+        }),
+      ),
+    )
+
+    // First in the timeline, ahead of everything the worker's exit records: the update was applied
+    // to the live run rather than dropped after it ended.
+    expect(detail.timeline.events[0]).toMatchObject({ category: 'reasoning', sequence: 1 })
   })
 
   it('answers unknown, sessionless, and starting identifiers distinctly', async (): Promise<void> => {
