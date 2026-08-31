@@ -352,6 +352,14 @@ describe('GitHub pull request monitor', (): void => {
           repository: {
             pullRequest: {
               reviewDecision: null,
+              reviews: {
+                nodes: [
+                  {
+                    author: { login: 'chatgpt-codex-connector[bot]' },
+                    commit: { oid: 'head-1' },
+                  },
+                ],
+              },
               reviewThreads: {
                 nodes: [
                   {
@@ -386,8 +394,69 @@ describe('GitHub pull request monitor', (): void => {
       body: 'Fix this',
       commentHeadSha: 'reviewed-head',
     })
-    expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
+    expect(result.codexReview).toEqual({ reviewedHeadSha: 'head-1', status: 'completed' })
     expect(fetchMock).toHaveBeenCalledTimes(5)
+  })
+
+  it('reads the reviewed commit from review data when an abbreviation is ambiguous', async (): Promise<void> => {
+    // The summary displays an abbreviation shared by the head and the commit Codex reviewed; only
+    // the review's own commit OID tells them apart.
+    const head = 'abcdef1234567890abcdef1234567890abcdef12'
+    const reviewedElsewhere = 'abcdef1fedcba0987654321fedcba098765432f'
+    expect(reviewedElsewhere.slice(0, 7)).toBe(head.slice(0, 7))
+
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/pulls/41')) {
+        return Response.json({
+          state: 'open',
+          html_url: 'https://github.test/example/symphony/pull/41',
+          head: { sha: head },
+          merged: false,
+          mergeable: true,
+          mergeable_state: 'clean',
+        })
+      }
+      if (url.includes('/check-runs')) {
+        return Response.json({ check_runs: [] })
+      }
+      if (url.includes('/issues/41/comments?')) {
+        return Response.json([
+          {
+            user: { login: 'chatgpt-codex-connector[bot]' },
+            body: `<!-- codex-pull-request-review-summary -->\n| Review | Status | Commit |\n| --- | --- | --- |\n| Code Review | ✅ **Completed** | \`${head.slice(0, 7)}\` |`,
+          },
+        ])
+      }
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewDecision: null,
+              reviews: {
+                nodes: [
+                  {
+                    author: { login: 'chatgpt-codex-connector[bot]' },
+                    commit: { oid: reviewedElsewhere },
+                  },
+                ],
+              },
+              reviewThreads: { nodes: [] },
+            },
+          },
+        },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await Effect.runPromise(makeGitHubPullRequestMonitor(provider).inspect(41))
+
+    expect(result.headSha).toBe(head)
+    // The full OID from review data wins over the abbreviation the summary printed.
+    expect(result.codexReview).toEqual({
+      reviewedHeadSha: reviewedElsewhere,
+      status: 'completed',
+    })
   })
 
   it('requests Codex review only after verifying the current pull request head', async (): Promise<void> => {

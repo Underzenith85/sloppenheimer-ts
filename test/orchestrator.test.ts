@@ -536,7 +536,7 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
-            codexReview: { headShaPrefix: 'recovered-head', status: 'pending' as const },
+            codexReview: { reviewedHeadSha: 'recovered-head', status: 'pending' as const },
           }),
       }),
     }
@@ -668,7 +668,7 @@ describe('restored pull request handoffs', (): void => {
             reviewDecision: null,
             reviewThreads: [],
             codexReview: {
-              headShaPrefix: number === 65 ? 'first-head' : 'second-head',
+              reviewedHeadSha: number === 65 ? 'first-head' : 'second-head',
               status: 'pending' as const,
             },
           }),
@@ -776,7 +776,7 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
-            codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+            codexReview: { reviewedHeadSha: 'persisted-head', status: 'pending' as const },
           }),
       }),
     }
@@ -977,7 +977,7 @@ describe('restored pull request handoffs', (): void => {
     )
     const harness = makeHarness(isolated, () => [issue])
     let codexReview: CodexReviewObservation = {
-      headShaPrefix: initialHead.slice(0, 7),
+      reviewedHeadSha: initialHead,
       status: 'pending',
     }
     const requestedHeads: string[] = []
@@ -1035,7 +1035,7 @@ describe('restored pull request handoffs', (): void => {
             reason: 'Waiting for Codex review of the current head to complete',
           })
 
-          codexReview = { headShaPrefix: initialHead.slice(0, 7), status: 'completed' }
+          codexReview = { reviewedHeadSha: initialHead, status: 'completed' }
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
@@ -1050,6 +1050,96 @@ describe('restored pull request handoffs', (): void => {
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([initialHead])
           expect(snapshot.handoffs).toEqual([])
+        }),
+      ),
+    )
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('does not merge on a completed review of a commit sharing the head abbreviation', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-abbrev-collision-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    // Two distinct commits whose displayed abbreviation is identical. Only the full OID separates
+    // the head from the commit Codex actually reviewed.
+    const head = 'abcdef1234567890abcdef1234567890abcdef12'
+    const reviewedElsewhere = 'abcdef1fedcba0987654321fedcba098765432f'
+    expect(reviewedElsewhere.slice(0, 7)).toBe(head.slice(0, 7))
+    expect(reviewedElsewhere).not.toBe(head)
+
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'awaiting_checks',
+          headSha: head,
+          reason: null,
+          repairAttempts: 0,
+          reviewRequestedHeadSha: head,
+          reviewCompletedHeadSha: null,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const mergedHeads: string[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) =>
+          Effect.succeed({
+            number,
+            state: 'open' as const,
+            url: 'https://github.test/example/symphony/pull/65',
+            headSha: head,
+            merged: false as const,
+            mergeCommitSha: null,
+            mergeable: true,
+            mergeState: 'clean',
+            checks: [
+              {
+                name: 'quality',
+                status: 'completed' as const,
+                conclusion: 'success',
+                url: null,
+              },
+            ],
+            reviewDecision: null,
+            reviewThreads: [],
+            codexReview: { reviewedHeadSha: reviewedElsewhere, status: 'completed' as const },
+          }),
+        mergePullRequest: (_number, expectedHeadSha) =>
+          Effect.sync(() => {
+            mergedHeads.push(expectedHeadSha)
+            return 'merged-head'
+          }),
+      }),
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          yield* control.refresh
+          const snapshot = yield* control.snapshot
+          expect(mergedHeads).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({
+            state: 'awaiting_checks',
+            reviewCompletedHeadSha: null,
+            reason: 'Waiting for Codex review of the current head to complete',
+          })
         }),
       ),
     )
@@ -1139,7 +1229,7 @@ describe('restored pull request handoffs', (): void => {
             reviewRequestedHeadSha: repairedHead,
           })
 
-          codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'pending' }
+          codexReview = { reviewedHeadSha: repairedHead, status: 'pending' }
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
@@ -1147,7 +1237,7 @@ describe('restored pull request handoffs', (): void => {
             'Waiting for Codex review of the current head to complete',
           )
 
-          codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'completed' }
+          codexReview = { reviewedHeadSha: repairedHead, status: 'completed' }
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
@@ -1231,7 +1321,7 @@ describe('restored pull request handoffs', (): void => {
               },
             ],
             codexReview: {
-              headShaPrefix: reviewedHead.slice(0, 7),
+              reviewedHeadSha: reviewedHead,
               status: 'completed' as const,
             },
           }),
@@ -1331,7 +1421,7 @@ describe('restored pull request handoffs', (): void => {
                   ]
                 : [],
             codexReview: {
-              headShaPrefix: currentHead.slice(0, 7),
+              reviewedHeadSha: currentHead,
               status: 'completed' as const,
             },
           }),
@@ -1420,7 +1510,7 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
-            codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+            codexReview: { reviewedHeadSha: head, status: 'completed' as const },
           }),
         handoffCompletedWork: () =>
           Effect.succeed({
@@ -1511,7 +1601,7 @@ describe('restored pull request handoffs', (): void => {
             reviewDecision: null,
             reviewThreads: [],
             codexReview: {
-              headShaPrefix: repairedHead.slice(0, 7),
+              reviewedHeadSha: repairedHead,
               status: 'completed' as const,
             },
           }),
@@ -1595,7 +1685,7 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
-            codexReview: { headShaPrefix: initialHead.slice(0, 7), status: 'completed' as const },
+            codexReview: { reviewedHeadSha: initialHead, status: 'completed' as const },
           }),
         handoffCompletedWork: () =>
           Effect.succeed({
@@ -1685,7 +1775,7 @@ describe('restored pull request handoffs', (): void => {
                 commentHeadSha: head,
               },
             ],
-            codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+            codexReview: { reviewedHeadSha: head, status: 'completed' as const },
           }),
         handoffCompletedWork: () =>
           Effect.succeed({
@@ -1770,7 +1860,7 @@ describe('restored pull request handoffs', (): void => {
                   checks: [],
                   reviewDecision: null,
                   reviewThreads: [],
-                  codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+                  codexReview: { reviewedHeadSha: head, status: 'completed' as const },
                 } as const)
               : ({
                   number,
@@ -1850,7 +1940,7 @@ describe('restored pull request handoffs', (): void => {
             checks: [],
             reviewDecision: null,
             reviewThreads: [],
-            codexReview: { headShaPrefix: head.slice(0, 7), status: 'pending' as const },
+            codexReview: { reviewedHeadSha: head, status: 'pending' as const },
           }),
       }),
       runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),

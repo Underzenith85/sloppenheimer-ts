@@ -89,10 +89,12 @@ export const reconcileHandoffs = (
         const codexReview = inspected.observation.codexReview
         if (handoff.reviewRequestedHeadSha !== observedHeadSha) {
           handoff.reviewCompletedHeadSha = null
+          // Adoption keys off the reviewed commit itself, so a review of some other commit whose
+          // abbreviation happens to match cannot pass for a review of this head.
           if (
             codexReview !== null &&
             codexReview !== undefined &&
-            observedHeadSha.startsWith(codexReview.headShaPrefix)
+            codexReview.reviewedHeadSha === observedHeadSha
           ) {
             handoff.reviewRequestedHeadSha = observedHeadSha
             handoff.state = 'awaiting_checks'
@@ -132,7 +134,7 @@ export const reconcileHandoffs = (
         }
         if (
           codexReview?.status !== 'completed' ||
-          !observedHeadSha.startsWith(codexReview.headShaPrefix)
+          codexReview.reviewedHeadSha !== observedHeadSha
         ) {
           handoff.reviewCompletedHeadSha = null
           handoff.state = 'awaiting_checks'

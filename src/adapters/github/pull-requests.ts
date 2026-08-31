@@ -185,7 +185,23 @@ const decodeThreads = (value: JsonValue | undefined): PullRequestObservation['re
   })
 }
 
-const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation | null => {
+const isCodexAuthor = (value: JsonValue | undefined): boolean => {
+  if (!isJsonRecord(value)) {
+    return false
+  }
+  const login = value['login']
+  return login === 'chatgpt-codex-connector' || login === 'chatgpt-codex-connector[bot]'
+}
+
+/**
+ * Reads the status the review summary comment displays.
+ *
+ * The commit abbreviation printed beside it is deliberately ignored: it cannot identify a commit
+ * unambiguously, and the reviewed commit comes from review data instead.
+ */
+const decodeCodexSummaryStatus = (
+  value: JsonValue | undefined,
+): CodexReviewObservation['status'] | null => {
   if (!isArray(value)) {
     throw new TrackerError({
       category: 'tracker_response',
@@ -195,41 +211,75 @@ const decodeCodexReview = (value: JsonValue | undefined): CodexReviewObservation
   }
   for (const item of [...value].reverse()) {
     const comment = record(item, 'GitHub pull request comment is invalid')
-    const author = comment['author'] ?? comment['user']
     const body = comment['body']
-    if (!isJsonRecord(author) || typeof body !== 'string') {
+    if (!isCodexAuthor(comment['author'] ?? comment['user']) || typeof body !== 'string') {
       continue
     }
-    const login = author['login']
-    const isCodexConnector =
-      login === 'chatgpt-codex-connector' || login === 'chatgpt-codex-connector[bot]'
-    if (!isCodexConnector || !body.includes('<!-- codex-pull-request-review-summary -->')) {
-      continue
-    }
-    const head = /\|\s*`([0-9a-f]{7,40})`\s*\|/u.exec(body)?.[1]
-    if (head === undefined) {
+    if (!body.includes('<!-- codex-pull-request-review-summary -->')) {
       continue
     }
     if (body.includes('✅ **Completed**')) {
-      return { headShaPrefix: head, status: 'completed' }
+      return 'completed'
     }
     if (body.includes('🔄 **Running**')) {
-      return { headShaPrefix: head, status: 'pending' }
+      return 'pending'
     }
   }
   return null
 }
 
-const fetchCodexReview = (
+/**
+ * Reads the full OID of the commit the newest submitted Codex review covers.
+ *
+ * A submitted review carries the commit it was written against, so this is the authoritative
+ * answer to which commit was reviewed; the summary comment only ever shows an abbreviation.
+ */
+const decodeCodexReviewedHead = (value: JsonValue | undefined): string | null => {
+  if (!isArray(value)) {
+    throw new TrackerError({
+      category: 'tracker_response',
+      message: 'GitHub pull request review list is missing',
+      retryable: false,
+    })
+  }
+  for (const item of [...value].reverse()) {
+    const review = record(item, 'GitHub pull request review is invalid')
+    if (!isCodexAuthor(review['author'])) {
+      continue
+    }
+    const commit = review['commit']
+    if (!isJsonRecord(commit)) {
+      continue
+    }
+    const oid = commit['oid']
+    if (typeof oid === 'string' && oid.length > 0) {
+      return oid
+    }
+  }
+  return null
+}
+
+const codexReviewObservation = (
+  status: CodexReviewObservation['status'] | null,
+  reviewedHeadSha: string | null,
+): CodexReviewObservation | null => {
+  if (status === null && reviewedHeadSha === null) {
+    return null
+  }
+  // A submitted review is a completed one, even if no summary comment reports it.
+  return { reviewedHeadSha, status: status ?? 'completed' }
+}
+
+const fetchCodexSummaryStatus = (
   provider: GitHubProviderConfig,
   prefix: string,
   number: number,
-): Effect.Effect<CodexReviewObservation | null, TrackerError> =>
+): Effect.Effect<CodexReviewObservation['status'] | null, TrackerError> =>
   Effect.gen(function* () {
     let nextUrl: string | null =
       `${prefix}/issues/${String(number)}/comments?per_page=${String(githubPageSize)}`
     let pages = 0
-    let latest: CodexReviewObservation | null = null
+    let latest: CodexReviewObservation['status'] | null = null
     while (nextUrl !== null) {
       if (pages >= githubMaxPages) {
         return yield* Effect.fail(
@@ -243,7 +293,7 @@ const fetchCodexReview = (
           trackerResponseError('GitHub pull request comment list is missing'),
         )
       }
-      const decoded = decodeCodexReview(response.body)
+      const decoded = decodeCodexSummaryStatus(response.body)
       if (decoded !== null) {
         latest = decoded
       }
@@ -353,13 +403,13 @@ export const makeGitHubPullRequestMonitor = (
               ),
               'GitHub check-run response is invalid',
             )
-            const codexReview = yield* fetchCodexReview(provider, prefix, number)
+            const codexSummaryStatus = yield* fetchCodexSummaryStatus(provider, prefix, number)
             const graphResponse = record(
               yield* json(provider, `${provider.apiBaseUrl.replace(/\/$/u, '')}/graphql`, {
                 method: 'POST',
                 body: JSON.stringify({
                   query:
-                    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
+                    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviews(last:50){nodes{author{login} commit{oid}}} reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
                   variables: { owner: provider.owner, name: provider.repository, number },
                 }),
               }),
@@ -373,6 +423,7 @@ export const makeGitHubPullRequestMonitor = (
             )
             const reviewDecision = graphPull['reviewDecision']
             const threads = record(graphPull['reviewThreads'], 'GitHub review threads are missing')
+            const reviews = record(graphPull['reviews'], 'GitHub pull request reviews are missing')
             if (reviewDecision !== null && typeof reviewDecision !== 'string') {
               throw new TrackerError({
                 category: 'tracker_response',
@@ -392,7 +443,10 @@ export const makeGitHubPullRequestMonitor = (
               checks: decodeChecks(checksResponse['check_runs']),
               reviewDecision,
               reviewThreads: decodeThreads(threads['nodes']),
-              codexReview,
+              codexReview: codexReviewObservation(
+                codexSummaryStatus,
+                decodeCodexReviewedHead(reviews['nodes']),
+              ),
             }
           }),
         ),

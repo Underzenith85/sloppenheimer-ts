@@ -16,7 +16,18 @@ export type PullRequestReviewThread = Readonly<{
 }>
 
 export type CodexReviewObservation = Readonly<{
-  headShaPrefix: string
+  /**
+   * Full OID of the commit the newest submitted Codex review covers, read from review data rather
+   * than from the abbreviation the review summary displays. `null` until a review is submitted.
+   *
+   * The merge gate matches this against the pull request head exactly, so two commits sharing a
+   * displayed abbreviation can never be mistaken for each other.
+   */
+  reviewedHeadSha: string | null
+  /**
+   * Whether the summary reports a review still running. Presentation only: it reports what the
+   * operator sees, and never establishes which commit was reviewed.
+   */
   status: 'pending' | 'completed'
 }>
 
