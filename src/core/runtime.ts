@@ -81,12 +81,22 @@ export type RetryEntry = {
   fiber: Fiber.RuntimeFiber<void>
 }
 
+/**
+ * What a cancelled run does with the repair identity it was carrying.
+ *
+ * - `release`: the repair is over, so the identity goes with it.
+ * - `retain`: a retry continues this repair from the same baseline.
+ * - `settle`: nothing continues it, but the worker may have pushed before it was cancelled, so the
+ *   baseline outlives it for exactly one handoff inspection to attribute that head.
+ */
+export type RepairDisposition = 'release' | 'retain' | 'settle'
+
 export type RepairEntry = {
   /** The repair-shaped issue, retained so a refused dispatch can render the same repair on retry. */
   issue: Issue
   /** Pull-request head from which this repair was started. */
   startedHeadSha: string
-  /** False only when a persisted baseline was restored without its original worker or retry. */
+  /** False once nothing continues this repair: a restored baseline, or a settled cancellation. */
   inFlight: boolean
   /** Whether a worker actually started, as opposed to a dispatch refused before launch. */
   workerStarted: boolean
@@ -431,7 +441,7 @@ export type OrchestratorContext = {
     id: IssueId,
     cleanupWorkspace: boolean,
     reason?: string,
-    repairDisposition?: 'release' | 'retain',
+    repairDisposition?: RepairDisposition,
   ) => Effect.Effect<RunningEntry | null, never>
   scheduleNextTickEffect: () => Effect.Effect<void, never, Scope.Scope>
   hydrateRestoredHandoffsEffect: () => Effect.Effect<void>
@@ -1353,7 +1363,7 @@ export const startOrchestratorRuntime = (
       id: IssueId,
       cleanupWorkspace: boolean,
       reason = 'the orchestrator cancelled the run',
-      repairDisposition: 'release' | 'retain' = 'release',
+      repairDisposition: RepairDisposition = 'release',
     ): Effect.Effect<RunningEntry | null, never> =>
       Effect.gen(function* () {
         const entry = state.running.get(id)
@@ -1386,9 +1396,12 @@ export const startOrchestratorRuntime = (
         if (
           handoff !== undefined &&
           Option.isSome(handoff.repair) &&
-          repairDisposition === 'release'
+          repairDisposition !== 'retain'
         ) {
-          handoff.repair = Option.none()
+          handoff.repair =
+            repairDisposition === 'release'
+              ? Option.none()
+              : Option.some({ ...handoff.repair.value, inFlight: false })
           yield* persistHandoffs()
         }
         const record = state.details.get(id)
@@ -1474,6 +1487,10 @@ export const startOrchestratorRuntime = (
               terminal
                 ? `the issue reached the terminal state ${issue.state}`
                 : `the issue left its active states as ${issue.state}`,
+              // A repair worker may have pushed immediately before its issue left the active
+              // states, and nothing continues it: keep the baseline for one inspection so that
+              // head is attributed. A terminal issue abandons the pull request outright.
+              terminal ? 'release' : 'settle',
             )
           } else {
             entry.issue = issue

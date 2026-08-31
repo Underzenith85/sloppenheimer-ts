@@ -9,7 +9,7 @@ import { logError, logInfo, logWarning } from '../support/logging.js'
 import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetry.js'
 import { dispatch } from './dispatch.js'
 import { hydrateRestoredHandoffs, reconcileHandoffs } from './handoff-reconciliation.js'
-import type { OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
 import { publishDetails } from './snapshot.js'
 import { adoptPorts, drainRetirements, revalidateCredentials } from './workflow-reload.js'
 
@@ -414,6 +414,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             Option.isSome(repair) && repair.value.inFlight
               ? { ...issue, description: repair.value.issue.description }
               : issue
+          // A repair belongs to the workflow the pull request was handed off under, the way
+          // reconciliation dispatches the first attempt. A reload between the refusal and this
+          // retry must not re-render the repair through a template that drops the instructions.
+          let repairEffective: EffectiveWorkflow | undefined = undefined
           // Every repair retry re-inspects the pull request first: a refused dispatch may be
           // queued behind a manual push, and a worker that pushed before it failed leaves a head
           // that is its output and nobody else's. Both have to be settled before another repair
@@ -490,6 +494,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             if (!handoff.repairObservedHeadShas.includes(observedHeadSha)) {
               handoff.repairObservedHeadShas.push(observedHeadSha)
             }
+            repairEffective = {
+              workflow: handoff.execution.workflow,
+              tracker: handoff.execution.tracker,
+              codeReview,
+              workspaces: handoff.execution.workspaces,
+              loadedAt: handoff.observedAt,
+            }
             yield* context.persistHandoffsEffect()
           }
           // Deferred with the refreshed repair identity, not the one this retry arrived with:
@@ -504,7 +515,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             break
           }
           // An ordinary worker continuation has no repair identity and establishes no baseline.
-          const started = yield* dispatch(context, dispatchIssue, event.attempt)
+          const started = yield* dispatch(context, dispatchIssue, event.attempt, repairEffective)
           if (started && handoff !== undefined && Option.isSome(handoff.repair)) {
             handoff.repair = Option.some({ ...handoff.repair.value, workerStarted: true })
             yield* context.persistHandoffsEffect()

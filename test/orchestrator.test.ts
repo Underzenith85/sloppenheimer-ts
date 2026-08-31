@@ -2204,6 +2204,136 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('attributes a repair head when its issue leaves the active states mid-run', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-inactive-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    let currentIssue = issue
+    let currentHead = originalHead
+    await saveRepairHandoff(handoffStorePath, issue, originalHead)
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+      }),
+      // The repair pushes and then stays open, so only the cancellation ends it.
+      runAgent: () =>
+        Effect.sync(() => {
+          currentHead = repairedHead
+        }).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.running.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // Not terminal: the issue simply leaves its active states while its repair is running.
+          currentIssue = { ...issue, state: 'blocked' }
+          while (current.handoffs[0]?.repairAttempts !== 1) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      ),
+    )
+
+    expect(snapshot.running).toEqual([])
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 1,
+      repairHeadShas: [repairedHead],
+      repairObservedHeadShas: [originalHead, repairedHead],
+      repairStartedHeadSha: null,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('dispatches a repair retry through the workflow its handoff was captured under', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-reload-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      fingerprint: 'original',
+      promptTemplate: '{{ issue.description }}',
+      config: { ...workflow.config, workspaceRoot },
+    }
+    // A reload that renders nothing of the issue would drop the repair instructions entirely.
+    const reloaded: Workflow = {
+      ...isolated,
+      fingerprint: 'reloaded',
+      promptTemplate: 'a reloaded template that says nothing about the pull request',
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const environment: Record<string, string> = {}
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [issue], undefined, environment)
+    const launchedPrompts: string[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      runAgent: ({ prompt }) =>
+        Effect.suspend(() => {
+          launchedPrompts.push(prompt)
+          return Effect.never
+        }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The workflow is reloaded and adopted while the refused repair waits to retry.
+          environment['SYMPHONY_TEST_TOKEN'] = 'secret'
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('30 seconds')
+          while (launchedPrompts.length === 0) {
+            yield* Effect.yieldNow()
+          }
+          current = yield* control.snapshot
+          yield* control.setIssuePaused(20, true)
+          return current
+        }),
+      ),
+    )
+
+    expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
+    expect(launchedPrompts[0]).toContain('## Pull request repair')
+    expect(launchedPrompts[0]).not.toContain('a reloaded template')
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('records that a refused repair dispatch never started a worker', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
