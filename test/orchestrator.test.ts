@@ -3210,6 +3210,11 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
+          // A retained handoff remains the scheduler's claim even though retry policy rejected
+          // another attempt. The ordinary candidate pass must not redispatch it without the repair
+          // prompt and lifecycle.
+          yield* control.refresh
+          current = yield* control.snapshot
           return current
         }),
       ),
@@ -3221,6 +3226,7 @@ describe('restored pull request handoffs', (): void => {
       repairStartedHeadSha: null,
       repairWorkerStarted: false,
     })
+    expect(snapshot.retrying).toEqual([])
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
       expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
     ])

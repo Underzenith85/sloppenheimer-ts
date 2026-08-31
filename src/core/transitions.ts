@@ -374,14 +374,10 @@ export const resumeIssueNumber = (state: RuntimeState, issueNumber: number): Run
 // Handoffs
 // ---------------------------------------------------------------------------
 
-export const putHandoff = (
-  state: RuntimeState,
-  id: IssueId,
-  entry: HandoffEntry,
-): RuntimeState => ({
-  ...state,
-  handoffs: withEntry(state.handoffs, id, entry),
-})
+export const putHandoff = (state: RuntimeState, id: IssueId, entry: HandoffEntry): RuntimeState => {
+  const claimed = claimIssue(state, entry.issue)
+  return { ...claimed, handoffs: withEntry(claimed.handoffs, id, entry) }
+}
 
 export const removeHandoff = (state: RuntimeState, id: IssueId): RuntimeState => ({
   ...state,

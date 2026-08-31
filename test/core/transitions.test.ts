@@ -538,7 +538,7 @@ describe('handoff bookkeeping', (): void => {
   it('drops the handoff, completes the issue, and releases the claim together', (): void => {
     const issue = makeIssue('example/symphony#1')
     const id: IssueId = issue.id
-    const held = Transitions.putHandoff(Transitions.claimIssue(emptyState(), issue), id, {
+    const held = Transitions.putHandoff(emptyState(), id, {
       issue,
       execution,
       pullRequestNumber: 7,
@@ -556,6 +556,7 @@ describe('handoff bookkeeping', (): void => {
     })
 
     expect(Transitions.handoffSnapshots(held).map((snapshot) => snapshot.issueId)).toEqual([id])
+    expect(held.claimed.has(id)).toBe(true)
 
     const completed = Transitions.completeHandoff(held, id, finishedWork(issue))
 
