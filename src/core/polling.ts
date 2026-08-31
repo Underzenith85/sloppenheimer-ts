@@ -1,6 +1,5 @@
 import { Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
 
-import { cyclicIssueIdentifiers } from '../domain/dependencies.js'
 import type { Issue, IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -171,13 +170,10 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
           ),
         ),
       )
-    const cyclicIdentifiers = cyclicIssueIdentifiers(candidates)
     for (const issue of sortIssues(candidates)) {
       // Read afresh: a dispatch earlier in this pass may have taken the slot this one wanted.
       const current = yield* Ref.get(context.state)
-      if (
-        dispatchAdmission(current, issue, effective.workflow, cyclicIdentifiers)._tag !== 'Admit'
-      ) {
+      if (dispatchAdmission(current, issue, effective.workflow)._tag !== 'Admit') {
         continue
       }
       yield* dispatch(context, issue, null)

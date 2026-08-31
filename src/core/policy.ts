@@ -1,6 +1,5 @@
 import { Option } from 'effect'
 
-import { unresolvedBlockers } from '../domain/dependencies.js'
 import { normalizeState, type Issue, type IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, RuntimeState } from './state.js'
@@ -25,9 +24,6 @@ export const issueIsRoutable = (issue: Issue, workflow: Workflow): boolean => {
   if (!issue.dispatchable) {
     return false
   }
-  if (unresolvedBlockers(issue, workflow.config.tracker.terminalStates).length > 0) {
-    return false
-  }
   const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
   return workflow.config.tracker.requiredLabels.every(
     (label) => label.length > 0 && labels.has(label),
@@ -39,9 +35,6 @@ export const issueIsActiveInSnapshot = (issue: Issue, snapshot: ExecutionSnapsho
 
 export const issueIsRoutableInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean => {
   if (!issue.dispatchable) {
-    return false
-  }
-  if (unresolvedBlockers(issue, snapshot.terminalStates).length > 0) {
     return false
   }
   const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
@@ -77,7 +70,7 @@ export type DispatchAdmission =
   | Readonly<{ _tag: 'Admit' }>
   | Readonly<{
       _tag: 'Refuse'
-      reason: 'recovering' | 'claimed' | 'paused' | 'cyclic' | 'inactive' | 'unroutable' | 'no_slot'
+      reason: 'recovering' | 'claimed' | 'paused' | 'inactive' | 'unroutable' | 'no_slot'
     }>
 
 /** The issue number an identifier ends in, when it carries one at all. */
@@ -95,7 +88,6 @@ export const dispatchAdmission = (
   state: RuntimeState,
   issue: Issue,
   workflow: Workflow,
-  cyclicIdentifiers: ReadonlySet<string>,
 ): DispatchAdmission => {
   if (!state.startupRecoveryFinished) {
     return { _tag: 'Refuse', reason: 'recovering' }
@@ -109,9 +101,6 @@ export const dispatchAdmission = (
     )
   ) {
     return { _tag: 'Refuse', reason: 'paused' }
-  }
-  if (cyclicIdentifiers.has(issue.identifier)) {
-    return { _tag: 'Refuse', reason: 'cyclic' }
   }
   if (!issueIsActive(issue, workflow)) {
     return { _tag: 'Refuse', reason: 'inactive' }

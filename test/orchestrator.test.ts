@@ -177,7 +177,7 @@ describe('orchestrator policies', (): void => {
     expect(issueIsRoutable(issue, workflow)).toBe(false)
   })
 
-  it('does not route an issue until its final native blocker is terminal', (): void => {
+  it('leaves blocker metadata to adapter-supplied dispatchability', (): void => {
     const openBlocker: BlockerRef = {
       id: '101',
       identifier: issueIdentifier('example/symphony#1'),
@@ -188,7 +188,7 @@ describe('orchestrator policies', (): void => {
     const blocked = makeIssue('example/symphony#2', 1, null, ['ready', 'symphony'], [openBlocker])
     const ready = { ...blocked, blockedBy: [{ ...openBlocker, state: 'closed' }] }
 
-    expect(issueIsRoutable(blocked, workflow)).toBe(false)
+    expect(issueIsRoutable(blocked, workflow)).toBe(true)
     expect(issueIsRoutable(ready, workflow)).toBe(true)
   })
 
@@ -5981,6 +5981,51 @@ describe('session telemetry accounting', (): void => {
           expect(snapshot.running).toEqual([])
           expect(snapshot.retrying).toEqual([])
           expect(removed).toEqual([])
+        }),
+      ),
+    )
+  })
+
+  it('keeps a running worker when only blocker metadata changes', async (): Promise<void> => {
+    let currentIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [currentIssue])
+    let resolveStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve
+    })
+    let interrupted = false
+    const ports: TestPorts = {
+      ...harness.ports,
+      runAgent: () =>
+        Effect.sync(resolveStarted).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true
+            }),
+          ),
+        ),
+    }
+    const blocker: BlockerRef = {
+      id: '20',
+      identifier: issueIdentifier('example/symphony#20'),
+      title: 'Prerequisite',
+      state: 'open',
+      url: 'https://github.com/example/symphony/issues/20',
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Effect.promise(() => started)
+          currentIssue = { ...currentIssue, blockedBy: [blocker] }
+
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(interrupted).toBe(false)
+          expect(snapshot.running.map((entry) => entry.issueId)).toEqual(['example/symphony#21'])
         }),
       ),
     )

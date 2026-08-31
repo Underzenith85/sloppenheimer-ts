@@ -2,6 +2,7 @@ import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Redacted, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
+import { cyclicIssueIdentifiers, unresolvedBlockers } from '../../domain/dependencies.js'
 import { TrackerError } from '../../errors.js'
 import { isJsonArray } from '../../support/json.js'
 import { logWarning } from '../../support/logging.js'
@@ -48,6 +49,18 @@ type DependencyCacheEntry = Readonly<{
   issueUpdatedAt: number | null
   expiresAt: number
 }>
+
+/** GitHub owns blocker and cycle eligibility; core treats `dispatchable` as authoritative. */
+const applyDispatchEligibility = (issues: readonly Issue[]): readonly Issue[] => {
+  const cyclic = cyclicIssueIdentifiers(issues)
+  return issues.map((issue) => ({
+    ...issue,
+    dispatchable:
+      issue.dispatchable &&
+      unresolvedBlockers(issue, ['closed']).length === 0 &&
+      !cyclic.has(issue.identifier),
+  }))
+}
 
 const githubTrackerToolSpecs: readonly HostToolSpec[] = Object.freeze([
   Object.freeze({
@@ -278,7 +291,7 @@ const hydrateDependencies = (
       )
     },
     { concurrency: dependencyConcurrency },
-  )
+  ).pipe(Effect.map(applyDispatchEligibility))
 
 /**
  * `httpClient` binds this tracker to one client. An operation that stays in Effect otherwise reads
@@ -391,7 +404,11 @@ export const makeGitHubIssueControl = (
     listOpenIssues: () =>
       tracker
         .fetchIssuesByStates(['open'], null)
-        .pipe(Effect.map((issues) => issues.filter((issue) => issue.dispatchable))),
+        .pipe(
+          Effect.map((issues) =>
+            issues.filter((issue) => issue.dispatchable || issue.blockedBy.length > 0),
+          ),
+        ),
     addLabel: (issueNumber, label) => {
       if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
         return Effect.fail(

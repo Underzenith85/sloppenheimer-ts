@@ -244,7 +244,7 @@ describe('dispatch admission', (): void => {
   const issue = makeIssue('example/symphony#1')
 
   it('admits an active, routable, unclaimed issue with a free slot', (): void => {
-    expect(dispatchAdmission(emptyState(), issue, workflow, new Set())).toEqual({ _tag: 'Admit' })
+    expect(dispatchAdmission(emptyState(), issue, workflow)).toEqual({ _tag: 'Admit' })
   })
 
   it('refuses everything until startup recovery has finished', (): void => {
@@ -254,7 +254,7 @@ describe('dispatch admission', (): void => {
       storeError: null,
     })
 
-    expect(dispatchAdmission(recovering, issue, workflow, new Set())).toEqual({
+    expect(dispatchAdmission(recovering, issue, workflow)).toEqual({
       _tag: 'Refuse',
       reason: 'recovering',
     })
@@ -263,7 +263,7 @@ describe('dispatch admission', (): void => {
   it('refuses an issue this orchestrator already claimed', (): void => {
     const claimed = Transitions.claimIssue(emptyState(), issue)
 
-    expect(dispatchAdmission(claimed, issue, workflow, new Set())).toEqual({
+    expect(dispatchAdmission(claimed, issue, workflow)).toEqual({
       _tag: 'Refuse',
       reason: 'claimed',
     })
@@ -272,45 +272,28 @@ describe('dispatch admission', (): void => {
   it('refuses an issue whose number the operator paused', (): void => {
     const paused = Transitions.pauseIssueNumber(emptyState(), 1)
 
-    expect(dispatchAdmission(paused, issue, workflow, new Set())).toEqual({
+    expect(dispatchAdmission(paused, issue, workflow)).toEqual({
       _tag: 'Refuse',
       reason: 'paused',
     })
   })
 
-  it('refuses a member of a dependency cycle', (): void => {
-    expect(dispatchAdmission(emptyState(), issue, workflow, new Set([issue.identifier]))).toEqual({
-      _tag: 'Refuse',
-      reason: 'cyclic',
-    })
-  })
-
   it('refuses an issue outside the active states', (): void => {
     expect(
-      dispatchAdmission(
-        emptyState(),
-        makeIssue('example/symphony#2', 'closed'),
-        workflow,
-        new Set(),
-      ),
+      dispatchAdmission(emptyState(), makeIssue('example/symphony#2', 'closed'), workflow),
     ).toEqual({ _tag: 'Refuse', reason: 'inactive' })
   })
 
   it('refuses an issue missing a required label', (): void => {
     expect(
-      dispatchAdmission(
-        emptyState(),
-        makeIssue('example/symphony#2', 'open', []),
-        workflow,
-        new Set(),
-      ),
+      dispatchAdmission(emptyState(), makeIssue('example/symphony#2', 'open', []), workflow),
     ).toEqual({ _tag: 'Refuse', reason: 'unroutable' })
   })
 
   it('refuses an issue when every agent slot is taken', (): void => {
     const busy = Transitions.beginRun(emptyState(), runningEntry(makeIssue('example/symphony#9')))
 
-    expect(dispatchAdmission(busy, issue, withAgentLimits(1), new Set())).toEqual({
+    expect(dispatchAdmission(busy, issue, withAgentLimits(1))).toEqual({
       _tag: 'Refuse',
       reason: 'no_slot',
     })
