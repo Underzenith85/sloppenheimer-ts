@@ -389,6 +389,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               event.attempt + 1,
               `retry refresh failed: ${refreshResult.error.message}`,
               false,
+              refreshResult.error,
             )
             break
           }
