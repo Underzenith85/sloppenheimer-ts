@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import chokidar from 'chokidar'
-import { Cause, Effect, Exit, Layer, Queue, Stream } from 'effect'
+import { Cause, ConfigProvider, Effect, Exit, Layer, Queue, Stream } from 'effect'
 
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
 import {
@@ -72,7 +72,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
     make: (settings) => Effect.succeed(makeWorkspaceManager(settings.root, settings.hooks)),
   }),
   layerWorkflowLoader({
-    load: (path) => loadWorkflow(path, process.env, trackerProviders),
+    load: (path) => loadWorkflow(path, trackerProviders),
     preflight: (workflow) => preflightWorkflow(workflow),
   }),
   layerWorkflowWatcher({
@@ -130,7 +130,7 @@ const ports = (
   WorkflowError | TrackerError
 > =>
   Layer.unwrapEffect(
-    loadWorkflow(workflowPath, process.env, trackerProviders).pipe(
+    loadWorkflow(workflowPath, trackerProviders).pipe(
       Effect.map((workflow) => {
         const configuration = portsConfiguration(workflow)
         return Layer.mergeAll(
@@ -198,7 +198,14 @@ const main = async (): Promise<number> => {
     // Provided around the whole program, not around the start: the cells the orchestrator rebuilds
     // through live as long as the host does. The GitHub adapter reads its HTTP transport from the
     // same context, so the client bound here reaches every request its ports make.
-  ).pipe(Effect.provide(ports(options.workflowPath)), Effect.provide(githubHttpClientLayer))
+  ).pipe(
+    Effect.provide(ports(options.workflowPath)),
+    Effect.provide(githubHttpClientLayer),
+    // The composition root states where configuration comes from. Everything below reads the
+    // environment as a `Config` against whatever provider the fiber carries, so this is the one
+    // place that says "the process environment" — and the one line a test replaces.
+    Effect.withConfigProvider(ConfigProvider.fromEnv()),
+  )
 
   const exit = await Effect.runPromiseExit(program, {
     signal: controller.signal,

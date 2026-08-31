@@ -1,3 +1,5 @@
+import { Config, Effect } from 'effect'
+
 import {
   makeTrackerProviderRegistry,
   registerTrackerProvider,
@@ -7,6 +9,7 @@ import {
   type ValidatedTrackerProvider,
 } from '../../src/domain/tracker-provider.js'
 import { WorkflowError } from '../../src/errors.js'
+import { withEnvironment } from './environment.js'
 
 /**
  * A tracker kind that exists only here.
@@ -26,15 +29,22 @@ const isStubProviderConfig = (value: unknown): value is StubProviderConfig => {
 
 export const stubTrackerProviderAdapter: TrackerProviderAdapter<StubProviderConfig> = {
   kind: 'stub',
-  validate: (provider, environment) => {
+  validate: (provider) => {
     const reference = provider['token']
     if (typeof reference !== 'string' || reference.length === 0) {
-      throw new WorkflowError({
-        category: 'invalid_config',
-        message: 'tracker.provider.token must be a non-empty string',
-      })
+      return Effect.fail(
+        new WorkflowError({
+          category: 'invalid_config',
+          message: 'tracker.provider.token must be a non-empty string',
+        }),
+      )
     }
-    return { token: environment[reference] ?? reference }
+    // Reads the named variable through the calling fiber's provider, and falls back to the
+    // reference itself so a selection can be built without an environment at all.
+    return Config.option(Config.string(reference)).pipe(
+      Effect.map((value) => ({ token: value._tag === 'Some' ? value.value : reference })),
+      Effect.orDie,
+    )
   },
   isProvider: isStubProviderConfig,
   same: (left, right) => left.token === right.token,
@@ -47,8 +57,9 @@ export const stubTrackerProviders: TrackerProviderRegistry = makeTrackerProvider
   stubTrackerProviderEntry,
 ])
 
+/** A validated stub selection whose token is the literal given, resolved against no environment. */
 export const stubProvider = (token: string): ValidatedTrackerProvider =>
-  stubTrackerProviders.validate('stub', { token }, {})
+  Effect.runSync(withEnvironment(stubTrackerProviders.validate('stub', { token })))
 
 export const stubProviderToken = (selection: ValidatedTrackerProvider): string =>
   trackerProviderOf(stubTrackerProviderAdapter, selection).token

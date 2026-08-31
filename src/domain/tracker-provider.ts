@@ -1,3 +1,5 @@
+import { Effect } from 'effect'
+
 import type { JsonObject } from './domain.js'
 import { WorkflowError } from '../errors.js'
 
@@ -22,10 +24,13 @@ export type ValidatedTrackerProvider = Readonly<{
   /**
    * Re-validates `tracker.provider` as it stands now, against the environment as it stands now.
    *
+   * The environment is not a parameter: validation reads it through the calling fiber's
+   * `ConfigProvider`, so a revalidation sees the environment the caller is running against.
+   *
    * The adapter comes from this selection rather than from a registry looked up again by kind, so
    * a revalidation cannot drift to a different registry than the one the workflow was loaded with.
    */
-  revalidate: (provider: JsonObject, environment: NodeJS.ProcessEnv) => ValidatedTrackerProvider
+  revalidate: (provider: JsonObject) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
 }>
 
 /**
@@ -37,10 +42,11 @@ export type ValidatedTrackerProvider = Readonly<{
 export type TrackerProviderAdapter<Provider> = Readonly<{
   kind: string
   /**
-   * Validates `tracker.provider` as authored, rejecting with a `WorkflowError` carrying the
-   * operator-visible message.
+   * Validates `tracker.provider` as authored, failing with a `WorkflowError` carrying the
+   * operator-visible message. Secret and path indirection resolves through the calling fiber's
+   * `ConfigProvider` rather than through a threaded environment record.
    */
-  validate: (provider: JsonObject, environment: NodeJS.ProcessEnv) => Provider
+  validate: (provider: JsonObject) => Effect.Effect<Provider, WorkflowError>
   /** Recognizes this adapter's own validated provider inside an opaque selection. */
   isProvider: (value: unknown) => value is Provider
   same: (left: Provider, right: Provider) => boolean
@@ -50,7 +56,7 @@ export type TrackerProviderAdapter<Provider> = Readonly<{
 /** An adapter with its provider type erased, as the registry holds it. */
 export type RegisteredTrackerProvider = Readonly<{
   kind: string
-  validate: (provider: JsonObject, environment: NodeJS.ProcessEnv) => ValidatedTrackerProvider
+  validate: (provider: JsonObject) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
 }>
 
 const validatedSelection = <Provider>(
@@ -65,8 +71,10 @@ const validatedSelection = <Provider>(
       other.kind === adapter.kind &&
       adapter.isProvider(other.provider) &&
       adapter.same(provider, other.provider),
-    revalidate: (authored: JsonObject, environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
-      validatedSelection(adapter, adapter.validate(authored, environment)),
+    revalidate: (authored: JsonObject): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
+      adapter
+        .validate(authored)
+        .pipe(Effect.map((validated) => validatedSelection(adapter, validated))),
   })
 
 /**
@@ -78,8 +86,10 @@ export const registerTrackerProvider = <Provider>(
 ): RegisteredTrackerProvider =>
   Object.freeze({
     kind: adapter.kind,
-    validate: (provider: JsonObject, environment: NodeJS.ProcessEnv): ValidatedTrackerProvider =>
-      validatedSelection(adapter, adapter.validate(provider, environment)),
+    validate: (provider: JsonObject): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
+      adapter
+        .validate(provider)
+        .pipe(Effect.map((validated) => validatedSelection(adapter, validated))),
   })
 
 /** The tracker kinds a build supports, and the validation each one owns. */
@@ -88,8 +98,7 @@ export type TrackerProviderRegistry = Readonly<{
   validate: (
     kind: string,
     provider: JsonObject,
-    environment: NodeJS.ProcessEnv,
-  ) => ValidatedTrackerProvider
+  ) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
 }>
 
 export const makeTrackerProviderRegistry = (
@@ -102,16 +111,17 @@ export const makeTrackerProviderRegistry = (
     validate: (
       kind: string,
       provider: JsonObject,
-      environment: NodeJS.ProcessEnv,
-    ): ValidatedTrackerProvider => {
+    ): Effect.Effect<ValidatedTrackerProvider, WorkflowError> => {
       const adapter = byKind.get(kind)
       if (adapter === undefined) {
-        throw new WorkflowError({
-          category: 'invalid_config',
-          message: `unsupported tracker.kind: ${kind} (supported: ${kinds.join(', ')})`,
-        })
+        return Effect.fail(
+          new WorkflowError({
+            category: 'invalid_config',
+            message: `unsupported tracker.kind: ${kind} (supported: ${kinds.join(', ')})`,
+          }),
+        )
       }
-      return adapter.validate(provider, environment)
+      return adapter.validate(provider)
     },
   })
 }
