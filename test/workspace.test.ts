@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs'
 import { access, mkdir, readFile, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import { Effect, Fiber } from 'effect'
-import { afterEach, describe, expect, it } from 'vitest'
+import { it } from '@effect/vitest'
+import { Clock, Effect, Fiber } from 'effect'
+import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
 import type { HooksConfig } from '../src/config/workflow.js'
@@ -14,11 +15,14 @@ import { processIsAlive } from './harness/processes.js'
 
 /**
  * The manager is built against the host filesystem, the way the composition root builds it. It
- * takes the filesystem from the layer, so building it is an effect; nothing about it is
- * asynchronous.
+ * takes the filesystem from the layer, so building it is an effect; the tests are effects too, so
+ * the port is acquired in the same fiber that uses it rather than run out to a value here.
  */
-const workspaceManager = (root: string, hooks: HooksConfig): WorkspaceManagerPort =>
-  Effect.runSync(makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem)))
+const workspaceManager = (root: string, hooks: HooksConfig): Effect.Effect<WorkspaceManagerPort> =>
+  makeWorkspaceManager(root, hooks).pipe(Effect.provide(hostFileSystem))
+
+/** Lifts one of the host filesystem calls these fixtures need into the effect under test. */
+const host = <Value>(work: () => Promise<Value>): Effect.Effect<Value> => Effect.promise(work)
 
 const roots: string[] = []
 
@@ -41,36 +45,47 @@ describe('workspace safety', (): void => {
     expect(() => containedWorkspacePath('/tmp/symphony-root', '.')).toThrow()
   })
 
-  it('runs after_create once and reuses the directory', async (): Promise<void> => {
-    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
-    roots.push(root)
-    const manager = workspaceManager(root, {
-      afterCreate: 'printf created > marker.txt',
-      beforeRun: null,
-      afterRun: null,
-      beforeRemove: null,
-      timeoutMs: 5_000,
-    })
+  it.live('runs after_create once and reuses the directory', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const manager = yield* workspaceManager(root, {
+        afterCreate: 'printf created > marker.txt',
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 5_000,
+      })
 
-    const first = await Effect.runPromise(manager.create(issueIdentifier('GH-8')))
-    const second = await Effect.runPromise(manager.create(issueIdentifier('GH-8')))
+      const first = yield* manager.create(issueIdentifier('GH-8'))
+      const second = yield* manager.create(issueIdentifier('GH-8'))
 
-    expect(first.createdNow).toBe(true)
-    expect(second.createdNow).toBe(false)
-    expect(await readFile(join(first.path, 'marker.txt'), 'utf8')).toBe('created')
-  })
+      expect(first.createdNow).toBe(true)
+      expect(second.createdNow).toBe(false)
+      expect(yield* host(() => readFile(join(first.path, 'marker.txt'), 'utf8'))).toBe('created')
+    }),
+  )
 })
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (predicate()) {
-      return true
+/**
+ * Polls the host for a condition a hook's own process tree reaches on its own schedule.
+ *
+ * Deadline and wait both run on the fiber's own clock rather than the ambient one, so a case that
+ * drives `TestClock` sees the poll move with it instead of quietly falling back to wall time.
+ * Every caller is `it.live`, where that clock is the wall clock — which is what waiting on a real
+ * process needs.
+ */
+const waitFor = (predicate: () => boolean, timeoutMs = 10_000): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const deadline = (yield* Clock.currentTimeMillis) + timeoutMs
+    while ((yield* Clock.currentTimeMillis) < deadline) {
+      if (predicate()) {
+        return true
+      }
+      yield* Effect.sleep(25)
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25))
-  }
-  return predicate()
-}
+    return predicate()
+  })
 
 const makeRoot = (): string => {
   const root = join('/tmp', `symphony-hooks-${crypto.randomUUID()}`)
@@ -94,233 +109,262 @@ const workspaceFor = (root: string, key: string): Workspace => ({
 })
 
 describe('hook process hardening', (): void => {
-  it('drains a hook that writes far more than the capture limit', async (): Promise<void> => {
-    const root = makeRoot()
-    const manager = workspaceManager(
-      root,
-      hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'a'` }),
-    )
+  it.live('drains a hook that writes far more than the capture limit', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(
+        root,
+        hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'a'` }),
+      )
 
-    const workspace = await Effect.runPromise(manager.create(issueIdentifier('GH-100')))
+      const workspace = yield* manager.create(issueIdentifier('GH-100'))
 
-    expect(workspace.createdNow).toBe(true)
-  })
+      expect(workspace.createdNow).toBe(true)
+    }),
+  )
 
-  it('truncates captured diagnostics in a hook failure', async (): Promise<void> => {
-    const root = makeRoot()
-    const manager = workspaceManager(
-      root,
-      hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'b' >&2; exit 3` }),
-    )
+  it.live('truncates captured diagnostics in a hook failure', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(
+        root,
+        hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'b' >&2; exit 3` }),
+      )
 
-    const error = await Effect.runPromise(Effect.flip(manager.create(issueIdentifier('GH-101'))))
+      const error = yield* Effect.flip(manager.create(issueIdentifier('GH-101')))
 
-    expect(error.category).toBe('hook_failed')
-    expect(error.message).toContain('exited with 3')
-    expect(error.message).toContain('(truncated)')
-    expect(error.message.length).toBeLessThan(2_000)
-  })
+      expect(error.category).toBe('hook_failed')
+      expect(error.message).toContain('exited with 3')
+      expect(error.message).toContain('(truncated)')
+      expect(error.message.length).toBeLessThan(2_000)
+    }),
+  )
 
-  it('reports a nonzero exit with the hook phase', async (): Promise<void> => {
-    const root = makeRoot()
-    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-102')))
-    const manager = workspaceManager(root, hooks({ beforeRun: 'echo "boom" >&2; exit 7' }))
+  it.live('reports a nonzero exit with the hook phase', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-102'))
+      const manager = yield* workspaceManager(root, hooks({ beforeRun: 'echo "boom" >&2; exit 7' }))
 
-    const error = await Effect.runPromise(
-      Effect.flip(manager.beforeRun(workspaceFor(root, 'GH-102'))),
-    )
+      const error = yield* Effect.flip(manager.beforeRun(workspaceFor(root, 'GH-102')))
 
-    expect(error.category).toBe('hook_failed')
-    expect(error.message).toContain('before_run hook exited with 7')
-    expect(error.message).toContain('boom')
-  })
+      expect(error.category).toBe('hook_failed')
+      expect(error.message).toContain('before_run hook exited with 7')
+      expect(error.message).toContain('boom')
+    }),
+  )
 
-  it('terminates the whole hook process tree on timeout', async (): Promise<void> => {
-    const root = makeRoot()
-    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-103')))
-    const workspace = workspaceFor(root, 'GH-103')
-    const manager = workspaceManager(
-      root,
-      hooks({
-        beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait',
-        timeoutMs: 250,
+  it.live('terminates the whole hook process tree on timeout', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-103'))
+      const workspace = workspaceFor(root, 'GH-103')
+      const manager = yield* workspaceManager(
+        root,
+        hooks({
+          beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait',
+          timeoutMs: 250,
+        }),
+      )
+
+      const error = yield* Effect.flip(manager.beforeRun(workspace))
+      const grandchild = Number(
+        (yield* host(() => readFile(join(workspace.path, 'grandchild.pid'), 'utf8'))).trim(),
+      )
+
+      expect(error.category).toBe('hook_timeout')
+      expect(Number.isSafeInteger(grandchild)).toBe(true)
+      expect(yield* waitFor(() => !processIsAlive(grandchild))).toBe(true)
+    }),
+  )
+
+  it.live(
+    'still forces termination when a descendant ignores SIGTERM after the shell closes',
+    () =>
+      Effect.gen(function* () {
+        const root = makeRoot()
+        yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-109'))
+        const workspace = workspaceFor(root, 'GH-109')
+        const manager = yield* workspaceManager(
+          root,
+          hooks({
+            // The descendant redirects its inherited pipes, so the shell's `close` fires while the
+            // process group is still alive.
+            beforeRun: `sh -c 'trap "" TERM; sleep 300' >/dev/null 2>&1 & echo $! > grandchild.pid; wait`,
+            timeoutMs: 250,
+          }),
+        )
+
+        const error = yield* Effect.flip(manager.beforeRun(workspace))
+        const grandchild = Number(
+          (yield* host(() => readFile(join(workspace.path, 'grandchild.pid'), 'utf8'))).trim(),
+        )
+
+        expect(error.category).toBe('hook_timeout')
+        expect(grandchild).toBeGreaterThan(0)
+        expect(yield* waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
       }),
-    )
+    40_000,
+  )
 
-    const error = await Effect.runPromise(Effect.flip(manager.beforeRun(workspace)))
-    const grandchild = Number(
-      (await readFile(join(workspace.path, 'grandchild.pid'), 'utf8')).trim(),
-    )
+  it.live('terminates the hook process tree when the effect is interrupted', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-104'))
+      const workspace = workspaceFor(root, 'GH-104')
+      const manager = yield* workspaceManager(
+        root,
+        hooks({ beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait' }),
+      )
 
-    expect(error.category).toBe('hook_timeout')
-    expect(Number.isSafeInteger(grandchild)).toBe(true)
-    expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
-  })
+      const fiber = Effect.runFork(manager.beforeRun(workspace))
+      yield* waitFor(() => existsSync(join(workspace.path, 'grandchild.pid')))
+      const grandchild = Number(
+        (yield* host(() => readFile(join(workspace.path, 'grandchild.pid'), 'utf8'))).trim(),
+      )
+      yield* Fiber.interrupt(fiber)
 
-  it('still forces termination when a descendant ignores SIGTERM after the shell closes', async (): Promise<void> => {
-    const root = makeRoot()
-    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-109')))
-    const workspace = workspaceFor(root, 'GH-109')
-    const manager = workspaceManager(
-      root,
-      hooks({
-        // The descendant redirects its inherited pipes, so the shell's `close` fires while the
-        // process group is still alive.
-        beforeRun: `sh -c 'trap "" TERM; sleep 300' >/dev/null 2>&1 & echo $! > grandchild.pid; wait`,
-        timeoutMs: 250,
-      }),
-    )
-
-    const error = await Effect.runPromise(Effect.flip(manager.beforeRun(workspace)))
-    const grandchild = Number(
-      (await readFile(join(workspace.path, 'grandchild.pid'), 'utf8')).trim(),
-    )
-
-    expect(error.category).toBe('hook_timeout')
-    expect(grandchild).toBeGreaterThan(0)
-    expect(await waitFor(() => !processIsAlive(grandchild), 20_000)).toBe(true)
-  }, 40_000)
-
-  it('terminates the hook process tree when the effect is interrupted', async (): Promise<void> => {
-    const root = makeRoot()
-    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-104')))
-    const workspace = workspaceFor(root, 'GH-104')
-    const manager = workspaceManager(
-      root,
-      hooks({ beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait' }),
-    )
-
-    const fiber = Effect.runFork(manager.beforeRun(workspace))
-    await waitFor(() => existsSync(join(workspace.path, 'grandchild.pid')))
-    const grandchild = Number(
-      (await readFile(join(workspace.path, 'grandchild.pid'), 'utf8')).trim(),
-    )
-    await Effect.runPromise(Fiber.interrupt(fiber))
-
-    expect(Number.isSafeInteger(grandchild)).toBe(true)
-    expect(await waitFor(() => !processIsAlive(grandchild))).toBe(true)
-  })
+      expect(Number.isSafeInteger(grandchild)).toBe(true)
+      expect(yield* waitFor(() => !processIsAlive(grandchild))).toBe(true)
+    }),
+  )
 })
 
 describe('hook phase semantics', (): void => {
-  it('treats after_create as fatal for the workspace', async (): Promise<void> => {
-    const root = makeRoot()
-    const manager = workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
+  it.live('treats after_create as fatal for the workspace', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
 
-    const error = await Effect.runPromise(Effect.flip(manager.create(issueIdentifier('GH-105'))))
+      const error = yield* Effect.flip(manager.create(issueIdentifier('GH-105')))
 
-    expect(error.category).toBe('hook_failed')
-    expect(error.message).toContain('after_create')
-  })
+      expect(error.category).toBe('hook_failed')
+      expect(error.message).toContain('after_create')
+    }),
+  )
 
-  it('treats after_run as best effort', async (): Promise<void> => {
-    const root = makeRoot()
-    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-106')))
-    const manager = workspaceManager(root, hooks({ afterRun: 'exit 1' }))
+  it.live('treats after_run as best effort', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-106'))
+      const manager = yield* workspaceManager(root, hooks({ afterRun: 'exit 1' }))
 
-    await expect(
-      Effect.runPromise(manager.afterRun(workspaceFor(root, 'GH-106'))),
-    ).resolves.toBeUndefined()
-  })
+      expect(yield* manager.afterRun(workspaceFor(root, 'GH-106'))).toBeUndefined()
+    }),
+  )
 
-  it('removes the workspace even when before_remove fails', async (): Promise<void> => {
-    const root = makeRoot()
-    const created = await Effect.runPromise(
-      workspaceManager(root, hooks()).create(issueIdentifier('GH-107')),
-    )
-    const manager = workspaceManager(root, hooks({ beforeRemove: 'exit 1' }))
+  it.live('removes the workspace even when before_remove fails', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const created = yield* (yield* workspaceManager(root, hooks())).create(
+        issueIdentifier('GH-107'),
+      )
+      const manager = yield* workspaceManager(root, hooks({ beforeRemove: 'exit 1' }))
 
-    await Effect.runPromise(manager.remove(issueIdentifier('GH-107')))
+      yield* manager.remove(issueIdentifier('GH-107'))
 
-    expect(existsSync(created.path)).toBe(false)
-  })
+      expect(existsSync(created.path)).toBe(false)
+    }),
+  )
 
-  it('runs before_remove only when the workspace directory exists', async (): Promise<void> => {
-    const root = makeRoot()
-    const marker = join(root, 'before-remove-ran')
-    const manager = workspaceManager(
-      root,
-      hooks({ beforeRemove: `printf ran > ${JSON.stringify(marker)}` }),
-    )
+  it.live('runs before_remove only when the workspace directory exists', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const marker = join(root, 'before-remove-ran')
+      const manager = yield* workspaceManager(
+        root,
+        hooks({ beforeRemove: `printf ran > ${JSON.stringify(marker)}` }),
+      )
 
-    await Effect.runPromise(manager.remove(issueIdentifier('GH-108')))
-    expect(existsSync(marker)).toBe(false)
+      yield* manager.remove(issueIdentifier('GH-108'))
+      expect(existsSync(marker)).toBe(false)
 
-    await Effect.runPromise(workspaceManager(root, hooks()).create(issueIdentifier('GH-108')))
-    await Effect.runPromise(manager.remove(issueIdentifier('GH-108')))
-    expect(existsSync(marker)).toBe(true)
-  })
+      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-108'))
+      yield* manager.remove(issueIdentifier('GH-108'))
+      expect(existsSync(marker)).toBe(true)
+    }),
+  )
 })
 
 describe('workspace inspection and cleanup', (): void => {
-  it('removes a missing workspace without running before_remove', async (): Promise<void> => {
-    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
-    roots.push(root)
-    const manager = workspaceManager(root, {
-      afterCreate: null,
-      beforeRun: null,
-      afterRun: null,
-      beforeRemove: 'touch hook-ran',
-      timeoutMs: 5_000,
-    })
+  it.live('removes a missing workspace without running before_remove', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const manager = yield* workspaceManager(root, {
+        afterCreate: null,
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: 'touch hook-ran',
+        timeoutMs: 5_000,
+      })
 
-    await Effect.runPromise(manager.remove(issueIdentifier('GH-9')))
+      yield* manager.remove(issueIdentifier('GH-9'))
 
-    await expect(access(root)).rejects.toThrow()
-  })
+      yield* host(() => expect(access(root)).rejects.toThrow())
+    }),
+  )
 
-  it('reports whether a contained workspace exists', async (): Promise<void> => {
-    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
-    roots.push(root)
-    const manager = workspaceManager(root, {
-      afterCreate: null,
-      beforeRun: null,
-      afterRun: null,
-      beforeRemove: null,
-      timeoutMs: 5_000,
-    })
-    const identifier = issueIdentifier('GH-11')
+  it.live('reports whether a contained workspace exists', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const manager = yield* workspaceManager(root, {
+        afterCreate: null,
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 5_000,
+      })
+      const identifier = issueIdentifier('GH-11')
 
-    expect(await Effect.runPromise(manager.exists(identifier))).toBe(false)
-    await Effect.runPromise(manager.create(identifier))
-    expect(await Effect.runPromise(manager.exists(identifier))).toBe(true)
-  })
+      expect(yield* manager.exists(identifier)).toBe(false)
+      yield* manager.create(identifier)
+      expect(yield* manager.exists(identifier)).toBe(true)
+    }),
+  )
 
-  it('rejects symlinked workspaces before running removal hooks', async (): Promise<void> => {
-    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
-    const outside = join('/tmp', `symphony-outside-${crypto.randomUUID()}`)
-    roots.push(root, outside)
-    await mkdir(root)
-    await mkdir(outside)
-    const identifier = issueIdentifier('GH-12')
-    await symlink(outside, join(root, workspaceKey(identifier)), 'dir')
-    const manager = workspaceManager(root, {
-      afterCreate: null,
-      beforeRun: null,
-      afterRun: null,
-      beforeRemove: 'touch hook-ran',
-      timeoutMs: 5_000,
-    })
+  it.live('rejects symlinked workspaces before running removal hooks', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      const outside = join('/tmp', `symphony-outside-${crypto.randomUUID()}`)
+      roots.push(root, outside)
+      yield* host(() => mkdir(root))
+      yield* host(() => mkdir(outside))
+      const identifier = issueIdentifier('GH-12')
+      yield* host(() => symlink(outside, join(root, workspaceKey(identifier)), 'dir'))
+      const manager = yield* workspaceManager(root, {
+        afterCreate: null,
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: 'touch hook-ran',
+        timeoutMs: 5_000,
+      })
 
-    await expect(Effect.runPromise(manager.exists(identifier))).rejects.toThrow()
-    await expect(Effect.runPromise(manager.remove(identifier))).rejects.toThrow()
-    await expect(access(join(outside, 'hook-ran'))).rejects.toThrow()
-  })
+      // `Effect.flip` already fails the test if either call succeeds; the tag says which
+      // refusal the containment check produced.
+      expect((yield* Effect.flip(manager.exists(identifier)))._tag).toBe('WorkspaceError')
+      expect((yield* Effect.flip(manager.remove(identifier)))._tag).toBe('WorkspaceError')
+      yield* host(() => expect(access(join(outside, 'hook-ran'))).rejects.toThrow())
+    }),
+  )
 
-  it('logs and ignores before_remove failure while deleting the workspace', async (): Promise<void> => {
-    const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
-    roots.push(root)
-    const manager = workspaceManager(root, {
-      afterCreate: null,
-      beforeRun: null,
-      afterRun: null,
-      beforeRemove: 'exit 7',
-      timeoutMs: 5_000,
-    })
-    const workspace = await Effect.runPromise(manager.create(issueIdentifier('GH-10')))
+  it.live('logs and ignores before_remove failure while deleting the workspace', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const manager = yield* workspaceManager(root, {
+        afterCreate: null,
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: 'exit 7',
+        timeoutMs: 5_000,
+      })
+      const workspace = yield* manager.create(issueIdentifier('GH-10'))
 
-    await Effect.runPromise(manager.remove(issueIdentifier('GH-10')))
+      yield* manager.remove(issueIdentifier('GH-10'))
 
-    await expect(access(workspace.path)).rejects.toThrow()
-  })
+      yield* host(() => expect(access(workspace.path)).rejects.toThrow())
+    }),
+  )
 })
