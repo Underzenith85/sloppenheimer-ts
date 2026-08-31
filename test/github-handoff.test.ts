@@ -420,6 +420,41 @@ describe('GitHub pull request monitor', (): void => {
     expect(fetchMock).toHaveBeenCalledTimes(5)
   })
 
+  it('keeps malformed comment pagination in the typed failure channel', async (): Promise<void> => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request): Promise<Response> => {
+        const url = requestUrl(input)
+        if (url.endsWith('/pulls/41')) {
+          return Response.json({
+            state: 'open',
+            html_url: 'https://github.test/example/symphony/pull/41',
+            head: { sha: 'head-1' },
+            merged: false,
+            merge_commit_sha: null,
+            mergeable: true,
+            mergeable_state: 'clean',
+          })
+        }
+        if (url.includes('/check-runs')) {
+          return Response.json({ check_runs: [] })
+        }
+        return Response.json([], {
+          headers: { Link: '<https://attacker.example.test/comments?page=2>; rel="next"' },
+        })
+      }),
+    )
+
+    const error = await Effect.runPromise(
+      Effect.flip(makeGitHubPullRequestMonitor(provider).inspect(41)),
+    )
+
+    expect(error).toMatchObject({
+      category: 'tracker_pagination',
+      retryable: false,
+    })
+  })
+
   it('requests Codex review only after verifying the current pull request head', async (): Promise<void> => {
     const requests: Array<Readonly<{ url: string; method: string; body: string | null }>> = []
     vi.stubGlobal(

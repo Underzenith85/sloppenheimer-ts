@@ -11,6 +11,7 @@ import {
   trackerPaginationError,
   trackerResponseError,
   withBoundHttpClient,
+  type GitHubHttpResult,
   type GitHubRequestInit,
 } from './client.js'
 import type { CodexReviewObservation, PullRequestObservation } from '../../domain/handoff.js'
@@ -189,13 +190,23 @@ const fetchCodexReview = (
           trackerPaginationError('GitHub pull request comment pagination exceeded its limit'),
         )
       }
-      const requestUrl = nextUrl
-      const response = yield* githubJson(provider, requestUrl)
+      const requestUrl: string = nextUrl
+      const response: GitHubHttpResult = yield* githubJson(provider, requestUrl)
       const decoded = yield* decodeCodexReview(response.body)
       if (decoded !== null) {
         latest = decoded
       }
-      nextUrl = parseNextUrl(response.linkHeader, requestUrl, provider.apiBaseUrl)
+      nextUrl = yield* Effect.try({
+        try: (): string | null =>
+          parseNextUrl(response.linkHeader, requestUrl, provider.apiBaseUrl),
+        catch: (cause: unknown) =>
+          cause instanceof TrackerError
+            ? cause
+            : trackerPaginationError(
+                'GitHub pull request comment pagination could not be decoded',
+                cause,
+              ),
+      })
       pages += 1
     }
     return latest
