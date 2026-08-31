@@ -257,6 +257,7 @@ type TestPorts = Readonly<{
   /** The configuration the composition root reads before the orchestrator loads it for itself. */
   configuration: PortsConfiguration
   loadWorkflow: (path: string) => Effect.Effect<Workflow, WorkflowError>
+  preflightWorkflow: (workflow: Workflow) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
   makeTracker: (provider: ValidatedTrackerProvider) => TrackerPort
   /** Omit to compose no code-review services at all, which disables pull-request handoff. */
   makeCodeReview?: (provider: ValidatedTrackerProvider) => CodeReviewPort | null
@@ -293,7 +294,7 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
     }),
     layerWorkflowLoader({
       load: ports.loadWorkflow,
-      preflight: (workflow) => preflightWorkflow(workflow),
+      preflight: ports.preflightWorkflow,
     }),
     layerWorkflowWatcher({
       // The harness pushes into the stream exactly as the chokidar adapter does, so a test drives
@@ -349,6 +350,7 @@ const startTestOrchestrator = (
 type TestHarness = Readonly<{
   ports: TestPorts
   setWorkflow: (workflow: Workflow | WorkflowError) => void
+  refuseNextPreflight: (message: string) => void
   notifyChanged: () => void
   loads: () => number
   stateFetches: () => number
@@ -374,6 +376,7 @@ const makeHarness = (
   environment: Record<string, string> = testEnvironment,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
+  let nextPreflightFailure: WorkflowError | null = null
   let notifyChanged = (): void => undefined
   let loadCount = 0
   let stateFetchCount = 0
@@ -401,6 +404,11 @@ const makeHarness = (
     loadWorkflow: () => {
       loadCount += 1
       return selected instanceof WorkflowError ? Effect.fail(selected) : Effect.succeed(selected)
+    },
+    preflightWorkflow: (workflow) => {
+      const failure = nextPreflightFailure
+      nextPreflightFailure = null
+      return failure === null ? preflightWorkflow(workflow) : Effect.fail(failure)
     },
     makeTracker: (provider): TrackerPort => {
       trackerProviders.push(provider)
@@ -488,6 +496,9 @@ const makeHarness = (
     setWorkflow: (next) => {
       selected = next
     },
+    refuseNextPreflight: (message) => {
+      nextPreflightFailure = new WorkflowError({ category: 'invalid_config', message })
+    },
     notifyChanged: () => {
       notifyChanged()
     },
@@ -511,6 +522,18 @@ const makeHarness = (
 const runWithTestClock = <Value>(
   effect: Effect.Effect<Value, WorkflowError | TrackerError>,
 ): Promise<Value> => Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
+
+/** Models a validation race after the tick gate, without making the whole tick invalid. */
+const armFirstRepairDispatchRefusal = (harness: TestHarness): (() => void) => {
+  let armed = false
+  return () => {
+    if (armed) {
+      return
+    }
+    armed = true
+    harness.refuseNextPreflight('repair dispatch validation changed after the tick preflight')
+  }
+}
 
 const requireCodeReview = (
   ports: TestPorts,
@@ -2025,14 +2048,18 @@ describe('restored pull request handoffs', (): void => {
     const queuedHead = 'cccccccccccccccccccccccccccccccccccccccc'
     const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     let currentHead = originalHead
-    const environment: Record<string, string> = {}
     await saveRepairHandoff(handoffStorePath, issue, originalHead)
-    const harness = makeHarness(isolated, () => [issue], undefined, environment)
+    const harness = makeHarness(isolated, () => [issue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, currentHead)
+          }),
         handoffCompletedWork: () =>
           Effect.succeed({
             _tag: 'PullRequest' as const,
@@ -2061,7 +2088,6 @@ describe('restored pull request handoffs', (): void => {
           }
           expect(current.handoffs[0]?.repairStartedHeadSha).toBe(originalHead)
           currentHead = queuedHead
-          environment['SYMPHONY_TEST_TOKEN'] = 'secret'
           yield* TestClock.adjust('20 seconds')
           while (current.handoffs[0]?.repairAttempts !== 1) {
             yield* Effect.yieldNow()
@@ -2092,12 +2118,17 @@ describe('restored pull request handoffs', (): void => {
     }
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue], undefined, {})
+    const harness = makeHarness(isolated, () => [issue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, head)
+          }),
       }),
     }
 
@@ -2621,15 +2652,19 @@ describe('restored pull request handoffs', (): void => {
       id: issueId('20'),
     }
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const environment: Record<string, string> = {}
     await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue], undefined, environment)
+    const harness = makeHarness(isolated, () => [issue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const launchedPrompts: string[] = []
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, head)
+          }),
       }),
       runAgent: ({ prompt }) =>
         Effect.suspend(() => {
@@ -2648,7 +2683,6 @@ describe('restored pull request handoffs', (): void => {
             current = yield* control.snapshot
           }
           // The workflow is reloaded and adopted while the refused repair waits to retry.
-          environment['SYMPHONY_TEST_TOKEN'] = 'secret'
           harness.setWorkflow(reloaded)
           harness.notifyChanged()
           while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
@@ -2693,16 +2727,20 @@ describe('restored pull request handoffs', (): void => {
       id: issueId('20'),
     }
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const environment: Record<string, string> = {}
     let currentIssue = issue
     await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [currentIssue], undefined, environment)
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const removedFrom: string[] = []
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, head)
+          }),
       }),
       makeWorkspaces: (settings) => ({
         ...harness.ports.makeWorkspaces(settings),
@@ -2723,7 +2761,6 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
-          environment['SYMPHONY_TEST_TOKEN'] = 'secret'
           harness.setWorkflow(reloaded)
           harness.notifyChanged()
           while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
@@ -3073,12 +3110,17 @@ describe('restored pull request handoffs', (): void => {
     }
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue], undefined, {})
+    const harness = makeHarness(isolated, () => [issue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, head)
+          }),
       }),
     }
 
@@ -3115,13 +3157,17 @@ describe('restored pull request handoffs', (): void => {
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     let currentIssue = issue
     await saveRepairHandoff(handoffStorePath, issue, head)
-    // No credential is available, so dispatch refuses before a worker starts and queues a retry.
-    const harness = makeHarness(isolated, () => [currentIssue], undefined, {})
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, head)
+          }),
       }),
     }
 
@@ -3166,7 +3212,8 @@ describe('restored pull request handoffs', (): void => {
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     let rejectRefresh = false
     await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue], undefined, {})
+    const harness = makeHarness(isolated, () => [issue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const ports: TestPorts = {
       ...harness.ports,
       makeTracker: (provider) => {
@@ -3187,7 +3234,11 @@ describe('restored pull request handoffs', (): void => {
       },
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            refuseRepairDispatch()
+            return repairObservation(number, head)
+          }),
       }),
     }
 
@@ -3244,7 +3295,8 @@ describe('restored pull request handoffs', (): void => {
     const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     let rejectInspection = false
     await saveRepairHandoff(handoffStorePath, issue, head)
-    const harness = makeHarness(isolated, () => [issue], undefined, {})
+    const harness = makeHarness(isolated, () => [issue])
+    const refuseRepairDispatch = armFirstRepairDispatchRefusal(harness)
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
@@ -3258,7 +3310,10 @@ describe('restored pull request handoffs', (): void => {
                   retryable: false,
                 }),
               )
-            : Effect.succeed(repairObservation(number, head)),
+            : Effect.sync(() => {
+                refuseRepairDispatch()
+                return repairObservation(number, head)
+              }),
       }),
     }
 
@@ -4095,6 +4150,81 @@ describe('workflow hot reload', (): void => {
     expect(observed.recoveredSnapshot.workflowReloadError).toBeNull()
     expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
     expect(harness.agentRuns()).toHaveLength(1)
+  })
+
+  it('reconciles a repair handoff without dispatching it during a failed tick', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-invalid-repair-tick-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const initial: Workflow = {
+      ...changedWorkflow({ fingerprint: 'last-known-good' }),
+      config: { ...workflow.config, workspaceRoot },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const harness = makeHarness(initial, () => [issue], undefined, environment)
+    let repairReady = false
+    let inspections = 0
+    let launches = 0
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) =>
+          Effect.sync(() => {
+            inspections += 1
+            const observation = repairObservation(number, head)
+            return repairReady
+              ? observation
+              : { ...observation, mergeable: null, mergeState: 'unknown' }
+          }),
+      }),
+      runAgent: () =>
+        Effect.sync(() => {
+          launches += 1
+        }).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    const observed = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          const candidateFetches = harness.stateFetches()
+          const inspectionsBeforeFailure = inspections
+          repairReady = true
+          delete environment['SYMPHONY_TEST_TOKEN']
+          yield* control.refresh
+          const failedSnapshot = yield* control.snapshot
+          const launchesAfterFailure = launches
+          environment['SYMPHONY_TEST_TOKEN'] = 'restored'
+          yield* control.refresh
+          return {
+            failedSnapshot,
+            recoveredSnapshot: yield* control.snapshot,
+            candidateFetches,
+            inspectionsBeforeFailure,
+            launchesAfterFailure,
+          }
+        }),
+      ),
+    )
+
+    expect(inspections).toBeGreaterThan(observed.inspectionsBeforeFailure)
+    expect(observed.launchesAfterFailure).toBe(0)
+    expect(observed.failedSnapshot.retrying).toEqual([])
+    expect(observed.failedSnapshot.handoffs[0]).toMatchObject({
+      state: 'repair_needed',
+      repairStartedHeadSha: null,
+    })
+    expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
+    expect(launches).toBe(1)
+    expect(observed.recoveredSnapshot.running[0]?.issueId).toBe(issue.id)
+    await rm(workspaceRoot, { force: true, recursive: true })
   })
 
   it('defensively reloads after a missed watch event', async (): Promise<void> => {

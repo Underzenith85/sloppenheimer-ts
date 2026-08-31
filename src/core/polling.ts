@@ -92,8 +92,6 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
     }
     yield* context.hydrateRestoredHandoffs
     yield* context.recoverMissingHandoffs
-    yield* reconcileHandoffs(context)
-    yield* context.reconcile
     const reloading = yield* Ref.get(context.state)
     const reloaded = yield* context.ports.workflowLoader.load(context.selectedWorkflowPath).pipe(
       Effect.matchEffect({
@@ -150,6 +148,8 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         }
       }
     }
+    yield* reconcileHandoffs(context, !dispatchValidationFailed)
+    yield* context.reconcile
     if (dispatchValidationFailed) {
       return
     }
@@ -509,6 +509,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               new Date(),
               repairPermission(settled, { _tag: 'Succeeded', issue }),
               Option.some(event.attempt),
+              true,
             )
             yield* context.persistHandoffs
             break
