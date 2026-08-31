@@ -151,15 +151,6 @@ const initialConnectionState: ConnectionState = {
   turnCount: 0,
 }
 
-/** Preserve the class's Promise API by rejecting with the typed failure, not Effect's FiberFailure. */
-const runAgentPromise = async <Value>(effect: Effect.Effect<Value, AgentError>): Promise<Value> => {
-  const result = await Effect.runPromise(Effect.either(effect))
-  if (result._tag === 'Left') {
-    throw result.left
-  }
-  return result.right
-}
-
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
     return 'unknown protocol error'
@@ -418,14 +409,14 @@ class CodexConnection {
     )
 
     this.#process.once('error', (cause) => {
-      void Effect.runPromise(
+      this.#fork(
         this.#fail(
           new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
         ),
       )
     })
     this.#process.once('exit', (code, signal) => {
-      void Effect.runPromise(
+      this.#fork(
         this.#failUnlessClosed(
           new AgentError({
             category: 'process_exited',
@@ -443,102 +434,112 @@ class CodexConnection {
     return this.#process.pid ?? null
   }
 
-  async initialize(config: AgentRunnerConfig, cwd: string): Promise<string> {
-    await this.#request('initialize', {
-      clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
-      capabilities: { experimentalApi: true },
-    })
-    this.#notify('initialized', {})
-    const rateLimitsResult = await this.#request('account/rateLimits/read', {})
-    if (!isJsonObject(rateLimitsResult) || !isJsonObject(rateLimitsResult['rateLimits'])) {
-      throw new AgentError({
-        category: 'protocol_error',
-        message: 'account/rateLimits/read returned no rate-limit snapshot',
+  initialize(config: AgentRunnerConfig, cwd: string): Effect.Effect<string, AgentError> {
+    return Effect.gen(this, function* () {
+      yield* this.#request('initialize', {
+        clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
+        capabilities: { experimentalApi: true },
       })
-    }
-    const rateLimits = await Effect.runPromise(
-      Ref.modify(this.#state, (state) => [
+      yield* this.#notify('initialized', {})
+      const rateLimitsResult = yield* this.#request('account/rateLimits/read', {})
+      if (!isJsonObject(rateLimitsResult) || !isJsonObject(rateLimitsResult['rateLimits'])) {
+        return yield* Effect.fail(
+          new AgentError({
+            category: 'protocol_error',
+            message: 'account/rateLimits/read returned no rate-limit snapshot',
+          }),
+        )
+      }
+      const rateLimits = yield* Ref.modify(this.#state, (state) => [
         mergeSparseObject(
           rateLimitsResult['rateLimits'] as JsonObject,
           Option.getOrElse(state.pendingRateLimits, () => ({})),
         ),
         { ...state, pendingRateLimits: Option.none(), rateLimitsReady: true },
-      ]),
-    )
-    this.#onEvent({
-      event: 'account/rateLimits/read',
-      timestamp: new Date(),
-      processId: this.processId,
-      message: null,
-      usage: null,
-      rateLimits,
-      payload: { kind: 'session' },
-      threadId: null,
-      turnId: null,
-      sessionId: null,
-      turnCount: 0,
-      turnStatus: null,
-    })
-    const baseThreadParams: JsonObject = {
-      cwd,
-      approvalPolicy: config.approvalPolicy,
-      sandbox: config.threadSandbox,
-      serviceName: 'symphony_ts',
-    }
-    const dynamicTools = this.#hostTools?.specs.map((spec) => ({ type: 'function', ...spec })) ?? []
-    const threadParams: JsonObject =
-      dynamicTools.length === 0 ? baseThreadParams : { ...baseThreadParams, dynamicTools }
-    const result = await this.#request('thread/start', threadParams)
-    if (
-      !isJsonObject(result) ||
-      !isJsonObject(result['thread']) ||
-      typeof result['thread']['id'] !== 'string'
-    ) {
-      throw new AgentError({
-        category: 'protocol_error',
-        message: 'thread/start returned no thread id',
+      ])
+      this.#onEvent({
+        event: 'account/rateLimits/read',
+        timestamp: new Date(),
+        processId: this.processId,
+        message: null,
+        usage: null,
+        rateLimits,
+        payload: { kind: 'session' },
+        threadId: null,
+        turnId: null,
+        sessionId: null,
+        turnCount: 0,
+        turnStatus: null,
       })
-    }
-    const threadId = result['thread']['id']
-    await Effect.runPromise(
-      Ref.update(this.#state, (state) => ({ ...state, threadId: Option.some(threadId) })),
-    )
-    return threadId
+      const baseThreadParams: JsonObject = {
+        cwd,
+        approvalPolicy: config.approvalPolicy,
+        sandbox: config.threadSandbox,
+        serviceName: 'symphony_ts',
+      }
+      const dynamicTools =
+        this.#hostTools?.specs.map((spec) => ({ type: 'function', ...spec })) ?? []
+      const threadParams: JsonObject =
+        dynamicTools.length === 0 ? baseThreadParams : { ...baseThreadParams, dynamicTools }
+      const result = yield* this.#request('thread/start', threadParams)
+      if (
+        !isJsonObject(result) ||
+        !isJsonObject(result['thread']) ||
+        typeof result['thread']['id'] !== 'string'
+      ) {
+        return yield* Effect.fail(
+          new AgentError({
+            category: 'protocol_error',
+            message: 'thread/start returned no thread id',
+          }),
+        )
+      }
+      const threadId = result['thread']['id']
+      yield* Ref.update(this.#state, (state) => ({
+        ...state,
+        threadId: Option.some(threadId),
+      }))
+      return threadId
+    })
   }
 
-  async startTurn(
+  startTurn(
     threadId: string,
     cwd: string,
     config: AgentRunnerConfig,
     prompt: string,
     turnCount: number,
-  ): Promise<string> {
-    const result = await this.#request(
-      'turn/start',
-      {
-        threadId,
-        input: [{ type: 'text', text: prompt }],
-        cwd,
-        approvalPolicy: config.approvalPolicy,
-        sandboxPolicy: config.turnSandboxPolicy ?? {
-          type: 'workspaceWrite',
-          writableRoots: [cwd],
-          networkAccess: true,
+  ): Effect.Effect<string, AgentError> {
+    return Effect.gen(this, function* () {
+      const result = yield* this.#request(
+        'turn/start',
+        {
+          threadId,
+          input: [{ type: 'text', text: prompt }],
+          cwd,
+          approvalPolicy: config.approvalPolicy,
+          sandboxPolicy: config.turnSandboxPolicy ?? {
+            type: 'workspaceWrite',
+            writableRoots: [cwd],
+            networkAccess: true,
+          },
         },
-      },
-      Option.some(turnCount),
-    )
-    if (
-      !isJsonObject(result) ||
-      !isJsonObject(result['turn']) ||
-      typeof result['turn']['id'] !== 'string'
-    ) {
-      throw new AgentError({
-        category: 'protocol_error',
-        message: 'turn/start returned no turn id',
-      })
-    }
-    return result['turn']['id']
+        Option.some(turnCount),
+      )
+      if (
+        !isJsonObject(result) ||
+        !isJsonObject(result['turn']) ||
+        typeof result['turn']['id'] !== 'string'
+      ) {
+        return yield* Effect.fail(
+          new AgentError({
+            category: 'protocol_error',
+            message: 'turn/start returned no turn id',
+          }),
+        )
+      }
+      return result['turn']['id']
+    })
   }
 
   /**
@@ -547,12 +548,10 @@ class CodexConnection {
    * serve, a process that died — is the same Deferred, so this never has to rank one against
    * another. A Deferred retains its result for late waiters.
    */
-  awaitTurn(turnId: string): Promise<void> {
-    return runAgentPromise(
-      this.#turnState(turnId).pipe(
-        Effect.tap((turn) => this.#startTurnTimer(turnId, turn)),
-        Effect.flatMap((turn) => Deferred.await(turn.settlement)),
-      ),
+  awaitTurn(turnId: string): Effect.Effect<void, AgentError> {
+    return this.#turnState(turnId).pipe(
+      Effect.tap((turn) => this.#startTurnTimer(turnId, turn)),
+      Effect.flatMap((turn) => Deferred.await(turn.settlement)),
     )
   }
 
@@ -735,30 +734,28 @@ class CodexConnection {
     )
   }
 
-  async stop(): Promise<void> {
-    const shouldStop = await Effect.runPromise(
-      Ref.modify(this.#state, (state) =>
+  stop(): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      const shouldStop = yield* Ref.modify(this.#state, (state) =>
         state.closed ? [false, state] : [true, { ...state, closed: true }],
-      ),
-    )
-    if (!shouldStop) {
-      return
-    }
-    await Effect.runPromise(
-      this.#emit('session_stopped', null).pipe(
+      )
+      if (!shouldStop) {
+        return
+      }
+      yield* this.#emit('session_stopped', null).pipe(
         Effect.zipRight(
           this.#fail(
             new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
             false,
           ),
         ),
-      ),
-    )
-    await Effect.runPromise(Fiber.interrupt(this.#stdout))
-    this.#process.stdin.end()
-    this.#terminate('SIGTERM')
-    await this.#reapGroup()
-    await this.#drainDiagnostics()
+      )
+      yield* Fiber.interrupt(this.#stdout)
+      this.#process.stdin.end()
+      this.#terminate('SIGTERM')
+      yield* this.#reapGroup()
+      yield* this.#drainDiagnostics()
+    })
   }
 
   /**
@@ -770,17 +767,20 @@ class CodexConnection {
    * Bounded, because a descendant that inherited the pipe and outlived the reap would otherwise
    * hold the session open indefinitely. A diagnostic lost to that bound is diagnostic only.
    */
-  async #drainDiagnostics(): Promise<void> {
-    await Effect.runPromise(
-      Fiber.await(this.#stderr).pipe(
-        Effect.timeout(diagnosticDrainDeadlineMs),
-        Effect.catchAll(() => Fiber.interrupt(this.#stderr)),
-        Effect.asVoid,
+  #drainDiagnostics(): Effect.Effect<void> {
+    return Fiber.await(this.#stderr).pipe(
+      Effect.timeout(diagnosticDrainDeadlineMs),
+      Effect.catchAll(() => Fiber.interrupt(this.#stderr)),
+      Effect.asVoid,
+      Effect.ensuring(
+        Effect.sync(() => {
+          // The reader leaves the pipe open for a child that is still writing; with the session
+          // over there is no such child, and the handle is released rather than held to the end
+          // of the host.
+          this.#process.stderr.destroy()
+        }),
       ),
     )
-    // The reader leaves the pipe open for a child that is still writing; with the session over
-    // there is no such child, and the handle is released rather than held to the end of the host.
-    this.#process.stderr.destroy()
   }
 
   /**
@@ -793,27 +793,23 @@ class CodexConnection {
    * does not hold the event loop open, so an unreferenced wait would let the host exit before the
    * escalation ever fired and leave behind the descendant this exists to kill.
    */
-  async #reapGroup(): Promise<void> {
-    const escalateAt = Date.now() + shutdownGraceMs
-    while (this.#processGroupIsAlive()) {
-      if (Date.now() >= escalateAt) {
-        this.#terminate('SIGKILL')
-        break
+  #reapGroup(): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      const escalateAt = Date.now() + shutdownGraceMs
+      while (this.#processGroupIsAlive()) {
+        if (Date.now() >= escalateAt) {
+          this.#terminate('SIGKILL')
+          break
+        }
+        yield* Effect.sleep(groupReapPollMs)
       }
-      await CodexConnection.#pause(groupReapPollMs)
-    }
-    // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
-    // finalizer complete — and terminal reconciliation start removing the workspace — while a
-    // descendant is still running in it.
-    const deadline = Date.now() + groupReapDeadlineMs
-    while (this.#processGroupIsAlive() && Date.now() < deadline) {
-      await CodexConnection.#pause(groupReapPollMs)
-    }
-  }
-
-  static #pause(milliseconds: number): Promise<void> {
-    return new Promise<void>((resolvePromise) => {
-      setTimeout(resolvePromise, milliseconds)
+      // Signal delivery is asynchronous, so returning as soon as SIGKILL was sent would let the
+      // finalizer complete — and terminal reconciliation start removing the workspace — while a
+      // descendant is still running in it.
+      const deadline = Date.now() + groupReapDeadlineMs
+      while (this.#processGroupIsAlive() && Date.now() < deadline) {
+        yield* Effect.sleep(groupReapPollMs)
+      }
     })
   }
 
@@ -857,54 +853,50 @@ class CodexConnection {
     method: string,
     params: JsonObject,
     turnCount: Option.Option<number> = Option.none(),
-  ): Promise<JsonValue> {
-    return runAgentPromise(
-      Effect.gen(this, function* () {
-        const reply = yield* Deferred.make<JsonValue, AgentError>()
-        const registered = yield* Ref.modify(
-          this.#state,
-          (state): readonly [RequestRegistration, ConnectionState] => {
-            if (Option.isSome(state.terminalError)) {
-              return [{ _tag: 'error', error: state.terminalError.value }, state]
-            }
-            const id = state.nextId
-            return [
-              { _tag: 'registered', id },
-              {
-                ...state,
-                nextId: id + 1,
-                pending: new Map(state.pending).set(id, {
-                  method,
-                  turnCount,
-                  reply,
-                  claimed: false,
-                }),
-              },
-            ]
-          },
-        )
-        if (registered._tag === 'error') {
-          return yield* Effect.fail(registered.error)
-        }
-        const id = registered.id
-        yield* this.#write({ id, method, params })
-        const response = yield* Deferred.await(reply).pipe(
-          Effect.timeoutOption(this.#readTimeoutMs),
-        )
-        return yield* Option.match(response, {
-          onNone: () =>
-            this.#expirePending(
-              id,
-              reply,
-              new AgentError({
-                category: 'read_timeout',
-                message: `${method} response timed out`,
+  ): Effect.Effect<JsonValue, AgentError> {
+    return Effect.gen(this, function* () {
+      const reply = yield* Deferred.make<JsonValue, AgentError>()
+      const registered = yield* Ref.modify(
+        this.#state,
+        (state): readonly [RequestRegistration, ConnectionState] => {
+          if (Option.isSome(state.terminalError)) {
+            return [{ _tag: 'error', error: state.terminalError.value }, state]
+          }
+          const id = state.nextId
+          return [
+            { _tag: 'registered', id },
+            {
+              ...state,
+              nextId: id + 1,
+              pending: new Map(state.pending).set(id, {
+                method,
+                turnCount,
+                reply,
+                claimed: false,
               }),
-            ),
-          onSome: Effect.succeed,
-        })
-      }),
-    )
+            },
+          ]
+        },
+      )
+      if (registered._tag === 'error') {
+        return yield* Effect.fail(registered.error)
+      }
+      const id = registered.id
+      yield* this.#write({ id, method, params })
+      const response = yield* Deferred.await(reply).pipe(Effect.timeoutOption(this.#readTimeoutMs))
+      return yield* Option.match(response, {
+        onNone: () =>
+          this.#expirePending(
+            id,
+            reply,
+            new AgentError({
+              category: 'read_timeout',
+              message: `${method} response timed out`,
+            }),
+          ),
+        onSome: Effect.succeed,
+      })
+    })
   }
 
   #expirePending(
@@ -929,8 +921,8 @@ class CodexConnection {
     )
   }
 
-  #notify(method: string, params: JsonObject): void {
-    void Effect.runPromise(this.#write({ method, params }))
+  #notify(method: string, params: JsonObject): Effect.Effect<void> {
+    return this.#write({ method, params })
   }
 
   #write(message: JsonObject): Effect.Effect<void> {
@@ -1204,10 +1196,11 @@ class CodexConnection {
     message: JsonObject,
     identity: Readonly<{ threadId: string | null; turnId: string | null }>,
   ): Effect.Effect<void> {
-    return Effect.promise(async () => {
+    return Effect.gen(this, function* () {
       const params = message['params']
       const tool = isJsonObject(params) ? params['tool'] : undefined
       const argumentsValue = isJsonObject(params) ? params['arguments'] : undefined
+      const hostTools = this.#hostTools
       let result: HostToolResult
       if (typeof tool !== 'string' || argumentsValue === undefined) {
         result = {
@@ -1218,34 +1211,31 @@ class CodexConnection {
             retryable: false,
           },
         }
-      } else if (this.#hostTools === null) {
+      } else if (hostTools === null) {
         result = unsupportedHostTool(tool)
       } else {
-        try {
-          result = await this.#hostTools.execute(tool, argumentsValue, this.#hostTools.context)
-        } catch {
-          result = {
+        result = yield* Effect.tryPromise({
+          try: async () => await hostTools.execute(tool, argumentsValue, hostTools.context),
+          catch: (): HostToolResult => ({
             success: false,
             error: {
               code: 'transport_error',
               message: 'Host tool execution failed unexpectedly',
               retryable: true,
             },
-          }
-        }
+          }),
+        }).pipe(Effect.catchAll(Effect.succeed))
       }
       const text = JSON.stringify(result)
-      await Effect.runPromise(
-        this.#write({
-          id,
-          result: { success: result.success, contentItems: [{ type: 'inputText', text }] },
-        }).pipe(
-          Effect.zipRight(
-            this.#emit(
-              result.success ? 'host_tool_succeeded' : 'host_tool_failed',
-              typeof tool === 'string' ? tool : null,
-              identity,
-            ),
+      yield* this.#write({
+        id,
+        result: { success: result.success, contentItems: [{ type: 'inputText', text }] },
+      }).pipe(
+        Effect.zipRight(
+          this.#emit(
+            result.success ? 'host_tool_succeeded' : 'host_tool_failed',
+            typeof tool === 'string' ? tool : null,
+            identity,
           ),
         ),
       )
@@ -1549,11 +1539,9 @@ const runVerifiedAgent = (
    * each path-consuming boundary: after the process is created and before every turn. A directory
    * renamed and replaced by a symlink in between is rejected rather than followed.
    */
-  const rebind = (): Promise<void> =>
-    Effect.runPromise(
-      assertWorkspaceIdentity(launch.workspaceRoot, verified).pipe(
-        Effect.mapError(rejectWorkspaceLaunch),
-      ),
+  const rebind = (): Effect.Effect<void, AgentError> =>
+    assertWorkspaceIdentity(launch.workspaceRoot, verified).pipe(
+      Effect.mapError(rejectWorkspaceLaunch),
     )
 
   /**
@@ -1587,57 +1575,55 @@ const runVerifiedAgent = (
             ),
         ),
       ),
-      (connection) => Effect.promise(() => connection.stop()),
+      (connection) => connection.stop(),
     )
 
   return Effect.scoped(
-    Effect.all([Effect.runtime<never>(), Effect.scope])
-      .pipe(Effect.flatMap(([runtime, scope]) => openConnection(runtime, scope)))
-      .pipe(
-        Effect.flatMap((connection) =>
-          Effect.tryPromise({
-            try: async () => {
-              await rebind()
-              const threadId = await connection.initialize(launch.config, verified.path)
-              // Re-bound after the boundary too: a swap during the request window is then detected
-              // and the session torn down before any turn runs.
-              await rebind()
-              let turnId = ''
-              let turnCount = 0
-              while (turnCount < launch.maxTurns) {
-                const turnPrompt =
-                  turnCount === 0
-                    ? launch.prompt
-                    : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
-                await rebind()
-                turnId = await connection.startTurn(
-                  threadId,
-                  verified.path,
-                  launch.config,
-                  turnPrompt,
-                  turnCount + 1,
-                )
-                await rebind()
-                await connection.awaitTurn(turnId)
-                turnCount += 1
-                const refreshed = await Effect.runPromise(launch.refreshIssue())
-                if (refreshed === null || !launch.isRoutable(refreshed)) {
-                  break
-                }
-              }
-              return { threadId, turnId, turnCount }
-            },
-            catch: (cause: unknown) =>
-              cause instanceof AgentError
-                ? cause
-                : new AgentError({
-                    category: 'protocol_error',
-                    message: `Codex session failed for ${launch.issue.identifier}`,
-                    cause,
-                  }),
-          }),
+    Effect.gen(function* () {
+      const [runtime, scope] = yield* Effect.all([Effect.runtime<never>(), Effect.scope])
+      const connection = yield* openConnection(runtime, scope)
+      yield* rebind()
+      const threadId = yield* connection.initialize(launch.config, verified.path)
+      // Re-bound after the boundary too: a swap during the request window is then detected and the
+      // session torn down before any turn runs.
+      yield* rebind()
+      let turnId = ''
+      let turnCount = 0
+      while (turnCount < launch.maxTurns) {
+        const turnPrompt =
+          turnCount === 0
+            ? launch.prompt
+            : 'Continue working on the issue. Review prior progress and complete the next necessary step.'
+        yield* rebind()
+        turnId = yield* connection.startTurn(
+          threadId,
+          verified.path,
+          launch.config,
+          turnPrompt,
+          turnCount + 1,
+        )
+        yield* rebind()
+        yield* connection.awaitTurn(turnId)
+        turnCount += 1
+        const refreshed = yield* launch.refreshIssue().pipe(Effect.map(Option.fromNullable))
+        if (Option.isNone(refreshed) || !launch.isRoutable(refreshed.value)) {
+          break
+        }
+      }
+      return { threadId, turnId, turnCount }
+    }).pipe(
+      Effect.catchAllDefect((cause: unknown) =>
+        Effect.fail(
+          cause instanceof AgentError
+            ? cause
+            : new AgentError({
+                category: 'protocol_error',
+                message: `Codex session failed for ${launch.issue.identifier}`,
+                cause,
+              }),
         ),
       ),
+    ),
   )
 }
 

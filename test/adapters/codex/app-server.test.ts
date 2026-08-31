@@ -69,6 +69,7 @@ const runScenario = async (
   scenario: string,
   overrides: Partial<CodexConfig> = {},
   maxTurns = 1,
+  launchOverrides: Partial<Pick<AgentLaunch, 'refreshIssue' | 'isRoutable'>> = {},
 ): Promise<RunOutcome & Readonly<{ path: string }>> => {
   const { root, path } = await makeWorkspace()
   const events: AgentEvent[] = []
@@ -90,8 +91,8 @@ const runScenario = async (
     prompt: 'do the work',
     maxTurns,
     secretEnvironmentNames: [],
-    refreshIssue: () => Effect.succeed(null),
-    isRoutable: () => false,
+    refreshIssue: launchOverrides.refreshIssue ?? (() => Effect.succeed(null)),
+    isRoutable: launchOverrides.isRoutable ?? (() => false),
     onEvent: (event) => {
       events.push(event)
     },
@@ -561,6 +562,67 @@ describe('App Server timeouts and shutdown', (): void => {
 
     expect(outcome.error?.category).toBe('turn_timeout')
   }, 30_000)
+
+  it('interrupts the turn loop and releases its process scope during issue refresh', async (): Promise<void> => {
+    const { root, path } = await makeWorkspace()
+    const events: AgentEvent[] = []
+    let refreshStarted = false
+    let refreshReleased = false
+    const fiber = Effect.runFork(
+      runAgent({
+        issue,
+        workspace: { path, key: 'issue-14', createdNow: false },
+        workspaceRoot: root,
+        config: {
+          command: `node ${JSON.stringify(fakeAppServer)} immediate-completion`,
+          approvalPolicy: 'never',
+          threadSandbox: 'workspace-write',
+          turnSandboxPolicy: null,
+          turnTimeoutMs: 60_000,
+          readTimeoutMs: 5_000,
+          stallTimeoutMs: 0,
+        },
+        prompt: 'do the work',
+        maxTurns: 2,
+        secretEnvironmentNames: [],
+        refreshIssue: () =>
+          Effect.sync(() => {
+            refreshStarted = true
+          }).pipe(
+            Effect.zipRight(Effect.never),
+            Effect.ensuring(
+              Effect.sync(() => {
+                refreshReleased = true
+              }),
+            ),
+          ),
+        isRoutable: () => true,
+        onEvent: (event) => {
+          events.push(event)
+        },
+      }),
+    )
+    expect(await waitFor(() => refreshStarted)).toBe(true)
+    const processId = events.find((event) => event.processId !== null)?.processId
+    if (processId === null || processId === undefined) {
+      throw new Error('Codex process id was not reported')
+    }
+
+    await Effect.runPromise(Fiber.interrupt(fiber))
+
+    expect(refreshReleased).toBe(true)
+    expect(processIsAlive(processId)).toBe(false)
+  }, 30_000)
+
+  it('maps a defect in the Effect turn loop to AgentError', async (): Promise<void> => {
+    const outcome = await runScenario('immediate-completion', {}, 2, {
+      refreshIssue: () => Effect.die(new Error('refresh defect')),
+      isRoutable: () => true,
+    })
+
+    expect(outcome.error?.category).toBe('protocol_error')
+    expect(outcome.error?.message).toContain(issue.identifier)
+  })
 
   it('settles a cancelled session once and leaves no process tree behind', async (): Promise<void> => {
     const { root, path } = await makeWorkspace()
