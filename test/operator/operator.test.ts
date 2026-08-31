@@ -1,9 +1,11 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { it } from '@effect/vitest'
 import { Effect, Layer, Redacted } from 'effect'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, vi } from 'vitest'
 
+import type { WorkflowError } from '../../src/errors.js'
 import {
   issueId,
   issueIdentifier,
@@ -151,18 +153,17 @@ const workflowLoader = layerWorkflowLoader({
   preflight: (workflow) => preflightWorkflow(workflow),
 })
 
-const runBackend = <Value>(
+/** Builds the backend and hands it to the case, with its layers provided once. */
+const runBackend = <Value, Error>(
   workflowPath: string,
   orchestrator: OrchestratorControl,
-  use: (backend: OperatorBackend) => Promise<Value>,
+  use: (backend: OperatorBackend) => Effect.Effect<Value, Error>,
   layer: Layer.Layer<CurrentIssueControl> = gitHubIssueControl,
-): Promise<Value> =>
-  Effect.runPromise(
-    makeOperatorBackend(workflowPath, orchestrator).pipe(
-      Effect.flatMap((backend) => Effect.promise(() => use(backend))),
-      Effect.provide(layer),
-      Effect.provide(workflowLoader),
-    ),
+): Effect.Effect<Value, Error | WorkflowError> =>
+  makeOperatorBackend(workflowPath, orchestrator).pipe(
+    Effect.flatMap(use),
+    Effect.provide(layer),
+    Effect.provide(workflowLoader),
   )
 
 const openIssueResponse = async (input: string | URL | Request): Promise<Response> => {
@@ -186,13 +187,14 @@ const openIssueResponse = async (input: string | URL | Request): Promise<Respons
   ])
 }
 
-const temporaryWorkflow = async (): Promise<string> => {
-  const directory = await mkdtemp(join(tmpdir(), 'symphony-operator-test-'))
-  temporaryDirectories.push(directory)
-  const workflowPath = join(directory, 'WORKFLOW.md')
-  await writeFile(
-    workflowPath,
-    `---
+const temporaryWorkflow = (): Effect.Effect<string> =>
+  Effect.promise(async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'symphony-operator-test-'))
+    temporaryDirectories.push(directory)
+    const workflowPath = join(directory, 'WORKFLOW.md')
+    await writeFile(
+      workflowPath,
+      `---
 tracker:
   kind: github
   provider:
@@ -204,26 +206,27 @@ tracker:
 ---
 Do the work
 `,
-  )
-  return workflowPath
-}
+    )
+    return workflowPath
+  })
 
 describe('operator dependency graph', (): void => {
-  it('filters non-dispatchable records out of the operator backlog', async (): Promise<void> => {
-    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-      return url.includes('/dependencies/blocked_by')
-        ? Response.json([])
-        : Response.json([githubIssue(1), githubPullRequest(2)])
-    })
-    vi.stubGlobal('fetch', fetchMock)
+  it.effect('filters non-dispatchable records out of the operator backlog', () =>
+    Effect.gen(function* () {
+      const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        return url.includes('/dependencies/blocked_by')
+          ? Response.json([])
+          : Response.json([githubIssue(1), githubPullRequest(2)])
+      })
+      vi.stubGlobal('fetch', fetchMock)
 
-    const issues = await Effect.runPromise(
-      Effect.runSync(makeGitHubIssueControl(provider)).listOpenIssues(),
-    )
+      const issues = yield* (yield* makeGitHubIssueControl(provider)).listOpenIssues()
 
-    expect(issues.map((issue) => issue.id)).toEqual(['1'])
-  })
+      expect(issues.map((issue) => issue.id)).toEqual(['1'])
+    }),
+  )
 
   it('builds deterministic nodes and blocker-to-dependent edges for mixed graph shapes', (): void => {
     const snapshot = buildBacklogSnapshot(
@@ -342,99 +345,116 @@ describe('operator dependency graph', (): void => {
     })
   })
 
-  it('reuses dependency hydration across repeated backlog snapshots', async (): Promise<void> => {
-    const workflowPath = await temporaryWorkflow()
-    vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
-    const fetchMock = vi.fn(openIssueResponse)
-    vi.stubGlobal('fetch', fetchMock)
-    const setIssuePaused = vi.fn()
+  it.effect('reuses dependency hydration across repeated backlog snapshots', () =>
+    Effect.gen(function* () {
+      const workflowPath = yield* temporaryWorkflow()
+      vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
+      const fetchMock = vi.fn(openIssueResponse)
+      vi.stubGlobal('fetch', fetchMock)
+      const setIssuePaused = vi.fn()
 
-    await runBackend(workflowPath, fakeOrchestrator(setIssuePaused), async (backend) => {
-      await Effect.runPromise(backend.backlog)
-      await Effect.runPromise(backend.backlog)
-      await Effect.runPromise(backend.setIssueEnabled(1, false))
-    })
+      yield* runBackend(
+        workflowPath,
+        fakeOrchestrator(setIssuePaused),
+        (backend: OperatorBackend) =>
+          Effect.gen(function* () {
+            yield* backend.backlog
+            yield* backend.backlog
+            yield* backend.setIssueEnabled(1, false)
+          }),
+      )
 
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(setIssuePaused).toHaveBeenCalledWith(1, true)
-  })
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(setIssuePaused).toHaveBeenCalledWith(1, true)
+    }),
+  )
 
-  it('rebuilds the issue control only when the workflow names a different provider', async (): Promise<void> => {
-    const workflowPath = await temporaryWorkflow()
-    vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
-    vi.stubGlobal('fetch', vi.fn(openIssueResponse))
-    const built: string[] = []
-    const factory = layerIssueControlFactory({
-      make: (provider) =>
-        Effect.sync((): IssueControlPort => {
-          built.push(Redacted.value(githubProviderOf(provider).token))
-          return { listOpenIssues: () => Effect.succeed([]), addLabel: () => Effect.void }
+  it.effect('rebuilds the issue control only when the workflow names a different provider', () =>
+    Effect.gen(function* () {
+      const workflowPath = yield* temporaryWorkflow()
+      vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
+      vi.stubGlobal('fetch', vi.fn(openIssueResponse))
+      const built: string[] = []
+      const factory = layerIssueControlFactory({
+        make: (provider) =>
+          Effect.sync((): IssueControlPort => {
+            built.push(Redacted.value(githubProviderOf(provider).token))
+            return { listOpenIssues: () => Effect.succeed([]), addLabel: () => Effect.void }
+          }),
+        serves: (left, right) =>
+          Redacted.value(githubProviderOf(left).token) ===
+          Redacted.value(githubProviderOf(right).token),
+      })
+
+      yield* runBackend(
+        workflowPath,
+        fakeOrchestrator(),
+        (backend: OperatorBackend) =>
+          Effect.gen(function* () {
+            yield* backend.backlog
+            yield* backend.backlog
+            vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'rotated')
+            yield* backend.backlog
+          }),
+        layerCurrentIssueControl.pipe(Layer.provide(factory)),
+      )
+
+      expect(built).toEqual(['secret', 'rotated'])
+    }),
+  )
+
+  it.effect('reports the orchestrator paused set rather than a copy of its own', () =>
+    Effect.gen(function* () {
+      const workflowPath = yield* temporaryWorkflow()
+      vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
+      vi.stubGlobal('fetch', vi.fn(openIssueResponse))
+      const orchestrator = fakeOrchestrator()
+
+      const enabled = yield* runBackend(workflowPath, orchestrator, (backend: OperatorBackend) =>
+        Effect.gen(function* () {
+          const before = yield* backend.backlog
+          // The pause originates outside the console, as one issued through the orchestrator does.
+          yield* orchestrator.setIssuePaused(1, true)
+          const after = yield* backend.backlog
+          return [before.issues[0]?.enabled, after.issues[0]?.enabled]
         }),
-      serves: (left, right) =>
-        Redacted.value(githubProviderOf(left).token) ===
-        Redacted.value(githubProviderOf(right).token),
-    })
+      )
 
-    await runBackend(
-      workflowPath,
-      fakeOrchestrator(),
-      async (backend) => {
-        await Effect.runPromise(backend.backlog)
-        await Effect.runPromise(backend.backlog)
-        vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'rotated')
-        await Effect.runPromise(backend.backlog)
-      },
-      layerCurrentIssueControl.pipe(Layer.provide(factory)),
-    )
+      expect(enabled).toEqual([true, false])
+    }),
+  )
 
-    expect(built).toEqual(['secret', 'rotated'])
-  })
+  it.effect('drives the backlog from an issue-control layer that is not GitHub', () =>
+    Effect.gen(function* () {
+      const workflowPath = yield* temporaryWorkflow()
+      vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
+      const addLabel = vi.fn((issueNumber: number, label: string) => [issueNumber, label])
+      const control: IssueControlPort = {
+        listOpenIssues: () => Effect.succeed([{ ...issue(1), labels: ['symphony'] }]),
+        addLabel: (issueNumber, label) => {
+          addLabel(issueNumber, label)
+          return Effect.void
+        },
+      }
+      const orchestrator = fakeOrchestrator()
 
-  it('reports the orchestrator paused set rather than a copy of its own', async (): Promise<void> => {
-    const workflowPath = await temporaryWorkflow()
-    vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
-    vi.stubGlobal('fetch', vi.fn(openIssueResponse))
-    const orchestrator = fakeOrchestrator()
-
-    const enabled = await runBackend(workflowPath, orchestrator, async (backend) => {
-      const before = await Effect.runPromise(backend.backlog)
-      // The pause originates outside the console, as one issued through the orchestrator does.
-      await Effect.runPromise(orchestrator.setIssuePaused(1, true))
-      const after = await Effect.runPromise(backend.backlog)
-      return [before.issues[0]?.enabled, after.issues[0]?.enabled]
-    })
-
-    expect(enabled).toEqual([true, false])
-  })
-
-  it('drives the backlog from an issue-control layer that is not GitHub', async (): Promise<void> => {
-    const workflowPath = await temporaryWorkflow()
-    vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
-    const addLabel = vi.fn((issueNumber: number, label: string) => [issueNumber, label])
-    const control: IssueControlPort = {
-      listOpenIssues: () => Effect.succeed([{ ...issue(1), labels: ['symphony'] }]),
-      addLabel: (issueNumber, label) => {
-        addLabel(issueNumber, label)
-        return Effect.void
-      },
-    }
-    const orchestrator = fakeOrchestrator()
-
-    const snapshot = await runBackend(
-      workflowPath,
-      orchestrator,
-      async (backend) => {
-        await Effect.runPromise(backend.setIssueEnabled(1, true))
-        return Effect.runPromise(backend.backlog)
-      },
-      layerCurrentIssueControl.pipe(
-        Layer.provide(
-          layerIssueControlFactory({ make: () => Effect.succeed(control), serves: () => true }),
+      const snapshot = yield* runBackend(
+        workflowPath,
+        orchestrator,
+        (backend: OperatorBackend) =>
+          Effect.gen(function* () {
+            yield* backend.setIssueEnabled(1, true)
+            return yield* backend.backlog
+          }),
+        layerCurrentIssueControl.pipe(
+          Layer.provide(
+            layerIssueControlFactory({ make: () => Effect.succeed(control), serves: () => true }),
+          ),
         ),
-      ),
-    )
+      )
 
-    expect(addLabel).toHaveBeenCalledWith(1, 'symphony')
-    expect(snapshot.issues.map(({ number, enabled }) => [number, enabled])).toEqual([[1, true]])
-  })
+      expect(addLabel).toHaveBeenCalledWith(1, 'symphony')
+      expect(snapshot.issues.map(({ number, enabled }) => [number, enabled])).toEqual([[1, true]])
+    }),
+  )
 })
