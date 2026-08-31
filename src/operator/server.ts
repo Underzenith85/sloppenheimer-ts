@@ -183,17 +183,17 @@ export const makeRouter = (
         ),
       ),
     ),
-    HttpRouter.all(
+    // Registered for POST alone rather than for every method, unlike the two above it. The method
+    // is what tells this route apart from the per-issue resource at the same path, so a GET falls
+    // through to the wildcard and an issue identified `refresh` stays addressable. Answering GET
+    // here with a 405 would reserve that identifier for no reason: the SPEC gives this path a POST
+    // and gives GET to the per-issue resource, so both are served as the SPEC spells them.
+    HttpRouter.post(
       '/api/v1/refresh',
-      withMethod(
-        'POST',
-        withCsrf(
-          csrfToken,
-          Effect.flatMap(runBackend(backend.refresh), (result) =>
-            HttpServerResponse.isServerResponse(result)
-              ? result
-              : json(202, publishRefresh(result)),
-          ),
+      withCsrf(
+        csrfToken,
+        Effect.flatMap(runBackend(backend.refresh), (result) =>
+          HttpServerResponse.isServerResponse(result) ? result : json(202, publishRefresh(result)),
         ),
       ),
     ),
@@ -246,13 +246,14 @@ export const makeRouter = (
         }),
       ),
     ),
-    // The wildcard sits below the fixed routes above it, so the three names they spell —
-    // `state`, `backlog` and `refresh` — are unaddressable as issue identifiers. SPEC 13.7.2 puts
-    // both resources in one namespace, so that collision is inherent to the URL design rather than
-    // to this registration order; #220 recorded it as a known limit and left it unhandled, because
-    // resolving it means either changing a SPEC route's URL or reserving identifiers no tracker
-    // profile can currently spell. `README.md` carries the decision and the three names, and
-    // `test/operator/server.test.ts` pins both what they answer and that the set has not grown.
+    // The wildcard sits below the fixed routes above it, so the two GET names they spell —
+    // `state` and `backlog` — are unaddressable as issue identifiers: a GET of either path cannot
+    // be told apart from a GET of the resource below. SPEC 13.7.2 puts both resources in one
+    // namespace, so that collision is inherent to the URL design rather than to this registration
+    // order; #220 recorded it as a known limit and left it unhandled, because resolving it means
+    // changing a SPEC route's URL for identifiers no tracker profile can currently spell.
+    // `README.md` carries the decision and the two names, and `test/operator/server.test.ts` pins
+    // both what they answer and that the set has not grown.
     HttpRouter.all(
       '/api/v1/:identifier',
       withMethod(

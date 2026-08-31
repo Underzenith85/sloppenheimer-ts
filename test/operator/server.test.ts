@@ -578,12 +578,13 @@ describe('operator server', (): void => {
   )
 
   /*
-   * SPEC 13.7.2 puts the fixed routes and the per-issue resource in one namespace, so an identifier
-   * spelled like a fixed route name is answered by that route instead. #220 decided to document
-   * that as a known limit rather than move the resource under a prefix or escape the three names,
-   * and this pins what each one answers — including that the shadowing is exactly three names wide.
+   * SPEC 13.7.2 puts the fixed routes and the per-issue resource in one namespace, so a GET of a
+   * path a fixed GET route already spells is answered by that route instead. #220 decided to
+   * document that as a known limit rather than move the resource under a prefix or escape the
+   * names, and this pins what each shadowed one answers — and that the shadowing is two names
+   * wide, since a route registered for another method leaves the GET below it reachable.
    */
-  it.live('shadows an issue identifier spelled like a fixed v1 route name', () =>
+  it.live('shadows an issue identifier spelled like a fixed v1 GET route, and only those', () =>
     Effect.gen(function* () {
       const handoff = (identifier: string): HandoffSnapshot => ({
         issueId: identifier,
@@ -627,14 +628,28 @@ describe('operator server', (): void => {
         expect(Array.isArray(backlogBody['nodes'])).toBe(true)
         expect(backlogBody['issue_identifier']).toBeUndefined()
 
-        // POST-only, so the issue spelled that way cannot even be read.
-        const shadowedRefresh = await fetch(`${url}/api/v1/refresh`)
-        expect(shadowedRefresh.status).toBe(405)
-        expect(shadowedRefresh.headers.get('allow')).toBe('POST')
+        // The refresh route is POST, and the resource below it is GET, so the method tells them
+        // apart and this identifier is not reserved at all: a GET reads the issue, and the SPEC's
+        // own POST still refreshes.
+        const readRefresh = await fetch(`${url}/api/v1/refresh`)
+        expect(readRefresh.status).toBe(200)
+        expect(await readRefresh.json()).toMatchObject({
+          self: '/api/v1/refresh',
+          issue_identifier: 'refresh',
+          status: 'handoff',
+        })
+        const page = await (await fetch(url)).text()
+        const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
+        const refreshed = await fetch(`${url}/api/v1/refresh`, {
+          method: 'POST',
+          headers: { 'X-Symphony-CSRF': token },
+        })
+        expect(refreshed.status).toBe(202)
+        expect(await refreshed.json()).toMatchObject({ queued: true })
 
-        // The other two words the router uses are not reserved: those routes carry a further
+        // The other two words the router uses are not reserved either: those routes carry a further
         // segment, so the wildcard still answers for an issue identified by the bare word.
-        for (const identifier of ['agents', 'issues']) {
+        for (const identifier of ['agents', 'issues', 'refresh']) {
           const resolved = await fetch(`${url}/api/v1/${identifier}`)
           expect(resolved.status).toBe(200)
           expect(await resolved.json()).toMatchObject({
@@ -648,24 +663,26 @@ describe('operator server', (): void => {
   )
 
   /*
-   * The shadowed set is exactly the fixed single-segment routes registered above the wildcard, so a
-   * fourth one would reserve a fourth identifier without anybody deciding to. The router's own
-   * registrations are what decide that, and they are what is read here: a path assembled from a
-   * constant, a helper or a template literal, or contributed by a prefixed sub-router, shadows an
-   * identifier exactly as a literal does, and would be invisible to a guard that read the source.
+   * The shadowed set is what the router's own registrations make it, so it is derived from them
+   * here rather than restated: a path assembled from a constant, a helper or a template literal, or
+   * contributed by a prefixed sub-router, shadows an identifier exactly as a literal does and would
+   * be invisible to a guard that read the source. A third shadowed name would arrive without
+   * anybody deciding to reserve one.
    */
-  it('reserves no identifier beyond the three fixed v1 routes the router registers', (): void => {
+  it('reserves no identifier beyond the two fixed v1 GET routes the router registers', (): void => {
     const registered = Chunk.toReadonlyArray(makeRouter(makeBackend(), 'csrf').routes).flatMap(
       (route) => {
         const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
         // Neither a parameter nor a further segment can collide: an identifier is one segment, and
-        // only a fixed one is spelled the same way twice.
+        // only a fixed one is spelled the same way twice. Nor can a route that answers some other
+        // method: the per-issue resource is a GET, so only a route reachable by GET hides it.
         const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(path)?.[1]
-        return reserved === undefined ? [] : [reserved]
+        const shadows = route.method === 'GET' || route.method === '*'
+        return reserved === undefined || !shadows ? [] : [reserved]
       },
     )
 
-    expect([...new Set(registered)].sort()).toEqual(['backlog', 'refresh', 'state'])
+    expect([...new Set(registered)].sort()).toEqual(['backlog', 'state'])
   })
 
   it.live('acknowledges a refresh with what the request amounted to', () =>
