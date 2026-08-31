@@ -1898,7 +1898,7 @@ describe('restored pull request handoffs', (): void => {
     const queuedHead = 'cccccccccccccccccccccccccccccccccccccccc'
     const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     let currentHead = originalHead
-    const environment: NodeJS.ProcessEnv = {}
+    const environment: Record<string, string> = {}
     await saveRepairHandoff(handoffStorePath, issue, originalHead)
     const harness = makeHarness(isolated, () => [issue], undefined, environment)
     const ports: TestPorts = {
@@ -2054,6 +2054,186 @@ describe('restored pull request handoffs', (): void => {
       repairHeadShas: [repairedHead],
       repairObservedHeadShas: [originalHead, repairedHead],
       repairStartedHeadSha: null,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('attributes a pushed head before dispatching a queued repair retry', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-attributed-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const intermediateHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    let currentHead = originalHead
+    await saveRepairHandoff(handoffStorePath, issue, originalHead)
+    const harness = makeHarness(isolated, () => [issue])
+    const launchedDescriptions: (string | null)[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+      }),
+      // The first repair pushes a head and then fails; the second is held open so the state it
+      // was dispatched with can be read.
+      runAgent: ({ issue: launchedIssue }) =>
+        Effect.suspend(() => {
+          launchedDescriptions.push(launchedIssue.description)
+          if (launchedDescriptions.length > 1) {
+            return Effect.never
+          }
+          currentHead = intermediateHead
+          return Effect.fail(
+            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+          )
+        }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The failed attempt still owns the baseline it started from.
+          expect(current.handoffs[0]?.repairStartedHeadSha).toBe(originalHead)
+          yield* TestClock.adjust('30 seconds')
+          while (launchedDescriptions.length < 2) {
+            yield* Effect.yieldNow()
+          }
+          current = yield* control.snapshot
+          yield* control.setIssuePaused(20, true)
+          return current
+        }),
+      ),
+    )
+
+    expect(launchedDescriptions[1]).toContain('## Pull request repair')
+    expect(launchedDescriptions[1]).toContain(`Head: ${intermediateHead}`)
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 1,
+      repairHeadShas: [intermediateHead],
+      repairObservedHeadShas: [originalHead, intermediateHead],
+      repairStartedHeadSha: intermediateHead,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('records that a refused repair dispatch never started a worker', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [issue], undefined, {})
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // A pass that skips this handoff, because its retry is queued, still writes the store.
+          yield* control.refresh
+          expect(current.handoffs[0]?.repairStartedHeadSha).toBe(head)
+        }),
+      ),
+    )
+
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: false }),
+    ])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('does not attribute a manual head to a restored repair that never ran', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-restored-refused-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const manualHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    await Effect.runPromise(
+      saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+          branchName: 'symphony/issue-20',
+          state: 'repair_needed',
+          headSha: originalHead,
+          reason: 'The pull request conflicts with protected main',
+          repairAttempts: 0,
+          repairHeadShas: [],
+          repairObservedHeadShas: [originalHead],
+          repairStartedHeadSha: originalHead,
+          repairWorkerStarted: false,
+          reviewRequestedHeadSha: manualHead,
+          reviewCompletedHeadSha: manualHead,
+          observedAt: new Date(0).toISOString(),
+        },
+      ]),
+    )
+    const harness = makeHarness(isolated, () => [issue])
+    const launchedDescriptions: (string | null)[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, manualHead)),
+      }),
+      runAgent: ({ issue: launchedIssue }) =>
+        Effect.suspend(() => {
+          launchedDescriptions.push(launchedIssue.description)
+          return Effect.never
+        }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (launchedDescriptions.length === 0) {
+            yield* Effect.yieldNow()
+          }
+          const current = yield* control.snapshot
+          yield* control.setIssuePaused(20, true)
+          return current
+        }),
+      ),
+    )
+
+    // The head moved while no worker was running, so it is a manual push rather than repair
+    // output: the budget is untouched and the fresh repair baselines on what is there now.
+    expect(launchedDescriptions[0]).toContain(`Head: ${manualHead}`)
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 0,
+      repairHeadShas: [],
+      repairStartedHeadSha: manualHead,
     })
     await rm(workspaceRoot, { force: true, recursive: true })
   })

@@ -1,7 +1,7 @@
 import { Effect, Option, type Scope } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
-import { classifyPullRequest } from '../domain/handoff.js'
+import { classifyPullRequest, maxRepairAttempts } from '../domain/handoff.js'
 import { logInfo } from '../support/logging.js'
 import { dispatch } from './dispatch.js'
 import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
@@ -55,7 +55,12 @@ export const reconcileHandoffs = (
       const repair = handoff.repair
       if (inspected.observation.state === 'open' && Option.isSome(repair)) {
         const repairedHeadSha = inspected.observation.headSha
-        if (repairedHeadSha !== repair.value.startedHeadSha) {
+        if (!repair.value.inFlight && !repair.value.workerStarted) {
+          // A dispatch refused before any worker started, whose queued retry did not outlive the
+          // process that held it. Nothing ran, so whatever the head is now belongs to nobody:
+          // drop the identity and let this same pass decide the repair again from scratch.
+          handoff.repair = Option.none()
+        } else if (repairedHeadSha !== repair.value.startedHeadSha) {
           if (handoff.repairObservedHeadShas.includes(repairedHeadSha)) {
             handoff.repair = Option.none()
             handoff.state = 'intervention_required'
@@ -222,7 +227,7 @@ export const reconcileHandoffs = (
         continue
       }
       if (disposition.state === 'repair_needed') {
-        if (handoff.repairHeadShas.length >= 3) {
+        if (handoff.repairHeadShas.length >= maxRepairAttempts) {
           handoff.state = 'intervention_required'
           handoff.reason = `Repair limit reached. ${disposition.reason}`
           continue

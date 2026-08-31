@@ -847,6 +847,12 @@ export const startOrchestratorRuntime = (
           onNone: () => null,
           onSome: (repair) => repair.startedHeadSha,
         }),
+        // Persisted beside the baseline: a refused dispatch owns a baseline without ever having
+        // run, so recovery must not read the next head change as that repair's output.
+        repairWorkerStarted: Option.match(handoff.repair, {
+          onNone: () => false,
+          onSome: (repair) => repair.workerStarted,
+        }),
         reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
         reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
         observedAt: handoff.observedAt.toISOString(),
@@ -942,7 +948,9 @@ export const startOrchestratorRuntime = (
                     issue,
                     startedHeadSha: restored.repairStartedHeadSha,
                     inFlight: false,
-                    workerStarted: true,
+                    // Snapshots written before the flag existed recorded a baseline only once a
+                    // worker had started, so their absence is a started worker.
+                    workerStarted: restored.repairWorkerStarted ?? true,
                   }),
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,

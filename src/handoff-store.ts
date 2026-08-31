@@ -40,6 +40,8 @@ const isSnapshot = (value: unknown): value is HandoffSnapshot => {
     (candidate['repairStartedHeadSha'] === undefined ||
       candidate['repairStartedHeadSha'] === null ||
       typeof candidate['repairStartedHeadSha'] === 'string') &&
+    (candidate['repairWorkerStarted'] === undefined ||
+      typeof candidate['repairWorkerStarted'] === 'boolean') &&
     (candidate['reviewRequestedHeadSha'] === undefined ||
       candidate['reviewRequestedHeadSha'] === null ||
       typeof candidate['reviewRequestedHeadSha'] === 'string') &&

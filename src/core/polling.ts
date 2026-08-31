@@ -2,7 +2,7 @@ import { Deferred, Effect, Fiber, Option, Queue, type Scope } from 'effect'
 
 import { cyclicIssueIdentifiers } from '../domain/dependencies.js'
 import type { Issue } from '../domain/domain.js'
-import { classifyPullRequest } from '../domain/handoff.js'
+import { classifyPullRequest, maxRepairAttempts } from '../domain/handoff.js'
 import type { Workflow } from '../config/workflow.js'
 import { mergeSparseObject } from '../support/json.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -423,12 +423,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             )
             break
           }
-          if (
-            handoff !== undefined &&
-            Option.isSome(repair) &&
-            repair.value.inFlight &&
-            !repair.value.workerStarted
-          ) {
+          // Every repair retry re-inspects the pull request first: a refused dispatch may be
+          // queued behind a manual push, and a worker that pushed before it failed leaves a head
+          // that is its output and nobody else's. Both have to be settled before another repair
+          // starts, or the next head would stand in for two attempts.
+          if (handoff !== undefined && Option.isSome(repair) && repair.value.inFlight) {
             const codeReview = handoff.execution.codeReview
             if (codeReview === null) {
               handoff.repair = Option.none()
@@ -450,30 +449,58 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               )
               break
             }
-            const disposition = classifyPullRequest(inspected.observation)
-            if (inspected.observation.state !== 'open' || disposition.state !== 'repair_needed') {
+            if (inspected.observation.state !== 'open') {
               handoff.repair = Option.none()
               yield* context.persistHandoffsEffect()
               break
             }
-            const startedHeadSha = inspected.observation.headSha
+            const observedHeadSha = inspected.observation.headSha
+            // The attempt that queued this retry pushed and then failed. That head spends the
+            // repair budget and joins cycle detection here, where reconciliation cannot see it:
+            // a handoff with a queued retry is skipped by every reconciliation pass.
+            if (repair.value.workerStarted && observedHeadSha !== repair.value.startedHeadSha) {
+              if (handoff.repairObservedHeadShas.includes(observedHeadSha)) {
+                handoff.repair = Option.none()
+                handoff.state = 'intervention_required'
+                handoff.headSha = observedHeadSha
+                handoff.reason =
+                  'Repair agent returned the pull request to an already observed repair head.'
+                yield* context.persistHandoffsEffect()
+                break
+              }
+              handoff.repairHeadShas.push(observedHeadSha)
+              handoff.repairObservedHeadShas.push(observedHeadSha)
+            }
+            const disposition = classifyPullRequest(inspected.observation)
+            if (disposition.state !== 'repair_needed') {
+              handoff.repair = Option.none()
+              yield* context.persistHandoffsEffect()
+              break
+            }
+            if (handoff.repairHeadShas.length >= maxRepairAttempts) {
+              handoff.repair = Option.none()
+              handoff.state = 'intervention_required'
+              handoff.headSha = observedHeadSha
+              handoff.reason = `Repair limit reached. ${disposition.reason}`
+              yield* context.persistHandoffsEffect()
+              break
+            }
             dispatchIssue = {
               ...issue,
-              description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${startedHeadSha}\n\n${disposition.reason}`,
+              description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${observedHeadSha}\n\n${disposition.reason}`,
             }
             handoff.repair = Option.some({
               issue: dispatchIssue,
-              startedHeadSha,
+              startedHeadSha: observedHeadSha,
               inFlight: true,
               workerStarted: false,
             })
-            if (!handoff.repairObservedHeadShas.includes(startedHeadSha)) {
-              handoff.repairObservedHeadShas.push(startedHeadSha)
+            if (!handoff.repairObservedHeadShas.includes(observedHeadSha)) {
+              handoff.repairObservedHeadShas.push(observedHeadSha)
             }
             yield* context.persistHandoffsEffect()
           }
           // An ordinary worker continuation has no repair identity and establishes no baseline.
-          // A refused repair dispatch refreshes its baseline and repair-shaped prompt on retries.
           const started = yield* dispatch(context, dispatchIssue, event.attempt)
           if (started && handoff !== undefined && Option.isSome(handoff.repair)) {
             handoff.repair = Option.some({ ...handoff.repair.value, workerStarted: true })

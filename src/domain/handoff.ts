@@ -68,6 +68,12 @@ export type HandoffDisposition =
 
 const successfulConclusions = new Set(['success', 'neutral', 'skipped'])
 
+/**
+ * How many heads a repair may produce for one pull request before the handoff is handed to an
+ * operator. Shared so the reconciliation pass and a queued repair retry spend the same budget.
+ */
+export const maxRepairAttempts = 3
+
 export const classifyPullRequest = (observation: PullRequestObservation): HandoffDisposition => {
   if (observation.merged) {
     return { state: 'merged', mergeCommitSha: observation.mergeCommitSha }
@@ -133,6 +139,13 @@ export type HandoffSnapshot = Readonly<{
   /** Every head this handoff has been observed at, including repair baselines. */
   repairObservedHeadShas?: readonly string[]
   repairStartedHeadSha?: string | null
+  /**
+   * Whether a worker actually started from `repairStartedHeadSha`. A dispatch refused before any
+   * worker launched keeps its baseline while its retry is queued, and a head that changes in the
+   * meantime is nobody's output. Absent in snapshots written before this was recorded, which only
+   * ever persisted a baseline once a worker had started.
+   */
+  repairWorkerStarted?: boolean
   reviewRequestedHeadSha?: string | null
   reviewCompletedHeadSha?: string | null
   observedAt: string
