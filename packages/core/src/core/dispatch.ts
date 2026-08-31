@@ -7,6 +7,7 @@ import { AgentError, type WorkspaceError } from '../domain/errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo } from '../support/logging.js'
+import type { AgentEvent } from '../telemetry.js'
 import {
   captureExecutionSnapshot,
   issueIsActiveInSnapshot,
@@ -60,12 +61,12 @@ export const makeHostToolSession = (
     },
   })
 
-const isLifecycleEvent = (event: string): boolean =>
-  event === 'session_started' ||
-  event === 'turn_started' ||
-  event === 'turn/completed' ||
-  event === 'turn/failed' ||
-  event === 'turn/terminated'
+/**
+ * Whether an update reports a lifecycle transition the run has to be told about, as the runner that
+ * emitted it says so. This used to match one backend's own method names, which meant a second
+ * runner's session would start, run and finish with none of these ever queued.
+ */
+const isLifecycleEvent = (update: AgentEvent): boolean => update.lifecycle !== null
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 export const dispatch = (
@@ -186,7 +187,7 @@ export const dispatch = (
                   if (update.rateLimits !== null) {
                     next = Transitions.recordPendingRateLimits(next, update.rateLimits)
                   }
-                  if (isLifecycleEvent(update.event)) {
+                  if (isLifecycleEvent(update)) {
                     next = Transitions.queuePendingLifecycle(next, issue.id, update)
                   }
                   return next

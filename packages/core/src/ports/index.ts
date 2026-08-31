@@ -41,7 +41,6 @@ export {
 export {
   AgentRunner,
   layerAgentRunner,
-  type AgentEventSemantics,
   type AgentLaunch,
   type AgentResult,
   type AgentRunnerConfig,
@@ -142,12 +141,14 @@ export const portsConfiguration = (workflow: Workflow): PortsConfiguration => ({
  *
  * An adapter set may carry requirements of its own — the host filesystem, say — and they travel out
  * unchanged for the composition root to discharge, so binding one here never becomes this module's
- * business.
+ * business. It may fail as well: selecting a concrete adapter is the composition root's business,
+ * and a selection that cannot be honoured is its error to report rather than one this module has to
+ * anticipate.
  */
-export const layerPorts = <Requirements = never>(
+export const layerPorts = <Requirements = never, AdapterError = never>(
   configuration: PortsConfiguration,
-  adapters: Layer.Layer<AdapterServices, never, Requirements>,
-): Layer.Layer<PortServices, TrackerError, Requirements> =>
+  adapters: Layer.Layer<AdapterServices, AdapterError, Requirements>,
+): Layer.Layer<PortServices, TrackerError | AdapterError, Requirements> =>
   Layer.mergeAll(
     layerCurrentTracker(configuration.tracker),
     layerCurrentWorkspaceManager(configuration.workspaces),

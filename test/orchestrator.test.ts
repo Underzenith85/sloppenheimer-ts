@@ -18,7 +18,6 @@ import {
 } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { codexAgentEventSemantics } from '@symphony/adapter-codex/agent-runner.js'
 import { githubProviderOf, githubTrackerProvider } from '@symphony/adapter-github'
 import { telemetryFrom, type AgentEvent, type AgentResult } from '@symphony/adapter-codex/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '@symphony/core/domain/dependencies.js'
@@ -57,7 +56,8 @@ import {
   type OrchestratorServices,
 } from '@symphony/core'
 import { makeRedactor } from '@symphony/core/support/redaction.js'
-import { normalizePayload, type AgentDetailSnapshot } from '@symphony/core/telemetry.js'
+import { normalizePayload } from '@symphony/adapter-codex/payload.js'
+import type { AgentDetailSnapshot } from '@symphony/core/telemetry.js'
 import {
   CodeReviewFactory,
   SourceControlFactory,
@@ -71,7 +71,6 @@ import {
   TrackerFactory,
   WorkspaceManagerFactory,
   type AdapterServices,
-  type AgentEventSemantics,
   type AgentLaunch,
   type AgentRunnerPort,
   type CodeReviewPort,
@@ -118,6 +117,12 @@ const saveHandoffs = (
   onHostFileSystem(saveHandoffsAgainstFileSystem(path, handoffs))
 import type { HostToolSession } from '@symphony/core/domain/host-tools.js'
 import type { ValidatedTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
+import {
+  auroraEvents,
+  auroraRunner,
+  auroraRunnerAdapter,
+  stubRunner,
+} from './harness/alien-agent-runner.js'
 
 const makeIssue = (
   identifier: string,
@@ -149,6 +154,10 @@ const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
   promptTemplate: 'test',
+  // The suite runs against a runner that shares no vocabulary with Codex: its kind, its settings
+  // and the event names below are all Aurora's. Anything in the core still reading one backend's
+  // names fails here rather than passing because Codex happens to be what it was shaped around.
+  runner: auroraRunner(),
   tracker: runWithEnvironment(
     githubTrackerProvider.validate({
       owner: 'example',
@@ -184,14 +193,12 @@ const workflow: Workflow = {
       maxRetryBackoffMs: 300_000,
       maxConcurrentAgentsByState: new Map(),
     },
-    codex: {
+    runner: {
       command: 'codex app-server',
-      approvalPolicy: 'never',
-      threadSandbox: 'workspace-write',
-      turnSandboxPolicy: null,
       turnTimeoutMs: 60_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 30_000,
+      settings: { tempo: 'largo' },
     },
     serverPort: null,
     extensions: {},
@@ -310,7 +317,6 @@ type TestPorts = Readonly<{
   makeSourceControl?: (provider: ValidatedTrackerProvider) => SourceControlPort | null
   makeWorkspaces: (settings: WorkspaceSettings) => WorkspaceManagerPort
   runAgent: AgentRunnerPort['run']
-  agentEventSemantics: AgentEventSemantics
   watchWorkflow: (path: string, onChange: () => void) => void
   /** The variables the run's `ConfigProvider` serves. Mutating one rotates that credential. */
   environment: Record<string, string>
@@ -322,7 +328,7 @@ type TestPorts = Readonly<{
 
 const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
   Layer.mergeAll(
-    layerAgentRunner({ run: ports.runAgent, semantics: ports.agentEventSemantics }),
+    layerAgentRunner({ kind: auroraRunnerAdapter.kind, run: ports.runAgent }),
     // Acquired rather than returned, so a test can observe when a replaced instance is released:
     // the cell builds every instance in its own scope, and closing it is what retirement does.
     Layer.succeed(TrackerFactory, {
@@ -559,7 +565,6 @@ const makeHarness = (
         remove: () => Effect.void,
       }
     },
-    agentEventSemantics: codexAgentEventSemantics,
     runAgent: ({ config, prompt, maxTurns, onEvent }) =>
       Effect.sync(() => {
         agentRuns.push({ command: config.command, prompt, maxTurns })
@@ -2156,7 +2161,7 @@ describe('restored pull request handoffs', (): void => {
         config: {
           ...workflow.config,
           workspaceRoot,
-          codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+          runner: { ...workflow.config.runner, stallTimeoutMs: 1 },
         },
       }
       const issue = {
@@ -4169,6 +4174,37 @@ describe('workflow hot reload', (): void => {
     }),
   )
 
+  it.effect('refuses a reload that changes the runner kind and keeps the last known good', () =>
+    Effect.gen(function* () {
+      // There is no cell to replace the runner through: it is bound once, at startup, because it
+      // holds no per-workflow state. Silently ignoring a changed kind would leave an operator
+      // watching a workflow that says one thing while the host runs another, which is the class of
+      // quiet failure this boundary exists to remove — so the reload is refused instead.
+      const initial = changedWorkflow({ fingerprint: 'initial', pollingIntervalMs: 1_000 })
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'repointed', pollingIntervalMs: 5_000 }),
+        runner: stubRunner('meridian'),
+      }
+      const harness = makeHarness(initial)
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          harness.setWorkflow(reloaded)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      expect(snapshot.effectiveWorkflow.fingerprint).toBe('initial')
+      expect(snapshot.pollingIntervalMs).toBe(1_000)
+      expect(snapshot.workflowReloadError?.message).toBe(
+        'runner.kind changed from aurora to meridian; restart the host to select a different agent runner',
+      )
+    }),
+  )
+
   it.effect('uses all reloaded settings for future operations', () =>
     Effect.gen(function* () {
       const initial = changedWorkflow({ fingerprint: 'initial' })
@@ -4194,7 +4230,7 @@ describe('workflow hot reload', (): void => {
             maxRetryBackoffMs: 12_000,
             maxTurns: 9,
           },
-          codex: { ...workflow.config.codex, command: 'reloaded-codex app-server' },
+          runner: { ...workflow.config.runner, command: 'reloaded-codex app-server' },
         },
       }
       const issue = makeIssue('GH-9', 1, null, ['symphony', 'ready'])
@@ -4323,7 +4359,7 @@ describe('workflow hot reload', (): void => {
         ...changedWorkflow({ fingerprint: 'last-known-good' }),
         config: {
           ...workflow.config,
-          codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+          runner: { ...workflow.config.runner, stallTimeoutMs: 1 },
         },
       }
       const harness = makeHarness(initial, () => [issue])
@@ -5120,6 +5156,9 @@ const makeAgentFactory = (): Readonly<{
                 params as Parameters<typeof normalizePayload>[1],
                 secretRedactor,
               ),
+              // Telemetry only: this helper drives usage and rate-limit accounting, not the
+              // session lifecycle, which the tests that need it state explicitly.
+              lifecycle: null,
             })
           },
           settle: (outcome) => {
@@ -5831,6 +5870,7 @@ describe('aged-out agent detail', (): void => {
 })
 
 const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
+  lifecycle: null,
   event: 'thread/tokenUsage/updated',
   timestamp: new Date(),
   processId: 123,
@@ -5858,7 +5898,13 @@ describe('session telemetry accounting', (): void => {
           Effect.gen(function* () {
             const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
             yield* harness.awaitAgentRun
-            harness.emitAgentEvent(makeAgentEvent({ event: 'session_started', usage: null }))
+            harness.emitAgentEvent(
+              makeAgentEvent({
+                event: auroraEvents.bootstrap,
+                usage: null,
+                lifecycle: { phase: 'session_started' },
+              }),
+            )
             harness.emitAgentEvent(makeAgentEvent())
             harness.emitAgentEvent(makeAgentEvent())
             harness.emitAgentEvent(
@@ -5898,11 +5944,12 @@ describe('session telemetry accounting', (): void => {
             )
             harness.emitAgentEvent(
               makeAgentEvent({
-                event: 'turn_started',
+                event: auroraEvents.legOpened,
                 turnId: 'turn-2',
                 turnCount: 2,
                 message: null,
                 usage: null,
+                lifecycle: { phase: 'turn_started' },
               }),
             )
             harness.emitAgentEvent(
@@ -5916,12 +5963,14 @@ describe('session telemetry accounting', (): void => {
             )
             harness.emitAgentEvent(
               makeAgentEvent({
-                event: 'turn/terminated',
+                event: auroraEvents.legSealed,
                 turnId: 'turn-2',
                 turnCount: 2,
                 message: null,
+                // The status is retained as operator detail; nothing reads it to decide the outcome.
                 turnStatus: 'timed_out',
                 usage: null,
+                lifecycle: { phase: 'turn_settled', outcome: 'failed' },
               }),
             )
             yield* Effect.yieldNow()
@@ -5964,7 +6013,7 @@ describe('session telemetry accounting', (): void => {
         ...workflow,
         config: {
           ...workflow.config,
-          codex: { ...workflow.config.codex, stallTimeoutMs: 1 },
+          runner: { ...workflow.config.runner, stallTimeoutMs: 1 },
         },
       }
       const issue = makeIssue('example/symphony#19', 1, null, ['symphony', 'ready'])
@@ -6496,7 +6545,7 @@ describe('session telemetry accounting', (): void => {
           expect(new Date(deadline).getTime()).toBe(
             new Date(
               snapshot.running[0]?.lastEventAt ?? snapshot.running[0]?.startedAt ?? '',
-            ).getTime() + workflow.config.codex.stallTimeoutMs,
+            ).getTime() + workflow.config.runner.stallTimeoutMs,
           )
         }),
       )

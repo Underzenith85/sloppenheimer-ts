@@ -57,6 +57,18 @@ const requireCapability = (
 ): Effect.Effect<CodeReviewPort, WorkflowError> =>
   port === null ? Effect.fail(handoffCapabilityMissing(workflow)) : Effect.succeed(port)
 
+/**
+ * A reload may change everything about how the selected runner is configured, but not which runner
+ * it is: the runner was bound once at startup and there is no cell to replace it through. Refusing
+ * the change keeps the last known good workflow in force and tells the operator why, which is the
+ * one outcome a silent no-op could not.
+ */
+const runnerKindChanged = (bound: string, workflow: Workflow): WorkflowError =>
+  new WorkflowError({
+    category: 'invalid_config',
+    message: `runner.kind changed from ${bound} to ${workflow.runner.kind}; restart the host to select a different agent runner`,
+  })
+
 const sourceControlCapabilityMissing = (workflow: Workflow): WorkflowError =>
   new WorkflowError({
     category: 'invalid_config',
@@ -157,6 +169,9 @@ export const rebuildEffectiveWorkflow = (
   Effect.suspend(() => {
     const replaced: Replaced = []
     return Effect.gen(function* () {
+      if (workflow.runner.kind !== ports.agentRunner.kind) {
+        return yield* Effect.fail(runnerKindChanged(ports.agentRunner.kind, workflow))
+      }
       const tracker = yield* rebuildCell(
         ports.trackerCell,
         'tracker',

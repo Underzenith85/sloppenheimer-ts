@@ -13,7 +13,7 @@ import {
 } from '@symphony/adapter-codex/codex.js'
 import type { AgentError } from '@symphony/core/domain/errors.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import type { CodexConfig } from '@symphony/core/config/workflow.js'
+import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
@@ -61,11 +61,13 @@ const runScenario = (
             turnSandboxPolicy: { type: 'readOnly', networkAccess: false },
           }
         : undefined
-      const config: CodexConfig = {
+      const config: AgentRunnerConfig = {
         command: fakeAppServerCommand(scenario, expectation),
-        approvalPolicy: expectation?.approvalPolicy ?? 'never',
-        threadSandbox: expectation?.threadSandbox ?? 'workspace-write',
-        turnSandboxPolicy: expectation?.turnSandboxPolicy ?? null,
+        settings: {
+          approvalPolicy: expectation?.approvalPolicy ?? 'never',
+          threadSandbox: expectation?.threadSandbox ?? 'workspace-write',
+          turnSandboxPolicy: expectation?.turnSandboxPolicy ?? null,
+        },
         readTimeoutMs: scenario === 'read-timeout' ? timeoutMs : 1_000,
         turnTimeoutMs: scenario === 'turn-timeout' ? timeoutMs : 1_000,
         stallTimeoutMs: 0,
