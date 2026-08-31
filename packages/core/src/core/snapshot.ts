@@ -130,6 +130,7 @@ export const createSnapshot = (
       identifier: entry.issue.identifier,
       title: entry.issue.title,
       url: entry.issue.url,
+      state: entry.issue.state,
       attempt: entry.attempt,
       startedAt: entry.startedAt.toISOString(),
       lastEventAt: entry.lastEventAt?.toISOString() ?? null,

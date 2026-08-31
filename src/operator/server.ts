@@ -9,6 +9,7 @@ import { Cause, Effect, type Scope } from 'effect'
 
 import { ServerError } from '@symphony/core/domain/errors.js'
 import { logError } from '@symphony/core/support/logging.js'
+import { publishRefresh, publishRetrying, publishRunning, publishState } from './api.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
 
@@ -69,7 +70,7 @@ const hostIsLoopback = (value: string | undefined): boolean => {
  * reaching the actor at all, and keeps the reflected error free of caller-supplied text.
  *
  * The length bound only excludes paths no tracker could have produced: a GitHub owner and
- * repository can together run to 140 characters, and a `detailUrl` the runtime snapshot publishes
+ * repository can together run to 140 characters, and a `detail_url` the runtime snapshot publishes
  * must never be rejected by the endpoint it points at.
  */
 const issueIdentifierPattern = /^[\w.\-/]{1,512}#\d{1,12}$/u
@@ -164,7 +165,7 @@ const makeRouter = (
       withMethod(
         'GET',
         Effect.flatMap(runBackend(backend.snapshot), (result) =>
-          HttpServerResponse.isServerResponse(result) ? result : json(200, result),
+          HttpServerResponse.isServerResponse(result) ? result : json(200, publishState(result)),
         ),
       ),
     ),
@@ -184,7 +185,9 @@ const makeRouter = (
         withCsrf(
           csrfToken,
           Effect.flatMap(runBackend(backend.refresh), (result) =>
-            HttpServerResponse.isServerResponse(result) ? result : json(202, { accepted: true }),
+            HttpServerResponse.isServerResponse(result)
+              ? result
+              : json(202, publishRefresh(result)),
           ),
         ),
       ),
@@ -255,9 +258,9 @@ const makeRouter = (
             return running === undefined && retrying === undefined
               ? errorResponse(404, 'issue_not_found', 'No live work has that identifier')
               : json(200, {
-                  identifier,
-                  running: running ?? null,
-                  retrying: retrying ?? null,
+                  issue_identifier: identifier,
+                  running: running === undefined ? null : publishRunning(running),
+                  retrying: retrying === undefined ? null : publishRetrying(retrying),
                 })
           }),
         ),
@@ -269,7 +272,7 @@ const makeRouter = (
 /**
  * The router's own limit on a path segment. Its default of 100 characters is shorter than a tracker
  * identifier can legitimately be — a GitHub owner and repository together reach 140 — and a segment
- * over the limit fails to match, so a published `detailUrl` would 404 before any handler ran.
+ * over the limit fails to match, so a published `detail_url` would 404 before any handler ran.
  */
 const maxIdentifierParamLength = 1024
 

@@ -55,6 +55,7 @@ const snapshot: OrchestratorSnapshot = {
       identifier: 'example/symphony#17',
       title: 'Operator console',
       url: 'https://github.com/example/symphony/issues/17',
+      state: 'open',
       attempt: null,
       startedAt: '2026-08-29T11:59:00.000Z',
       lastEventAt: null,
@@ -155,7 +156,11 @@ const detailLookups = new Map<string, AgentDetailLookup>([
 
 const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
   snapshot: Effect.succeed(snapshot),
-  refresh: Effect.void,
+  refresh: Effect.succeed({
+    coalesced: false,
+    requestedAt: '2026-08-29T12:00:00.000Z',
+    operations: ['issue_reconciliation', 'dispatch'],
+  }),
   agentDetail: (identifier) =>
     Effect.succeed(detailLookups.get(identifier) ?? { _tag: 'Unknown', identifier }),
   backlog: Effect.succeed({
@@ -228,20 +233,30 @@ describe('operator server', (): void => {
       expect(page.headers.get('content-security-policy')).toContain("default-src 'self'")
       expect(await page.text()).toContain('Work by state')
       expect(state.status).toBe(200)
-      expect(await state.json()).toMatchObject({ counts: { running: 1 }, maxConcurrentAgents: 2 })
+      expect(await state.json()).toMatchObject({
+        counts: { running: 1 },
+        max_concurrent_agents: 2,
+        running: [{ issue_identifier: 'example/symphony#17', state: 'open' }],
+      })
       expect(await backlog.json()).toMatchObject({
         nodes: [{ identifier: 'example/symphony#17', readiness: 'ready' }],
         edges: [],
         cycles: [],
       })
-      expect(await detail.json()).toMatchObject({ identifier: 'example/symphony#17' })
+      expect(await detail.json()).toMatchObject({
+        issue_identifier: 'example/symphony#17',
+        running: {
+          issue_identifier: 'example/symphony#17',
+          detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+        },
+        retrying: null,
+      })
       const source = await script.text()
       expect(source).toContain("'graph-node state-' + statusClass(status)")
       expect(source).toContain("awaiting_checks: 'Awaiting checks'")
       expect(source).toContain("closed_without_merge: 'Closed without merge'")
-      expect(source).toContain(
-        '(state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)',
-      )
+      expect(source).toContain('(state?.handoffs ?? []).find(')
+      expect(source).toContain('entry.issue_identifier === node.identifier')
       // The served bundle is the whole console, in dependency order: the view model, the shared
       // browser primitives, the detail overlay and the shell.
       expect(source).toContain("start: 'Start agent'")
@@ -321,6 +336,29 @@ describe('operator server', (): void => {
         expect(longIdentifier.status).toBe(200)
         expect(wrongMethod.status).toBe(405)
       }),
+  )
+
+  it.live('acknowledges a refresh with what the request amounted to', () =>
+    withServer(makeBackend(), async (url) => {
+      const rejected = await fetch(`${url}/api/v1/refresh`, { method: 'POST' })
+      expect(rejected.status).toBe(403)
+      expect(await rejected.json()).toMatchObject({ error: { code: 'invalid_csrf_token' } })
+
+      const page = await (await fetch(url)).text()
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
+      const accepted = await fetch(`${url}/api/v1/refresh`, {
+        method: 'POST',
+        headers: { 'X-Symphony-CSRF': token },
+      })
+
+      expect(accepted.status).toBe(202)
+      expect(await accepted.json()).toEqual({
+        queued: true,
+        coalesced: false,
+        requested_at: '2026-08-29T12:00:00.000Z',
+        operations: ['issue_reconciliation', 'dispatch'],
+      })
+    }),
   )
 
   it.live('requires its page token before changing issue eligibility', () =>

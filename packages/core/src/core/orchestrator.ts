@@ -17,6 +17,8 @@ export {
   type OrchestratorControl,
   type OrchestratorServices,
   type OrchestratorSnapshot,
+  type RefreshOperation,
+  type RefreshOutcome,
   type RetrySnapshot,
   type RunningSnapshot,
   type RuntimePorts,

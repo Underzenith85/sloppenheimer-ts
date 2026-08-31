@@ -6,7 +6,12 @@ import {
   type DependencyCycle,
 } from '@symphony/core/domain/dependencies.js'
 import { normalizeState, type Issue } from '@symphony/core/domain/domain.js'
-import type { AgentDetailLookup, OrchestratorControl, OrchestratorSnapshot } from '@symphony/core'
+import type {
+  AgentDetailLookup,
+  OrchestratorControl,
+  OrchestratorSnapshot,
+  RefreshOutcome,
+} from '@symphony/core'
 import { CurrentIssueControl, type IssueControlPort } from '@symphony/core/ports/issue-control.js'
 import { WorkflowLoader } from '@symphony/core/ports/workflow.js'
 import { TrackerError, WorkflowError } from '@symphony/core/domain/errors.js'
@@ -67,7 +72,7 @@ export type OperatorBackendError = WorkflowError | TrackerError
 
 export type OperatorBackend = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
-  refresh: Effect.Effect<void>
+  refresh: Effect.Effect<RefreshOutcome>
   /**
    * Live detail for one agent. It is served from the orchestrator's published index, so polling it
    * cannot queue behind — or interfere with — tracker polling.

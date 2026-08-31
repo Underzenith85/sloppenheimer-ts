@@ -1,5 +1,6 @@
 import { Window, type HTMLElement } from 'happy-dom'
 
+import { publishRefresh, publishState } from '../../src/operator/api.js'
 import { appJavaScript, appTemplate } from '../../src/operator/ui-assets.js'
 import type { BacklogSnapshot } from '../../src/operator/operator.js'
 import type { OrchestratorSnapshot } from '@symphony/core'
@@ -68,13 +69,22 @@ export const bootConsole = async (options: BootOptions = {}): Promise<ConsolePag
       return overridden
     }
     if (path === '/api/v1/state') {
-      return jsonResponse(200, options.state ?? null)
+      // The console reads the published document, so the fixtures go through the same
+      // serialization boundary the server uses rather than restating its field names.
+      return jsonResponse(200, options.state === undefined ? null : publishState(options.state))
     }
     if (path === '/api/v1/backlog') {
       return jsonResponse(200, options.backlog ?? null)
     }
     if (path === '/api/v1/refresh') {
-      return jsonResponse(202, { accepted: true })
+      return jsonResponse(
+        202,
+        publishRefresh({
+          coalesced: false,
+          requestedAt: new Date().toISOString(),
+          operations: ['issue_reconciliation'],
+        }),
+      )
     }
     if (path.startsWith('/api/v1/issues/')) {
       return jsonResponse(202, { accepted: true })
