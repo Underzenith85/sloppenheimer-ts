@@ -351,13 +351,20 @@ export const afterMerge = (handoff: HandoffEntry, failure: string | null): Hando
     ? { ...handoff, state: 'merged' }
     : { ...handoff, state: 'awaiting_checks', reason: failure }
 
-/** The issue a repair agent is dispatched against: the original, plus what it has to fix. */
+/**
+ * The issue a repair agent is dispatched against: a tracker record, plus what it has to fix.
+ *
+ * The record is passed in rather than read from the handoff, because a queued retry has refetched
+ * the issue since the handoff stored it. Dispatching the stale one would hand the worker stale
+ * fields and bucket the run by a state the issue has left, which is how admission counts it.
+ */
 export const repairIssue = (
   handoff: HandoffEntry,
+  issue: Issue,
   headSha: string | null,
   reason: string,
 ): Issue => ({
-  ...handoff.issue,
+  ...issue,
   description: `${handoff.issue.description ?? ''}\n\n## Pull request repair\n\nPR: ${handoff.pullRequestUrl}\nHead: ${headSha}\n\n${reason}`,
 })
 

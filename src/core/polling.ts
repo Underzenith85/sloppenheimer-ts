@@ -179,7 +179,9 @@ const prepareRepairRetry = (
       })
       return Option.none()
     }
-    const dispatchIssue = repairIssue(attributed, observedHeadSha, disposition.reason)
+    // Built on the record this retry just refetched, not the one the handoff stored: the worker
+    // gets current fields, and admission buckets the run by the state the issue is in now.
+    const dispatchIssue = repairIssue(attributed, issue, observedHeadSha, disposition.reason)
     yield* writeHandoff(
       context,
       id,

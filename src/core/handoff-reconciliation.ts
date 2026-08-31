@@ -165,7 +165,7 @@ const perform = (
           })
           return
         }
-        const issue = repairIssue(handoff, baselineHeadSha, action.reason)
+        const issue = repairIssue(handoff, handoff.issue, baselineHeadSha, action.reason)
         const current = yield* Ref.get(context.state)
         if (!hasSlot(current, issue, handoff.execution.workflow)) {
           yield* writeHandoff(context, id, awaitingSlot(handoff, action.reason))

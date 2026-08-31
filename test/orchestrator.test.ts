@@ -2233,6 +2233,66 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('dispatches a repair retry against the tracker record it just refetched', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refetched-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const launched: Issue[] = []
+    let currentIssue = issue
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      // The first repair fails without pushing, queueing a retry; the second is held open.
+      runAgent: ({ issue: launchedIssue }) =>
+        Effect.suspend(() => {
+          launched.push(launchedIssue)
+          return launched.length > 1
+            ? Effect.never
+            : Effect.fail(
+                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+              )
+        }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The tracker record moves on while the repair retry waits: still active and routable,
+          // but re-titled and re-prioritised.
+          currentIssue = { ...issue, title: 'renamed upstream', priority: 5 }
+          yield* TestClock.adjust('30 seconds')
+          while (launched.length < 2) {
+            yield* Effect.yieldNow()
+          }
+          yield* control.setIssuePaused(20, true)
+        }),
+      ),
+    )
+
+    // The retry carries the repair instructions on top of the record as it stands now, not the one
+    // the handoff captured before any of this.
+    expect(launched[1]?.title).toBe('renamed upstream')
+    expect(launched[1]?.priority).toBe(5)
+    expect(launched[1]?.description).toContain('## Pull request repair')
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('keeps the refreshed repair identity when a retry defers for capacity', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
