@@ -420,7 +420,7 @@ const renderViews = (): void => {
     model.finished,
     'Nothing finished in the ' + finishedWindowLabel + '.',
   )
-  element('#finished-scope').textContent = 'Scope: the ' + finishedWindowLabel + '.'
+  element('#finished-scope').textContent = 'Scope: ' + finishedScopeLabel + '.'
 }
 
 /**

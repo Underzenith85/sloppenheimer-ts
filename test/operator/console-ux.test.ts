@@ -136,10 +136,34 @@ describe('operator console information architecture', (): void => {
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {
     const console_ = await boot()
 
-    expect(console_.text('#finished-scope')).toBe('Scope: the last 24 hours.')
+    expect(console_.text('#finished-scope')).toBe(
+      'Scope: work this host finished in the last 24 hours; a restart clears it.',
+    )
     const finished = identifiersIn(console_, '#finished-list')
     expect(finished).toEqual([mergedIdentifier])
     expect(finished).not.toContain(staleMergedIdentifier)
+  })
+
+  it('offers the retained post-mortem for work that has finished', async (): Promise<void> => {
+    const state = consoleState()
+    const console_ = await boot({
+      // The merged issue's session is still retained, so its detail resource answers.
+      state: { ...state, inspectableAgents: [...state.inspectableAgents, mergedIdentifier] },
+    })
+
+    console_.query('#tab-finished').click()
+    await console_.flush()
+
+    expect(console_.card(mergedIdentifier).querySelector('.inspect')).not.toBeNull()
+  })
+
+  it('offers no post-mortem once the finished session has aged out', async (): Promise<void> => {
+    const console_ = await boot()
+
+    console_.query('#tab-finished').click()
+    await console_.flush()
+
+    expect(console_.card(mergedIdentifier).querySelector('.inspect')).toBeNull()
   })
 
   it('collapses an idle host to one system-health line instead of empty panels', async (): Promise<void> => {

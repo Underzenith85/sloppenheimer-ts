@@ -113,6 +113,12 @@ type WorkModel = Readonly<{
 /** How far back Finished reaches. Stated once here and rendered as a label the tests can read. */
 const finishedWindowMs = 24 * 60 * 60 * 1000
 const finishedWindowLabel = 'last 24 hours'
+/**
+ * The full scope, which is a window *and* a lifetime: completions live in the running host's state,
+ * so a restart empties the view even for work that merged inside the window. Saying so is the point
+ * — a view that claimed a flat 24 hours would be claiming more than the host can know.
+ */
+const finishedScopeLabel = 'work this host finished in the last 24 hours; a restart clears it'
 
 const workStateLabels: Readonly<Record<WorkState, string>> = {
   attention: 'Needs attention',
@@ -394,7 +400,7 @@ const handoffItem = (
   }
 }
 
-const completedItem = (entry: CompletedEntry): WorkItem => ({
+const completedItem = (entry: CompletedEntry, inspectable: ReadonlySet<string>): WorkItem => ({
   identifier: entry.identifier,
   issueNumber: issueNumberOf(entry.identifier),
   title: entry.title,
@@ -409,7 +415,9 @@ const completedItem = (entry: CompletedEntry): WorkItem => ({
   ranking: null,
   blockers: [],
   unlocks: 0,
-  hasDetail: false,
+  // A session whose timeline is still retained answers with a post-mortem, and finished work is
+  // exactly where an operator goes looking for one.
+  hasDetail: inspectable.has(entry.identifier),
   queueReason: null,
   finishedAt: entry.finishedAt,
   pullRequestUrl: entry.pullRequestUrl,
@@ -590,7 +598,7 @@ const buildWorkModel = (
   }
   for (const entry of state?.completed ?? []) {
     if (now - new Date(entry.finishedAt).getTime() <= finishedWindowMs) {
-      claim(completedItem(entry))
+      claim(completedItem(entry, inspectable))
     }
   }
   for (const issue of backlog?.issues ?? []) {

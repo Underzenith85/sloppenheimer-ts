@@ -190,17 +190,18 @@ machine-specific schema is committed.
 
 The console answers four questions, and its navigation is the four answers with their counts:
 
-| View                | What is in it                                                                                                                                                                                                                                               |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                |
-| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                              |
-| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                     |
-| **Finished**        | Work merged and closed out in the last 24 hours. The window is stated on the view, and an item is dated by the provider's merge time rather than by when Symphony noticed it, so a pull request merged while the host was down does not reappear as recent. |
+| View                | What is in it                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                                                                                                                                    |
+| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                                                                                                                                                  |
+| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                                                                                                                                         |
+| **Finished**        | Work this host merged and closed out in the last 24 hours. The scope is stated on the view — it is a window _and_ a lifetime, since completions live in the running host's state and a restart empties it. An item is dated by the provider's merge time rather than by when Symphony noticed it, so a pull request merged while the host was down does not reappear as recent. |
 
 Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
 agent** control appears only where the detail resource will answer: a handoff restored from the
 store after a restart has a pull request to open but no agent session behind it, and the runtime
-publishes which identifiers are inspectable rather than leaving the console to guess. Attention
+publishes which identifiers are inspectable rather than leaving the console to guess. Finished work
+keeps the control for as long as its timeline is retained, so a post-mortem stays one click away. Attention
 condition, pipeline phase, and orchestration eligibility are separate from that placement and are
 shown as their own labelled chips — status is never carried by colour alone. Ordinary dependency
 blocking is not an exception: blocked work is summarised under Ready ("_n_ issues are waiting on a
