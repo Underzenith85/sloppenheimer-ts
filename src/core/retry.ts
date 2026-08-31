@@ -9,6 +9,9 @@ const baseRetryDelayMs = 10_000
  */
 export const agentRetrySchedule = (maximumMs: number): Schedule.Schedule<number, number> =>
   Schedule.exponential(baseRetryDelayMs).pipe(
+    // The attempt is an explicit input so callers can evaluate any attempt in constant time. Reset
+    // the exponential seed after each step to keep a multi-step driver from advancing it as well.
+    Schedule.resetWhen(() => true),
     Schedule.zipWith(Schedule.identity<number>(), (base, attempt) =>
       Math.min(Duration.toMillis(base) * 2 ** Math.max(attempt - 1, 0), maximumMs),
     ),
