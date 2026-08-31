@@ -330,6 +330,8 @@ describe('workflow defaults and extension keys', (): void => {
       expect(workflow.config.tracker.terminalStates).toEqual(['closed'])
       expect(workflow.config.tracker.requiredLabels).toEqual([])
       expect(workflow.config.serverPort).toBeNull()
+      expect(workflow.config.handoffEnabled).toBe(workflowDefaults.handoffEnabled)
+      expect(workflow.config.handoffEnabled).toBe(true)
       expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://api.github.com')
     }),
   )
@@ -578,6 +580,9 @@ describe('front-matter decoding messages', (): void => {
       'codex.stall_timeout_ms must not be negative',
     ],
     [`${minimalTracker}\nserver: 5`, 'server must be a map'],
+    [`${minimalTracker}\nhandoff: 5`, 'handoff must be a map'],
+    [`${minimalTracker}\nhandoff:\n  enabled: 5`, 'handoff.enabled must be a boolean'],
+    [`${minimalTracker}\nhandoff:\n  enabled: "false"`, 'handoff.enabled must be a boolean'],
     [`${minimalTracker}\nserver:\n  port: 70000`, 'server.port must be between 0 and 65535'],
     [`${minimalTracker}\nserver:\n  port: -1`, 'server.port must be between 0 and 65535'],
     // An extension key is passed through rather than decoded, so the only thing it can be wrong
@@ -627,7 +632,9 @@ codex:
   read_timeout_ms: 500
   stall_timeout_ms: 0
 server:
-  port: 8080`)
+  port: 8080
+handoff:
+  enabled: false`)
 
       const workflow = yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {
         TEST_TRACKER_TOKEN: 'secret',
@@ -663,6 +670,10 @@ server:
         turnSandboxPolicy: null,
       })
       expect(workflow.config.serverPort).toBe(8_080)
+      expect(workflow.config.handoffEnabled).toBe(false)
+      // The extension owns a section of its own now, so it is configuration rather than an unknown
+      // key the loader carries through.
+      expect(workflow.config.extensions).toEqual({})
     }),
   )
 })

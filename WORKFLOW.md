@@ -28,6 +28,8 @@ codex:
   stall_timeout_ms: 600000
 server:
   port: 3000
+handoff:
+  enabled: true
 ---
 
 Implement GitHub issue {{ issue.identifier }} in this repository.

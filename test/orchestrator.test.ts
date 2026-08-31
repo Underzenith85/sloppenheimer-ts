@@ -203,6 +203,9 @@ const workflow: Workflow = {
       settings: { tempo: 'largo' },
     },
     serverPort: null,
+    // Stated rather than defaulted: these runs compose the code-review services explicitly, so the
+    // workflow they run under says the pull-request handoff extension is enabled.
+    handoffEnabled: true,
     extensions: {},
   },
 }
