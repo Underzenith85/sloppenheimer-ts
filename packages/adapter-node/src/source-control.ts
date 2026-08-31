@@ -13,7 +13,11 @@ import type {
   SourceControlPort,
   SourceControlTarget,
 } from '@symphony/core/ports/source-control.js'
-import { terminateChildProcess } from '@symphony/core/support/subprocess.js'
+import {
+  detachChildProcess,
+  resumeOnce,
+  terminateChildProcess,
+} from '@symphony/core/support/subprocess.js'
 
 export type GitCredential = Readonly<{
   username: string
@@ -134,25 +138,7 @@ const runProcess = (
     }
     let stdout = ''
     let stderr = ''
-    let settled = false
     let streamFailure: unknown
-
-    const detach = (): void => {
-      child.stdout.removeAllListeners()
-      child.stderr.removeAllListeners()
-      child.removeAllListeners('error')
-      child.removeAllListeners('close')
-      // Node delivers a spawn failure asynchronously, so one can still arrive after this effect has
-      // settled or been cancelled — and an `error` event with no listener is rethrown as an uncaught
-      // exception, which would take the whole host down rather than fail the operation. The
-      // replacement listener keeps that from outliving the effect that could report it.
-      child.on('error', () => {})
-      // The two output pipes are the same hazard with a different trigger: they are streams, so an
-      // `error` on either with no listener is likewise uncaught, and the child can still be running
-      // after this effect has settled or been cancelled.
-      child.stdout.on('error', () => {})
-      child.stderr.on('error', () => {})
-    }
 
     /**
      * Reads one output pipe, remembering the first error it raises.
@@ -169,14 +155,13 @@ const runProcess = (
       })
     }
 
-    const settle = (effect: Effect.Effect<string, SourceControlError>): void => {
-      if (settled) {
-        return
-      }
-      settled = true
-      detach()
-      resume(effect)
-    }
+    // Node delivers a spawn failure asynchronously, so one can still arrive after this effect has
+    // settled or been cancelled, and the child outlives an interrupted fiber until the terminator
+    // below reaps it. `resumeOnce` is what keeps both from reaching a resume that has already
+    // fired, and takes the listeners off as it settles.
+    const { settle, claim } = resumeOnce(resume, () => {
+      detachChildProcess(child)
+    })
 
     capture(child.stdout, (chunk: Buffer) => {
       stdout = append(stdout, chunk)
@@ -213,14 +198,13 @@ const runProcess = (
       settle(Effect.fail(sourceControlFailure({ args, exitCode, stdout, stderr }, operation)))
     })
 
-    return Effect.suspend(() => {
-      if (settled) {
-        return Effect.void
-      }
-      settled = true
-      detach()
-      return Effect.promise(() => terminateChildProcess(child, gitTerminationGraceMs))
-    })
+    // Interruption: a git invocation nobody is waiting on any more must not keep running against
+    // the workspace, but one that already settled has nothing left to terminate.
+    return Effect.suspend(() =>
+      claim()
+        ? Effect.promise(() => terminateChildProcess(child, gitTerminationGraceMs))
+        : Effect.void,
+    )
   })
 
 /**

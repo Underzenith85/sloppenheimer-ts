@@ -4,6 +4,7 @@ import type { Issue, IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
+import { asSettled } from '../support/settled.js'
 import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetry.js'
 import { dispatch } from './dispatch.js'
 import { releaseRepair, settleRepair } from './handoff-decision.js'
@@ -68,12 +69,7 @@ export const poll = (
     yield* drainRetirements(context)
     let dispatchValidationFailed = false
     const opening = yield* Ref.get(context.state)
-    const revalidated = yield* revalidateCredentials(context, opening.lastKnownGood).pipe(
-      Effect.match({
-        onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-        onSuccess: (value) => ({ _tag: 'Succeeded' as const, value }),
-      }),
-    )
+    const revalidated = yield* revalidateCredentials(context, opening.lastKnownGood).pipe(asSettled)
     if (revalidated._tag === 'Failed') {
       dispatchValidationFailed = true
       const observedAt = yield* currentInstant
@@ -127,12 +123,7 @@ export const poll = (
     if (reloaded !== null) {
       const before = yield* Ref.get(context.state)
       if (reloaded.fingerprint !== before.lastKnownGood.workflow.fingerprint) {
-        const configured = yield* context.makeEffectiveWorkflow(reloaded).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (value) => ({ _tag: 'Succeeded' as const, value }),
-          }),
-        )
+        const configured = yield* context.makeEffectiveWorkflow(reloaded).pipe(asSettled)
         if (configured._tag === 'Failed') {
           dispatchValidationFailed = true
           const observedAt = yield* currentInstant
@@ -323,12 +314,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             ),
           )
           yield* context.publish
-          const handoff = yield* codeReview.value.handoffCompletedWork(settled.issue).pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
-            }),
-          )
+          const handoff = yield* codeReview.value
+            .handoffCompletedWork(settled.issue)
+            .pipe(asSettled)
           if (handoff._tag === 'Failed') {
             const failedAt = yield* currentInstant
             yield* Ref.update(context.state, (current) =>
@@ -349,7 +337,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             )
             break
           }
-          const result = handoff.result
+          const result = handoff.value
           if (result._tag === 'NoBranch') {
             const absentAt = yield* currentInstant
             yield* Ref.update(context.state, (current) =>
@@ -471,12 +459,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             onNone: () => effective.tracker,
             onSome: (entry) => entry.execution.tracker,
           })
-          const refreshResult = yield* refreshTracker.fetchIssuesByIds([event.issueId]).pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-            }),
-          )
+          const refreshResult = yield* refreshTracker
+            .fetchIssuesByIds([event.issueId])
+            .pipe(asSettled)
           if (refreshResult._tag === 'Failed') {
             const scheduled = yield* context.scheduleRetry(
               due.value.issue,
@@ -491,7 +476,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             break
           }
           const issue = Option.fromNullable(
-            refreshResult.issues.find((candidate) => candidate.id === event.issueId),
+            refreshResult.value.find((candidate) => candidate.id === event.issueId),
           )
           if (Option.isSome(repairHandoff)) {
             const entry = repairHandoff.value
@@ -521,12 +506,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             }
             const inspected = yield* codeReview.value
               .inspectPullRequest(entry.pullRequestNumber)
-              .pipe(
-                Effect.match({
-                  onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-                  onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-                }),
-              )
+              .pipe(asSettled)
             if (inspected._tag === 'Failed') {
               const scheduled = yield* context.scheduleRetry(
                 repair.value.issue,
@@ -546,7 +526,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               context,
               event.issueId,
               settled,
-              inspected.observation,
+              inspected.value,
               inspectedAt,
               repairPermission(settled, { _tag: 'Succeeded', issue }),
               Option.some(event.attempt),
@@ -578,8 +558,8 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             break
           }
           if (
-            !issueIsActive(issue.value, effective.workflow) ||
-            !issueIsRoutable(issue.value, effective.workflow)
+            !issueIsActive(issue.value, effective.workflow.config.tracker) ||
+            !issueIsRoutable(issue.value, effective.workflow.config.tracker)
           ) {
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),

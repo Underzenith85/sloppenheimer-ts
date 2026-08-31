@@ -26,7 +26,7 @@ import type {
 } from '@symphony/core/ports/agent-runner.js'
 import { currentInstant } from '@symphony/core/support/clock.js'
 import { isJsonObject, isJsonValue, mergeSparseObject } from '@symphony/core/support/json.js'
-import { processGroupIsAlive } from '@symphony/core/support/subprocess.js'
+import { childProcessGroupIsAlive, signalChildGroup } from '@symphony/core/support/subprocess.js'
 import type { HostToolResult, HostToolSession } from '@symphony/core/domain/host-tools.js'
 import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
 import {
@@ -706,7 +706,7 @@ class CodexConnection {
       )
       yield* Fiber.interrupt(this.#stdout)
       this.#process.stdin.end()
-      this.#terminate('SIGTERM')
+      signalChildGroup(this.#process, 'SIGTERM')
       yield* this.#reapGroup()
       yield* this.#drainDiagnostics()
     })
@@ -750,9 +750,9 @@ class CodexConnection {
   #reapGroup(): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       const escalateAt = (yield* Clock.currentTimeMillis) + shutdownGraceMs
-      while (this.#processGroupIsAlive()) {
+      while (childProcessGroupIsAlive(this.#process)) {
         if ((yield* Clock.currentTimeMillis) >= escalateAt) {
-          this.#terminate('SIGKILL')
+          signalChildGroup(this.#process, 'SIGKILL')
           break
         }
         yield* Effect.sleep(groupReapPollMs)
@@ -761,37 +761,13 @@ class CodexConnection {
       // finalizer complete — and terminal reconciliation start removing the workspace — while a
       // descendant is still running in it.
       const deadline = (yield* Clock.currentTimeMillis) + groupReapDeadlineMs
-      while (this.#processGroupIsAlive() && (yield* Clock.currentTimeMillis) < deadline) {
+      while (
+        childProcessGroupIsAlive(this.#process) &&
+        (yield* Clock.currentTimeMillis) < deadline
+      ) {
         yield* Effect.sleep(groupReapPollMs)
       }
     })
-  }
-
-  /**
-   * Whether the App Server's process group still has a member that can run. Zombies left behind by
-   * a host that does not reap orphans are not members: counting them would keep a killed tree
-   * reporting alive and hold the reap loop open for its whole bound.
-   */
-  #processGroupIsAlive(): boolean {
-    const { pid } = this.#process
-    return pid !== undefined && processGroupIsAlive(pid)
-  }
-
-  /** Signals the whole App Server process group, not only the shell that started it. */
-  #terminate(signal: NodeJS.Signals): void {
-    const { pid } = this.#process
-    if (pid === undefined) {
-      return
-    }
-    try {
-      process.kill(-pid, signal)
-    } catch {
-      try {
-        this.#process.kill(signal)
-      } catch {
-        // The process tree is already gone.
-      }
-    }
   }
 
   static #turnFailure(turnId: string, status: string): AgentError {
