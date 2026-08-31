@@ -55,10 +55,21 @@ pending set. The netlink proc connector needs elevated privileges, drops message
 unsound exactly when the host is busy — and supplies events from which membership must be
 reconstructed, with a race at subscribe time.
 
-Independent of all of the above, workspace removal is worth making safe against a straggler rather
-than dependent on the verdict: rename the workspace to a sibling trash path before deleting it, so
-the canonical path is free for reuse immediately and a surviving process cannot corrupt the next
-attempt. That would make this residual cost disk rather than correctness.
+Independently of the verdict, workspace removal is safe against a straggler. `remove` renames the
+workspace into a reserved trash root inside the workspace root and then sweeps that root, so the
+canonical path is free the moment the rename returns and a process that survived termination is
+writing somewhere the next attempt will never read. Deleting its files is no longer something that
+has to succeed for the workspace to be gone, which is what makes the residual above cost disk
+rather than correctness.
+
+- The trash root is named so that no workspace key can collide with it. `workspaceKey` replaces
+  every character outside `[A-Za-z0-9._-]`, so a name containing `@` is reserved by construction
+  and needs no exclusion rule kept in step with the sanitizer.
+- The sweep runs on every removal, including one that found no workspace, which is what clears an
+  entry stranded by a host that died between the rename and the delete. Its failure is invisible:
+  it costs disk until the next removal, never a caller that only asked for a workspace to go away.
+- A rename that cannot be done falls back to deleting in place, so this is never worse than the
+  direct removal it replaced.
 
 ## Repository structure
 

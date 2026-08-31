@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '../../src/domain/domain.js'
 import {
+  containedTrashEntryPath,
+  containedTrashRoot,
   containedWorkspacePath,
   declaredWorkspacePath,
   isStrictDescendant,
@@ -10,6 +12,7 @@ import {
   sameDirectoryIdentity,
   verifiedDirectoryRejection,
   verifiedHandleRejection,
+  trashDirectoryName,
   verifiedRootRejection,
   workspaceKey,
   type VerifiedWorkspace,
@@ -115,6 +118,50 @@ describe('workspace path containment', (): void => {
 
   it('treats a nested key as contained', (): void => {
     expect(accepted(containedWorkspacePath(root, 'a/b'))).toBe(`${root}/a/b`)
+  })
+})
+
+describe('trash path containment', (): void => {
+  it('puts the trash root inside the workspace root', (): void => {
+    expect(accepted(containedTrashRoot(root))).toBe(`${root}/${trashDirectoryName}`)
+  })
+
+  it('names a distinct entry per removal, tagged with the key it came from', (): void => {
+    const first = accepted(containedTrashEntryPath(root, 'GH-7', 'aaaa'))
+    const second = accepted(containedTrashEntryPath(root, 'GH-7', 'bbbb'))
+
+    expect(first).toBe(`${root}/${trashDirectoryName}/GH-7-aaaa`)
+    expect(first).not.toBe(second)
+  })
+
+  /**
+   * The reservation is what makes the trash root safe to keep inside the workspace root, and it
+   * holds by construction rather than by an exclusion rule: the sanitizer's allow-list has no `@`,
+   * so no identifier can be turned into a key that names the trash root.
+   */
+  it('reserves a trash root that no issue identifier can be sanitized into', (): void => {
+    expect(trashDirectoryName).toContain('@')
+    for (const identifier of ['@trash', '@trash-0000000000000000', 'a@trash', '@@@']) {
+      expect(workspaceKey(issueIdentifier(identifier))).not.toContain('@')
+      expect(
+        accepted(containedWorkspacePath(root, workspaceKey(issueIdentifier(identifier)))),
+      ).not.toBe(accepted(containedTrashRoot(root)))
+    }
+  })
+
+  /**
+   * Defence in depth rather than a reachable case: `workspaceKey` replaces the separator, so a key
+   * that traverses cannot arrive here. A bare `..` is not among these, because the unique suffix
+   * makes it the ordinary filename `..-0000` rather than a traversal.
+   */
+  it('rejects a trash entry whose key would escape the trash root', (): void => {
+    for (const key of ['../..', 'nested/../../..', '/etc/passwd']) {
+      const error = pathRejection(containedTrashEntryPath(root, key, '0000'))
+      expect(error.message).toMatch(/^workspace path escapes or equals root: /u)
+    }
+    expect(accepted(containedTrashEntryPath(root, '..', '0000'))).toBe(
+      `${root}/${trashDirectoryName}/..-0000`,
+    )
   })
 })
 

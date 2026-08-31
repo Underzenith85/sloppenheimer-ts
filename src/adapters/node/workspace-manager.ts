@@ -1,10 +1,17 @@
+import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { Effect } from 'effect'
 
 import type { HooksConfig } from '../../config/workflow.js'
 import type { IssueIdentifier, Workspace } from '../../domain/domain.js'
-import { containedWorkspacePath, workspaceKey } from '../../domain/workspace-containment.js'
+import {
+  containedTrashEntryPath,
+  containedTrashRoot,
+  containedWorkspacePath,
+  workspaceKey,
+} from '../../domain/workspace-containment.js'
 import { WorkspaceError } from '../../errors.js'
 import type { WorkspaceManagerPort } from '../../ports/workspace.js'
 import { isSymbolicLink } from './filesystem.js'
@@ -68,6 +75,68 @@ const prepareWorkspace = (
   })
 
 /**
+ * Moves a workspace out of its canonical path and into the trash root, where deletion no longer
+ * has to succeed for the path to be reusable.
+ *
+ * The rename is atomic and the trash root is a sibling inside the same root, so it is a link
+ * operation on one filesystem rather than a copy: the moment it returns, the canonical path is free
+ * for the next attempt, and any process still running in the old directory is writing somewhere
+ * nothing will look at again.
+ */
+const retireWorkspace = (
+  fileSystem: FileSystem.FileSystem,
+  root: string,
+  key: string,
+  path: string,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    const trashRoot = yield* containedTrashRoot(root)
+    const entry = yield* containedTrashEntryPath(root, key, randomUUID())
+    yield* fileSystem.makeDirectory(trashRoot, { recursive: true })
+    yield* fileSystem.rename(path, entry)
+  })
+
+/**
+ * Retires the workspace, falling back to deleting it where it stands.
+ *
+ * The fallback exists so that this can never be worse than the direct removal it replaces: a
+ * filesystem that refuses the rename, or a trash root that cannot be created, still gets the
+ * workspace deleted. The path has already passed containment either way, so every failure of the
+ * retirement is answered the same way rather than being distinguished.
+ */
+const retireOrRemoveWorkspace = (
+  fileSystem: FileSystem.FileSystem,
+  root: string,
+  key: string,
+  path: string,
+): Effect.Effect<void, PlatformError> =>
+  retireWorkspace(fileSystem, root, key, path).pipe(
+    Effect.catchAll(() => fileSystem.remove(path, { force: true, recursive: true })),
+  )
+
+/**
+ * Deletes everything in the trash root, and reports nothing.
+ *
+ * This is where retired workspaces are actually freed, so it runs on every removal — including one
+ * that found no workspace, which is what clears entries stranded by a host that died between the
+ * rename and the delete. Failure is deliberately invisible: a sweep that cannot finish costs disk
+ * until the next removal, and never a caller that was only asking for a workspace to go away.
+ */
+const sweepTrash = (fileSystem: FileSystem.FileSystem, root: string): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const trashRoot = yield* containedTrashRoot(root)
+    const entries = yield* fileSystem.readDirectory(trashRoot)
+    yield* Effect.forEach(
+      entries,
+      (entry) =>
+        fileSystem
+          .remove(join(trashRoot, entry), { force: true, recursive: true })
+          .pipe(Effect.ignore),
+      { discard: true },
+    )
+  }).pipe(Effect.ignore)
+
+/**
  * The one shape every operation reports through: a containment rejection is already the answer and
  * travels unchanged, and anything else becomes this operation's own category.
  */
@@ -119,22 +188,30 @@ export const makeWorkspaceManager = (
             Effect.catchAll(() => Effect.void),
           ),
     // `before_remove` is best effort, runs only for a workspace that exists, and never blocks removal.
+    //
+    // Removal frees the path before it deletes anything: the workspace is renamed into the trash
+    // root and the trash root is then swept. A process that survived termination and is still
+    // writing in the old directory therefore cannot corrupt the next attempt on this issue, and
+    // deleting its files is no longer something that has to succeed for the workspace to be gone.
+    // In the ordinary case the sweep deletes it in the same call, so removal is still complete when
+    // this returns.
     remove: (identifier) =>
       Effect.gen(function* () {
-        const path = yield* containedWorkspacePath(root, workspaceKey(identifier))
+        const key = workspaceKey(identifier)
+        const path = yield* containedWorkspacePath(root, key)
         const exists = yield* workspaceDirectoryExists(fileSystem, path).pipe(
           reportedAs('remove_failed', 'failed to inspect workspace'),
         )
-        if (!exists) {
-          return
-        }
-        if (hooks.beforeRemove !== null) {
-          yield* runHook('before_remove', hooks.beforeRemove, path, hooks.timeoutMs).pipe(
-            Effect.catchAll(() => Effect.void),
+        if (exists) {
+          if (hooks.beforeRemove !== null) {
+            yield* runHook('before_remove', hooks.beforeRemove, path, hooks.timeoutMs).pipe(
+              Effect.catchAll(() => Effect.void),
+            )
+          }
+          yield* retireOrRemoveWorkspace(fileSystem, root, key, path).pipe(
+            reportedAs('remove_failed', 'failed to remove workspace'),
           )
         }
-        yield* fileSystem
-          .remove(path, { force: true, recursive: true })
-          .pipe(reportedAs('remove_failed', 'failed to remove workspace'))
+        yield* sweepTrash(fileSystem, root)
       }),
   }))

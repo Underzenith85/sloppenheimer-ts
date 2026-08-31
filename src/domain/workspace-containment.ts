@@ -32,6 +32,16 @@ export const workspaceKey = (identifier: IssueIdentifier): string => {
   return `${sanitized}-${suffix}`
 }
 
+/**
+ * The directory inside the root that holds workspaces which have been retired but not yet deleted.
+ *
+ * The name is reserved by construction rather than by an exclusion rule: `workspaceKey` replaces
+ * every character outside `[A-Za-z0-9._-]`, so no key can contain an `@` and no issue identifier,
+ * however hostile, can be sanitized into this name. A rule that instead excluded a spellable name
+ * such as `.trash` would have to be kept in step with the sanitizer forever.
+ */
+export const trashDirectoryName = '@trash'
+
 export const isStrictDescendant = (root: string, candidate: string): boolean => {
   const difference = relative(root, candidate)
   return (
@@ -53,6 +63,30 @@ export const containedWorkspacePath = (
   }
   return Either.right(candidate)
 }
+
+export const containedTrashRoot = (root: string): Either.Either<string, WorkspaceError> =>
+  containedWorkspacePath(root, trashDirectoryName)
+
+/**
+ * Where a workspace goes when it is retired, so that its canonical path is free for reuse before
+ * anything is deleted.
+ *
+ * `unique` separates successive removals of one key, and separates both from an entry stranded by
+ * an earlier crash; the caller supplies it so this stays a function of its inputs. It is appended
+ * to the key rather than replacing it, because an operator looking in the trash root should be able
+ * to tell which workspace an entry came from.
+ *
+ * The entry is contained against the trash root by the same rule that contains a workspace against
+ * the workspace root, so a key that would escape is rejected here too.
+ */
+export const containedTrashEntryPath = (
+  root: string,
+  key: string,
+  unique: string,
+): Either.Either<string, WorkspaceError> =>
+  Either.flatMap(containedTrashRoot(root), (trashRoot) =>
+    containedWorkspacePath(trashRoot, `${key}-${unique}`),
+  )
 
 /**
  * The identity of a verified workspace directory. The path alone is not enough: a path string is

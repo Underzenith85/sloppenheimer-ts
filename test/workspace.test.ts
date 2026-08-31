@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { access, mkdir, readFile, rm, symlink } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
 import { Clock, Effect, Either, Fiber } from 'effect'
@@ -8,7 +8,11 @@ import { afterEach, describe, expect } from 'vitest'
 import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
 import type { HooksConfig } from '../src/config/workflow.js'
 import { makeWorkspaceManager } from '../src/adapters/node/workspace-manager.js'
-import { containedWorkspacePath, workspaceKey } from '../src/domain/workspace-containment.js'
+import {
+  containedWorkspacePath,
+  trashDirectoryName,
+  workspaceKey,
+} from '../src/domain/workspace-containment.js'
 import type { WorkspaceManagerPort } from '../src/ports/workspace.js'
 import { hostFileSystem } from './harness/filesystem.js'
 import { processIsAlive } from './harness/processes.js'
@@ -346,6 +350,63 @@ describe('workspace inspection and cleanup', (): void => {
       expect((yield* Effect.flip(manager.exists(identifier)))._tag).toBe('WorkspaceError')
       expect((yield* Effect.flip(manager.remove(identifier)))._tag).toBe('WorkspaceError')
       yield* host(() => expect(access(join(outside, 'hook-ran'))).rejects.toThrow())
+    }),
+  )
+
+  /**
+   * Removal frees the canonical path by renaming into the trash root and then sweeping it, so the
+   * observable contract is unchanged: nothing is left behind, including in the trash root itself.
+   */
+  it.live('leaves neither the workspace nor a trash entry behind', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const manager = yield* workspaceManager(root, hooks())
+      const workspace = yield* manager.create(issueIdentifier('GH-13'))
+      yield* host(() => writeFile(join(workspace.path, 'work.txt'), 'agent output'))
+
+      yield* manager.remove(issueIdentifier('GH-13'))
+
+      yield* host(() => expect(access(workspace.path)).rejects.toThrow())
+      expect(yield* host(() => readdir(join(root, trashDirectoryName)))).toEqual([])
+    }),
+  )
+
+  /** The point of the rename: the path is reusable, and what the last attempt left is not there. */
+  it.live('reuses the freed path for a fresh workspace', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = issueIdentifier('GH-14')
+      const first = yield* manager.create(identifier)
+      yield* host(() => writeFile(join(first.path, 'stale.txt'), 'from the last attempt'))
+      yield* manager.remove(identifier)
+
+      const second = yield* manager.create(identifier)
+
+      expect(second.path).toBe(first.path)
+      expect(second.createdNow).toBe(true)
+      yield* host(() => expect(access(join(second.path, 'stale.txt'))).rejects.toThrow())
+    }),
+  )
+
+  /**
+   * A host that died between the rename and the delete leaves an entry nothing owns. The next
+   * removal clears it, including a removal that found no workspace of its own to retire.
+   */
+  it.live('sweeps a trash entry stranded by an earlier run', () =>
+    Effect.gen(function* () {
+      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      roots.push(root)
+      const stranded = join(root, trashDirectoryName, 'GH-1-0000')
+      yield* host(() => mkdir(stranded, { recursive: true }))
+      yield* host(() => writeFile(join(stranded, 'left-over.txt'), 'from a dead run'))
+      const manager = yield* workspaceManager(root, hooks())
+
+      yield* manager.remove(issueIdentifier('GH-15'))
+
+      expect(yield* host(() => readdir(join(root, trashDirectoryName)))).toEqual([])
     }),
   )
 
