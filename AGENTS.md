@@ -15,6 +15,36 @@ The following port boundary was accepted in the 2026-08-30 architecture review:
 
 This convention is the architecture record for the boundary. Do not create a separate ADR for it.
 
+## Agent runners
+
+The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/symphony-ts/issues/214),
+against the design in `docs/agent-runner-claude-code.md`. This section is the architecture record for
+it; do not create a separate ADR.
+
+- A workflow selects its coding agent with `runner: {kind, settings}`, the same shape `tracker` uses.
+  `settings` is preserved exactly as authored and validated only by the adapter owning the kind.
+- `AgentRunnerConfig` carries only what the core consumes — `command`, `turnTimeoutMs`,
+  `readTimeoutMs`, `stallTimeoutMs` — plus the opaque validated `settings`. A second backend adds no
+  field to it. Backend policy values (Codex's approval policy and sandbox modes) are validated in
+  that backend's adapter, never in `packages/core`.
+- Each `AgentEvent` states its own `lifecycle`. The orchestrator must never recognize a session
+  transition by matching a runner's event names: that was the defect #214 removed, and it fails
+  silently rather than loudly. `AgentEventSemantics` was deleted rather than extended, because an
+  event that carries its own meaning cannot be consulted for the wrong runner.
+- `packages/core` names no backend. `test/runner-neutrality.test.ts` enforces that, with the
+  `@codex review` handoff vocabulary as the one listed carve-out — that names a code-review
+  provider, not the agent that authored the change.
+- Authentication environment names belong to the registered runner, not to a core constant. The
+  loader refuses a tracker credential that names the _selected_ runner's own authentication, since
+  the host would have to both strip and preserve it.
+- `src/agent-runners.ts` is the only file outside the adapters that names a concrete runner kind.
+  Adding a backend is one entry there and no change under `config/` or `core/`.
+- The runner is bound once at startup and has no cell: it holds no per-workflow state, so everything
+  that varies reaches it on the launch. A reload may change how it is configured, but a reload that
+  changes `runner.kind` is refused with an operator-visible error and the last known good workflow
+  stays in force. Do not add a runner cell to make that reload succeed without a deliberate design
+  decision about what happens to a session already running under the previous kind.
+
 ## Repository structure
 
 Symphony is a private pnpm workspace. `pnpm-workspace.yaml` declares `packages/*` beside the

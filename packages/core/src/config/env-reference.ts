@@ -5,15 +5,6 @@ import { WorkflowError } from '../domain/errors.js'
 
 const referencePattern = /^\$([A-Za-z_][A-Za-z0-9_]*)$/u
 
-/**
- * Codex owns these authentication sources. Tracker configuration may never reuse them, and the
- * host never strips them from Codex subprocess environments.
- */
-export const codexAuthenticationEnvironmentNames: ReadonlySet<string> = new Set([
-  'OPENAI_API_KEY',
-  'CODEX_ACCESS_TOKEN',
-])
-
 export const environmentReferenceName = (value: string): string | null => {
   const match = referencePattern.exec(value)
   return match?.[1] ?? null
@@ -67,6 +58,11 @@ export type ResolvedSecretReference = Readonly<{
 /**
  * Resolves `$VAR` indirection for a declared secret field. Literal credentials are rejected so
  * repository-owned workflow files never carry plaintext tokens.
+ *
+ * Whether the resolved name collides with the selected runner's own authentication is not decided
+ * here: only the workflow loader knows which runner was selected, so it makes that check against
+ * the names the adapter reports once both selections are validated. A rule about two adapters
+ * cannot live inside either one.
  */
 export const resolveSecretReference = (
   value: string,
@@ -78,14 +74,6 @@ export const resolveSecretReference = (
       new WorkflowError({
         category: 'invalid_config',
         message: `${name} must reference an environment variable; literal credentials are not allowed in repository-owned workflow files`,
-      }),
-    )
-  }
-  if (codexAuthenticationEnvironmentNames.has(environmentName)) {
-    return Effect.fail(
-      new WorkflowError({
-        category: 'invalid_config',
-        message: `${name} must not use Codex authentication environment variable ${environmentName}`,
       }),
     )
   }

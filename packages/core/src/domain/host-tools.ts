@@ -1,6 +1,10 @@
 import type { IssueIdentifier, JsonObject, JsonValue } from './domain.js'
 
-/** A provider-native function exposed to Codex through the App Server dynamic-tool protocol. */
+/**
+ * A provider-native function the host exposes to the running agent. How it reaches the agent is the
+ * runner adapter's business — a dynamic-tool protocol for one backend, an MCP server for another —
+ * so nothing about the transport appears in this shape.
+ */
 export type HostToolSpec = Readonly<{
   name: string
   description: string

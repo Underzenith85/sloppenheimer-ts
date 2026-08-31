@@ -813,7 +813,8 @@ export const startOrchestratorRuntime = (
     ): Effect.Effect<RunningEntry> =>
       Effect.gen(function* () {
         const applied = Transitions.applyRunEvent(entry, update)
-        if (applied.sessionId !== null && update.event === 'session_started') {
+        const lifecycle = update.lifecycle
+        if (applied.sessionId !== null && lifecycle?.phase === 'session_started') {
           yield* logInfo('action=session outcome=started', {
             ...sessionLogContext(applied),
             action: 'session',
@@ -821,7 +822,7 @@ export const startOrchestratorRuntime = (
             error: null,
           })
         }
-        if (applied.sessionId !== null && update.event === 'turn_started') {
+        if (applied.sessionId !== null && lifecycle?.phase === 'turn_started') {
           yield* logInfo('action=turn outcome=started', {
             ...sessionLogContext(applied),
             action: 'turn',
@@ -830,21 +831,24 @@ export const startOrchestratorRuntime = (
           })
           return { ...applied, turnActive: true }
         }
-        if (
-          applied.sessionId !== null &&
-          (update.event === 'turn/completed' ||
-            update.event === 'turn/failed' ||
-            update.event === 'turn/terminated') &&
-          update.turnStatus !== null
-        ) {
-          const outcome = ports.agentRunner.semantics.turnOutcome(update.turnStatus)
+        if (applied.sessionId !== null && lifecycle?.phase === 'turn_settled') {
+          // The runner states the outcome on the settling event, so nothing here interprets one
+          // backend's status vocabulary. `turnStatus` survives only as the operator-facing detail.
+          const outcome = lifecycle.outcome
           const completed = outcome === 'completed'
           const cancelled = outcome === 'cancelled'
           yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
             ...sessionLogContext(applied),
             action: 'turn',
             outcome,
-            error: completed || cancelled ? null : `turn finished with status ${update.turnStatus}`,
+            // The outcome is the authoritative fact; a runner that reports no status string of
+            // its own must still produce a legible line rather than one naming `null`.
+            error:
+              completed || cancelled
+                ? null
+                : update.turnStatus === null
+                  ? `turn finished as ${outcome}`
+                  : `turn finished with status ${update.turnStatus}`,
           })
           return { ...applied, turnActive: false }
         }

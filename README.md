@@ -159,10 +159,10 @@ name, or label, and the `name` a thread reads back with is server-derived with n
 so Symphony sends none. `test/installed-codex.integration.test.ts` asserts that against the
 installed `codex app-server generate-json-schema` and fails as soon as such a field appears.
 
-Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
-`codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
+Three timeouts stay distinct. `runner.read_timeout_ms` bounds one request/response round trip.
+`runner.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
 re-arms it, so a long but active turn never expires while a genuinely silent one does.
-`codex.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
+`runner.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
 
 The App Server runs in its own process group. Shutdown, cancellation and interruption signal the
 whole tree — `SIGTERM`, then `SIGKILL` after a bounded grace — so tools the App Server itself
@@ -201,7 +201,7 @@ asks would let the agent negotiate the containment that verifying the workspace 
 exists to establish. Symphony answers in the shape the protocol requires — so the turn proceeds
 rather than stalling — while granting nothing beyond the sandbox already configured, and records a
 `permissions_grant_withheld` event. Widening is an operator decision made in `WORKFLOW.md` through
-`codex.turn_sandbox_policy`, where it is reviewable, not one made by the agent mid-turn.
+`runner.settings.turn_sandbox_policy`, where it is reviewable, not one made by the agent mid-turn.
 
 `test/fixtures/fake-app-server.ts` is a deterministic stand-in used by the protocol suite; a
 separate test compares the methods, policy values, and permission types this client sends against
@@ -421,31 +421,48 @@ rather than as the first exception a decoder happened to throw.
 
 ### Defaults
 
-| Key                           | Default                                     |
-| ----------------------------- | ------------------------------------------- |
-| `tracker.required_labels`     | `[]`                                        |
-| `tracker.active_states`       | `[open]`                                    |
-| `tracker.terminal_states`     | `[closed]`                                  |
-| `polling.interval_ms`         | `30000`                                     |
-| `workspace.root`              | `<tmpdir>/symphony_workspaces`              |
-| `hooks.timeout_ms`            | `60000`                                     |
-| `agent.max_concurrent_agents` | `10`                                        |
-| `agent.max_turns`             | `20`                                        |
-| `agent.max_retry_backoff_ms`  | `300000`                                    |
-| `codex.command`               | `codex app-server`                          |
-| `codex.approval_policy`       | `never`                                     |
-| `codex.thread_sandbox`        | `workspace-write`                           |
-| `codex.turn_sandbox_policy`   | unset (host-derived workspace-write policy) |
-| `codex.turn_timeout_ms`       | `3600000`                                   |
-| `codex.read_timeout_ms`       | `5000`                                      |
-| `codex.stall_timeout_ms`      | `300000` (`0` disables stall detection)     |
-| `server.port`                 | unset (no operator console)                 |
+| Key                           | Default                                  |
+| ----------------------------- | ---------------------------------------- |
+| `tracker.required_labels`     | `[]`                                     |
+| `tracker.active_states`       | `[open]`                                 |
+| `tracker.terminal_states`     | `[closed]`                               |
+| `polling.interval_ms`         | `30000`                                  |
+| `workspace.root`              | `<tmpdir>/symphony_workspaces`           |
+| `hooks.timeout_ms`            | `60000`                                  |
+| `agent.max_concurrent_agents` | `10`                                     |
+| `agent.max_turns`             | `20`                                     |
+| `agent.max_retry_backoff_ms`  | `300000`                                 |
+| `runner.kind`                 | `codex`                                  |
+| `runner.command`              | the selected runner's own default        |
+| `runner.turn_timeout_ms`      | `3600000`                                |
+| `runner.read_timeout_ms`      | `5000`                                   |
+| `runner.stall_timeout_ms`     | `300000` (`0` disables stall detection)  |
+| `runner.settings`             | `{}` (validated by the selected adapter) |
+| `server.port`                 | unset (no operator console)              |
 
-`codex.approval_policy` accepts `untrusted`, `on-request`, or `never`, and
-`codex.thread_sandbox` accepts `read-only`, `workspace-write`, or `danger-full-access`; both are
-Codex-owned values that must stay aligned with the generated App Server schemas.
-`codex.turn_sandbox_policy` is an escape hatch: when set, the map is passed to `turn/start` as
-`sandboxPolicy` verbatim instead of the host-derived workspace-write policy.
+### Selecting an agent runner
+
+`runner.kind` selects the coding agent, the same way `tracker.kind` selects the issue tracker. The
+four fields beside it are the ones the host consumes itself; `runner.settings` is preserved exactly
+as authored and validated only by the adapter that owns the kind, so the host never has to know what
+values a particular backend permits. `runner.command` defaults to that adapter's own launch command
+(`codex app-server` for `codex`), because naming an executable is the one part of the neutral
+configuration only the backend can supply.
+
+For `kind: codex`, `runner.settings` accepts `approval_policy` (`untrusted`, `on-request`, or
+`never`), `thread_sandbox` (`read-only`, `workspace-write`, or `danger-full-access`) — both
+Codex-owned values that must stay aligned with the generated App Server schemas — and
+`turn_sandbox_policy`, an escape hatch that is passed to `turn/start` as `sandboxPolicy` verbatim
+instead of the host-derived workspace-write policy.
+
+A top-level `codex:` block is the deprecated spelling of `runner: {kind: codex}`: its `command` and
+three timeouts are the runner's own fields, and every other key it carries becomes `runner.settings`.
+Every workflow written before `runner` existed therefore loads unchanged. Declaring both `runner`
+and `codex` is a configuration error rather than a merge.
+
+The runner is selected once, at startup. It holds no per-workflow state, so unlike the tracker it
+has no cell to be replaced through: a reload may change everything about how it is configured, but a
+reload that changes `runner.kind` is refused and the last known good workflow stays in force.
 
 ### Workspace hooks
 
@@ -473,7 +490,7 @@ never left behind. Hook scripts are never written to the log, because they may e
 declared path field: it resolves a bare `$VAR` reference, expands a leading `~`, and resolves
 relative values against the workflow file's directory. Each tracker adapter declares its own secret
 fields; for GitHub that is `tracker.provider.token`, which must be a `$VAR` reference. Every other
-string — including `codex.command` and hook scripts — is used literally, so a `$VAR` inside a hook
+string — including `runner.command` and hook scripts — is used literally, so a `$VAR` inside a hook
 is expanded by the hook shell rather than by the loader.
 
 Every one of these reads goes through Effect's `Config`, resolved against the `ConfigProvider` the

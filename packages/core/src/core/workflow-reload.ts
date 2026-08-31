@@ -1,5 +1,6 @@
 import { Effect, Either, MutableRef, Option, Ref } from 'effect'
 
+import { sameAgentRunner } from '../domain/agent-runner-provider.js'
 import { sameTrackerProvider } from '../domain/tracker-provider.js'
 import { currentInstant } from '../support/clock.js'
 import type { Workflow } from '../config/workflow.js'
@@ -56,6 +57,18 @@ const requireCapability = (
   port: CodeReviewPort | null,
 ): Effect.Effect<CodeReviewPort, WorkflowError> =>
   port === null ? Effect.fail(handoffCapabilityMissing(workflow)) : Effect.succeed(port)
+
+/**
+ * A reload may change everything about how the selected runner is configured, but not which runner
+ * it is: the runner was bound once at startup and there is no cell to replace it through. Refusing
+ * the change keeps the last known good workflow in force and tells the operator why, which is the
+ * one outcome a silent no-op could not.
+ */
+const runnerKindChanged = (bound: string, workflow: Workflow): WorkflowError =>
+  new WorkflowError({
+    category: 'invalid_config',
+    message: `runner.kind changed from ${bound} to ${workflow.runner.kind}; restart the host to select a different agent runner`,
+  })
 
 const sourceControlCapabilityMissing = (workflow: Workflow): WorkflowError =>
   new WorkflowError({
@@ -157,6 +170,9 @@ export const rebuildEffectiveWorkflow = (
   Effect.suspend(() => {
     const replaced: Replaced = []
     return Effect.gen(function* () {
+      if (workflow.runner.kind !== ports.agentRunner.kind) {
+        return yield* Effect.fail(runnerKindChanged(ports.agentRunner.kind, workflow))
+      }
       const tracker = yield* rebuildCell(
         ports.trackerCell,
         'tracker',
@@ -194,9 +210,15 @@ export const rebuildEffectiveWorkflow = (
   })
 
 /**
- * Re-reads the tracker credentials the workflow references and, when they have changed, rebuilds
- * the two ports that were constructed from them. The workspace manager is untouched: nothing about
- * it is derived from a credential.
+ * Re-reads the credentials the workflow references and, when they have changed, installs the
+ * revalidated selections and rebuilds the ports constructed from them. The workspace manager is
+ * untouched: nothing about it is derived from a credential.
+ *
+ * Both selections are installed, not just the tracker's. The runner has no cell to rebuild — it
+ * holds no per-workflow state, and everything that varies reaches it on the launch — so installing
+ * it is exactly replacing it on the workflow the next execution snapshot is captured from. Leaving
+ * that out would let a rotated runner credential pass preflight, which revalidates it, and then
+ * launch the subprocess with the superseded value.
  */
 export const revalidateCredentials = (
   context: OrchestratorContext,
@@ -204,17 +226,27 @@ export const revalidateCredentials = (
 ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
   context.ports.workflowLoader.preflight(effective.workflow).pipe(
     Effect.flatMap((validated) => {
-      if (sameTrackerProvider(validated, effective.workflow.tracker)) {
+      const trackerChanged = !sameTrackerProvider(validated.tracker, effective.workflow.tracker)
+      const runnerChanged = !sameAgentRunner(validated.runner, effective.workflow.runner)
+      if (!trackerChanged && !runnerChanged) {
         return Effect.succeed(effective)
       }
-      const workflow: Workflow = { ...effective.workflow, tracker: validated }
+      const workflow: Workflow = {
+        ...effective.workflow,
+        tracker: validated.tracker,
+        runner: validated.runner,
+      }
+      if (!trackerChanged) {
+        // Only the runner moved, and it has no cell: the replaced workflow is the whole install.
+        return Effect.succeed({ ...effective, workflow })
+      }
       const replaced: Replaced = []
       return Effect.gen(function* () {
         const tracker = yield* rebuildCell(
           context.ports.trackerCell,
           'tracker',
           replaced,
-          validated,
+          validated.tracker,
         ).pipe(Effect.mapError(portConfigurationError))
         const codeReview = yield* rebuildCodeReview(context.ports, replaced, workflow)
         const sourceControl = yield* rebuildSourceControl(

@@ -51,6 +51,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     sessionId: 'thread-1:turn-1',
     turnCount: 1,
     turnStatus: null,
+    lifecycle: null,
     payload: {
       kind: 'message',
       role: 'assistant',
@@ -70,6 +71,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     sessionId: 'thread-1:turn-1',
     turnCount: 1,
     turnStatus: null,
+    lifecycle: null,
     payload: {
       kind: 'command',
       program: 'pnpm',

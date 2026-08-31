@@ -24,6 +24,7 @@ import {
   type AgentEvent,
 } from '@symphony/core/telemetry.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
+import { auroraRunner } from '../harness/alien-agent-runner.js'
 
 /**
  * These exercise the scheduler's transitions directly: no orchestrator, no mailbox, no ports. A
@@ -39,6 +40,7 @@ const workflow: Workflow = {
   fingerprint: 'test',
   promptTemplate: 'test',
   tracker: stubProvider('token'),
+  runner: auroraRunner(),
   config: {
     tracker: {
       kind: 'stub',
@@ -62,14 +64,12 @@ const workflow: Workflow = {
       maxRetryBackoffMs: 300_000,
       maxConcurrentAgentsByState: new Map(),
     },
-    codex: {
+    runner: {
       command: 'codex app-server',
-      approvalPolicy: 'never',
-      threadSandbox: 'workspace-write',
-      turnSandboxPolicy: null,
       turnTimeoutMs: 60_000,
       readTimeoutMs: 5_000,
       stallTimeoutMs: 30_000,
+      settings: { tempo: 'largo' },
     },
     serverPort: null,
     extensions: {},
@@ -115,7 +115,7 @@ const execution = {
   secretEnvironmentNames: [],
   workspaceRoot: workflow.config.workspaceRoot,
   prompt: '',
-  agentRunner: workflow.config.codex,
+  agentRunner: { ...workflow.config.runner, settings: workflow.runner.settings },
   maxTurns: 1,
   stallTimeoutMs: 30_000,
   tracker: unusedPorts.tracker,
@@ -211,6 +211,9 @@ const agentEvent = (
   event: 'item/agentMessage',
   timestamp: new Date('2026-01-01T00:00:05.000Z'),
   processId: 42,
+  // A turn ends when the runner says so. Overrides that name a terminal event state it too, the
+  // way an adapter does, rather than relying on the event name being recognized.
+  lifecycle: null,
   message: null,
   usage: null,
   rateLimits: null,
@@ -223,12 +226,16 @@ const agentEvent = (
   ...overrides,
 })
 
-/** The event that ends a turn, at a later instant than the activity that preceded it. */
+/**
+ * The event that ends a turn, at a later instant than the activity that preceded it. The runner
+ * states that the turn settled; the status beside it is retained detail, not what is read.
+ */
 const turnCompleted = (turnId: string, sessionId: string, turnCount: number): AgentEvent =>
   agentEvent(turnId, sessionId, turnCount, {
     event: 'turn/completed',
     turnStatus: 'completed',
     timestamp: new Date('2026-01-01T00:00:08.000Z'),
+    lifecycle: { phase: 'turn_settled', outcome: 'completed' },
   })
 
 describe('turn identity', (): void => {
