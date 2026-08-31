@@ -1,6 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as NodeStream from '@effect/platform-node/NodeStream'
-import { Config, Effect, Fiber, Redacted, Runtime, Stream, type Scope } from 'effect'
+import {
+  Config,
+  Deferred,
+  Effect,
+  Fiber,
+  Option,
+  Queue,
+  Redacted,
+  Ref,
+  Runtime,
+  Stream,
+  type Scope,
+} from 'effect'
 
 import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.js'
@@ -84,27 +96,63 @@ export const sessionSecretValues = (
 type PendingRequest = Readonly<{
   method: string
   turnCount: number | null
-  resolve: (value: JsonValue) => void
-  reject: (error: AgentError) => void
-  timeout: NodeJS.Timeout
+  reply: Deferred.Deferred<JsonValue, AgentError>
 }>
 
-type TurnWaiter = Readonly<{
-  resolve: () => void
-  reject: (error: AgentError) => void
-  timeout: NodeJS.Timeout
+type TurnState = Readonly<{
+  settlement: Deferred.Deferred<void, AgentError>
+  activity: Queue.Queue<void>
+  timerStarted: boolean
 }>
 
-/**
- * How a turn ended. Whatever observes the end — a lifecycle notification, a request Symphony
- * cannot serve, the turn timeout, or the session dying — records one of these against the turn id,
- * and the first record wins. That single rule replaces the precedence questions that arise once
- * "completed", "failed", and "the session died" live in separate places: a turn the server already
- * reported keeps its own result, and a later session-level error cannot overwrite or mask it.
- */
-type TurnSettlement =
-  | Readonly<{ _tag: 'completed' }>
-  | Readonly<{ _tag: 'failed'; error: AgentError }>
+type TurnSelection =
+  | Readonly<{ _tag: 'turn'; turn: TurnState }>
+  | Readonly<{ _tag: 'error'; error: AgentError }>
+
+type RequestRegistration =
+  | Readonly<{ _tag: 'registered'; id: number }>
+  | Readonly<{ _tag: 'error'; error: AgentError }>
+
+type ConnectionState = Readonly<{
+  pending: ReadonlyMap<number, PendingRequest>
+  turns: ReadonlyMap<string, TurnState>
+  turnUsage: ReadonlyMap<string, NonNullable<AgentEvent['usage']>>
+  startedTurns: ReadonlySet<string>
+  turnCounts: ReadonlyMap<string, number>
+  pendingRateLimits: JsonObject | null
+  rateLimitsReady: boolean
+  nextId: number
+  closed: boolean
+  terminalError: AgentError | null
+  threadId: string | null
+  turnId: string | null
+  turnCount: number
+}>
+
+const initialConnectionState: ConnectionState = {
+  pending: new Map(),
+  turns: new Map(),
+  turnUsage: new Map(),
+  startedTurns: new Set(),
+  turnCounts: new Map(),
+  pendingRateLimits: null,
+  rateLimitsReady: false,
+  nextId: 1,
+  closed: false,
+  terminalError: null,
+  threadId: null,
+  turnId: null,
+  turnCount: 0,
+}
+
+/** Preserve the class's Promise API by rejecting with the typed failure, not Effect's FiberFailure. */
+const runAgentPromise = async <Value>(effect: Effect.Effect<Value, AgentError>): Promise<Value> => {
+  const result = await Effect.runPromise(Effect.either(effect))
+  if (result._tag === 'Left') {
+    throw result.left
+  }
+  return result.right
+}
 
 const errorMessage = (value: JsonValue): string => {
   if (!isJsonObject(value)) {
@@ -274,26 +322,8 @@ class CodexConnection {
   readonly #stdout: Fiber.RuntimeFiber<void>
   /** The fiber reading diagnostic records from the child's stderr. */
   readonly #stderr: Fiber.RuntimeFiber<void>
-  readonly #pending = new Map<number, PendingRequest>()
-  /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
-  readonly #settled = new Map<string, TurnSettlement>()
-  /** Callers waiting on turns that have not settled yet. */
-  readonly #waiters = new Map<string, TurnWaiter>()
-  readonly #turnUsage = new Map<string, NonNullable<AgentEvent['usage']>>()
-  readonly #startedTurns = new Set<string>()
-  readonly #turnCounts = new Map<string, number>()
-  #pendingRateLimits: JsonObject | null = null
-  #rateLimitsReady = false
-  #nextId = 1
-  #closed = false
-  /**
-   * Why the session as a whole is unusable. It answers only turns that never settled — a turn with
-   * a settlement of its own is already decided.
-   */
-  #terminalError: AgentError | null = null
-  #threadId: string | null = null
-  #turnId: string | null = null
-  #turnCount = 0
+  readonly #state: Ref.Ref<ConnectionState>
+  readonly #fork: ForkReader
 
   constructor(
     command: string,
@@ -307,6 +337,7 @@ class CodexConnection {
     hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
     fork: ForkReader,
+    state: Ref.Ref<ConnectionState>,
   ) {
     // The full host environment, minus the names this session must not hand down. It is read here
     // rather than described as a `Config`, because what the child inherits is every remaining
@@ -325,6 +356,8 @@ class CodexConnection {
     this.#readTimeoutMs = config.readTimeoutMs
     this.#turnTimeoutMs = config.turnTimeoutMs
     this.#onEvent = onEvent
+    this.#fork = fork
+    this.#state = state
 
     // stdout carries protocol framing only. Reading it as a stream keeps the framing state in
     // the pipeline rather than in the connection, and lets the framing limit end the read the way
@@ -336,22 +369,8 @@ class CodexConnection {
           new AgentError({ category: 'protocol_error', message: 'Codex stdout failed', cause }),
       ).pipe(
         protocolLines(codexMaxLineBytes),
-        Stream.runForEach((line) =>
-          Effect.sync(() => {
-            // A closed session has already reported how it ended; nothing still in the pipe can
-            // change that, and dispatching it would answer requests that were failed on close.
-            if (!this.#closed) {
-              this.#receiveLine(line)
-            }
-          }),
-        ),
-        Effect.catchAll((error) =>
-          Effect.sync(() => {
-            if (!this.#closed) {
-              this.#fail(error)
-            }
-          }),
-        ),
+        Stream.runForEach((line) => this.#receiveLine(line)),
+        Effect.catchAll((error) => this.#failUnlessClosed(error)),
       ),
     )
 
@@ -372,31 +391,32 @@ class CodexConnection {
         Stream.catchAll(() => Stream.empty),
         diagnosticLines(codexMaxLineBytes),
         diagnosticRecords,
-        Stream.runForEach((message) =>
-          Effect.sync(() => {
-            this.#emit('diagnostic', message)
-          }),
-        ),
+        Stream.runForEach((message) => this.#emit('diagnostic', message)),
         Effect.catchAll(() =>
-          Effect.sync(() => {
-            this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
-            // Framing has given up on this stream, but the child has not stopped writing to it.
-            // Keep emptying the pipe and discard what arrives: a full stderr buffer blocks the App
-            // Server mid-protocol, which would turn a diagnostic-only overflow into a dead turn.
-            this.#process.stderr.resume()
-          }),
+          this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit').pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                // Framing has given up on this stream, but the child has not stopped writing to it.
+                // Keep emptying the pipe and discard what arrives: a full stderr buffer blocks the App
+                // Server mid-protocol, which would turn a diagnostic-only overflow into a dead turn.
+                this.#process.stderr.resume()
+              }),
+            ),
+          ),
         ),
       ),
     )
 
     this.#process.once('error', (cause) => {
-      this.#fail(
-        new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
+      void Effect.runPromise(
+        this.#fail(
+          new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
+        ),
       )
     })
     this.#process.once('exit', (code, signal) => {
-      if (!this.#closed) {
-        this.#fail(
+      void Effect.runPromise(
+        this.#failUnlessClosed(
           new AgentError({
             category: 'process_exited',
             message:
@@ -404,8 +424,8 @@ class CodexConnection {
                 ? `Codex process exited with ${String(code)}`
                 : `Codex process terminated by ${signal}`,
           }),
-        )
-      }
+        ),
+      )
     })
   }
 
@@ -426,12 +446,15 @@ class CodexConnection {
         message: 'account/rateLimits/read returned no rate-limit snapshot',
       })
     }
-    const rateLimits = mergeSparseObject(
-      rateLimitsResult['rateLimits'],
-      this.#pendingRateLimits ?? {},
+    const rateLimits = await Effect.runPromise(
+      Ref.modify(this.#state, (state) => [
+        mergeSparseObject(
+          rateLimitsResult['rateLimits'] as JsonObject,
+          state.pendingRateLimits ?? {},
+        ),
+        { ...state, pendingRateLimits: null, rateLimitsReady: true },
+      ]),
     )
-    this.#pendingRateLimits = null
-    this.#rateLimitsReady = true
     this.#onEvent({
       event: 'account/rateLimits/read',
       timestamp: new Date(),
@@ -466,8 +489,9 @@ class CodexConnection {
         message: 'thread/start returned no thread id',
       })
     }
-    this.#threadId = result['thread']['id']
-    return this.#threadId
+    const threadId = result['thread']['id']
+    await Effect.runPromise(Ref.update(this.#state, (state) => ({ ...state, threadId })))
+    return threadId
   }
 
   async startTurn(
@@ -508,82 +532,130 @@ class CodexConnection {
   /**
    * Waits for a turn to finish. Everything that could have decided it already — a completion the
    * App Server emitted in the same batch as the `turn/start` response, a request Symphony could not
-   * serve, a process that died — is one settlement lookup, so this never has to rank one against
-   * another.
+   * serve, a process that died — is the same Deferred, so this never has to rank one against
+   * another. A Deferred retains its result for late waiters.
    */
   awaitTurn(turnId: string): Promise<void> {
-    const settlement = this.#settled.get(turnId)
-    if (settlement !== undefined) {
-      return settlement._tag === 'completed' ? Promise.resolve() : Promise.reject(settlement.error)
-    }
-    // Only a turn that never settled falls back to the session-level reason.
-    if (this.#terminalError !== null) {
-      return Promise.reject(this.#terminalError)
-    }
-    return new Promise<void>((resolvePromise, rejectPromise) => {
-      this.#waiters.set(turnId, {
-        resolve: resolvePromise,
-        reject: rejectPromise,
-        timeout: this.#armTurnTimer(turnId),
-      })
+    return runAgentPromise(
+      this.#turnState(turnId).pipe(
+        Effect.tap((turn) => this.#startTurnTimer(turnId, turn)),
+        Effect.flatMap((turn) => Deferred.await(turn.settlement)),
+      ),
+    )
+  }
+
+  /**
+   * Finds or installs a turn's Deferred. Allocation happens outside the Ref update, while the
+   * update chooses atomically between a concurrently installed value, the session's terminal
+   * error, and this candidate.
+   */
+  #turnState(turnId: string): Effect.Effect<TurnState, AgentError> {
+    return Effect.gen(this, function* () {
+      const settlement = yield* Deferred.make<void, AgentError>()
+      const activity = yield* Queue.unbounded<void>()
+      const candidate: TurnState = { settlement, activity, timerStarted: false }
+      const selected = yield* Ref.modify(
+        this.#state,
+        (state): readonly [TurnSelection, ConnectionState] => {
+          const existing = state.turns.get(turnId)
+          if (existing !== undefined) {
+            return [{ _tag: 'turn' as const, turn: existing }, state]
+          }
+          if (state.terminalError !== null) {
+            return [{ _tag: 'error' as const, error: state.terminalError }, state]
+          }
+          return [
+            { _tag: 'turn' as const, turn: candidate },
+            { ...state, turns: new Map(state.turns).set(turnId, candidate) },
+          ]
+        },
+      )
+      if (selected._tag === 'error') {
+        return yield* Effect.fail(selected.error)
+      }
+      return selected.turn
     })
   }
 
   /**
-   * Records how a turn ended and answers anyone waiting on it. The first settlement wins, so a
-   * later report — including the session dying — cannot overwrite a decided turn.
+   * Completes the turn exactly once. Deferred completion reports whether this call won, which
+   * keeps a later lifecycle notification or session failure from overturning the first result.
    */
-  #settle(turnId: string, settlement: TurnSettlement, reported = false): void {
-    if (this.#settled.has(turnId)) {
-      return
-    }
-    this.#settled.set(turnId, settlement)
-    if (!reported) {
-      const status =
+  #settle(
+    turnId: string,
+    settlement: Readonly<{ _tag: 'completed' }> | Readonly<{ _tag: 'failed'; error: AgentError }>,
+    reported = false,
+  ): Effect.Effect<boolean> {
+    return this.#turnState(turnId).pipe(
+      Effect.flatMap((turn) =>
         settlement._tag === 'completed'
-          ? 'completed'
-          : settlement.error.category === 'turn_timeout'
-            ? 'timed_out'
-            : 'failed'
-      this.#emit('turn/terminated', null, { threadId: null, turnId }, status)
-    }
-    const waiter = this.#waiters.get(turnId)
-    if (waiter === undefined) {
-      return
-    }
-    this.#waiters.delete(turnId)
-    clearTimeout(waiter.timeout)
-    if (settlement._tag === 'completed') {
-      waiter.resolve()
-      return
-    }
-    waiter.reject(settlement.error)
+          ? Deferred.succeed(turn.settlement, undefined)
+          : Deferred.fail(turn.settlement, settlement.error),
+      ),
+      Effect.tap((won) => {
+        if (!won || reported) {
+          return Effect.void
+        }
+        const status =
+          settlement._tag === 'completed'
+            ? 'completed'
+            : settlement.error.category === 'turn_timeout'
+              ? 'timed_out'
+              : 'failed'
+        return this.#emit('turn/terminated', null, { threadId: null, turnId }, status)
+      }),
+      Effect.catchAll(() => Effect.succeed(false)),
+    )
   }
 
-  /**
-   * Fails the turn the App Server is working on. A request Symphony cannot serve ends that turn,
-   * and the turn it names — or failing that, the turn in flight — is where the reason belongs. With
-   * no turn to attribute it to the whole session is unusable, so it becomes the terminal reason.
-   */
-  #failCurrentTurn(error: AgentError, turnId: string | null): void {
-    const target = turnId ?? this.#turnId
-    if (target === null) {
-      this.#fail(error)
-      return
-    }
-    this.#settle(target, { _tag: 'failed', error })
+  #failCurrentTurn(error: AgentError, turnId: string | null): Effect.Effect<void> {
+    return Ref.get(this.#state).pipe(
+      Effect.flatMap((state) => {
+        const target = turnId ?? state.turnId
+        return target === null
+          ? this.#fail(error)
+          : this.#settle(target, { _tag: 'failed', error }).pipe(Effect.asVoid)
+      }),
+    )
   }
 
-  #armTurnTimer(turnId: string): NodeJS.Timeout {
-    return setTimeout(() => {
-      this.#settle(turnId, {
-        _tag: 'failed',
-        error: new AgentError({
-          category: 'turn_timeout',
-          message: `turn ${turnId} produced no output for ${String(this.#turnTimeoutMs)}ms`,
-        }),
-      })
-    }, this.#turnTimeoutMs)
+  #startTurnTimer(turnId: string, turn: TurnState): Effect.Effect<void> {
+    return Ref.modify(this.#state, (state) => {
+      const current = state.turns.get(turnId)
+      if (current !== turn || current.timerStarted) {
+        return [false, state]
+      }
+      const started = { ...current, timerStarted: true }
+      return [true, { ...state, turns: new Map(state.turns).set(turnId, started) }]
+    }).pipe(
+      Effect.tap((start) => {
+        if (!start) {
+          return Effect.void
+        }
+        const awaitActivity = (): Effect.Effect<void> =>
+          Queue.take(turn.activity).pipe(
+            Effect.timeoutOption(this.#turnTimeoutMs),
+            Effect.flatMap(
+              Option.match({
+                onNone: () =>
+                  this.#settle(turnId, {
+                    _tag: 'failed',
+                    error: new AgentError({
+                      category: 'turn_timeout',
+                      message: `turn ${turnId} produced no output for ${String(this.#turnTimeoutMs)}ms`,
+                    }),
+                  }).pipe(Effect.asVoid),
+                onSome: () => awaitActivity(),
+              }),
+            ),
+          )
+        this.#fork(
+          Effect.raceFirst(Deferred.await(turn.settlement).pipe(Effect.ignore), awaitActivity()),
+        )
+        return Effect.void
+      }),
+      Effect.asVoid,
+    )
   }
 
   /**
@@ -595,24 +667,34 @@ class CodexConnection {
    * timeout, responses matching nothing, unsupported requests, or session-level notifications that
    * have no bearing on the turn at all.
    */
-  #noteActivity(turnId: string): void {
-    const waiter = this.#waiters.get(turnId)
-    if (waiter === undefined) {
-      return
-    }
-    clearTimeout(waiter.timeout)
-    this.#waiters.set(turnId, { ...waiter, timeout: this.#armTurnTimer(turnId) })
+  #noteActivity(turnId: string): Effect.Effect<void> {
+    return Ref.get(this.#state).pipe(
+      Effect.flatMap((state) => {
+        const turn = state.turns.get(turnId)
+        return turn?.timerStarted === true ? Queue.offer(turn.activity, undefined) : Effect.void
+      }),
+      Effect.asVoid,
+    )
   }
 
   async stop(): Promise<void> {
-    if (this.#closed) {
+    const shouldStop = await Effect.runPromise(
+      Ref.modify(this.#state, (state) =>
+        state.closed ? [false, state] : [true, { ...state, closed: true }],
+      ),
+    )
+    if (!shouldStop) {
       return
     }
-    this.#emit('session_stopped', null)
-    this.#closed = true
-    this.#fail(
-      new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
-      false,
+    await Effect.runPromise(
+      this.#emit('session_stopped', null).pipe(
+        Effect.zipRight(
+          this.#fail(
+            new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
+            false,
+          ),
+        ),
+      ),
     )
     await Effect.runPromise(Fiber.interrupt(this.#stdout))
     this.#process.stdin.end()
@@ -718,115 +800,174 @@ class CodexConnection {
     params: JsonObject,
     turnCount: number | null = null,
   ): Promise<JsonValue> {
-    if (this.#terminalError !== null) {
-      return Promise.reject(this.#terminalError)
-    }
-    const id = this.#nextId
-    this.#nextId += 1
-    return new Promise<JsonValue>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.#pending.delete(id)
-        rejectPromise(
-          new AgentError({ category: 'read_timeout', message: `${method} response timed out` }),
+    return runAgentPromise(
+      Effect.gen(this, function* () {
+        const reply = yield* Deferred.make<JsonValue, AgentError>()
+        const registered = yield* Ref.modify(
+          this.#state,
+          (state): readonly [RequestRegistration, ConnectionState] => {
+            if (state.terminalError !== null) {
+              return [{ _tag: 'error', error: state.terminalError }, state]
+            }
+            const id = state.nextId
+            return [
+              { _tag: 'registered', id },
+              {
+                ...state,
+                nextId: id + 1,
+                pending: new Map(state.pending).set(id, { method, turnCount, reply }),
+              },
+            ]
+          },
         )
-      }, this.#readTimeoutMs)
-      this.#pending.set(id, {
-        method,
-        turnCount,
-        resolve: resolvePromise,
-        reject: rejectPromise,
-        timeout,
-      })
-      this.#write({ id, method, params })
-    })
+        if (registered._tag === 'error') {
+          return yield* Effect.fail(registered.error)
+        }
+        const id = registered.id
+        yield* this.#write({ id, method, params })
+        return yield* Deferred.await(reply).pipe(
+          Effect.timeoutFail({
+            duration: this.#readTimeoutMs,
+            onTimeout: () =>
+              new AgentError({ category: 'read_timeout', message: `${method} response timed out` }),
+          }),
+          Effect.ensuring(
+            Ref.update(this.#state, (state) => {
+              if (state.pending.get(id)?.reply !== reply) {
+                return state
+              }
+              const pending = new Map(state.pending)
+              pending.delete(id)
+              return { ...state, pending }
+            }),
+          ),
+        )
+      }),
+    )
   }
 
   #notify(method: string, params: JsonObject): void {
-    this.#write({ method, params })
+    void Effect.runPromise(this.#write({ method, params }))
   }
 
-  #write(message: JsonObject): void {
-    if (this.#closed) {
-      return
-    }
-    this.#process.stdin.write(`${JSON.stringify(message)}\n`)
+  #write(message: JsonObject): Effect.Effect<void> {
+    return Ref.get(this.#state).pipe(
+      Effect.flatMap((state) =>
+        state.closed
+          ? Effect.void
+          : Effect.sync(() => {
+              this.#process.stdin.write(`${JSON.stringify(message)}\n`)
+            }),
+      ),
+    )
   }
 
-  #receiveLine(line: string): void {
-    if (line.trim().length === 0) {
-      return
-    }
-    let decoded: unknown
-    try {
-      decoded = JSON.parse(line) as unknown
-    } catch {
-      this.#emit('malformed', 'Codex emitted malformed JSON')
-      return
-    }
-    if (!isJsonValue(decoded) || !isJsonObject(decoded)) {
-      this.#emit('malformed', 'Codex emitted a non-object protocol message')
-      return
-    }
-    const parsed = decoded
-    const id = parsed['id']
-    const method = parsed['method']
-    if (
-      typeof id === 'number' &&
-      typeof method !== 'string' &&
-      (parsed['result'] !== undefined || parsed['error'] !== undefined)
-    ) {
-      this.#settleResponse(id, parsed)
-      return
-    }
-    if (typeof method !== 'string') {
-      this.#emit('malformed', 'Codex emitted a message with no method or response payload')
-      return
-    }
-    // `RequestId` is a string or an int64, so a server request carrying a string id is still a
-    // request. Reading it as a notification would leave it unanswered and stall the turn.
-    if (typeof id === 'string' || typeof id === 'number') {
-      this.#handleServerRequest(id, method, parsed)
-      return
-    }
-    this.#handleNotification(method, parsed)
+  #receiveLine(line: string): Effect.Effect<void, AgentError> {
+    return Ref.get(this.#state).pipe(
+      Effect.flatMap((state) => {
+        if (state.closed || line.trim().length === 0) {
+          return Effect.void
+        }
+        let decoded: unknown
+        try {
+          decoded = JSON.parse(line) as unknown
+        } catch {
+          return this.#emit('malformed', 'Codex emitted malformed JSON')
+        }
+        if (!isJsonValue(decoded) || !isJsonObject(decoded)) {
+          return this.#emit('malformed', 'Codex emitted a non-object protocol message')
+        }
+        const parsed = decoded
+        const id = parsed['id']
+        const method = parsed['method']
+        if (
+          typeof id === 'number' &&
+          typeof method !== 'string' &&
+          (parsed['result'] !== undefined || parsed['error'] !== undefined)
+        ) {
+          return this.#settleResponse(id, parsed)
+        }
+        if (typeof method !== 'string') {
+          return this.#emit(
+            'malformed',
+            'Codex emitted a message with no method or response payload',
+          )
+        }
+        if (typeof id === 'string' || typeof id === 'number') {
+          return this.#handleServerRequest(id, method, parsed)
+        }
+        return this.#handleNotification(method, parsed)
+      }),
+    )
   }
 
-  #settleResponse(id: number, parsed: JsonObject): void {
-    const pending = this.#pending.get(id)
-    if (pending === undefined) {
-      // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
-      // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
-      this.#emit('unmatched_response', `no pending request for response id ${String(id)}`)
-      return
-    }
-    clearTimeout(pending.timeout)
-    this.#pending.delete(id)
-    const error = parsed['error']
-    if (error !== undefined) {
-      pending.reject(
-        new AgentError({
-          category: 'protocol_error',
-          message: boundedMessage(errorMessage(error), this.#knownSecretValues),
-        }),
-      )
-      return
-    }
-    const result = parsed['result']
-    if (result === undefined) {
-      pending.reject(
-        new AgentError({ category: 'protocol_error', message: 'response has no result' }),
-      )
-      return
-    }
-    this.#adoptIdentity(result)
-    if (pending.method === 'thread/start' && this.#threadId !== null) {
-      this.#emit('thread_started', null)
-      this.#emit('session_started', null)
-    }
-    if (pending.method === 'turn/start' && pending.turnCount !== null && this.#turnId !== null) {
-      this.#ensureTurnStarted(this.#turnId, pending.turnCount, this.#threadId)
-    }
-    pending.resolve(result)
+  #settleResponse(id: number, parsed: JsonObject): Effect.Effect<void, AgentError> {
+    return Ref.modify(this.#state, (state) => {
+      const pending = state.pending.get(id)
+      if (pending === undefined) {
+        return [undefined, state]
+      }
+      const remaining = new Map(state.pending)
+      remaining.delete(id)
+      return [pending, { ...state, pending: remaining }]
+    }).pipe(
+      Effect.flatMap((pending) => {
+        if (pending === undefined) {
+          // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
+          // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
+          return this.#emit(
+            'unmatched_response',
+            `no pending request for response id ${String(id)}`,
+          )
+        }
+        const error = parsed['error']
+        if (error !== undefined) {
+          return Deferred.fail(
+            pending.reply,
+            new AgentError({
+              category: 'protocol_error',
+              message: boundedMessage(errorMessage(error), this.#knownSecretValues),
+            }),
+          ).pipe(Effect.asVoid)
+        }
+        const result = parsed['result']
+        if (result === undefined) {
+          return Deferred.fail(
+            pending.reply,
+            new AgentError({ category: 'protocol_error', message: 'response has no result' }),
+          ).pipe(Effect.asVoid)
+        }
+        return this.#adoptIdentity(result).pipe(
+          Effect.flatMap((identity) => {
+            const events =
+              pending.method === 'thread/start' && identity.threadId !== null
+                ? this.#emit('thread_started', null).pipe(
+                    Effect.zipRight(this.#emit('session_started', null)),
+                  )
+                : Effect.void
+            const turnStarted =
+              pending.method === 'turn/start' &&
+              pending.turnCount !== null &&
+              identity.turnId !== null
+                ? this.#turnState(identity.turnId).pipe(
+                    Effect.zipRight(
+                      this.#ensureTurnStarted(
+                        identity.turnId,
+                        pending.turnCount,
+                        identity.threadId,
+                      ),
+                    ),
+                  )
+                : Effect.void
+            return events.pipe(
+              Effect.zipRight(turnStarted),
+              Effect.zipRight(Deferred.succeed(pending.reply, result)),
+              Effect.asVoid,
+            )
+          }),
+        )
+      }),
+    )
   }
 
   /**
@@ -836,206 +977,279 @@ class CodexConnection {
    * reader, long before any `await` resumes, so an id adopted by the awaiter would arrive too late
    * and every batched notification would report the previous turn — or none at all.
    */
-  #adoptIdentity(result: JsonValue): void {
+  #adoptIdentity(
+    result: JsonValue,
+  ): Effect.Effect<Readonly<{ threadId: string | null; turnId: string | null }>> {
     if (!isJsonObject(result)) {
-      return
+      return Ref.get(this.#state).pipe(
+        Effect.map((state) => ({ threadId: state.threadId, turnId: state.turnId })),
+      )
     }
     const thread = result['thread']
-    if (isJsonObject(thread) && typeof thread['id'] === 'string') {
-      this.#threadId = thread['id']
-    }
     const turn = result['turn']
-    if (isJsonObject(turn) && typeof turn['id'] === 'string') {
-      this.#turnId = turn['id']
-    }
+    return Ref.modify(this.#state, (state) => {
+      const threadId =
+        isJsonObject(thread) && typeof thread['id'] === 'string' ? thread['id'] : state.threadId
+      const turnId =
+        isJsonObject(turn) && typeof turn['id'] === 'string' ? turn['id'] : state.turnId
+      return [
+        { threadId, turnId },
+        { ...state, threadId, turnId },
+      ]
+    })
   }
 
-  #ensureTurnStarted(turnId: string, turnCount: number, threadId: string | null): void {
-    if (this.#startedTurns.has(turnId)) {
-      return
-    }
-    this.#startedTurns.add(turnId)
-    this.#turnCounts.set(turnId, turnCount)
-    this.#turnId = turnId
-    this.#turnCount = turnCount
-    this.#emit('turn_started', null, { threadId, turnId })
+  #ensureTurnStarted(
+    turnId: string,
+    turnCount: number,
+    threadId: string | null,
+  ): Effect.Effect<void> {
+    return Ref.modify(this.#state, (state) => {
+      if (state.startedTurns.has(turnId)) {
+        return [false, state]
+      }
+      return [
+        true,
+        {
+          ...state,
+          startedTurns: new Set(state.startedTurns).add(turnId),
+          turnCounts: new Map(state.turnCounts).set(turnId, turnCount),
+          turnId,
+          turnCount,
+        },
+      ]
+    }).pipe(
+      Effect.flatMap((started) =>
+        started ? this.#emit('turn_started', null, { threadId, turnId }) : Effect.void,
+      ),
+    )
   }
 
   /** `id` is echoed back in whichever form the server sent it. */
-  #handleServerRequest(id: string | number, method: string, message: JsonObject): void {
+  #handleServerRequest(
+    id: string | number,
+    method: string,
+    message: JsonObject,
+  ): Effect.Effect<void> {
     // A server request declares its own thread and turn, so its events are attributed from the
     // request rather than from connection state, which is null on the first turn and names the
     // previous one afterwards.
     const identity = notificationIdentity(message)
     // Only when the request names its turn; an unattributed one is not evidence that turn is alive.
-    if (identity.turnId !== null) {
-      this.#noteActivity(identity.turnId)
-    }
+    const noteActivity =
+      identity.turnId === null ? Effect.void : this.#noteActivity(identity.turnId)
     if (isPermissionsApproval(method)) {
-      this.#write({ id, result: withheldPermissionsGrant })
-      this.#emit('permissions_grant_withheld', method, identity)
-      return
+      return noteActivity.pipe(
+        Effect.zipRight(this.#write({ id, result: withheldPermissionsGrant })),
+        Effect.zipRight(this.#emit('permissions_grant_withheld', method, identity)),
+      )
     }
     if (isApprovalRequest(method)) {
-      this.#write({ id, result: { decision: 'acceptForSession' } })
-      this.#emit('approval_auto_approved', method, identity)
-      return
+      return noteActivity.pipe(
+        Effect.zipRight(this.#write({ id, result: { decision: 'acceptForSession' } })),
+        Effect.zipRight(this.#emit('approval_auto_approved', method, identity)),
+      )
     }
     if (isUserInputRequest(method)) {
-      this.#write({
-        id,
-        error: { code: -32000, message: 'Symphony does not support interactive input' },
-      })
-      this.#failCurrentTurn(
-        new AgentError({
-          category: 'input_required',
-          message: 'Codex requested interactive input',
-        }),
-        identity.turnId,
+      return noteActivity.pipe(
+        Effect.zipRight(
+          this.#write({
+            id,
+            error: { code: -32000, message: 'Symphony does not support interactive input' },
+          }),
+        ),
+        Effect.zipRight(
+          this.#failCurrentTurn(
+            new AgentError({
+              category: 'input_required',
+              message: 'Codex requested interactive input',
+            }),
+            identity.turnId,
+          ),
+        ),
       )
-      return
     }
     if (method === 'item/tool/call') {
-      void this.#handleHostToolCall(id, message, identity)
-      return
+      this.#fork(this.#handleHostToolCall(id, message, identity))
+      return noteActivity
     }
-    this.#write({ id, error: { code: -32601, message: `Unsupported client request: ${method}` } })
-    this.#emit('unsupported_tool_call', method, identity)
+    return noteActivity.pipe(
+      Effect.zipRight(
+        this.#write({
+          id,
+          error: { code: -32601, message: `Unsupported client request: ${method}` },
+        }),
+      ),
+      Effect.zipRight(this.#emit('unsupported_tool_call', method, identity)),
+    )
   }
 
-  async #handleHostToolCall(
+  #handleHostToolCall(
     id: string | number,
     message: JsonObject,
     identity: Readonly<{ threadId: string | null; turnId: string | null }>,
-  ): Promise<void> {
-    const params = message['params']
-    const tool = isJsonObject(params) ? params['tool'] : undefined
-    const argumentsValue = isJsonObject(params) ? params['arguments'] : undefined
-    let result: HostToolResult
-    if (typeof tool !== 'string' || argumentsValue === undefined) {
-      result = {
-        success: false,
-        error: {
-          code: 'invalid_arguments',
-          message: 'Host tool request is missing tool or arguments',
-          retryable: false,
-        },
-      }
-    } else if (this.#hostTools === null) {
-      result = unsupportedHostTool(tool)
-    } else {
-      try {
-        result = await this.#hostTools.execute(tool, argumentsValue, this.#hostTools.context)
-      } catch {
+  ): Effect.Effect<void> {
+    return Effect.promise(async () => {
+      const params = message['params']
+      const tool = isJsonObject(params) ? params['tool'] : undefined
+      const argumentsValue = isJsonObject(params) ? params['arguments'] : undefined
+      let result: HostToolResult
+      if (typeof tool !== 'string' || argumentsValue === undefined) {
         result = {
           success: false,
           error: {
-            code: 'transport_error',
-            message: 'Host tool execution failed unexpectedly',
-            retryable: true,
+            code: 'invalid_arguments',
+            message: 'Host tool request is missing tool or arguments',
+            retryable: false,
           },
         }
+      } else if (this.#hostTools === null) {
+        result = unsupportedHostTool(tool)
+      } else {
+        try {
+          result = await this.#hostTools.execute(tool, argumentsValue, this.#hostTools.context)
+        } catch {
+          result = {
+            success: false,
+            error: {
+              code: 'transport_error',
+              message: 'Host tool execution failed unexpectedly',
+              retryable: true,
+            },
+          }
+        }
       }
-    }
-    const text = JSON.stringify(result)
-    this.#write({
-      id,
-      result: { success: result.success, contentItems: [{ type: 'inputText', text }] },
+      const text = JSON.stringify(result)
+      await Effect.runPromise(
+        this.#write({
+          id,
+          result: { success: result.success, contentItems: [{ type: 'inputText', text }] },
+        }).pipe(
+          Effect.zipRight(
+            this.#emit(
+              result.success ? 'host_tool_succeeded' : 'host_tool_failed',
+              typeof tool === 'string' ? tool : null,
+              identity,
+            ),
+          ),
+        ),
+      )
     })
-    this.#emit(
-      result.success ? 'host_tool_succeeded' : 'host_tool_failed',
-      typeof tool === 'string' ? tool : null,
-      identity,
-    )
   }
 
-  #handleNotification(method: string, message: JsonObject): void {
-    const turn = this.#turnFrom(message)
-    const carried = notificationIdentity(message)
-    const telemetry = telemetryFrom(method, message)
-    let rateLimits = telemetry.rateLimits
-    if (rateLimits !== null && !this.#rateLimitsReady) {
-      this.#pendingRateLimits = mergeSparseObject(this.#pendingRateLimits, rateLimits)
-      rateLimits = null
-    }
-    // A notification that names its own thread and turn is attributable even when it arrives before
-    // the response that would have taught the connection those ids.
-    const threadId = carried.threadId ?? this.#threadId
-    const turnId = carried.turnId ?? turn?.id ?? this.#turnId
-    const isTerminal = method === 'turn/completed' || method === 'turn/failed'
-    const terminalStatus =
-      isTerminal && turn !== null
-        ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
-        : null
-    if (isTerminal && turn !== null && this.#settled.has(turn.id)) {
-      return
-    }
-    const pendingTurnStart = [...this.#pending.values()].find(
-      (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
-    )
-    if (turnId !== null && pendingTurnStart !== undefined && pendingTurnStart.turnCount !== null) {
-      this.#ensureTurnStarted(turnId, pendingTurnStart.turnCount, threadId)
-    }
-    let usage = telemetry.usage
-    if (method === 'turn/usage' && usage !== null && turnId !== null) {
-      const previous = this.#turnUsage.get(turnId)
-      this.#turnUsage.set(turnId, {
-        inputTokens: Math.max(previous?.inputTokens ?? 0, usage.inputTokens),
-        outputTokens: Math.max(previous?.outputTokens ?? 0, usage.outputTokens),
-        totalTokens: Math.max(previous?.totalTokens ?? 0, usage.totalTokens),
-      })
-      usage = [...this.#turnUsage.values()].reduce(
-        (total, current) => ({
-          inputTokens: total.inputTokens + current.inputTokens,
-          outputTokens: total.outputTokens + current.outputTokens,
-          totalTokens: total.totalTokens + current.totalTokens,
-        }),
-        { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  #handleNotification(method: string, message: JsonObject): Effect.Effect<void, AgentError> {
+    return Effect.gen(this, function* () {
+      const turn = this.#turnFrom(message)
+      const carried = notificationIdentity(message)
+      const telemetry = telemetryFrom(method, message)
+      const isTerminal = method === 'turn/completed' || method === 'turn/failed'
+      const terminalStatus =
+        isTerminal && turn !== null
+          ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
+          : null
+
+      const initial = yield* Ref.get(this.#state)
+      const existingTurn = turn === null ? undefined : initial.turns.get(turn.id)
+      if (
+        isTerminal &&
+        existingTurn !== undefined &&
+        (yield* Deferred.isDone(existingTurn.settlement))
+      ) {
+        return
+      }
+
+      let rateLimits = telemetry.rateLimits
+      if (rateLimits !== null) {
+        const ready = yield* Ref.modify(this.#state, (state) => {
+          if (state.rateLimitsReady) {
+            return [true, state]
+          }
+          return [
+            false,
+            {
+              ...state,
+              pendingRateLimits: mergeSparseObject(state.pendingRateLimits, rateLimits ?? {}),
+            },
+          ]
+        })
+        if (!ready) {
+          rateLimits = null
+        }
+      }
+
+      let state = yield* Ref.get(this.#state)
+      const threadId = carried.threadId ?? state.threadId
+      const turnId = carried.turnId ?? turn?.id ?? state.turnId
+      const pendingTurnStart = [...state.pending.values()].find(
+        (pending) => pending.method === 'turn/start' && pending.turnCount !== null,
       )
-    }
-    // Re-arm the turn this notification names, not whichever turn happens to be waiting.
-    const attributed = carried.turnId ?? turn?.id
-    if (attributed !== undefined) {
-      this.#noteActivity(attributed)
-    }
-    this.#onEvent({
-      event: method,
-      timestamp: new Date(),
-      processId: this.processId,
-      message: messageFrom(message, this.#knownSecretValues),
-      usage,
-      rateLimits,
-      threadId,
-      turnId,
-      sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
-      turnCount:
-        turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
-      turnStatus: terminalStatus,
-      payload: normalizePayload(method, message['params'], this.#redact),
+      if (
+        turnId !== null &&
+        pendingTurnStart?.turnCount !== null &&
+        pendingTurnStart !== undefined
+      ) {
+        yield* this.#turnState(turnId)
+        yield* this.#ensureTurnStarted(turnId, pendingTurnStart.turnCount, threadId)
+      }
+
+      let usage = telemetry.usage
+      if (method === 'turn/usage' && usage !== null && turnId !== null) {
+        usage = yield* Ref.modify(this.#state, (current) => {
+          const previous = current.turnUsage.get(turnId)
+          const nextUsage = new Map(current.turnUsage).set(turnId, {
+            inputTokens: Math.max(previous?.inputTokens ?? 0, usage?.inputTokens ?? 0),
+            outputTokens: Math.max(previous?.outputTokens ?? 0, usage?.outputTokens ?? 0),
+            totalTokens: Math.max(previous?.totalTokens ?? 0, usage?.totalTokens ?? 0),
+          })
+          const total = [...nextUsage.values()].reduce(
+            (sum, currentUsage) => ({
+              inputTokens: sum.inputTokens + currentUsage.inputTokens,
+              outputTokens: sum.outputTokens + currentUsage.outputTokens,
+              totalTokens: sum.totalTokens + currentUsage.totalTokens,
+            }),
+            { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          )
+          return [total, { ...current, turnUsage: nextUsage }]
+        })
+      }
+
+      const attributed = carried.turnId ?? turn?.id ?? null
+      if (attributed !== null) {
+        yield* this.#noteActivity(attributed)
+      }
+      state = yield* Ref.get(this.#state)
+      this.#onEvent({
+        event: method,
+        timestamp: new Date(),
+        processId: this.processId,
+        message: messageFrom(message, this.#knownSecretValues),
+        usage,
+        rateLimits,
+        threadId,
+        turnId,
+        sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+        turnCount:
+          turnId === null ? state.turnCount : (state.turnCounts.get(turnId) ?? state.turnCount),
+        turnStatus: terminalStatus,
+        payload: normalizePayload(method, message['params'], this.#redact),
+      })
+      if (!isTerminal || turn === null) {
+        return
+      }
+      if (turn.status === null && method === 'turn/completed') {
+        yield* this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
+      }
+      yield* this.#settle(
+        turn.id,
+        terminalStatus === 'completed'
+          ? { _tag: 'completed' }
+          : {
+              _tag: 'failed',
+              error: CodexConnection.#turnFailure(turn.id, terminalStatus ?? 'unreported'),
+            },
+        true,
+      )
     })
-    if (!isTerminal) {
-      return
-    }
-    if (turn === null) {
-      return
-    }
-    // The reported status is the specific one — `cancelled`, say — so it always wins. `turn/failed`
-    // supplies `failed` only when the notification omitted it, since there the method says enough.
-    if (turn.status === null && method === 'turn/completed') {
-      // The Turn schema requires `status`. Reading a missing one as success would hand off work
-      // the server never reported as complete, so the turn fails with a legible reason instead.
-      this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
-    }
-    this.#settle(
-      turn.id,
-      terminalStatus === 'completed'
-        ? { _tag: 'completed' }
-        : {
-            _tag: 'failed',
-            error: CodexConnection.#turnFailure(turn.id, terminalStatus ?? 'unreported'),
-          },
-      true,
-    )
   }
 
   #turnFrom(message: JsonObject): Readonly<{ id: string; status: string | null }> | null {
@@ -1064,25 +1278,32 @@ class CodexConnection {
       turnId: null,
     },
     turnStatus: string | null = null,
-  ): void {
-    const threadId = carried.threadId ?? this.#threadId
-    const turnId = carried.turnId ?? this.#turnId
-    const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
-    this.#onEvent({
-      event,
-      timestamp: new Date(),
-      processId: this.processId,
-      message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
-      usage: null,
-      rateLimits: null,
-      threadId,
-      turnId,
-      sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
-      turnCount:
-        turnId === null ? this.#turnCount : (this.#turnCounts.get(turnId) ?? this.#turnCount),
-      turnStatus,
-      payload,
-    })
+  ): Effect.Effect<void> {
+    return Ref.get(this.#state).pipe(
+      Effect.tap((state) =>
+        Effect.sync(() => {
+          const threadId = carried.threadId ?? state.threadId
+          const turnId = carried.turnId ?? state.turnId
+          const payload: AgentEventPayload = clientPayload(event, message, this.#redact)
+          this.#onEvent({
+            event,
+            timestamp: new Date(),
+            processId: this.processId,
+            message: message === null ? null : boundedMessage(message, this.#knownSecretValues),
+            usage: null,
+            rateLimits: null,
+            threadId,
+            turnId,
+            sessionId: threadId === null ? null : composeSessionId(threadId, turnId),
+            turnCount:
+              turnId === null ? state.turnCount : (state.turnCounts.get(turnId) ?? state.turnCount),
+            turnStatus,
+            payload,
+          })
+        }),
+      ),
+      Effect.asVoid,
+    )
   }
 
   /**
@@ -1090,26 +1311,47 @@ class CodexConnection {
    * settled keep their own result — `#settle` ignores a second write — so finished work is never
    * relabelled as a session failure.
    */
-  #fail(error: AgentError, remember = true): void {
-    if (remember && this.#terminalError === null) {
-      this.#terminalError = error
-    }
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timeout)
-      pending.reject(error)
-    }
-    this.#pending.clear()
-    // The turn in flight counts even with no waiter registered yet: a caller between `startTurn`
-    // and `awaitTurn` has none, and `exit` can arrive before stdout finishes draining. Without
-    // this, a `turn/completed` still queued in the pipe would become that turn's first settlement
-    // and report success for a session already observed to have died.
-    const outstanding = new Set(this.#waiters.keys())
-    if (this.#turnId !== null) {
-      outstanding.add(this.#turnId)
-    }
-    for (const turnId of outstanding) {
-      this.#settle(turnId, { _tag: 'failed', error })
-    }
+  #fail(error: AgentError, remember = true): Effect.Effect<void> {
+    return Ref.modify(this.#state, (state) => [
+      {
+        pending: [...state.pending.values()],
+        turns: [...state.turns.entries()],
+        turnId: state.turnId,
+      },
+      {
+        ...state,
+        pending: new Map(),
+        terminalError: remember && state.terminalError === null ? error : state.terminalError,
+      },
+    ]).pipe(
+      Effect.flatMap(({ pending, turns, turnId }) =>
+        Effect.all(
+          [
+            ...pending.map((request) => Deferred.fail(request.reply, error).pipe(Effect.asVoid)),
+            ...turns.map(([id, turn]) =>
+              Deferred.fail(turn.settlement, error).pipe(
+                Effect.tap((won) =>
+                  won
+                    ? this.#emit('turn/terminated', null, { threadId: null, turnId: id }, 'failed')
+                    : Effect.void,
+                ),
+                Effect.asVoid,
+              ),
+            ),
+            ...(turnId !== null && !turns.some(([id]) => id === turnId)
+              ? [this.#settle(turnId, { _tag: 'failed', error }).pipe(Effect.asVoid)]
+              : []),
+          ],
+          { concurrency: 'unbounded', discard: true },
+        ),
+      ),
+    )
+  }
+
+  #failUnlessClosed(error: AgentError): Effect.Effect<void> {
+    return Ref.get(this.#state).pipe(
+      Effect.flatMap((state) => (state.closed ? Effect.void : this.#fail(error))),
+    )
   }
 }
 
@@ -1146,9 +1388,12 @@ const runVerifiedAgent = (
     scope: Scope.Scope,
   ): Effect.Effect<CodexConnection, never, Scope.Scope> =>
     Effect.acquireRelease(
-      sessionSecretValues(launch.secretEnvironmentNames).pipe(
+      Effect.all([
+        sessionSecretValues(launch.secretEnvironmentNames),
+        Ref.make(initialConnectionState),
+      ]).pipe(
         Effect.map(
-          (knownSecretValues) =>
+          ([knownSecretValues, state]) =>
             new CodexConnection(
               launch.config.command,
               verified.path,
@@ -1158,6 +1403,7 @@ const runVerifiedAgent = (
               launch.hostTools ?? null,
               launch.onEvent,
               (reader) => Runtime.runFork(runtime)(reader, { scope }),
+              state,
             ),
         ),
       ),
