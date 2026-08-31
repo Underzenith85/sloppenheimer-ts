@@ -1,11 +1,15 @@
+import { readFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
+import { resolve } from 'node:path'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
 import type { ServerError } from '@symphony/core/domain/errors.js'
+import type { HandoffSnapshot } from '@symphony/core/domain/handoff.js'
 import { TrackerError } from '@symphony/core/domain/errors.js'
+import { issueDetailPath } from '../../src/operator/api.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '@symphony/core'
 import { startOperatorServer } from '../../src/operator/server.js'
@@ -574,6 +578,93 @@ describe('operator server', (): void => {
       })
     }),
   )
+
+  /*
+   * SPEC 13.7.2 puts the fixed routes and the per-issue resource in one namespace, so an identifier
+   * spelled like a fixed route name is answered by that route instead. #220 decided to document
+   * that as a known limit rather than move the resource under a prefix or escape the three names,
+   * and this pins what each one answers — including that the shadowing is exactly three names wide.
+   */
+  it.live('shadows an issue identifier spelled like a fixed v1 route name', () =>
+    Effect.gen(function* () {
+      const handoff = (identifier: string): HandoffSnapshot => ({
+        issueId: identifier,
+        identifier,
+        pullRequestUrl: `https://example.test/pull/${identifier}`,
+        branchName: `symphony/${identifier}`,
+        state: 'awaiting_checks',
+        headSha: null,
+        reason: null,
+        repairAttempts: 0,
+        observedAt: '2026-08-29T12:00:00.000Z',
+      })
+      const colliding: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          running: [],
+          counts: { running: 0, retrying: 0, completed: 0 },
+          // Every one of these is an issue this host knows about, addressable or not.
+          handoffs: ['state', 'backlog', 'refresh', 'agents', 'issues'].map(handoff),
+        }),
+        agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
+      }
+
+      yield* withServer(colliding, async (url) => {
+        // This is the link such an issue would advertise as `self`, and it is the fixed route.
+        expect(issueDetailPath('state')).toBe('/api/v1/state')
+
+        const shadowedState = await fetch(`${url}/api/v1/state`)
+        expect(shadowedState.status).toBe(200)
+        const stateBody = (await shadowedState.json()) as Record<string, unknown>
+        // The runtime state document, not the issue whose identifier is spelled that way.
+        expect(stateBody).toMatchObject({ counts: { running: 0 } })
+        expect(stateBody['issue_identifier']).toBeUndefined()
+
+        const shadowedBacklog = await fetch(`${url}/api/v1/backlog`)
+        expect(shadowedBacklog.status).toBe(200)
+        const backlogBody = (await shadowedBacklog.json()) as Record<string, unknown>
+        // The backlog document, in the internal vocabulary its own consumer reads.
+        expect(backlogBody).toMatchObject({ controlLabel: 'symphony' })
+        expect(Array.isArray(backlogBody['nodes'])).toBe(true)
+        expect(backlogBody['issue_identifier']).toBeUndefined()
+
+        // POST-only, so the issue spelled that way cannot even be read.
+        const shadowedRefresh = await fetch(`${url}/api/v1/refresh`)
+        expect(shadowedRefresh.status).toBe(405)
+        expect(shadowedRefresh.headers.get('allow')).toBe('POST')
+
+        // The other two words the router uses are not reserved: those routes carry a further
+        // segment, so the wildcard still answers for an issue identified by the bare word.
+        for (const identifier of ['agents', 'issues']) {
+          const resolved = await fetch(`${url}/api/v1/${identifier}`)
+          expect(resolved.status).toBe(200)
+          expect(await resolved.json()).toMatchObject({
+            self: `/api/v1/${identifier}`,
+            issue_identifier: identifier,
+            status: 'handoff',
+          })
+        }
+      })
+    }),
+  )
+
+  /*
+   * The shadowed set is exactly the fixed single-segment routes registered above the wildcard, so a
+   * fourth one would reserve a fourth identifier without anybody deciding to. The registrations are
+   * read rather than trusted, because the collision is invisible at every other layer.
+   */
+  it('registers no fixed v1 route name beyond the three that are documented', (): void => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, '../../src/operator/server.ts'),
+      'utf8',
+    )
+    const registered = [...source.matchAll(/'\/api\/v1\/([^'/:]+)'/gu)].map(
+      (match) => match[1] ?? '',
+    )
+
+    expect([...new Set(registered)].sort()).toEqual(['backlog', 'refresh', 'state'])
+  })
 
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {

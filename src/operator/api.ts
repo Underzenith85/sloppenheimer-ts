@@ -270,7 +270,14 @@ export const publishRefresh = (outcome: RefreshOutcome): PublishedRefresh => ({
  */
 export const publishedRecentEvents = 20
 
-/** The versioned per-issue resource SPEC 13.7.2 describes. */
+/**
+ * The versioned per-issue resource SPEC 13.7.2 describes.
+ *
+ * An identifier spelled exactly `state`, `backlog` or `refresh` names a fixed route instead, so the
+ * link this builds answers for that route rather than for the issue. #220 recorded that as a known
+ * limit of the SPEC's namespace rather than moving the resource; `README.md` names the three and
+ * why nothing is escaped here.
+ */
 export const issueDetailPath = (identifier: string): string =>
   `/api/v1/${encodeURIComponent(identifier)}`
 

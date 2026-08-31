@@ -240,6 +240,13 @@ const makeRouter = (
         }),
       ),
     ),
+    // The wildcard sits below the fixed routes above it, so the three names they spell —
+    // `state`, `backlog` and `refresh` — are unaddressable as issue identifiers. SPEC 13.7.2 puts
+    // both resources in one namespace, so that collision is inherent to the URL design rather than
+    // to this registration order; #220 recorded it as a known limit and left it unhandled, because
+    // resolving it means either changing a SPEC route's URL or reserving identifiers no tracker
+    // profile can currently spell. `README.md` carries the decision and the three names, and
+    // `test/operator/server.test.ts` pins both what they answer and that the set has not grown.
     HttpRouter.all(
       '/api/v1/:identifier',
       withMethod(
