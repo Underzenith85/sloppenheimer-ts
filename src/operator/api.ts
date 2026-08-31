@@ -513,7 +513,18 @@ export const publishIssueDetail = (
   const events = detail === null ? [] : detail.timeline.events.slice(-publishedRecentEvents)
   const lastError = detail?.errors.at(-1)
   const detailRetry = detail?.retry ?? null
-  const rowAttempt = retrying?.attempt ?? running?.attempt ?? 0
+  /*
+   * The attempt count the snapshot rows imply, on the canonical record's terms.
+   *
+   * A retrying row names the attempt that is *scheduled next* — the runtime queues a retry as
+   * `(attempt ?? 0) + 1` — whereas the record advances `attempt` and `retries` together, and only
+   * when `recordAttemptStarted` folds an actual launch into it. Copying the pending number would
+   * report a restart that has not happened, and would make the same issue answer differently
+   * depending on whether a detail record happened to be retained. The pending attempt is not lost:
+   * it is what `retry.attempt` publishes.
+   */
+  const rowAttempt =
+    retrying !== undefined ? Math.max(0, retrying.attempt - 1) : (running?.attempt ?? 0)
   // Both come from whichever source `status` was taken from, so a response never carries a run and
   // a pending retry at once, nor either one under a status that denies it.
   const publishedRun: PublishedIssueRun | null =

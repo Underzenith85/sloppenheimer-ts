@@ -468,6 +468,50 @@ describe('operator server', (): void => {
     }),
   )
 
+  /*
+   * A queued retry is not a restart that happened. The runtime queues one as `(attempt ?? 0) + 1`,
+   * so a retrying row names the attempt scheduled next, while the detail record advances its
+   * counters only when an attempt actually starts. The fallback must answer on the record's terms,
+   * or the same issue reports a different history depending on whether a record was retained.
+   */
+  it.live('does not count a pending retry as a restart that already happened', () =>
+    Effect.gen(function* () {
+      const queued: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.succeed({
+          ...snapshot,
+          running: [],
+          retrying: [
+            {
+              issueId: issueId('31'),
+              identifier: 'example/symphony#31',
+              title: 'Awaiting its first retry',
+              url: null,
+              // The first attempt failed; attempt 1 is scheduled and has not begun.
+              attempt: 1,
+              dueAt: '2026-08-29T12:01:00.000Z',
+              error: 'turn failed',
+              workerHost: 'local',
+              detailUrl: '/api/v1/agents/example%2Fsymphony%2331',
+            },
+          ],
+        }),
+        // Nothing retained for this issue, so the retrying row stands in.
+        agentDetail: (identifier) => Effect.succeed({ _tag: 'NoSession', identifier }),
+      }
+      yield* withServer(queued, async (url) => {
+        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#31')}`)
+        expect(await response.json()).toMatchObject({
+          status: 'retrying',
+          // No attempt beyond the first has started yet.
+          attempts: { restart_count: 0, current_retry_attempt: 0 },
+          // The attempt that is queued is published here, where it belongs.
+          retry: { attempt: 1, due_at: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
+        })
+      })
+    }),
+  )
+
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {
       const rejected = await fetch(`${url}/api/v1/refresh`, { method: 'POST' })
