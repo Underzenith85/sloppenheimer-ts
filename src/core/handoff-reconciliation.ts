@@ -334,17 +334,25 @@ export const applyHandoffObservation = (
 export const reconcileHandoffs = (
   context: OrchestratorContext,
   repairDispatchAllowed: boolean,
+  onlyIssueId: Option.Option<IssueId> = Option.none(),
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
+    const selected = (id: IssueId): boolean =>
+      Option.isNone(onlyIssueId) || onlyIssueId.value === id
     const opening = yield* Ref.get(context.state)
     const eligible = new Map(
       [...opening.handoffs].filter(
         ([id, handoff]) =>
-          !skipped(opening, id, handoff) && Option.isSome(handoff.execution.codeReview),
+          selected(id) &&
+          !skipped(opening, id, handoff) &&
+          Option.isSome(handoff.execution.codeReview),
       ),
     )
     const refreshedIssues = yield* refreshHandoffIssues(eligible)
     for (const id of opening.handoffs.keys()) {
+      if (!selected(id)) {
+        continue
+      }
       // Re-read: an earlier handoff in this pass may have taken the last agent slot, or dispatched
       // a repair for this very issue.
       const current = yield* Ref.get(context.state)
@@ -392,6 +400,9 @@ export const reconcileHandoffs = (
     // not news, and the timeline is a bounded resource.
     const closing = yield* Ref.get(context.state)
     for (const [id, handoff] of closing.handoffs) {
+      if (!selected(id)) {
+        continue
+      }
       if (closing.details.get(id)?.handoff.pullRequest.state !== handoff.state) {
         yield* context.noteHandoffOutcome(
           id,
@@ -406,7 +417,7 @@ export const reconcileHandoffs = (
     yield* Ref.update(context.state, (current) => {
       let released = current
       for (const id of current.handoffs.keys()) {
-        if (!current.running.has(id) && !current.retries.has(id)) {
+        if (selected(id) && !current.running.has(id) && !current.retries.has(id)) {
           released = Transitions.releaseClaim(released, id)
         }
       }
