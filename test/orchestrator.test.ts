@@ -769,6 +769,9 @@ describe('restored pull request handoffs', (): void => {
 
     expect(snapshot.handoffRecovery.status).toBe('degraded')
     expect(snapshot.handoffRecovery.storeError).toMatchObject({ operation: 'read' })
+    expect(snapshot.handoffRecovery.storeError?.message).toContain(
+      `Could not decode handoff store ${storePath}`,
+    )
     expect(await readFile(storePath, 'utf8')).toBe('{malformed')
     await rm(workspaceRoot, { force: true, recursive: true })
   })
