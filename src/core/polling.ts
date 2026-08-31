@@ -9,9 +9,26 @@ import { logError, logInfo, logWarning } from '../support/logging.js'
 import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetry.js'
 import { dispatch } from './dispatch.js'
 import { hydrateRestoredHandoffs, reconcileHandoffs } from './handoff-reconciliation.js'
-import type { EffectiveWorkflow, OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, HandoffEntry, OrchestratorContext } from './runtime.js'
 import { publishDetails } from './snapshot.js'
 import { adoptPorts, drainRetirements, revalidateCredentials } from './workflow-reload.js'
+
+/**
+ * Keeps a repair's baseline across an interruption that is not the repair ending.
+ *
+ * A worker that started may have pushed immediately before it stopped, and this baseline is the
+ * only thing that can attribute that head to the repair rather than to nobody; the next handoff
+ * inspection attributes it and drops the baseline. A dispatch refused before any worker started
+ * produced nothing, so it has no output to keep.
+ */
+const settleRepair = (handoff: HandoffEntry): void => {
+  if (Option.isNone(handoff.repair)) {
+    return
+  }
+  handoff.repair = handoff.repair.value.workerStarted
+    ? Option.some({ ...handoff.repair.value, inFlight: false })
+    : Option.none()
+}
 
 export const poll = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
@@ -364,7 +381,8 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           if (issue === undefined) {
             const handoff = context.state.handoffs.get(event.issueId)
             if (handoff !== undefined && Option.isSome(handoff.repair)) {
-              handoff.repair = Option.none()
+              // The handoff stays active, so a head the worker pushed is still the repair's.
+              settleRepair(handoff)
               yield* context.persistHandoffsEffect()
             }
             context.state.claimed.delete(event.issueId)
@@ -401,12 +419,8 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           ) {
             const handoff = context.state.handoffs.get(event.issueId)
             if (handoff !== undefined && Option.isSome(handoff.repair)) {
-              // A worker may have pushed immediately before failing. Keep its baseline for one
-              // handoff reconciliation even though the continuation cannot currently be routed.
-              // A dispatch refused before any worker started has no output to attribute.
-              handoff.repair = handoff.repair.value.workerStarted
-                ? Option.some({ ...handoff.repair.value, inFlight: false })
-                : Option.none()
+              // The continuation cannot be routed right now, but that does not end the repair.
+              settleRepair(handoff)
               yield* context.persistHandoffsEffect()
             }
             context.state.claimed.delete(event.issueId)
@@ -545,6 +559,8 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 context.state.claimed.delete(id)
                 const handoff = context.state.handoffs.get(id)
                 if (handoff !== undefined && Option.isSome(handoff.repair)) {
+                  // An operator pause is a decision to stop, not an interruption to recover from:
+                  // the repair identity goes with the run the operator ended.
                   handoff.repair = Option.none()
                   yield* context.persistHandoffsEffect()
                 }

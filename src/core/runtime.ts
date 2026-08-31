@@ -1476,7 +1476,9 @@ export const startOrchestratorRuntime = (
           }
           const issue = refreshResult.issues.find((candidate) => candidate.id === id)
           if (issue === undefined) {
-            yield* cancelRunning(id, false, 'the tracker no longer reports the issue')
+            // The handoff outlives the issue the tracker stopped reporting, so a head this worker
+            // pushed is still the repair's to account for on the next inspection.
+            yield* cancelRunning(id, false, 'the tracker no longer reports the issue', 'settle')
             continue
           }
           const terminal = stateIsIn(issue.state, execution.terminalStates)

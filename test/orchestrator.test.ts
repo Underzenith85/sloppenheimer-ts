@@ -2408,6 +2408,75 @@ describe('restored pull request handoffs', (): void => {
     await rm(reloadedRoot, { force: true, recursive: true })
   })
 
+  it('attributes a repair head when the tracker omits the issue from a retry refresh', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-missing-issue-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    let currentHead = originalHead
+    let candidates: readonly Issue[] = [issue]
+    await saveRepairHandoff(handoffStorePath, issue, originalHead)
+    const harness = makeHarness(isolated, () => candidates)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+      }),
+      runAgent: () =>
+        Effect.sync(() => {
+          currentHead = repairedHead
+        }).pipe(
+          Effect.zipRight(
+            Effect.fail(
+              new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+            ),
+          ),
+        ),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The tracker stops reporting the issue before the queued retry comes due. The handoff
+          // stays active, so the head the failed worker pushed is still the repair's.
+          candidates = []
+          yield* TestClock.adjust('20 seconds')
+          while (current.retrying.length !== 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          expect(current.handoffs[0]?.repairStartedHeadSha).toBe(originalHead)
+          while (current.handoffs[0]?.repairAttempts !== 1) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 1,
+      repairHeadShas: [repairedHead],
+      repairObservedHeadShas: [originalHead, repairedHead],
+      repairStartedHeadSha: null,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('records that a refused repair dispatch never started a worker', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-record-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
