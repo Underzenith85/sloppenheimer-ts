@@ -139,12 +139,22 @@ result, and a later session-level error cannot relabel finished work. A process 
 to start settles every outstanding request and turn once, including the turn in flight, so no call
 waits out its timeout after the session is already gone.
 
-Malformed protocol data is reported as an event rather than ending the session. A session is one
-App Server thread, so `session_started` carries the thread id as both `threadId` and the stable
-`sessionId`; its `message` is null. Turn identity is reported independently through `turnId` and
-`turnCount`. Every event is attributed from the `threadId` and `turnId` the provoking message
-carries where it has them, so a message that arrives before the response introducing those ids is
-still recorded against the right turn.
+Malformed protocol data is reported as an event rather than ending the session. Session identity is
+composed as SPEC §4.1.6 defines it: `sessionId` is `<threadId>-<turnId>`, so a continuation turn on
+the same live thread reuses the thread id the App Server issued and gets a new session id. Thread
+and turn identity stay separately visible through `threadId`, `turnId` and `turnCount`. The one
+event with no turn half is `session_started`, emitted between `thread/start` and the first
+`turn/start`: it names the thread alone rather than a turn that never ran, and its `message` is
+null. Every event is attributed from the `threadId` and `turnId` the provoking message carries where
+it has them, so a message that arrives before the response introducing those ids is still recorded
+against the right turn, and a late event from a turn the run has moved past can restore neither
+half of the identity.
+
+SPEC §10.2 also asks for issue-identifying metadata "when the targeted protocol supports turn or
+session titles". The App Server does not: neither `thread/start` nor `turn/start` accepts a title,
+name, or label, and the `name` a thread reads back with is server-derived with no method to set it,
+so Symphony sends none. `test/installed-codex.integration.test.ts` asserts that against the
+installed `codex app-server generate-json-schema` and fails as soon as such a field appears.
 
 Three timeouts stay distinct. `codex.read_timeout_ms` bounds one request/response round trip.
 `codex.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
