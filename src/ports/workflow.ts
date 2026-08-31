@@ -1,6 +1,6 @@
 import { Context, Layer, type Effect, type Scope } from 'effect'
 
-import type { ValidatedTrackerProvider } from '../config/tracker-config.js'
+import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
 import type { WorkflowError } from '../errors.js'
 

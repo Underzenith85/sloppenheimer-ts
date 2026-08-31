@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Option, Ref } from 'effect'
 
-import type { ValidatedTrackerProvider } from '../config/tracker-config.js'
+import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { Issue } from '../domain/domain.js'
 import type { TrackerError } from '../errors.js'
 

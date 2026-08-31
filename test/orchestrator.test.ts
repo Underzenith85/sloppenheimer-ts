@@ -5,6 +5,7 @@ import { Effect, Fiber, Layer, TestClock, TestContext, type Scope } from 'effect
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
+import { githubProviderOf, githubTrackerProvider } from '../src/adapters/github/index.js'
 import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/adapters/codex/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
 import {
@@ -51,7 +52,7 @@ import {
 } from '../src/ports/index.js'
 import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
 import type { HostToolSession } from '../src/host-tools.js'
-import type { ValidatedTrackerProvider } from '../src/config/tracker-config.js'
+import type { ValidatedTrackerProvider } from '../src/domain/tracker-provider.js'
 
 const makeIssue = (
   identifier: string,
@@ -83,17 +84,10 @@ const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
   promptTemplate: 'test',
-  tracker: {
-    kind: 'github',
-    provider: {
-      owner: 'example',
-      repository: 'symphony',
-      token: 'secret',
-      tokenEnvironmentName: 'SYMPHONY_TEST_TOKEN',
-      apiBaseUrl: 'https://api.github.com',
-      baseBranch: 'main',
-    },
-  },
+  tracker: githubTrackerProvider.validate(
+    { owner: 'example', repository: 'symphony', token: '$SYMPHONY_TEST_TOKEN' },
+    testEnvironment,
+  ),
   config: {
     tracker: {
       kind: 'github',
@@ -391,7 +385,7 @@ const makeHarness = (
         fetchIssuesByIds: () =>
           Effect.sync(() => {
             idFetchCount += 1
-            idFetchTokens.push(provider.provider.token)
+            idFetchTokens.push(githubProviderOf(provider).token)
             return candidates(currentWorkflow())
           }),
         toolSpecs: [],
@@ -2343,7 +2337,9 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerProviders().at(-1)?.provider.repository).toBe('reloaded-repository')
+    expect(harness.trackerProviders().map(githubProviderOf).at(-1)?.repository).toBe(
+      'reloaded-repository',
+    )
     expect(harness.stateFetchStates().at(-1)).toEqual(['open', 'queued'])
     expect(snapshot.pollingIntervalMs).toBe(7_000)
     expect(snapshot.maxConcurrentAgents).toBe(3)
@@ -2473,7 +2469,7 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerProviders().at(-1)?.provider.token).toBe('rotated')
+    expect(harness.trackerProviders().map(githubProviderOf).at(-1)?.token).toBe('rotated')
   })
 
   it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
@@ -2542,7 +2538,7 @@ describe('tracker credential revalidation', (): void => {
         ...harness.ports.makeTracker(provider),
         toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
         executeTool: () => {
-          executedTokens.push(provider.provider.token)
+          executedTokens.push(githubProviderOf(provider).token)
           return Promise.resolve({ success: true, data: null })
         },
       }),
@@ -2596,7 +2592,7 @@ describe('tracker credential revalidation', (): void => {
 
     // Twice at startup: the layer builds the first instance from the workflow the composition root
     // read, and the orchestrator replaces it with one built from the workflow it loaded itself.
-    expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+    expect(harness.trackerProviders().map((each) => githubProviderOf(each).token)).toEqual([
       'secret',
       'secret',
       'first',
@@ -2622,7 +2618,7 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
-    expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+    expect(harness.trackerProviders().map((each) => githubProviderOf(each).token)).toEqual([
       'secret',
       'secret',
       'first',
@@ -2660,7 +2656,7 @@ describe('rebuilt port lifecycle', (): void => {
           environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
 
-          expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
+          expect(harness.trackerProviders().map((each) => githubProviderOf(each).token)).toEqual([
             'secret',
             'secret',
             'rotated',
@@ -2674,7 +2670,7 @@ describe('rebuilt port lifecycle', (): void => {
           yield* control.refresh
           yield* control.refresh
 
-          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
+          expect(harness.releasedTrackers().map((each) => githubProviderOf(each).token)).toEqual([
             'secret',
             'secret',
           ])
@@ -2750,7 +2746,7 @@ describe('rebuilt port lifecycle', (): void => {
           // The run has ended into a handoff under the same issue, and that handoff holds the
           // adopted tracker — so what the run superseded is free while the pull request stays open.
           expect(snapshot.handoffs).toHaveLength(1)
-          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
+          expect(harness.releasedTrackers().map((each) => githubProviderOf(each).token)).toEqual([
             'secret',
             'secret',
           ])

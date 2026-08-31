@@ -11,7 +11,7 @@ import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
 import { makeGitHubCodeReview } from '../../src/adapters/github/code-review.js'
 import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
-import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
+import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
 
 const fakeAppServer = resolve(
