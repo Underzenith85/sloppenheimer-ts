@@ -1,55 +1,52 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { Effect } from 'effect'
+import { Effect, ParseResult, Schema } from 'effect'
 
 import { HandoffStoreError } from './errors.js'
 import type { HandoffSnapshot } from './domain/handoff.js'
 
-const isSnapshot = (value: unknown): value is HandoffSnapshot => {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false
-  }
-  const candidate = value as Record<string, unknown>
-  const states = new Set([
-    'merged',
-    'closed_without_merge',
-    'awaiting_checks',
-    'repair_needed',
-    'ready_to_merge',
-    'merging',
-    'intervention_required',
-  ])
-  return (
-    typeof candidate['issueId'] === 'string' &&
-    typeof candidate['identifier'] === 'string' &&
-    typeof candidate['pullRequestUrl'] === 'string' &&
-    typeof candidate['branchName'] === 'string' &&
-    typeof candidate['state'] === 'string' &&
-    states.has(candidate['state']) &&
-    (candidate['headSha'] === null || typeof candidate['headSha'] === 'string') &&
-    (candidate['reason'] === null || typeof candidate['reason'] === 'string') &&
-    typeof candidate['repairAttempts'] === 'number' &&
-    Number.isSafeInteger(candidate['repairAttempts']) &&
-    candidate['repairAttempts'] >= 0 &&
-    (candidate['repairHeadShas'] === undefined ||
-      (Array.isArray(candidate['repairHeadShas']) &&
-        candidate['repairHeadShas'].every((headSha) => typeof headSha === 'string'))) &&
-    (candidate['repairObservedHeadShas'] === undefined ||
-      (Array.isArray(candidate['repairObservedHeadShas']) &&
-        candidate['repairObservedHeadShas'].every((headSha) => typeof headSha === 'string'))) &&
-    (candidate['repairStartedHeadSha'] === undefined ||
-      candidate['repairStartedHeadSha'] === null ||
-      typeof candidate['repairStartedHeadSha'] === 'string') &&
-    (candidate['reviewRequestedHeadSha'] === undefined ||
-      candidate['reviewRequestedHeadSha'] === null ||
-      typeof candidate['reviewRequestedHeadSha'] === 'string') &&
-    (candidate['reviewCompletedHeadSha'] === undefined ||
-      candidate['reviewCompletedHeadSha'] === null ||
-      typeof candidate['reviewCompletedHeadSha'] === 'string') &&
-    typeof candidate['observedAt'] === 'string' &&
-    !Number.isNaN(Date.parse(candidate['observedAt']))
-  )
-}
+const handoffState = Schema.Literal(
+  'merged',
+  'closed_without_merge',
+  'awaiting_checks',
+  'repair_needed',
+  'ready_to_merge',
+  'merging',
+  'intervention_required',
+).annotations({ message: () => 'handoff state is not recognized' })
+
+const repairAttempts = Schema.Number.pipe(
+  Schema.filter((value) => Number.isSafeInteger(value) && value >= 0),
+).annotations({ message: () => 'repairAttempts must be a non-negative safe integer' })
+
+const observedAt = Schema.String.pipe(
+  Schema.filter((value) => !Number.isNaN(Date.parse(value))),
+).annotations({ message: () => 'observedAt must be a date string' })
+
+const nullableString = Schema.NullOr(Schema.String)
+
+const handoffSnapshot = Schema.Struct({
+  issueId: Schema.String,
+  identifier: Schema.String,
+  pullRequestUrl: Schema.String,
+  branchName: Schema.String,
+  state: handoffState,
+  headSha: nullableString,
+  reason: nullableString,
+  repairAttempts,
+  repairHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
+  repairObservedHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
+  repairStartedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  reviewRequestedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  reviewCompletedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  observedAt,
+}).annotations({ message: () => 'handoff snapshot is malformed' })
+
+/** Versioned at the envelope so a future format is added as another schema union member. */
+const handoffStoreV1 = Schema.Struct({
+  version: Schema.Literal(1),
+  handoffs: Schema.Array(handoffSnapshot),
+}).annotations({ message: () => 'handoff store envelope is not version 1 or contains bad data' })
 
 const storeError = (operation: 'read' | 'write', path: string, cause: unknown): HandoffStoreError =>
   new HandoffStoreError({
@@ -58,24 +55,28 @@ const storeError = (operation: 'read' | 'write', path: string, cause: unknown): 
     cause,
   })
 
+const decodeError = (path: string, detail: string, cause: unknown): HandoffStoreError =>
+  new HandoffStoreError({
+    operation: 'read',
+    message: `Could not decode handoff store ${path}: ${detail}`,
+    cause,
+  })
+
+const schemaDecodeError = (path: string, error: ParseResult.ParseError): HandoffStoreError =>
+  decodeError(
+    path,
+    ParseResult.ArrayFormatter.formatIssueSync(error.issue)[0]?.message ??
+      'handoff store schema rejected the document',
+    error,
+  )
+
 export const loadHandoffs = (
   path: string,
 ): Effect.Effect<readonly HandoffSnapshot[], HandoffStoreError> =>
   Effect.tryPromise({
     try: async () => {
       try {
-        const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
-        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-          throw new Error('handoff store root is not an object')
-        }
-        if (!('version' in parsed) || !('handoffs' in parsed)) {
-          throw new Error('handoff store is missing version or handoffs')
-        }
-        const handoffs = parsed.handoffs
-        if (parsed.version !== 1 || !Array.isArray(handoffs) || !handoffs.every(isSnapshot)) {
-          throw new Error('handoff store has an unsupported version or malformed handoff')
-        }
-        return handoffs
+        return await readFile(path, 'utf8')
       } catch (cause: unknown) {
         if (
           typeof cause === 'object' &&
@@ -83,13 +84,30 @@ export const loadHandoffs = (
           'code' in cause &&
           cause.code === 'ENOENT'
         ) {
-          return []
+          return null
         }
         throw cause
       }
     },
     catch: (cause: unknown) => storeError('read', path, cause),
-  })
+  }).pipe(
+    Effect.flatMap((contents) => {
+      if (contents === null) {
+        return Effect.succeed<readonly HandoffSnapshot[]>([])
+      }
+      return Effect.try({
+        try: (): unknown => JSON.parse(contents),
+        catch: (cause: unknown) => decodeError(path, 'the file is not valid JSON', cause),
+      }).pipe(
+        Effect.flatMap((parsed) =>
+          Schema.decodeUnknown(handoffStoreV1)(parsed).pipe(
+            Effect.mapError((error) => schemaDecodeError(path, error)),
+          ),
+        ),
+        Effect.map(({ handoffs }) => handoffs),
+      )
+    }),
+  )
 
 export const saveHandoffs = (
   path: string,
