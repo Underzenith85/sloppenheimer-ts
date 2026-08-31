@@ -646,13 +646,14 @@ class CodexConnection {
     ).pipe(Effect.asVoid)
   }
 
-  #failCurrentTurn(error: AgentError, turnId: string | null): Effect.Effect<void> {
+  #failCurrentTurn(error: AgentError, turnId: Option.Option<string>): Effect.Effect<void> {
     return Ref.get(this.#state).pipe(
       Effect.flatMap((state) => {
-        const target = turnId ?? Option.getOrNull(state.turnId)
-        return target === null
-          ? this.#fail(error)
-          : this.#settle(target, { _tag: 'failed', error }).pipe(Effect.asVoid)
+        const target = turnId.pipe(Option.orElse(() => state.turnId))
+        return Option.match(target, {
+          onNone: () => this.#fail(error),
+          onSome: (id) => this.#settle(id, { _tag: 'failed', error }).pipe(Effect.asVoid),
+        })
       }),
     )
   }
@@ -1146,9 +1147,12 @@ class CodexConnection {
     // request rather than from connection state, which is null on the first turn and names the
     // previous one afterwards.
     const identity = notificationIdentity(message)
+    const turnId = Option.fromNullable(identity.turnId)
     // Only when the request names its turn; an unattributed one is not evidence that turn is alive.
-    const noteActivity =
-      identity.turnId === null ? Effect.void : this.#noteActivity(identity.turnId)
+    const noteActivity = Option.match(turnId, {
+      onNone: () => Effect.void,
+      onSome: (id) => this.#noteActivity(id),
+    })
     if (isPermissionsApproval(method)) {
       return noteActivity.pipe(
         Effect.zipRight(this.#write({ id, result: withheldPermissionsGrant })),
@@ -1175,7 +1179,7 @@ class CodexConnection {
               category: 'input_required',
               message: 'Codex requested interactive input',
             }),
-            identity.turnId,
+            turnId,
           ),
         ),
       )
