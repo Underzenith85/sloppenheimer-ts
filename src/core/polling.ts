@@ -58,6 +58,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
   Effect.gen(function* () {
     // A worker that ended since the last pass may have been the last holder of a replaced instance.
     yield* drainRetirements(context)
+    let dispatchValidationFailed = false
     const opening = yield* Ref.get(context.state)
     const revalidated = yield* revalidateCredentials(context, opening.lastKnownGood).pipe(
       Effect.match({
@@ -66,7 +67,18 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
       }),
     )
     if (revalidated._tag === 'Failed') {
+      dispatchValidationFailed = true
+      const observedAt = new Date()
+      yield* Ref.update(context.state, (current) =>
+        Transitions.setWorkflowReloadError(current, {
+          message: revalidated.error.message,
+          observedAt,
+        }),
+      )
       yield* logError('tracker credential validation failed; retaining last known good', {
+        action: 'workflow_validation',
+        outcome: 'failed',
+        stage: 'credential_revalidation',
         error: revalidated.error.message,
         effective_fingerprint: opening.lastKnownGood.workflow.fingerprint,
       })
@@ -87,11 +99,15 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
       Effect.matchEffect({
         onFailure: (error) =>
           Effect.gen(function* () {
+            dispatchValidationFailed = true
             const observedAt = new Date()
             yield* Ref.update(context.state, (current) =>
               Transitions.setWorkflowReloadError(current, { message: error.message, observedAt }),
             )
             yield* logError('workflow validation failed; retaining last known good', {
+              action: 'workflow_validation',
+              outcome: 'failed',
+              stage: 'reload',
               error: error.message,
               effective_fingerprint: reloading.lastKnownGood.workflow.fingerprint,
             })
@@ -101,9 +117,6 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
       }),
     )
     if (reloaded !== null) {
-      yield* Ref.update(context.state, (current) =>
-        Transitions.setWorkflowReloadError(current, null),
-      )
       const before = yield* Ref.get(context.state)
       if (reloaded.fingerprint !== before.lastKnownGood.workflow.fingerprint) {
         const configured = yield* context.makeEffectiveWorkflow(reloaded).pipe(
@@ -113,6 +126,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
           }),
         )
         if (configured._tag === 'Failed') {
+          dispatchValidationFailed = true
           const observedAt = new Date()
           yield* Ref.update(context.state, (current) =>
             Transitions.setWorkflowReloadError(current, {
@@ -121,6 +135,9 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
             }),
           )
           yield* logError('workflow port configuration failed; retaining last known good', {
+            action: 'workflow_validation',
+            outcome: 'failed',
+            stage: 'port_configuration',
             error: configured.error.message,
             effective_fingerprint: before.lastKnownGood.workflow.fingerprint,
           })
@@ -133,6 +150,10 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         }
       }
     }
+    if (dispatchValidationFailed) {
+      return
+    }
+    yield* Ref.update(context.state, (current) => Transitions.setWorkflowReloadError(current, null))
     const dispatching = yield* Ref.get(context.state)
     const effective = dispatching.lastKnownGood
     const requiredLabels = effective.workflow.config.tracker.requiredLabels

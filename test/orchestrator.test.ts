@@ -4017,29 +4017,84 @@ describe('workflow hot reload', (): void => {
     ])
   })
 
-  it('keeps invalid reloads visible while reconciling and dispatching with the valid workflow', async (): Promise<void> => {
-    const issue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+  it('keeps invalid reloads visible while reconciling without fetching dispatch candidates', async (): Promise<void> => {
+    const runningIssue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+    const candidate = makeIssue('GH-2', 2, null, ['symphony', 'ready'])
+    let candidates: readonly Issue[] = [runningIssue]
     const initial = changedWorkflow({ fingerprint: 'last-known-good' })
-    const harness = makeHarness(initial, () => [issue])
+    const harness = makeHarness(initial, () => candidates)
 
-    const snapshot = await runWithTestClock(
+    const observed = await runWithTestClock(
       Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* control.refresh
+          yield* harness.awaitAgentRun
+          const candidateFetches = harness.stateFetches()
+          const reconciliations = harness.idFetches()
+          candidates = [runningIssue, candidate]
           harness.setWorkflow(
             new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
           )
           yield* control.refresh
-          return yield* control.snapshot
+          return {
+            snapshot: yield* control.snapshot,
+            candidateFetches,
+            reconciliations,
+          }
         }),
       ),
     )
 
-    expect(snapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
-    expect(snapshot.workflowReloadError?.message).toBe('invalid reload')
-    expect(harness.idFetches()).toBeGreaterThan(0)
-    expect(harness.stateFetches()).toBeGreaterThan(1)
+    expect(observed.snapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
+    expect(observed.snapshot.workflowReloadError?.message).toBe('invalid reload')
+    expect(harness.idFetches()).toBeGreaterThan(observed.reconciliations)
+    expect(harness.stateFetches()).toBe(observed.candidateFetches)
+    expect(harness.agentRuns()).toHaveLength(1)
+    expect(observed.snapshot.running[0]?.issueId).toBe(runningIssue.id)
+    expect(observed.snapshot.retrying).toEqual([])
+  })
+
+  it('publishes a credential validation failure without fetching or claiming candidates', async (): Promise<void> => {
+    const candidate = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+    let candidates: readonly Issue[] = []
+    const initial = changedWorkflow({ fingerprint: 'last-known-good' })
+    const harness = makeHarness(initial, () => candidates, undefined, environment)
+
+    const observed = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          const candidateFetches = harness.stateFetches()
+          candidates = [candidate]
+          delete environment['SYMPHONY_TEST_TOKEN']
+          yield* control.refresh
+          const failedSnapshot = yield* control.snapshot
+          const agentRunsAfterFailure = harness.agentRuns().length
+          environment['SYMPHONY_TEST_TOKEN'] = 'restored'
+          yield* control.refresh
+          return {
+            failedSnapshot,
+            recoveredSnapshot: yield* control.snapshot,
+            candidateFetches,
+            agentRunsAfterFailure,
+          }
+        }),
+      ),
+    )
+
+    expect(observed.failedSnapshot.effectiveWorkflow.fingerprint).toBe('last-known-good')
+    expect(observed.failedSnapshot.workflowReloadError?.message).toContain(
+      'references a missing environment variable',
+    )
+    expect(observed.agentRunsAfterFailure).toBe(0)
+    expect(observed.failedSnapshot.running).toEqual([])
+    expect(observed.failedSnapshot.retrying).toEqual([])
+    expect(observed.recoveredSnapshot.workflowReloadError).toBeNull()
+    expect(harness.stateFetches()).toBe(observed.candidateFetches + 1)
+    expect(harness.agentRuns()).toHaveLength(1)
   })
 
   it('defensively reloads after a missed watch event', async (): Promise<void> => {
@@ -4462,6 +4517,7 @@ describe('rebuilt port lifecycle', (): void => {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
           const beforeReload = harness.releasedTrackers().length
+          const candidateFetchesBeforeReload = harness.stateFetches()
 
           handoffAvailable = false
           harness.setWorkflow(changedWorkflow({ fingerprint: 'no-code-review' }))
@@ -4474,6 +4530,7 @@ describe('rebuilt port lifecycle', (): void => {
           const snapshot = yield* control.snapshot
           expect(snapshot.workflowReloadError?.message).toContain('does not supply CodeReviewPort')
           expect(snapshot.effectiveWorkflow.fingerprint).toBe('initial')
+          expect(harness.stateFetches()).toBe(candidateFetchesBeforeReload)
           expect(harness.releasedTrackers().length).toBeGreaterThan(beforeReload)
         }),
       ),
@@ -5185,9 +5242,14 @@ describe('live agent detail', (): void => {
 
   it('keeps a retry scheduled before the session starts inspectable', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
-    // Dispatch preflight fails without the referenced secret, so the retry is scheduled before any
-    // agent session exists — and its published link still has to resolve.
-    const harness = makeHarness(workflow, () => [issue], undefined, {})
+    // Prompt rendering fails after the tick-wide validation gate admits the candidate, so the
+    // retry is scheduled before any agent session exists — and its published link still has to
+    // resolve.
+    const invalidPrompt = changedWorkflow({
+      fingerprint: 'invalid-prompt',
+      promptTemplate: '{{ missing }}',
+    })
+    const harness = makeHarness(invalidPrompt, () => [issue])
     const factory = makeAgentFactory()
 
     const lookup = await Effect.runPromise(
@@ -5210,7 +5272,7 @@ describe('live agent detail', (): void => {
     expect(lookup._tag).toBe('Found')
     if (lookup._tag === 'Found') {
       expect(lookup.detail.retry?.attempt).toBe(1)
-      expect(lookup.detail.retry?.reason).toContain('environment variable')
+      expect(lookup.detail.retry?.reason).toContain('failed to render workflow prompt')
       expect(lookup.detail.timeline.events.map((entry) => entry.category)).toEqual(['retry'])
       expect(factory.agents.size).toBe(0)
     }
@@ -5218,9 +5280,13 @@ describe('live agent detail', (): void => {
 
   it('closes the detail of a queued retry an operator pauses away', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
-    // The same pre-launch failure as above, so the issue is waiting to retry with no session behind
-    // it when the pause drops the queued retry.
-    const harness = makeHarness(workflow, () => [issue], undefined, {})
+    // The same prompt-rendering failure as above, so the issue is waiting to retry with no session
+    // behind it when the pause drops the queued retry.
+    const invalidPrompt = changedWorkflow({
+      fingerprint: 'invalid-prompt',
+      promptTemplate: '{{ missing }}',
+    })
+    const harness = makeHarness(invalidPrompt, () => [issue])
     const factory = makeAgentFactory()
 
     const lookup = await Effect.runPromise(
