@@ -12,6 +12,7 @@ import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
 import { githubProviderDefaults } from '@symphony/adapter-github/provider.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
+import { anIssue } from '../harness/fixtures.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -96,23 +97,12 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       const identifier = `real-integration-${process.pid}-${Date.now().toString(36)}`
       const workspacePath = join(workspaceRoot, identifier)
       yield* Effect.promise(() => mkdir(workspacePath))
-      const issue: Issue = {
+      const issue: Issue = anIssue({
         id: issueId(identifier),
-        nativeRef: null,
         identifier: issueIdentifier(identifier),
         title: 'Real integration smoke test',
-        description: null,
-        priority: null,
-        state: 'open',
-        branchName: null,
-        url: null,
-        assigneeId: null,
         labels: [],
-        blockedBy: [],
-        dispatchable: true,
-        createdAt: null,
-        updatedAt: null,
-      }
+      })
       const config = codexRunnerConfig({
         command: environment['SYMPHONY_INTEGRATION_CODEX_COMMAND'] ?? 'codex app-server',
         turnTimeoutMs: 90_000,

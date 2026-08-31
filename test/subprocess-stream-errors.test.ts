@@ -1,15 +1,15 @@
 import type { ChildProcess } from 'node:child_process'
 import { join } from 'node:path'
 import { rm, writeFile } from 'node:fs/promises'
-import { Effect, Option } from 'effect'
+import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { HooksConfig } from '@symphony/core/config/workflow.js'
-import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
 import { makeWorkspaceManager } from '@symphony/adapter-node/workspace-manager.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { hostFileSystem } from './harness/filesystem.js'
 import { makeGitRepository } from './harness/git-repository.js'
+import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
 /**
  * Which spawned child to fail an output pipe on, and which pipe.
@@ -75,23 +75,12 @@ afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })))
 })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('200'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#200'),
   title: 'Survive a failing output pipe',
-  description: null,
   priority: 1,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 const hooks = (overrides: Partial<HooksConfig>): HooksConfig => ({
   afterCreate: null,
@@ -113,11 +102,7 @@ describe('a child output pipe that fails', (): void => {
   it('fails the git invocation rather than returning the output it managed to read', async (): Promise<void> => {
     const fixture = await makeGitRepository()
     roots.push(fixture.root)
-    const sourceControl = makeGitSourceControl({
-      remoteUrl: fixture.remote,
-      baseBranch: 'main',
-      credential: Option.none(),
-    })
+    const sourceControl = sourceControlFor(fixture)
 
     // The revision of the protected base, read from this invocation's stdout. `initialize` runs
     // first and recovers from any failure of its own, so a pipe failed there would be swallowed;
@@ -157,11 +142,7 @@ describe('a child output pipe that fails', (): void => {
     const fixture = await makeGitRepository()
     roots.push(fixture.root)
     await writeFile(join(fixture.workspace, 'issue-403.ts'), 'untracked\n')
-    const sourceControl = makeGitSourceControl({
-      remoteUrl: fixture.remote,
-      baseBranch: 'main',
-      credential: Option.none(),
-    })
+    const sourceControl = sourceControlFor(fixture)
 
     failPipeOnce({
       matches: (command, args) => command === 'git' && args[0] === 'status',

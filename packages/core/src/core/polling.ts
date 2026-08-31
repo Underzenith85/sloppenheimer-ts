@@ -33,7 +33,13 @@ import {
   revalidateCredentials,
 } from './workflow-reload.js'
 
-/** One handoff write, in the shape every repair-identity change in this module needs. */
+/**
+ * One handoff write, persisted as it is made.
+ *
+ * The repair-identity changes in this module stand alone rather than arriving as a batch, so each
+ * is durable before the next thing happens — unlike `stageHandoff` in `handoff-reconciliation.ts`,
+ * where a whole pass is flushed once at its end.
+ */
 const writeHandoff = (
   context: OrchestratorContext,
   id: IssueId,

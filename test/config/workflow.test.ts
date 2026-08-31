@@ -21,6 +21,7 @@ import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
 import { codexSettingsDefaults, codexSettingsOf } from '@symphony/adapter-codex'
 import { auroraTempo } from '../harness/alien-agent-runner.js'
+import { anIssue } from '../harness/fixtures.js'
 
 /**
  * `loadWorkflow` reads its source through `FileSystem`; every test here reads the real files it
@@ -41,23 +42,16 @@ const makeTemporaryDirectory = (): Effect.Effect<string> =>
     return path
   })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('42'),
-  nativeRef: { number: 42 },
   identifier: issueIdentifier('GH-42'),
   title: 'Keep types exact',
+  nativeRef: { number: 42 },
   description: 'Use the type system',
   priority: 1,
-  state: 'open',
-  branchName: null,
   url: 'https://example.test/issues/42',
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
-  updatedAt: null,
-}
+})
 
 afterEach(async (): Promise<void> => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))

@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import { Effect, Fiber, Option, Redacted } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
 import { SourceControlError } from '@symphony/core/domain/errors.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { commitFile, git, makeGitRepository } from './harness/git-repository.js'
+import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
 const roots: string[] = []
 const originalTmpDir = process.env['TMPDIR']
@@ -21,23 +21,12 @@ afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })))
 })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('185'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#185'),
   title: 'Interruptible publication',
-  description: null,
   priority: 1,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 /** How long the remote hook blocks the push for, and how long the assertion outlives it. */
 const blockedPushSeconds = 3
@@ -87,9 +76,7 @@ describe('host Git source control interruption', (): void => {
     )
     await chmod(hook, 0o755)
 
-    const sourceControl = makeGitSourceControl({
-      remoteUrl: fixture.remote,
-      baseBranch: 'main',
+    const sourceControl = sourceControlFor(fixture, {
       credential: Option.some({ username: 'x-access-token', password: Redacted.make('secret') }),
     })
     const workspace = { path: fixture.workspace, key: 'issue-185', createdNow: true }
@@ -120,11 +107,7 @@ describe('host Git source control interruption', (): void => {
     await commitFile(fixture.seed, 'conflict.ts', 'base\n', 'add the contested file')
     await git(fixture.seed, ['push', 'origin', 'main'])
 
-    const sourceControl = makeGitSourceControl({
-      remoteUrl: fixture.remote,
-      baseBranch: 'main',
-      credential: Option.none(),
-    })
+    const sourceControl = sourceControlFor(fixture)
     const prepared = await Effect.runPromise(
       sourceControl.prepare(
         issue,
@@ -178,11 +161,7 @@ describe('host Git source control interruption', (): void => {
     roots.push(fixture.root)
     // `spawn` rejects a NUL byte by throwing synchronously instead of emitting `error`, which is
     // the one way of failing to start git that never reaches a listener.
-    const sourceControl = makeGitSourceControl({
-      remoteUrl: `${fixture.remote}${NUL}`,
-      baseBranch: 'main',
-      credential: Option.none(),
-    })
+    const sourceControl = sourceControlFor(fixture, { remoteUrl: `${fixture.remote}${NUL}` })
 
     const failure = await Effect.runPromise(
       Effect.flip(

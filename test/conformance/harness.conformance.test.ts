@@ -5,24 +5,17 @@ import { describe, expect } from 'vitest'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { FakeTracker } from '../harness/fake-tracker.js'
 import { FakeWorkspaceProcess } from '../harness/fake-workspace-process.js'
+import { anIssue } from '../harness/fixtures.js'
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('opaque-1'),
-  nativeRef: { number: 1 },
   identifier: issueIdentifier('owner/repository#1'),
   title: 'Conformance fixture',
-  description: null,
+  nativeRef: { number: 1 },
   priority: 1,
   state: 'Open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
-  updatedAt: null,
-}
+})
 
 describe('Core Conformance typed harness boundaries', (): void => {
   it.effect('advances scheduled work deterministically in due-time order', () => {

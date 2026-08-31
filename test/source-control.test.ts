@@ -1,12 +1,12 @@
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
-import { Effect, Option } from 'effect'
+import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { makeGitRepository, git } from './harness/git-repository.js'
+import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
 const roots: string[] = []
 
@@ -14,23 +14,12 @@ afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })))
 })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('165'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#165'),
   title: 'Host-owned publication',
-  description: null,
   priority: 1,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 /** The git fixture is promise-shaped; this lifts one of its calls into the effect under test. */
 const host = <Value>(work: () => Promise<Value>): Effect.Effect<Value> => Effect.promise(work)
@@ -41,11 +30,7 @@ describe('host Git source control', (): void => {
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
-      const sourceControl = makeGitSourceControl({
-        remoteUrl: fixture.remote,
-        baseBranch: 'main',
-        credential: Option.none(),
-      })
+      const sourceControl = sourceControlFor(fixture)
       const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
       const prepared = yield* sourceControl.prepare(issue, workspace, {
         _tag: 'Normal',
@@ -78,11 +63,7 @@ describe('host Git source control', (): void => {
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
-      const sourceControl = makeGitSourceControl({
-        remoteUrl: fixture.remote,
-        baseBranch: 'main',
-        credential: Option.none(),
-      })
+      const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
         { path: fixture.workspace, key: 'issue-165', createdNow: true },

@@ -3,7 +3,7 @@ import { Exit, Fiber, MutableRef, Option } from 'effect'
 import { describe, expect } from 'vitest'
 
 import type { Workflow } from '@symphony/core/config/workflow.js'
-import { issueId, issueIdentifier, type Issue, type IssueId } from '@symphony/core/domain/domain.js'
+import { issueIdentifier, type Issue, type IssueId } from '@symphony/core/domain/domain.js'
 import { dispatchAdmission, hasSlot } from '@symphony/core/core/policy.js'
 import {
   initialState,
@@ -25,6 +25,7 @@ import {
 } from '@symphony/core/telemetry.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
+import { anIssue } from '../harness/fixtures.js'
 
 /**
  * These exercise the scheduler's transitions directly: no orchestrator, no mailbox, no ports. A
@@ -125,23 +126,8 @@ const execution = {
   workspaces: unusedPorts.workspaces,
 } as unknown as ExecutionSnapshot
 
-const makeIssue = (identifier: string, state = 'open', labels = ['symphony']): Issue => ({
-  id: issueId(identifier),
-  nativeRef: null,
-  identifier: issueIdentifier(identifier),
-  title: identifier,
-  description: null,
-  priority: null,
-  state,
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels,
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-})
+const makeIssue = (identifier: string, state = 'open', labels = ['symphony']): Issue =>
+  anIssue({ identifier: issueIdentifier(identifier), state, labels })
 
 const emptyState = (): RuntimeState =>
   Transitions.finishStartupRecovery(

@@ -29,6 +29,7 @@ import { trackerProviders } from '../../src/tracker-adapters.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { githubProviderOf, type GitHubProviderConfig } from '@symphony/adapter-github'
 import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
+import { anIssue } from '../harness/fixtures.js'
 
 const temporaryDirectories: string[] = []
 
@@ -73,23 +74,15 @@ const blocker = (number: number, state = 'open'): BlockerRef => ({
   url: `https://github.com/example/symphony/issues/${String(number)}`,
 })
 
-const issue = (number: number, blockers: readonly BlockerRef[] = []): Issue => ({
-  id: issueId(String(number)),
-  nativeRef: null,
-  identifier: issueIdentifier(`example/symphony#${String(number)}`),
-  title: `Issue ${String(number)}`,
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
-  url: `https://github.com/example/symphony/issues/${String(number)}`,
-  assigneeId: null,
-  labels: [],
-  blockedBy: blockers,
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-})
+const issue = (number: number, blockers: readonly BlockerRef[] = []): Issue =>
+  anIssue({
+    id: issueId(String(number)),
+    identifier: issueIdentifier(`example/symphony#${String(number)}`),
+    title: `Issue ${String(number)}`,
+    url: `https://github.com/example/symphony/issues/${String(number)}`,
+    labels: [],
+    blockedBy: blockers,
+  })
 
 const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): OrchestratorSnapshot => ({
   generatedAt: '2026-08-30T00:00:00.000Z',

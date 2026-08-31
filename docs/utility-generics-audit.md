@@ -7,9 +7,9 @@ verbatim, or written once per concrete type where one type parameter would do.
 Findings are ordered by how much they remove and how safe the removal is. Each names the call sites
 so the work can be scoped without re-deriving the search.
 
-**Status.** Findings 1–8 are implemented; each is marked below, and the line numbers in those
-sections refer to the code as it stood before the change. Findings 9, 10, and 11 remain open and are
-tracked in [#215](https://github.com/Underzenith85/symphony-ts/issues/215).
+**Status.** All eleven findings are implemented; each is marked below, and the line numbers in those
+sections refer to the code as it stood before the change. Tracked in
+[#215](https://github.com/Underzenith85/symphony-ts/issues/215).
 
 Every proposed home respects the layering in `AGENTS.md`: `support/` is the bottom layer, `core/`
 and the adapter packages may both reach it, and all three adapter packages already import from
@@ -313,6 +313,8 @@ While there: the label-normalizing set — `new Set(issue.labels.map((l) => l.tr
 
 ## 9. Two byte-identical comparators, and a comparator shape repeated three times
 
+_Implemented: `compareOptionalNumber`, `compareRank`, and `inOrder` in `src/operator/ui/model.ts`._
+
 `src/operator/ui/model.ts:196` `comparePriority` and `:209` `compareNumber` are the same eleven
 lines; substituting the name makes `diff` report no difference at all. Both are "compare two
 nullables, nulls last".
@@ -355,6 +357,8 @@ shared regexp constant even if the three readings stay separate.
 
 ## 10. Test fixtures: the generic that would remove the most lines in the repository
 
+_Implemented: `fixture`, `anIssue`, `anOpenPullRequest`, and `sourceControlFor` in `test/harness/fixtures.ts`._
+
 83 distinct five-line blocks are duplicated across two or more test files. They are almost all object
 literals restating a record's every field to vary one:
 
@@ -387,6 +391,8 @@ tests rather than being silently ignored.
 
 ## 11. One naming hazard found on the way (not a generics finding)
 
+_Implemented: the reconciliation copy is now `stageHandoff`. Both behaviours were wanted — see below._
+
 `packages/core/src/core/polling.ts:36` and `packages/core/src/core/handoff-reconciliation.ts:70`
 both define `writeHandoff` with the identical signature
 `(context: OrchestratorContext, id: IssueId, handoff: HandoffEntry) => Effect.Effect<void>` — and
@@ -397,6 +403,12 @@ Whether that difference is intentional is a question for whoever owns the handof
 same-named, same-typed, differently-behaving functions one directory apart will eventually be
 confused for each other. If both behaviours are wanted, the names should say which is which
 (`writeHandoff` / `stageHandoff`); if only one is, they should be one function.
+
+**Resolved: both are wanted.** `reconcileHandoffs` rewrites many handoffs in a pass and flushes them
+with a single `persistHandoffs` as its last statement, so its sixteen writes are deliberately staged
+rather than each hitting the store. The polling copy persists as it writes because the
+repair-identity changes it makes stand alone. The reconciliation one is now `stageHandoff`, and both
+say in their doc comments which they are and why.
 
 ---
 

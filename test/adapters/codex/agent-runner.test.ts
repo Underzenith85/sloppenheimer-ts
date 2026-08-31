@@ -8,6 +8,7 @@ import { codexTurnOutcome, type AgentLaunch } from '@symphony/adapter-codex/code
 import { AgentRunner, type AgentRunnerPort } from '@symphony/core/ports/agent-runner.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
+import { anIssue } from '../../harness/fixtures.js'
 
 const codexConfig = codexRunnerConfig({
   command: 'codex app-server',
@@ -16,23 +17,12 @@ const codexConfig = codexRunnerConfig({
   stallTimeoutMs: 1_000,
 })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('19'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#19'),
   title: 'Bind the runner to a filesystem',
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
   labels: [],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 /** A launch whose workspace is not contained by its root, which launch verification refuses first. */
 const uncontainedLaunch: AgentLaunch = {
