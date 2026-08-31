@@ -30,7 +30,7 @@ import { makeGitHubCodeReview } from '@symphony/adapter-github/code-review.js'
 import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
 import type { TrackerPort } from '@symphony/core/ports/tracker.js'
 import type { GitHubProviderConfig } from '@symphony/adapter-github'
-import type { CodexConfig } from '@symphony/core/config/workflow.js'
+import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
@@ -88,11 +88,9 @@ const toolContext: HostToolContext = {
   nativeRef: issue.nativeRef,
 }
 
-const configFor = (scenario: string, dynamicTools: readonly JsonValue[]): CodexConfig => ({
+const configFor = (scenario: string, dynamicTools: readonly JsonValue[]): AgentRunnerConfig => ({
   command: `${JSON.stringify(process.execPath)} ${JSON.stringify(fakeAppServer)} ${JSON.stringify(scenario)} ${JSON.stringify(JSON.stringify({ dynamicTools }))}`,
-  approvalPolicy: 'never',
-  threadSandbox: 'workspace-write',
-  turnSandboxPolicy: null,
+  settings: { approvalPolicy: 'never', threadSandbox: 'workspace-write', turnSandboxPolicy: null },
   turnTimeoutMs: 2_000,
   readTimeoutMs: 2_000,
   stallTimeoutMs: 0,

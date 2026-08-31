@@ -151,9 +151,14 @@ export const captureExecutionSnapshot = (
   workspaces: effective.workspaces,
   workspaceRoot: effective.workflow.config.workspaceRoot,
   prompt,
-  agentRunner: { ...effective.workflow.config.codex },
+  // The neutral half comes from the configuration, the opaque half from the validated selection:
+  // together they are everything the launch hands the adapter that owns the kind.
+  agentRunner: {
+    ...effective.workflow.config.runner,
+    settings: effective.workflow.runner.settings,
+  },
   maxTurns: effective.workflow.config.agent.maxTurns,
-  stallTimeoutMs: effective.workflow.config.codex.stallTimeoutMs,
+  stallTimeoutMs: effective.workflow.config.runner.stallTimeoutMs,
 })
 
 export const sortIssues = (issues: readonly Issue[]): readonly Issue[] =>

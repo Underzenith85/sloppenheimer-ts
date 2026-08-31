@@ -2,26 +2,19 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 
-import {
-  codexAgentEventSemantics,
-  codexAgentRunner,
-  layerCodexAgentRunner,
-} from '@symphony/adapter-codex/agent-runner.js'
+import { codexAgentRunner, layerCodexAgentRunner } from '@symphony/adapter-codex/agent-runner.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import type { CodexConfig } from '@symphony/core/config/workflow.js'
-import type { AgentLaunch } from '@symphony/adapter-codex/codex.js'
+import { codexTurnOutcome, type AgentLaunch } from '@symphony/adapter-codex/codex.js'
 import { AgentRunner, type AgentRunnerPort } from '@symphony/core/ports/agent-runner.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
+import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 
-const codexConfig: CodexConfig = {
+const codexConfig = codexRunnerConfig({
   command: 'codex app-server',
-  approvalPolicy: 'never',
-  threadSandbox: 'workspace-write',
-  turnSandboxPolicy: null,
   turnTimeoutMs: 1_000,
   readTimeoutMs: 1_000,
   stallTimeoutMs: 1_000,
-}
+})
 
 const issue: Issue = {
   id: issueId('19'),
@@ -71,7 +64,7 @@ describe('Codex agent runner adapter', (): void => {
       const error = yield* Effect.flip(runner.run(uncontainedLaunch))
 
       expect(error.category).toBe('workspace_rejected')
-      expect(runner.semantics).toBe(codexAgentEventSemantics)
+      expect(runner.kind).toBe('codex')
     }),
   )
 
@@ -82,18 +75,18 @@ describe('Codex agent runner adapter', (): void => {
       const error = yield* Effect.flip(provided.run(uncontainedLaunch))
 
       expect(error.category).toBe('workspace_rejected')
-      expect(provided.semantics).toBe(codexAgentEventSemantics)
+      expect(provided.kind).toBe('codex')
     }).pipe(Effect.provide(layerCodexAgentRunner), Effect.provide(hostFileSystem)),
   )
 
-  it('reads Codex turn statuses as port outcomes', (): void => {
-    const { turnOutcome } = codexAgentEventSemantics
-
-    expect(turnOutcome('completed')).toBe('completed')
-    expect(turnOutcome('cancelled')).toBe('cancelled')
-    expect(turnOutcome('canceled')).toBe('cancelled')
-    expect(turnOutcome('interrupted')).toBe('cancelled')
-    expect(turnOutcome('failed')).toBe('failed')
-    expect(turnOutcome('anything else')).toBe('failed')
+  // The reading itself stayed with Codex; what changed is that its result travels on the event as
+  // the lifecycle outcome rather than being asked for afterwards by the runtime.
+  it('reads its own turn statuses as port outcomes', (): void => {
+    expect(codexTurnOutcome('completed')).toBe('completed')
+    expect(codexTurnOutcome('cancelled')).toBe('cancelled')
+    expect(codexTurnOutcome('canceled')).toBe('cancelled')
+    expect(codexTurnOutcome('interrupted')).toBe('cancelled')
+    expect(codexTurnOutcome('failed')).toBe('failed')
+    expect(codexTurnOutcome('anything else')).toBe('failed')
   })
 })

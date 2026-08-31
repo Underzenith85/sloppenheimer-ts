@@ -13,10 +13,11 @@ import { renderPrompt, type Workflow } from '@symphony/core/config/workflow.js'
 import { loadWorkflow } from '../../src/config/workflow.js'
 import type { WorkflowError } from '@symphony/core/domain/errors.js'
 import { hostFileSystem } from '../harness/filesystem.js'
+import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
 
 /** The workflow source is read through `FileSystem`; these tests read the files they wrote. */
 const loadHostWorkflow = (path: string): Effect.Effect<Workflow, WorkflowError> =>
-  loadWorkflow(path, trackerProviders).pipe(Effect.provide(hostFileSystem))
+  loadWorkflow(path, workflowAdaptersFor(trackerProviders)).pipe(Effect.provide(hostFileSystem))
 
 const directories: string[] = []
 const writeWorkflow = async (source: string): Promise<string> => {
@@ -87,7 +88,7 @@ codex:
 `),
       )
       const workflow = yield* withEnvironment(loadHostWorkflow(path), { TRACKER_TOKEN: 'secret' })
-      expect(workflow.config.codex.command).toBe('printf "$UNCHANGED" | codex app-server')
+      expect(workflow.config.runner.command).toBe('printf "$UNCHANGED" | codex app-server')
       expect([...workflow.config.agent.maxConcurrentAgentsByState]).toEqual([['ready', 2]])
       expect(yield* renderPrompt(workflow, issue, 4)).toBe('owner/repository#19 4')
     }),

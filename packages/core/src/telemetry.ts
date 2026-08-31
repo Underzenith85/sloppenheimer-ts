@@ -1,34 +1,25 @@
 /**
  * Canonical agent session telemetry.
  *
- * One pipeline carries everything an operator can see about a live agent: the Codex client
- * normalizes each protocol message into a bounded, already-redacted {@link AgentEventPayload}, and
- * the orchestrator folds those payloads — plus the scheduling facts only it knows, such as retries,
+ * One pipeline carries everything an operator can see about a live agent: the selected runner's
+ * adapter normalizes each protocol message into a bounded, already-redacted
+ * {@link AgentEventPayload} and states what that message means for the session's lifecycle, and the
+ * orchestrator folds those payloads — plus the scheduling facts only it knows, such as retries,
  * cancellations, and pull-request handoff — into an actor-owned {@link AgentDetailRecord}. The
  * record is never read directly by a consumer; the actor publishes exact, immutable
  * {@link AgentDetailSnapshot} values built from it.
  */
-
-import { Schema } from 'effect'
 
 import type { IssueId, IssueIdentifier, JsonObject, JsonValue } from './domain/domain.js'
 import { withEntry } from './support/collections.js'
 import {
   decodeOrNull,
   finiteNumber,
-  nonEmptyString,
   protocolRecord,
   protocolStruct,
   tolerant,
 } from './support/schema.js'
-import {
-  bound,
-  boundRedacted,
-  commandSummary,
-  pathKey,
-  redact,
-  type Redactor,
-} from './support/redaction.js'
+import { bound, boundRedacted, redact } from './support/redaction.js'
 
 /** How many timeline events are retained per issue. Older events are dropped and counted. */
 export const timelineEventLimit = 200
@@ -119,9 +110,26 @@ export type AgentEventPayload =
     }>
   | Readonly<{ kind: 'cancellation'; reason: string }>
 
+export type AgentTurnOutcome = 'completed' | 'cancelled' | 'failed'
+
+/**
+ * What one event means for the session's lifecycle, as the runner that emitted it reads its own
+ * vocabulary.
+ *
+ * The orchestrator used to recognize the lifecycle by matching one backend's literal method names,
+ * which meant a runner with a different vocabulary would run to completion while the scheduler
+ * observed nothing at all. Stating the meaning on the event removes that failure mode entirely: an adapter
+ * cannot forget to be understood, and no consumer can consult the wrong runner's reading. `null` is
+ * the ordinary case — most messages report progress rather than a lifecycle transition.
+ */
+export type AgentLifecycle =
+  | Readonly<{ phase: 'session_started' }>
+  | Readonly<{ phase: 'turn_started' }>
+  | Readonly<{ phase: 'turn_settled'; outcome: AgentTurnOutcome }>
+
 /**
  * The canonical session event. Identity, token totals, rate limits, turn count, and turn status are
- * the normalized telemetry the Codex client already produces; `payload` is this module's bounded,
+ * the normalized telemetry the runner's adapter produces; `payload` is that adapter's bounded,
  * pre-redacted view of the same message, for the retained timeline.
  */
 export type AgentEvent = Readonly<{
@@ -137,19 +145,17 @@ export type AgentEvent = Readonly<{
   turnCount: number
   turnStatus: string | null
   payload: AgentEventPayload
+  /** What this event means for the session, or `null` when it reports no transition. */
+  lifecycle: AgentLifecycle | null
 }>
 
-const noPayload: AgentEventPayload = Object.freeze({ kind: 'none' })
-
 /**
- * The protocol shapes this module reads. Every field is tolerant and every record is normalized to
- * one casing by {@link protocolStruct}, so the App Server's habit of reporting the same value as
- * `used_percent` on one notification and `usedPercent` on the next is answered here rather than at
- * each field read. Alternatives that are genuinely different names, not different casings, stay
- * visible as the fields they are and are chosen between where they are read.
+ * One rate-limit window, as a runner reports it. Every field is tolerant and the record is
+ * normalized to one casing by {@link protocolStruct}, so a backend reporting `used_percent` on one
+ * message and `usedPercent` on the next is answered here rather than at each field read.
  *
- * These schemas decode the *protocol* shape only. Redaction and bounding stay in the payload
- * builders below, so no retained value is ever constructed before the redactor has seen it.
+ * This decodes the window's *shape* only. Redaction and bounding happen in {@link decodeRateLimits}
+ * below, so no retained value is ever constructed before the redactor has seen it.
  */
 const rateLimitWindowSource = protocolStruct({
   usedPercent: tolerant(finiteNumber),
@@ -157,88 +163,8 @@ const rateLimitWindowSource = protocolStruct({
   resetsInSeconds: tolerant(finiteNumber),
 })
 
-/** A command is reported either as one line or as its already-split words. */
-const commandSource = Schema.Union(
-  nonEmptyString,
-  Schema.transform(Schema.Array(Schema.Unknown), Schema.String, {
-    strict: false,
-    decode: (parts: readonly unknown[]) =>
-      parts.filter((part) => typeof part === 'string').join(' '),
-    encode: (text: string) => [text],
-  }).pipe(Schema.filter((text) => text.length > 0)),
-)
-
-/**
- * One protocol item, in the union of every shape the App Server reports. The type word decides
- * which fields the payload below reads; the rest are simply absent.
- *
- * `input`, `arguments`, `args`, `output`, and `result` are deliberately left unread: only their
- * serialized size is retained, so the values reach {@link byteLength} as they arrived.
- */
-const itemSource = protocolStruct({
-  type: tolerant(nonEmptyString),
-  itemType: tolerant(nonEmptyString),
-  status: tolerant(nonEmptyString),
-  state: tolerant(nonEmptyString),
-  text: tolerant(nonEmptyString),
-  content: tolerant(nonEmptyString),
-  message: tolerant(nonEmptyString),
-  error: tolerant(nonEmptyString),
-  code: tolerant(nonEmptyString),
-  name: tolerant(nonEmptyString),
-  tool: tolerant(nonEmptyString),
-  server: tolerant(nonEmptyString),
-  command: tolerant(commandSource),
-  commandLine: tolerant(commandSource),
-  exitCode: tolerant(finiteNumber),
-  durationMs: tolerant(finiteNumber),
-  changes: tolerant(Schema.Array(Schema.Unknown)),
-  input: Schema.optional(Schema.Unknown),
-  arguments: Schema.optional(Schema.Unknown),
-  args: Schema.optional(Schema.Unknown),
-  output: Schema.optional(Schema.Unknown),
-  result: Schema.optional(Schema.Unknown),
-})
-
-/** The file an item reports changing, either as the item itself or as its first listed change. */
-const fileTargetSource = protocolStruct({
-  path: tolerant(nonEmptyString),
-  file: tolerant(nonEmptyString),
-  filePath: tolerant(nonEmptyString),
-  kind: tolerant(nonEmptyString),
-  type: tolerant(nonEmptyString),
-  change: tolerant(nonEmptyString),
-  changeKind: tolerant(nonEmptyString),
-  addedLines: tolerant(finiteNumber),
-  additions: tolerant(finiteNumber),
-  deletedLines: tolerant(finiteNumber),
-  deletions: tolerant(finiteNumber),
-})
-
-/** A notification's parameters, as far as the retained payload is concerned. */
-const notificationSource = protocolStruct({
-  item: Schema.optional(Schema.Unknown),
-  text: tolerant(nonEmptyString),
-  message: tolerant(nonEmptyString),
-})
-
 const decodeRateLimitWindow = decodeOrNull(rateLimitWindowSource)
 const decodeRateLimitReport = decodeOrNull(protocolRecord)
-const decodeItem = decodeOrNull(itemSource)
-const decodeFileTarget = decodeOrNull(fileTargetSource)
-const decodeNotification = decodeOrNull(notificationSource)
-
-/** The size of a payload we deliberately do not retain, so an operator still sees its scale. */
-const byteLength = (value: unknown): number | null => {
-  if (value === undefined) {
-    return null
-  }
-  try {
-    return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8')
-  } catch {
-    return null
-  }
-}
 
 export const qualityPhaseOf = (command: string): QualityPhase | null => {
   const words = new Set(command.toLowerCase().split(/[^a-z]+/u))
@@ -272,193 +198,6 @@ export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLim
       .sort((left, right) => left.name.localeCompare(right.name))
       .map((window) => Object.freeze(window)),
   )
-}
-
-const itemState = (method: string, status: string | null): ToolState => {
-  const reported = status?.toLowerCase() ?? null
-  if (reported === 'failed' || reported === 'error') {
-    return 'failed'
-  }
-  if (reported === 'completed' || reported === 'succeeded' || method.endsWith('/completed')) {
-    return 'completed'
-  }
-  return 'started'
-}
-
-const fileChangeKinds = new Map<string, FileChangeKind>([
-  ['add', 'add'],
-  ['added', 'add'],
-  ['create', 'add'],
-  ['created', 'add'],
-  ['delete', 'delete'],
-  ['deleted', 'delete'],
-  ['remove', 'delete'],
-  ['removed', 'delete'],
-  ['update', 'update'],
-  ['updated', 'update'],
-  ['modify', 'update'],
-  ['modified', 'update'],
-])
-
-const changeKind = (value: string | null): FileChangeKind =>
-  fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
-
-const itemPayload = (
-  method: string,
-  source: unknown,
-  redactor: Redactor,
-): AgentEventPayload | null => {
-  const item = decodeItem(source)
-  if (item === null) {
-    return null
-  }
-  const type = (item.type ?? item.itemType ?? '').toLowerCase()
-  const status = item.status ?? item.state
-  if (type.includes('reasoning')) {
-    // Private reasoning is never retained, not even truncated: the fact that the agent is thinking
-    // is the whole of the signal an operator is entitled to.
-    return { kind: 'reasoning' }
-  }
-  if (type.includes('message')) {
-    const raw = item.text ?? item.content ?? item.message
-    const summary = raw === null ? null : boundRedacted(raw, redactor)
-    return {
-      kind: 'message',
-      role: type.includes('user') ? 'user' : 'assistant',
-      text: summary?.text ?? null,
-      truncated: summary?.truncated ?? false,
-    }
-  }
-  if (type.includes('command') || type.includes('exec') || type.includes('shell')) {
-    const raw = item.command ?? item.commandLine
-    const summary = commandSummary(raw ?? 'unknown', redactor)
-    return {
-      kind: 'command',
-      program: summary.program,
-      argumentCount: summary.argumentCount,
-      quality: raw === null ? null : qualityPhaseOf(raw),
-      state: itemState(method, status),
-      exitCode: item.exitCode,
-      durationMs: item.durationMs,
-    }
-  }
-  if (type.includes('file') || type.includes('patch') || type.includes('diff')) {
-    // The change list is authoritative when it carries one; an item that reports the file inline
-    // is read directly.
-    const target = decodeFileTarget(item.changes?.[0]) ?? decodeFileTarget(source)
-    const path = target?.path ?? target?.file ?? target?.filePath ?? null
-    return {
-      kind: 'file',
-      path: path === null ? 'unknown' : pathKey(redactor(path)),
-      change: changeKind(
-        target?.kind ?? target?.type ?? target?.change ?? target?.changeKind ?? null,
-      ),
-      addedLines: target?.addedLines ?? target?.additions ?? null,
-      deletedLines: target?.deletedLines ?? target?.deletions ?? null,
-    }
-  }
-  if (type.includes('tool') || type.includes('search') || type.includes('mcp')) {
-    return {
-      kind: 'tool',
-      name: bound(redactor(item.name ?? item.tool ?? item.server ?? 'tool'), 80).text,
-      state: itemState(method, status),
-      // Tool arguments and results routinely carry file contents and credentials, so only their
-      // scale is kept.
-      inputBytes: byteLength(item.input ?? item.arguments ?? item.args),
-      outputBytes: byteLength(item.output ?? item.result),
-    }
-  }
-  if (type.includes('error')) {
-    const summary = boundRedacted(item.message ?? item.error ?? method, redactor)
-    return {
-      kind: 'error',
-      severity: 'error',
-      code: item.code,
-      message: summary.text,
-      truncated: summary.truncated,
-    }
-  }
-  return null
-}
-
-/**
- * Normalizes one App Server message into the bounded payload the timeline retains. Anything not
- * recognized degrades to `none`: an unknown message still appears on the timeline by method name,
- * which is safe, rather than being retained verbatim, which is not.
- */
-export const normalizePayload = (
-  method: string,
-  params: JsonValue | undefined,
-  redactor: Redactor = redact,
-): AgentEventPayload => {
-  const source = decodeNotification(params)
-  if (source !== null) {
-    const payload = itemPayload(method, source.item, redactor)
-    if (payload !== null) {
-      return payload
-    }
-    const text = source.text ?? source.message
-    if (text !== null && /message/iu.test(method)) {
-      const summary = boundRedacted(text, redactor)
-      return {
-        kind: 'message',
-        role: 'assistant',
-        text: summary.text,
-        truncated: summary.truncated,
-      }
-    }
-  }
-  if (/^thread\/|^session\/|^turn\//u.test(method)) {
-    return { kind: 'session' }
-  }
-  return noPayload
-}
-
-/** The payload for a message the client itself emits about the session. */
-export const clientPayload = (
-  event: string,
-  message: string | null,
-  redactor: Redactor = redact,
-): AgentEventPayload => {
-  const summary = boundRedacted(message ?? event, redactor)
-  switch (event) {
-    case 'session_started':
-    case 'session_stopped':
-    case 'thread_started':
-    case 'turn_started':
-    case 'turn/terminated': {
-      return { kind: 'session' }
-    }
-    case 'approval_auto_approved': {
-      return {
-        kind: 'tool',
-        name: summary.text,
-        state: 'approved',
-        inputBytes: null,
-        outputBytes: null,
-      }
-    }
-    case 'permissions_grant_withheld': {
-      return {
-        kind: 'tool',
-        name: summary.text,
-        state: 'withheld',
-        inputBytes: null,
-        outputBytes: null,
-      }
-    }
-    default: {
-      return {
-        kind: 'error',
-        // Client-side notices — stderr noise, an unmatched response, a message Symphony could not
-        // decode — are reported, but they are not by themselves session failures.
-        severity: 'warning',
-        code: event,
-        message: summary.text,
-        truncated: summary.truncated,
-      }
-    }
-  }
 }
 
 export type AgentPhase =
@@ -1004,11 +743,7 @@ const alignSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord =>
  * summary ends here rather than whenever the next turn happens to start or the attempt is torn
  * down — the gap where a continuation decides whether to run again belongs to no session.
  */
-const endsTurn = (event: AgentEvent): boolean =>
-  event.turnStatus !== null &&
-  (event.event === 'turn/completed' ||
-    event.event === 'turn/failed' ||
-    event.event === 'turn/terminated')
+const endsTurn = (event: AgentEvent): boolean => event.lifecycle?.phase === 'turn_settled'
 
 const messageOperation = (text: string | null): string =>
   text === null || text.length === 0 ? 'Writing a reply' : `Replying: ${bound(text, 80).text}`

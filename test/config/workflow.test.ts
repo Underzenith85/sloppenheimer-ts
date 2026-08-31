@@ -18,6 +18,9 @@ import { stubProviderToken, stubTrackerProviders } from '../harness/stub-tracker
 import { JsonConversionError, toJsonValue } from '@symphony/core/support/json.js'
 import { renderPrompt, workflowDefaults, type Workflow } from '@symphony/core/config/workflow.js'
 import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
+import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
+import { codexSettingsDefaults, codexSettingsOf } from '@symphony/adapter-codex'
+import { auroraTempo } from '../harness/alien-agent-runner.js'
 
 /**
  * `loadWorkflow` reads its source through `FileSystem`; every test here reads the real files it
@@ -27,7 +30,7 @@ const loadHostWorkflow = (
   path: string,
   providers: TrackerProviderRegistry,
 ): Effect.Effect<Workflow, WorkflowError> =>
-  loadWorkflow(path, providers).pipe(Effect.provide(hostFileSystem))
+  loadWorkflow(path, workflowAdaptersFor(providers)).pipe(Effect.provide(hostFileSystem))
 
 const temporaryDirectories: string[] = []
 
@@ -102,7 +105,9 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
       expect(githubProviderOf(workflow.tracker).baseBranch).toBe('main')
       expect(workflow.config.workspaceRoot).toBe(join(directory, '.workspaces'))
       expect(workflow.config.agent.maxConcurrentAgents).toBe(2)
-      expect(workflow.config.codex.threadSandbox).toBe('workspace-write')
+      // The sandbox is Codex's own setting now: preserved verbatim under `settings`, and read back
+      // through the adapter that owns it rather than off the neutral configuration.
+      expect(codexSettingsOf(workflow.runner).threadSandbox).toBe('workspace-write')
       expect(prompt).toBe('Work on GH-42: Keep types exact (attempt 3)')
     }),
   )
@@ -314,14 +319,12 @@ describe('workflow defaults and extension keys', (): void => {
       expect(workflow.config.agent.maxConcurrentAgents).toBe(workflowDefaults.maxConcurrentAgents)
       expect(workflow.config.agent.maxTurns).toBe(workflowDefaults.maxTurns)
       expect(workflow.config.agent.maxRetryBackoffMs).toBe(workflowDefaults.maxRetryBackoffMs)
-      expect(workflow.config.codex).toEqual({
-        command: workflowDefaults.codexCommand,
-        approvalPolicy: workflowDefaults.approvalPolicy,
-        threadSandbox: workflowDefaults.threadSandbox,
-        turnSandboxPolicy: null,
+      expect(workflow.config.runner).toEqual({
+        command: codexSettingsDefaults.command,
         turnTimeoutMs: workflowDefaults.turnTimeoutMs,
         readTimeoutMs: workflowDefaults.readTimeoutMs,
         stallTimeoutMs: workflowDefaults.stallTimeoutMs,
+        settings: {},
       })
       expect(workflow.config.tracker.activeStates).toEqual(['open'])
       expect(workflow.config.tracker.terminalStates).toEqual(['closed'])
@@ -438,7 +441,7 @@ codex:
         CODEX_COMMAND: 'not-substituted',
       })
 
-      expect(workflow.config.codex.command).toBe('$CODEX_COMMAND')
+      expect(workflow.config.runner.command).toBe('$CODEX_COMMAND')
       expect(workflow.config.hooks.beforeRun).toBe('echo $HOME')
     }),
   )
@@ -527,7 +530,7 @@ describe('front-matter decoding messages', (): void => {
     [`${minimalTracker}\ncodex:\n  command: 5`, 'codex.command must be a non-empty string'],
     [
       `${minimalTracker}\ncodex:\n  approval_policy: 5`,
-      'codex.approval_policy must be a non-empty string',
+      'codex.approval_policy must be one of: untrusted, on-request, never',
     ],
     [
       `${minimalTracker}\ncodex:\n  approval_policy: sometimes`,
@@ -536,6 +539,23 @@ describe('front-matter decoding messages', (): void => {
     [
       `${minimalTracker}\ncodex:\n  thread_sandbox: everything`,
       'codex.thread_sandbox must be one of: read-only, workspace-write, danger-full-access',
+    ],
+    [
+      `${minimalTracker}\nrunner:\n  kind: nowhere`,
+      'unsupported runner.kind: nowhere (supported: codex, aurora)',
+    ],
+    [`${minimalTracker}\nrunner:\n  settings: 5`, 'runner.settings must be a map'],
+    [
+      `${minimalTracker}\nrunner:\n  kind: aurora\n  settings:\n    tempo: allegro`,
+      'runner.settings.tempo must be one of: largo, presto',
+    ],
+    [
+      `${minimalTracker}\nrunner:\n  kind: codex\n  settings:\n    approval_policy: sometimes`,
+      'runner.settings.approval_policy must be one of: untrusted, on-request, never',
+    ],
+    [
+      `${minimalTracker}\nrunner:\n  kind: codex\ncodex:\n  command: codex app-server`,
+      'runner and codex must not both be declared; codex is the deprecated spelling of runner.kind codex',
     ],
     [
       `${minimalTracker}\ncodex:\n  turn_sandbox_policy: 5`,
@@ -627,14 +647,20 @@ server:
       expect(workflow.config.agent.maxConcurrentAgents).toBe(3)
       expect(workflow.config.agent.maxTurns).toBe(5)
       expect(workflow.config.agent.maxRetryBackoffMs).toBe(60_000)
-      expect(workflow.config.codex).toEqual({
+      // Under the alias, the four neutral fields become the runner's own and everything else the
+      // block declared is preserved verbatim as the adapter's settings.
+      expect(workflow.config.runner).toEqual({
         command: 'codex app-server --flag',
-        approvalPolicy: 'on-request',
-        threadSandbox: 'read-only',
-        turnSandboxPolicy: null,
         turnTimeoutMs: 1_000,
         readTimeoutMs: 500,
         stallTimeoutMs: 0,
+        settings: { approval_policy: 'on-request', thread_sandbox: 'read-only' },
+      })
+      expect(workflow.runner.kind).toBe('codex')
+      expect(codexSettingsOf(workflow.runner)).toEqual({
+        approvalPolicy: 'on-request',
+        threadSandbox: 'read-only',
+        turnSandboxPolicy: null,
       })
       expect(workflow.config.serverPort).toBe(8_080)
     }),
@@ -792,7 +818,7 @@ codex:
         TEST_TRACKER_TOKEN: 'secret',
       })
 
-      expect(workflow.config.codex.turnSandboxPolicy).toEqual({
+      expect(codexSettingsOf(workflow.runner).turnSandboxPolicy).toEqual({
         type: 'workspaceWrite',
         writableRoots: ['/srv/work'],
         networkAccess: false,
@@ -812,7 +838,7 @@ codex:
       })
       const error = yield* Effect.flip(withEnvironment(preflightWorkflow(workflow)))
 
-      expect(Redacted.value(githubProviderOf(validated).token)).toBe('rotated')
+      expect(Redacted.value(githubProviderOf(validated.tracker).token)).toBe('rotated')
       expect(error.category).toBe('invalid_config')
       expect(error.message).toContain('missing environment variable')
     }),
@@ -840,8 +866,8 @@ codex:
         })
 
         expect(stubProviderToken(workflow.tracker)).toBe('secret')
-        expect(stubProviderToken(validated)).toBe('rotated')
-        expect(sameTrackerProvider(validated, workflow.tracker)).toBe(false)
+        expect(stubProviderToken(validated.tracker)).toBe('rotated')
+        expect(sameTrackerProvider(validated.tracker, workflow.tracker)).toBe(false)
       }),
   )
 })
@@ -859,4 +885,88 @@ describe('JSON-safe adapter configuration', (): void => {
 
     expect(Object.isFrozen(value)).toBe(true)
   })
+})
+
+describe('agent runner selection', (): void => {
+  const runnerWorkflow = (frontMatter: string): Effect.Effect<Workflow, WorkflowError> =>
+    Effect.gen(function* () {
+      const path = yield* writeWorkflow(`${minimalTracker}\n${frontMatter}`)
+      return yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {
+        TEST_TRACKER_TOKEN: 'secret',
+      })
+    })
+
+  it.effect('reads a document that names no runner as the default kind', () =>
+    Effect.gen(function* () {
+      const workflow = yield* runnerWorkflow('polling:\n  interval_ms: 1000')
+
+      expect(workflow.runner.kind).toBe('codex')
+      expect(workflow.config.runner.command).toBe(codexSettingsDefaults.command)
+    }),
+  )
+
+  it.effect("selects a second kind and takes that adapter's default command", () =>
+    Effect.gen(function* () {
+      const workflow = yield* runnerWorkflow(
+        'runner:\n  kind: aurora\n  settings:\n    tempo: presto',
+      )
+
+      expect(workflow.runner.kind).toBe('aurora')
+      // The command default belongs to the adapter, not to this loader: selecting a different
+      // runner changes which executable a workflow that named none is launching.
+      expect(workflow.config.runner.command).toBe('aurora --serve')
+      expect(auroraTempo(workflow.runner)).toBe('presto')
+      expect(workflow.runner.authenticationEnvironmentNames).toEqual(['AURORA_SIGNING_KEY'])
+    }),
+  )
+
+  it.effect('keeps the neutral fields under the new spelling', () =>
+    Effect.gen(function* () {
+      const workflow = yield* runnerWorkflow(
+        'runner:\n  kind: aurora\n  command: aurora --once\n  stall_timeout_ms: 42',
+      )
+
+      expect(workflow.config.runner.command).toBe('aurora --once')
+      expect(workflow.config.runner.stallTimeoutMs).toBe(42)
+      expect(workflow.config.runner.settings).toEqual({})
+    }),
+  )
+
+  it.effect("refuses a tracker credential naming the selected runner's own authentication", () =>
+    Effect.gen(function* () {
+      // The host has to strip tracker secrets from the agent's environment and preserve the
+      // runner's authentication in it; a variable that is both cannot be honoured either way. The
+      // rule is stated against whichever runner the workflow chose, not against a fixed list.
+      const path = yield* writeWorkflow(
+        `tracker:\n  kind: github\n  provider:\n    owner: example\n    repository: symphony\n    token: $AURORA_SIGNING_KEY\nrunner:\n  kind: aurora`,
+      )
+
+      const error = yield* Effect.flip(
+        withEnvironment(loadHostWorkflow(path, trackerProviders), {
+          AURORA_SIGNING_KEY: 'secret',
+        }),
+      )
+
+      expect(error.category).toBe('invalid_config')
+      expect(error.message).toBe(
+        'tracker credentials must not use aurora authentication environment variable AURORA_SIGNING_KEY',
+      )
+    }),
+  )
+
+  it.effect('accepts a credential that only the other registered runner reserves', () =>
+    Effect.gen(function* () {
+      // OPENAI_API_KEY is Codex's, and Codex is registered — but it is not the selected runner, so
+      // nothing about this workflow makes the name unusable.
+      const path = yield* writeWorkflow(
+        `tracker:\n  kind: github\n  provider:\n    owner: example\n    repository: symphony\n    token: $OPENAI_API_KEY\nrunner:\n  kind: aurora`,
+      )
+
+      const workflow = yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {
+        OPENAI_API_KEY: 'secret',
+      })
+
+      expect(workflow.runner.kind).toBe('aurora')
+    }),
+  )
 })
