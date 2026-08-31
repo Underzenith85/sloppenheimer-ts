@@ -1,0 +1,111 @@
+import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Effect, Fiber, Option, Redacted } from 'effect'
+import { afterEach, describe, expect, it } from 'vitest'
+
+import { makeGitSourceControl } from '../src/adapters/node/source-control.js'
+import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
+import { makeGitRepository } from './harness/git-repository.js'
+
+const roots: string[] = []
+const originalTmpDir = process.env['TMPDIR']
+
+afterEach(async (): Promise<void> => {
+  if (originalTmpDir === undefined) {
+    delete process.env['TMPDIR']
+  } else {
+    process.env['TMPDIR'] = originalTmpDir
+  }
+  await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })))
+})
+
+const issue: Issue = {
+  id: issueId('185'),
+  nativeRef: null,
+  identifier: issueIdentifier('example/symphony#185'),
+  title: 'Interruptible publication',
+  description: null,
+  priority: 1,
+  state: 'open',
+  branchName: null,
+  url: null,
+  assigneeId: null,
+  labels: ['symphony'],
+  blockedBy: [],
+  dispatchable: true,
+  createdAt: null,
+  updatedAt: null,
+}
+
+/** How long the remote hook blocks the push for, and how long the assertion outlives it. */
+const blockedPushSeconds = 3
+const outlivesBlockedPushMs = (blockedPushSeconds + 2) * 1_000
+const pollIntervalMs = 10
+const waitLimitMs = 20_000
+
+const waitFor = async (condition: () => Promise<boolean>): Promise<void> => {
+  const deadline = Date.now() + waitLimitMs
+  while (Date.now() < deadline) {
+    if (await condition()) {
+      return
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs))
+  }
+  throw new Error('condition was not met before the deadline')
+}
+
+const askPassDirectories = async (root: string): Promise<readonly string[]> => {
+  const entries = await readdir(root)
+  return entries.filter((entry) => entry.startsWith('symphony-git-askpass-'))
+}
+
+describe('host Git source control interruption', (): void => {
+  it('removes the askpass directory and the git process group when a push is interrupted', async (): Promise<void> => {
+    const fixture = await makeGitRepository()
+    roots.push(fixture.root)
+    // A private TMPDIR so the assertion sees only this test's askpass directories. `os.tmpdir()`
+    // reads the environment on each call, so the adapter picks this up without being told.
+    const temporary = await mkdtemp(join(tmpdir(), 'symphony-askpass-observation-'))
+    roots.push(temporary)
+    process.env['TMPDIR'] = temporary
+
+    // `receive-pack` runs this on the remote, so the push blocks while every earlier git
+    // invocation of the publication — status, commit, fetch, rebase, ls-remote — still succeeds.
+    const started = join(fixture.root, 'push-started')
+    const survived = join(fixture.root, 'push-survived')
+    const hook = join(fixture.remote, 'hooks', 'pre-receive')
+    await writeFile(
+      hook,
+      `#!/bin/sh\ntouch '${started}'\nsleep ${String(blockedPushSeconds)}\ntouch '${survived}'\nexit 1\n`,
+      { mode: 0o755 },
+    )
+    await chmod(hook, 0o755)
+
+    const sourceControl = makeGitSourceControl({
+      remoteUrl: fixture.remote,
+      baseBranch: 'main',
+      credential: Option.some({ username: 'x-access-token', password: Redacted.make('secret') }),
+    })
+    const workspace = { path: fixture.workspace, key: 'issue-185', createdNow: true }
+    const prepared = await Effect.runPromise(
+      sourceControl.prepare(issue, workspace, {
+        _tag: 'Normal',
+        branchName: 'symphony/issue-185',
+      }),
+    )
+    await writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n')
+
+    const fiber = Effect.runFork(sourceControl.publish(issue, prepared))
+    await waitFor(async () => (await readdir(fixture.root)).includes('push-started'))
+    expect(await askPassDirectories(temporary)).toHaveLength(1)
+
+    await Effect.runPromise(Fiber.interrupt(fiber))
+
+    expect(await askPassDirectories(temporary)).toEqual([])
+    // The blocked hook is a descendant of the interrupted git process group. A group that outlived
+    // the interruption would run the hook to completion and leave its second sentinel behind.
+    await new Promise<void>((resolve) => setTimeout(resolve, outlivesBlockedPushMs))
+    await expect(readdir(fixture.root)).resolves.not.toContain('push-survived')
+  }, 30_000)
+})

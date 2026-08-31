@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Option, Redacted } from 'effect'
+import { Effect, Option, Redacted, type Scope } from 'effect'
 
 import type { Issue, Workspace } from '../../domain/domain.js'
 import { SourceControlError } from '../../errors.js'
@@ -12,6 +12,7 @@ import type {
   SourceControlPort,
   SourceControlTarget,
 } from '../../ports/source-control.js'
+import { terminateChildProcess } from '../../support/subprocess.js'
 
 export type GitCredential = Readonly<{
   username: string
@@ -24,6 +25,10 @@ export type GitSourceControlSettings = Readonly<{
   credential: Option.Option<GitCredential>
 }>
 
+/** Which port operation a git invocation serves. It decides how a failure is categorised. */
+type GitOperation = 'prepare' | 'publish'
+
+/** What one git invocation reports when it does not exit zero, or could not be started at all. */
 type GitFailure = Readonly<{
   args: readonly string[]
   exitCode: number | null
@@ -33,6 +38,8 @@ type GitFailure = Readonly<{
 }>
 
 const outputLimit = 1024 * 1024
+/** How long a git process group has to exit politely before it is killed. */
+const gitTerminationGraceMs = 5_000
 const gitIdentity: NodeJS.ProcessEnv = {
   GIT_AUTHOR_NAME: 'Symphony',
   GIT_AUTHOR_EMAIL: 'symphony@localhost',
@@ -53,104 +60,14 @@ const append = (current: string, chunk: Buffer): string => {
   return `${current}${chunk.toString('utf8')}`.slice(0, outputLimit)
 }
 
-const runProcess = (
-  cwd: string,
-  args: readonly string[],
-  environment: NodeJS.ProcessEnv,
-): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const child = spawn('git', [...args], {
-      cwd,
-      env: environment,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout = append(stdout, chunk)
-    })
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, chunk)
-    })
-    child.once('error', (cause: unknown) => {
-      reject({ args, exitCode: null, stdout, stderr, cause } satisfies GitFailure)
-    })
-    child.once('close', (exitCode) => {
-      if (exitCode === 0) {
-        resolve(stdout)
-        return
-      }
-      reject({ args, exitCode, stdout, stderr } satisfies GitFailure)
-    })
-  })
-
-const runGit = (
-  settings: GitSourceControlSettings,
-  cwd: string,
-  args: readonly string[],
-  extraEnvironment: NodeJS.ProcessEnv = {},
-): Promise<string> =>
-  Option.match(settings.credential, {
-    onNone: () =>
-      runProcess(cwd, args, {
-        ...process.env,
-        ...extraEnvironment,
-        GIT_TERMINAL_PROMPT: '0',
-      }),
-    onSome: async (credential) => {
-      const directory = await mkdtemp(join(tmpdir(), 'symphony-git-askpass-'))
-      const askPass = join(directory, 'askpass.sh')
-      try {
-        await writeFile(askPass, askPassScript, { mode: 0o700 })
-        return await runProcess(cwd, args, {
-          ...process.env,
-          ...extraEnvironment,
-          GIT_ASKPASS: askPass,
-          GIT_TERMINAL_PROMPT: '0',
-          SYMPHONY_GIT_USERNAME: credential.username,
-          SYMPHONY_GIT_PASSWORD: Redacted.value(credential.password),
-        })
-      } finally {
-        await rm(directory, { force: true, recursive: true })
-      }
-    },
-  })
-
 const failureText = (failure: GitFailure): string => `${failure.stderr}\n${failure.stdout}`.trim()
-
-const gitFailure = (cause: unknown, operation: string): GitFailure => {
-  if (
-    typeof cause === 'object' &&
-    cause !== null &&
-    'args' in cause &&
-    Array.isArray(cause.args) &&
-    cause.args.every((argument) => typeof argument === 'string') &&
-    'stdout' in cause &&
-    typeof cause.stdout === 'string' &&
-    'stderr' in cause &&
-    typeof cause.stderr === 'string' &&
-    'exitCode' in cause &&
-    (cause.exitCode === null || typeof cause.exitCode === 'number')
-  ) {
-    return {
-      args: cause.args,
-      exitCode: cause.exitCode,
-      stdout: cause.stdout,
-      stderr: cause.stderr,
-    }
-  }
-  return { args: [operation], exitCode: null, stdout: '', stderr: '', cause }
-}
 
 const isAuthenticationFailure = (failure: GitFailure): boolean =>
   /authentication failed|could not read username|invalid username or password|permission denied|repository not found|403|401/iu.test(
     failureText(failure),
   )
 
-const sourceControlFailure = (
-  failure: GitFailure,
-  operation: 'prepare' | 'publish',
-): SourceControlError => {
+const sourceControlFailure = (failure: GitFailure, operation: GitOperation): SourceControlError => {
   const authentication = isAuthenticationFailure(failure)
   const leaseConflict = /stale info|fetch first|non-fast-forward|rejected.*stale/iu.test(
     failureText(failure),
@@ -172,142 +89,306 @@ const sourceControlFailure = (
   })
 }
 
-const attempt = <Value>(
-  operation: 'prepare' | 'publish',
-  run: () => Promise<Value>,
-): Effect.Effect<Value, SourceControlError> =>
-  Effect.tryPromise({
-    try: run,
-    catch: (cause: unknown) =>
-      cause instanceof SourceControlError
-        ? cause
-        : sourceControlFailure(gitFailure(cause, operation), operation),
+/** A failure of the askpass staging itself, which has no git invocation to report. */
+const askPassFailure = (operation: GitOperation, cause: unknown): SourceControlError =>
+  sourceControlFailure(
+    { args: [operation], exitCode: null, stdout: '', stderr: '', cause },
+    operation,
+  )
+
+/**
+ * Runs one git invocation as its own process group.
+ *
+ * The effect settles exactly once, and a failure is built here — at the point of failure — with the
+ * captured diagnostics still in hand, so no rejection value has to be re-sniffed further up.
+ * Interrupting the fiber terminates the whole git process group rather than letting a clone, fetch
+ * or push run on against a workspace nobody is waiting for any more.
+ */
+const runProcess = (
+  operation: GitOperation,
+  cwd: string,
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): Effect.Effect<string, SourceControlError> =>
+  Effect.async<string, SourceControlError>((resume) => {
+    const child = spawn('git', [...args], {
+      cwd,
+      env: environment,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+
+    const detach = (): void => {
+      child.stdout.removeAllListeners()
+      child.stderr.removeAllListeners()
+      child.removeAllListeners('error')
+      child.removeAllListeners('close')
+    }
+
+    const settle = (effect: Effect.Effect<string, SourceControlError>): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      detach()
+      resume(effect)
+    }
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout = append(stdout, chunk)
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = append(stderr, chunk)
+    })
+    child.once('error', (cause: unknown) => {
+      settle(
+        Effect.fail(
+          sourceControlFailure({ args, exitCode: null, stdout, stderr, cause }, operation),
+        ),
+      )
+    })
+    // `close` rather than `exit`: both pipes are fully drained by then.
+    child.once('close', (exitCode: number | null) => {
+      if (exitCode === 0) {
+        settle(Effect.succeed(stdout))
+        return
+      }
+      settle(Effect.fail(sourceControlFailure({ args, exitCode, stdout, stderr }, operation)))
+    })
+
+    return Effect.suspend(() => {
+      if (settled) {
+        return Effect.void
+      }
+      settled = true
+      detach()
+      return Effect.promise(() => terminateChildProcess(child, gitTerminationGraceMs))
+    })
   })
 
-const remoteHead = async (
+/**
+ * The path of a `GIT_ASKPASS` script staged in a temporary directory that the surrounding scope
+ * removes.
+ *
+ * `Effect.acquireRelease` rather than a `finally`: a finalizer is visible to the runtime, so an
+ * interruption that unwinds the fiber still removes the directory holding a credential-serving
+ * script, which a `finally` on a promise chain does not.
+ */
+const askPassScriptPath = (
+  operation: GitOperation,
+): Effect.Effect<string, SourceControlError, Scope.Scope> =>
+  Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => mkdtemp(join(tmpdir(), 'symphony-git-askpass-')),
+      catch: (cause: unknown) => askPassFailure(operation, cause),
+    }),
+    (directory) =>
+      Effect.ignore(Effect.tryPromise(() => rm(directory, { force: true, recursive: true }))),
+  ).pipe(
+    Effect.flatMap((directory) => {
+      const askPass = join(directory, 'askpass.sh')
+      return Effect.as(
+        Effect.tryPromise({
+          try: () => writeFile(askPass, askPassScript, { mode: 0o700 }),
+          catch: (cause: unknown) => askPassFailure(operation, cause),
+        }),
+        askPass,
+      )
+    }),
+  )
+
+const runGit = (
   settings: GitSourceControlSettings,
+  operation: GitOperation,
+  cwd: string,
+  args: readonly string[],
+  extraEnvironment: NodeJS.ProcessEnv = {},
+): Effect.Effect<string, SourceControlError> =>
+  Option.match(settings.credential, {
+    onNone: () =>
+      runProcess(operation, cwd, args, {
+        ...process.env,
+        ...extraEnvironment,
+        GIT_TERMINAL_PROMPT: '0',
+      }),
+    onSome: (credential) =>
+      Effect.scoped(
+        Effect.flatMap(askPassScriptPath(operation), (askPass) =>
+          runProcess(operation, cwd, args, {
+            ...process.env,
+            ...extraEnvironment,
+            GIT_ASKPASS: askPass,
+            GIT_TERMINAL_PROMPT: '0',
+            SYMPHONY_GIT_USERNAME: credential.username,
+            SYMPHONY_GIT_PASSWORD: Redacted.value(credential.password),
+          }),
+        ),
+      ),
+  })
+
+const remoteHead = (
+  settings: GitSourceControlSettings,
+  operation: GitOperation,
   workspace: Workspace,
   branchName: string,
-): Promise<Option.Option<string>> => {
-  const output = await runGit(settings, workspace.path, [
-    'ls-remote',
-    '--heads',
-    'origin',
-    `refs/heads/${branchName}`,
-  ])
-  const sha = output.trim().split(/\s+/u)[0]
-  return sha === undefined || sha.length === 0 ? Option.none() : Option.some(sha)
-}
+): Effect.Effect<Option.Option<string>, SourceControlError> =>
+  Effect.map(
+    runGit(settings, operation, workspace.path, [
+      'ls-remote',
+      '--heads',
+      'origin',
+      `refs/heads/${branchName}`,
+    ]),
+    (output) => {
+      const sha = output.trim().split(/\s+/u)[0]
+      return sha === undefined || sha.length === 0 ? Option.none() : Option.some(sha)
+    },
+  )
 
 const revParse = (
   settings: GitSourceControlSettings,
+  operation: GitOperation,
   workspace: Workspace,
   revision: string,
-): Promise<string> =>
-  runGit(settings, workspace.path, ['rev-parse', revision]).then((value) => value.trim())
+): Effect.Effect<string, SourceControlError> =>
+  Effect.map(runGit(settings, operation, workspace.path, ['rev-parse', revision]), (value) =>
+    value.trim(),
+  )
 
-const currentBranch = async (
+const currentBranch = (
+  settings: GitSourceControlSettings,
+  operation: GitOperation,
+  workspace: Workspace,
+): Effect.Effect<Option.Option<string>> =>
+  Effect.option(
+    Effect.map(
+      runGit(settings, operation, workspace.path, ['symbolic-ref', '--short', 'HEAD']),
+      (value) => value.trim(),
+    ),
+  )
+
+const currentHead = (
+  settings: GitSourceControlSettings,
+  operation: GitOperation,
+  workspace: Workspace,
+): Effect.Effect<Option.Option<string>> =>
+  Effect.option(revParse(settings, operation, workspace, 'HEAD'))
+
+const status = (
+  settings: GitSourceControlSettings,
+  operation: GitOperation,
+  workspace: Workspace,
+): Effect.Effect<string, SourceControlError> =>
+  runGit(settings, operation, workspace.path, ['status', '--porcelain=v1', '--untracked-files=all'])
+
+const initialize = (
   settings: GitSourceControlSettings,
   workspace: Workspace,
-): Promise<Option.Option<string>> => {
-  try {
-    const value = await runGit(settings, workspace.path, ['symbolic-ref', '--short', 'HEAD'])
-    return Option.some(value.trim())
-  } catch {
-    return Option.none()
-  }
-}
-
-const currentHead = async (
-  settings: GitSourceControlSettings,
-  workspace: Workspace,
-): Promise<Option.Option<string>> => {
-  try {
-    return Option.some(await revParse(settings, workspace, 'HEAD'))
-  } catch {
-    return Option.none()
-  }
-}
-
-const status = (settings: GitSourceControlSettings, workspace: Workspace): Promise<string> =>
-  runGit(settings, workspace.path, ['status', '--porcelain=v1', '--untracked-files=all'])
-
-const initialize = async (
-  settings: GitSourceControlSettings,
-  workspace: Workspace,
-): Promise<void> => {
-  try {
-    await runGit(settings, workspace.path, ['rev-parse', '--git-dir'])
-    await runGit(settings, workspace.path, ['remote', 'set-url', 'origin', settings.remoteUrl])
-  } catch {
-    await runGit(settings, workspace.path, ['init'])
-    await runGit(settings, workspace.path, ['remote', 'add', 'origin', settings.remoteUrl])
-  }
-}
+): Effect.Effect<void, SourceControlError> =>
+  runGit(settings, 'prepare', workspace.path, ['rev-parse', '--git-dir']).pipe(
+    Effect.zipRight(
+      runGit(settings, 'prepare', workspace.path, [
+        'remote',
+        'set-url',
+        'origin',
+        settings.remoteUrl,
+      ]),
+    ),
+    Effect.catchAll(() =>
+      runGit(settings, 'prepare', workspace.path, ['init']).pipe(
+        Effect.zipRight(
+          runGit(settings, 'prepare', workspace.path, [
+            'remote',
+            'add',
+            'origin',
+            settings.remoteUrl,
+          ]),
+        ),
+      ),
+    ),
+    Effect.asVoid,
+  )
 
 const expectedRepairHead = (
   target: SourceControlTarget,
   observed: Option.Option<string>,
-): string | null => {
+): Effect.Effect<string | null, SourceControlError> => {
   if (target._tag === 'Normal') {
-    return null
+    return Effect.succeed(null)
   }
   if (Option.contains(observed, target.expectedHeadSha)) {
-    return target.expectedHeadSha
+    return Effect.succeed(target.expectedHeadSha)
   }
-  throw new SourceControlError({
-    category: 'lease_conflict',
-    message: `remote branch ${target.branchName} no longer matches expected head ${target.expectedHeadSha}`,
-    retryable: true,
-    worktreePreserved: true,
-  })
+  return Effect.fail(
+    new SourceControlError({
+      category: 'lease_conflict',
+      message: `remote branch ${target.branchName} no longer matches expected head ${target.expectedHeadSha}`,
+      retryable: true,
+      worktreePreserved: true,
+    }),
+  )
 }
 
-const prepareRepository = async (
+const prepareRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
   workspace: Workspace,
   target: SourceControlTarget,
-): Promise<PreparedRepository> => {
-  void issue
-  await initialize(settings, workspace)
-  await runGit(settings, workspace.path, [
-    'fetch',
-    '--no-tags',
-    'origin',
-    `+refs/heads/${settings.baseBranch}:refs/remotes/origin/${settings.baseBranch}`,
-  ])
-  const baseSha = await revParse(settings, workspace, `refs/remotes/origin/${settings.baseBranch}`)
-  const observedRemoteHead = await remoteHead(settings, workspace, target.branchName)
-  const repairHead = expectedRepairHead(target, observedRemoteHead)
-  if (repairHead !== null) {
-    await runGit(settings, workspace.path, [
+): Effect.Effect<PreparedRepository, SourceControlError> =>
+  Effect.gen(function* () {
+    void issue
+    yield* initialize(settings, workspace)
+    yield* runGit(settings, 'prepare', workspace.path, [
       'fetch',
       '--no-tags',
       'origin',
-      `+refs/heads/${target.branchName}:refs/remotes/origin/${target.branchName}`,
+      `+refs/heads/${settings.baseBranch}:refs/remotes/origin/${settings.baseBranch}`,
     ])
-  }
+    const baseSha = yield* revParse(
+      settings,
+      'prepare',
+      workspace,
+      `refs/remotes/origin/${settings.baseBranch}`,
+    )
+    const observedRemoteHead = yield* remoteHead(settings, 'prepare', workspace, target.branchName)
+    const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
+    if (repairHead !== null) {
+      yield* runGit(settings, 'prepare', workspace.path, [
+        'fetch',
+        '--no-tags',
+        'origin',
+        `+refs/heads/${target.branchName}:refs/remotes/origin/${target.branchName}`,
+      ])
+    }
 
-  const branch = await currentBranch(settings, workspace)
-  const head = await currentHead(settings, workspace)
-  const dirty = (await status(settings, workspace)).length > 0
-  const baselineSha = repairHead ?? baseSha
-  const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
-  const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
-  if (!preserve) {
-    await runGit(settings, workspace.path, ['checkout', '-B', target.branchName, baselineSha])
-    await runGit(settings, workspace.path, ['reset', '--hard', baselineSha])
-  }
-  return {
-    workspace,
-    target,
-    baseBranch: settings.baseBranch,
-    baseSha,
-    baselineSha,
-    expectedRemoteHead: observedRemoteHead,
-  }
-}
+    const branch = yield* currentBranch(settings, 'prepare', workspace)
+    const head = yield* currentHead(settings, 'prepare', workspace)
+    const dirty = (yield* status(settings, 'prepare', workspace)).length > 0
+    const baselineSha = repairHead ?? baseSha
+    const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
+    const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
+    if (!preserve) {
+      yield* runGit(settings, 'prepare', workspace.path, [
+        'checkout',
+        '-B',
+        target.branchName,
+        baselineSha,
+      ])
+      yield* runGit(settings, 'prepare', workspace.path, ['reset', '--hard', baselineSha])
+    }
+    const prepared: PreparedRepository = {
+      workspace,
+      target,
+      baseBranch: settings.baseBranch,
+      baseSha,
+      baselineSha,
+      expectedRemoteHead: observedRemoteHead,
+    }
+    return prepared
+  })
 
 const sameHead = (left: Option.Option<string>, right: Option.Option<string>): boolean =>
   Option.match(left, {
@@ -326,94 +407,107 @@ const leaseFailure = (
     worktreePreserved: true,
   })
 
-const publishRepository = async (
+const rebaseOntoBase = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<void, SourceControlError> =>
+  Effect.catchAll(
+    Effect.asVoid(
+      runGit(
+        settings,
+        'publish',
+        prepared.workspace.path,
+        ['rebase', '--committer-date-is-author-date', `refs/remotes/origin/${prepared.baseBranch}`],
+        gitIdentity,
+      ),
+    ),
+    (cause) =>
+      Effect.zipRight(
+        // The original failure is the useful one; an absent rebase state needs no cleanup.
+        Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort'])),
+        Effect.fail(
+          new SourceControlError({
+            category: 'rebase_conflict',
+            message: 'source-control publication could not rebase onto the protected base',
+            retryable: true,
+            worktreePreserved: true,
+            cause,
+          }),
+        ),
+      ),
+  )
+
+const publishRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
   prepared: PreparedRepository,
-): Promise<PublicationOutcome> => {
-  const dirty = (await status(settings, prepared.workspace)).length > 0
-  if (dirty) {
-    await runGit(settings, prepared.workspace.path, ['add', '--all'])
-    const commitDate = await runGit(settings, prepared.workspace.path, [
-      'show',
-      '-s',
-      '--format=%aI',
-      'HEAD',
-    ])
-    await runGit(
-      settings,
-      prepared.workspace.path,
-      ['commit', '-m', `symphony: ${issue.identifier} ${issue.title}`],
-      {
-        ...gitIdentity,
-        GIT_AUTHOR_DATE: commitDate.trim(),
-        GIT_COMMITTER_DATE: commitDate.trim(),
-      },
-    )
-  }
-  let headSha = await revParse(settings, prepared.workspace, 'HEAD')
-  if (!dirty && headSha === prepared.baselineSha) {
-    return {
-      _tag: 'NoChanges',
-      branchName: prepared.target.branchName,
-      baselineSha: prepared.baselineSha,
+): Effect.Effect<PublicationOutcome, SourceControlError> =>
+  Effect.gen(function* () {
+    const dirty = (yield* status(settings, 'publish', prepared.workspace)).length > 0
+    if (dirty) {
+      yield* runGit(settings, 'publish', prepared.workspace.path, ['add', '--all'])
+      const commitDate = yield* runGit(settings, 'publish', prepared.workspace.path, [
+        'show',
+        '-s',
+        '--format=%aI',
+        'HEAD',
+      ])
+      yield* runGit(
+        settings,
+        'publish',
+        prepared.workspace.path,
+        ['commit', '-m', `symphony: ${issue.identifier} ${issue.title}`],
+        {
+          ...gitIdentity,
+          GIT_AUTHOR_DATE: commitDate.trim(),
+          GIT_COMMITTER_DATE: commitDate.trim(),
+        },
+      )
     }
-  }
+    const committedHead = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    if (!dirty && committedHead === prepared.baselineSha) {
+      const unchanged: PublicationOutcome = {
+        _tag: 'NoChanges',
+        branchName: prepared.target.branchName,
+        baselineSha: prepared.baselineSha,
+      }
+      return unchanged
+    }
 
-  await runGit(settings, prepared.workspace.path, [
-    'fetch',
-    '--no-tags',
-    'origin',
-    `+refs/heads/${prepared.baseBranch}:refs/remotes/origin/${prepared.baseBranch}`,
-  ])
-  try {
-    await runGit(
+    yield* runGit(settings, 'publish', prepared.workspace.path, [
+      'fetch',
+      '--no-tags',
+      'origin',
+      `+refs/heads/${prepared.baseBranch}:refs/remotes/origin/${prepared.baseBranch}`,
+    ])
+    yield* rebaseOntoBase(settings, prepared)
+    const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    const actualRemoteHead = yield* remoteHead(
       settings,
-      prepared.workspace.path,
-      ['rebase', '--committer-date-is-author-date', `refs/remotes/origin/${prepared.baseBranch}`],
-      gitIdentity,
+      'publish',
+      prepared.workspace,
+      prepared.target.branchName,
     )
-  } catch (cause: unknown) {
-    try {
-      await runGit(settings, prepared.workspace.path, ['rebase', '--abort'])
-    } catch {
-      // The original failure is the useful one; an absent rebase state needs no cleanup.
+    if (!sameHead(prepared.expectedRemoteHead, actualRemoteHead)) {
+      return yield* Effect.fail(leaseFailure(prepared, actualRemoteHead))
     }
-    throw new SourceControlError({
-      category: 'rebase_conflict',
-      message: 'source-control publication could not rebase onto the protected base',
-      retryable: true,
-      worktreePreserved: true,
-      cause,
-    })
-  }
-  headSha = await revParse(settings, prepared.workspace, 'HEAD')
-  const actualRemoteHead = await remoteHead(
-    settings,
-    prepared.workspace,
-    prepared.target.branchName,
-  )
-  if (!sameHead(prepared.expectedRemoteHead, actualRemoteHead)) {
-    throw leaseFailure(prepared, actualRemoteHead)
-  }
-  const expected = Option.getOrElse(prepared.expectedRemoteHead, () => '')
-  await runGit(settings, prepared.workspace.path, [
-    'push',
-    'origin',
-    `HEAD:refs/heads/${prepared.target.branchName}`,
-    `--force-with-lease=refs/heads/${prepared.target.branchName}:${expected}`,
-  ])
-  return {
-    _tag: 'Published',
-    branchName: prepared.target.branchName,
-    headSha,
-    commitCreated: dirty,
-  }
-}
+    const expected = Option.getOrElse(prepared.expectedRemoteHead, () => '')
+    yield* runGit(settings, 'publish', prepared.workspace.path, [
+      'push',
+      'origin',
+      `HEAD:refs/heads/${prepared.target.branchName}`,
+      `--force-with-lease=refs/heads/${prepared.target.branchName}:${expected}`,
+    ])
+    const published: PublicationOutcome = {
+      _tag: 'Published',
+      branchName: prepared.target.branchName,
+      headSha,
+      commitCreated: dirty,
+    }
+    return published
+  })
 
 export const makeGitSourceControl = (settings: GitSourceControlSettings): SourceControlPort => ({
-  prepare: (issue, workspace, target) =>
-    attempt('prepare', () => prepareRepository(settings, issue, workspace, target)),
-  publish: (issue, prepared) =>
-    attempt('publish', () => publishRepository(settings, issue, prepared)),
+  prepare: (issue, workspace, target) => prepareRepository(settings, issue, workspace, target),
+  publish: (issue, prepared) => publishRepository(settings, issue, prepared),
 })
