@@ -1,8 +1,9 @@
 import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
-import type { Issue } from '../domain/domain.js'
-import { AgentError } from '../errors.js'
+import type { Issue, Workspace } from '../domain/domain.js'
+import { issueBranchName } from '../domain/handoff.js'
+import { AgentError, type WorkspaceError } from '../errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../host-tools.js'
 import { toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
@@ -14,6 +15,7 @@ import {
 } from './policy.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, SessionPorts } from './state.js'
+import type { SourceControlTarget } from '../ports/index.js'
 import * as Transitions from './transitions.js'
 import { installEffectiveWorkflow, revalidateCredentials } from './workflow-reload.js'
 
@@ -25,9 +27,9 @@ import { installEffectiveWorkflow, revalidateCredentials } from './workflow-relo
  * rotation calls the instance the orchestrator adopted rather than the one it was dispatched with.
  */
 export const makeHostToolSession = (
-  execution: SessionPorts,
+  execution: Pick<SessionPorts, 'tracker' | 'codeReview'>,
   issue: Issue,
-  current: () => SessionPorts = () => execution,
+  current: () => Pick<SessionPorts, 'tracker' | 'codeReview'> = () => execution,
 ): HostToolSession =>
   Object.freeze({
     specs: Object.freeze([
@@ -66,6 +68,7 @@ export const dispatch = (
   issue: Issue,
   attempt: number | null,
   effectiveOverride?: EffectiveWorkflow,
+  sourceTarget?: SourceControlTarget,
 ): Effect.Effect<boolean, never, Scope.Scope> =>
   Effect.gen(function* () {
     const before = yield* Ref.get(context.state)
@@ -117,6 +120,10 @@ export const dispatch = (
       return false
     }
     const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
+    const target: SourceControlTarget = sourceTarget ?? {
+      _tag: 'Normal',
+      branchName: issueBranchName(issue),
+    }
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
     /**
      * The ports this run reaches its provider through, in a cell the non-Effect world can read. A
@@ -127,6 +134,7 @@ export const dispatch = (
     const sessionPorts = MutableRef.make<SessionPorts>({
       tracker: execution.tracker,
       codeReview: execution.codeReview,
+      sourceControl: execution.sourceControl,
     })
     const hostTools = makeHostToolSession(execution, issue, () => MutableRef.get(sessionPorts))
     const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
@@ -144,57 +152,84 @@ export const dispatch = (
           ),
         )
 
-    const worker = execution.workspaces.create(issue.identifier).pipe(
-      Effect.flatMap((workspace) =>
-        execution.workspaces.beforeRun(workspace).pipe(
-          Effect.zipRight(
-            context.ports.agentRunner.run({
-              issue,
-              workspace,
-              workspaceRoot: execution.workspaceRoot,
-              config: execution.agentRunner,
-              prompt: execution.prompt,
-              maxTurns: execution.maxTurns,
-              secretEnvironmentNames: execution.secretEnvironmentNames,
-              hostTools,
-              refreshIssue,
-              isRoutable: (refreshed) =>
-                issueIsActiveInSnapshot(refreshed, execution) &&
-                issueIsRoutableInSnapshot(refreshed, execution),
-              // The runner reports progress from a plain callback. Recording what the update owes
-              // the run and enqueueing it are one step, so an exit cannot overtake a report the
-              // callback has already made.
-              onEvent: (update) => {
-                context.runFromCallback(
-                  Ref.update(context.state, (current) => {
-                    let next = current
-                    if (update.usage !== null) {
-                      next = Transitions.recordPendingUsage(next, issue.id, update.usage)
-                    }
-                    if (update.rateLimits !== null) {
-                      next = Transitions.recordPendingRateLimits(next, update.rateLimits)
-                    }
-                    if (isLifecycleEvent(update.event)) {
-                      next = Transitions.queuePendingLifecycle(next, issue.id, update)
-                    }
-                    return next
-                  }).pipe(
-                    Effect.zipRight(
-                      Queue.offer(context.mailbox, {
-                        _tag: 'AgentUpdate',
-                        issueId: issue.id,
-                        update,
-                      }),
-                    ),
-                    Effect.asVoid,
+    const runSession = (workspace: Workspace): Effect.Effect<void, AgentError | WorkspaceError> =>
+      execution.workspaces.beforeRun(workspace).pipe(
+        Effect.zipRight(
+          context.ports.agentRunner.run({
+            issue,
+            workspace,
+            workspaceRoot: execution.workspaceRoot,
+            config: execution.agentRunner,
+            prompt: execution.prompt,
+            maxTurns: execution.maxTurns,
+            secretEnvironmentNames: execution.secretEnvironmentNames,
+            hostTools,
+            refreshIssue,
+            isRoutable: (refreshed) =>
+              issueIsActiveInSnapshot(refreshed, execution) &&
+              issueIsRoutableInSnapshot(refreshed, execution),
+            // The runner reports progress from a plain callback. Recording what the update owes
+            // the run and enqueueing it are one step, so an exit cannot overtake a report the
+            // callback has already made.
+            onEvent: (update) => {
+              context.runFromCallback(
+                Ref.update(context.state, (current) => {
+                  let next = current
+                  if (update.usage !== null) {
+                    next = Transitions.recordPendingUsage(next, issue.id, update.usage)
+                  }
+                  if (update.rateLimits !== null) {
+                    next = Transitions.recordPendingRateLimits(next, update.rateLimits)
+                  }
+                  if (isLifecycleEvent(update.event)) {
+                    next = Transitions.queuePendingLifecycle(next, issue.id, update)
+                  }
+                  return next
+                }).pipe(
+                  Effect.zipRight(
+                    Queue.offer(context.mailbox, {
+                      _tag: 'AgentUpdate',
+                      issueId: issue.id,
+                      update,
+                    }),
                   ),
-                )
-              },
-            }),
-          ),
-          Effect.ensuring(execution.workspaces.afterRun(workspace)),
+                  Effect.asVoid,
+                ),
+              )
+            },
+          }),
         ),
-      ),
+        Effect.ensuring(execution.workspaces.afterRun(workspace)),
+        Effect.asVoid,
+      )
+    const worker = execution.workspaces.create(issue.identifier).pipe(
+      Effect.flatMap((workspace) => {
+        const sourceControl = MutableRef.get(sessionPorts).sourceControl
+        if (sourceControl === null) {
+          return runSession(workspace)
+        }
+        return sourceControl.prepare(issue, workspace, target).pipe(
+          Effect.flatMap((prepared) =>
+            runSession(workspace).pipe(
+              Effect.zipRight(
+                Effect.suspend(() => {
+                  const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
+                  return publisher.publish(issue, prepared)
+                }),
+              ),
+              Effect.tap((outcome) =>
+                logInfo('host source-control publication completed', {
+                  ...logContext(issue),
+                  action: 'source_control_publish',
+                  outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
+                  branch: outcome.branchName,
+                }),
+              ),
+              Effect.asVoid,
+            ),
+          ),
+        )
+      }),
       Effect.matchEffect({
         onFailure: (error) =>
           Queue.offer(context.mailbox, {

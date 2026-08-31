@@ -1,11 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { fakeAppServerCommand } from './harness/fake-app-server.js'
+import { git } from './harness/git-repository.js'
 import { processIsAlive } from './harness/processes.js'
 
 const cliPath = resolve('src/cli.ts')
@@ -113,7 +114,11 @@ const spawnCli = (cwd: string, arguments_: readonly string[], detached = false):
   const child = spawn(process.execPath, ['--import', tsxImport, cliPath, ...arguments_], {
     cwd,
     detached,
-    env: { ...process.env, SYMPHONY_CLI_TEST_TOKEN: 'test-token' },
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: join(cwd, '.gitconfig'),
+      SYMPHONY_CLI_TEST_TOKEN: 'test-token',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   children.push(child)
@@ -207,6 +212,23 @@ const makeIssueTrackerServer = async (count: number): Promise<number> => {
  * that used to overrun the CLI's shutdown watchdog.
  */
 const writeStubbornWorkflow = async (directory: string, concurrency: number): Promise<string> => {
+  const remote = join(directory, 'remote.git')
+  const seed = join(directory, 'seed')
+  await mkdir(seed)
+  await git(directory, ['init', '--bare', remote])
+  await git(seed, ['init'])
+  await git(seed, ['checkout', '-b', 'main'])
+  await git(seed, ['config', 'user.name', 'Test Author'])
+  await git(seed, ['config', 'user.email', 'test@example.test'])
+  await writeFile(join(seed, 'README.md'), 'base\n')
+  await git(seed, ['add', 'README.md'])
+  await git(seed, ['commit', '-m', 'base'])
+  await git(seed, ['remote', 'add', 'origin', remote])
+  await git(seed, ['push', '-u', 'origin', 'main'])
+  await writeFile(
+    join(directory, '.gitconfig'),
+    `[url "file://${remote}"]\n  insteadOf = https://github.com/example/symphony.git\n`,
+  )
   const trackerPort = await makeIssueTrackerServer(concurrency)
   const path = join(directory, 'WORKFLOW.md')
   await writeFile(

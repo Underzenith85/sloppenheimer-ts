@@ -28,6 +28,7 @@ import { workspaceKey } from '../domain/workspace-containment.js'
 import {
   AgentRunner,
   CurrentCodeReview,
+  CurrentSourceControl,
   CurrentTracker,
   CurrentWorkspaceManager,
   WorkflowLoader,
@@ -375,6 +376,7 @@ export const startOrchestratorRuntime = (
       trackerCell: yield* CurrentTracker,
       workspaceCell: yield* CurrentWorkspaceManager,
       codeReviewCell: yield* Effect.serviceOption(CurrentCodeReview),
+      sourceControlCell: yield* Effect.serviceOption(CurrentSourceControl),
     }
     /**
      * Built from the workflow the orchestrator loaded rather than adopted from the composition

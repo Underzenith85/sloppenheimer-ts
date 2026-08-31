@@ -230,11 +230,7 @@ const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
   if (snapshot.status === 'retrying') {
     return 'The next attempt runs on schedule; the work so far is kept in the same workspace.'
   }
-  return (
-    'On completion the agent pushes ' +
-    (handoff.expectedBranch ?? 'its branch') +
-    ' and opens a pull request for review.'
-  )
+  return `On completion Symphony publishes ${handoff.expectedBranch ?? 'the issue branch'} with its host credential and opens a pull request for review.`
 }
 
 const detailHealth = (snapshot: AgentDetailSnapshot): Readonly<{ kind: string; label: string }> => {

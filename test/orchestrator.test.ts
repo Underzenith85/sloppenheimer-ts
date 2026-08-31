@@ -6,6 +6,7 @@ import {
   Exit,
   Fiber,
   Layer,
+  Option,
   Queue,
   Redacted,
   Scope,
@@ -27,7 +28,13 @@ import {
   type IssueId,
   type JsonObject,
 } from '../src/domain/domain.js'
-import { AgentError, TrackerError, WorkflowError, WorkspaceError } from '../src/errors.js'
+import {
+  AgentError,
+  SourceControlError,
+  TrackerError,
+  WorkflowError,
+  WorkspaceError,
+} from '../src/errors.js'
 import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
 import type { CodexReviewObservation, PullRequestObservation } from '../src/domain/handoff.js'
 import {
@@ -44,8 +51,10 @@ import { makeRedactor } from '../src/support/redaction.js'
 import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
 import {
   CodeReviewFactory,
+  SourceControlFactory,
   layerAgentRunner,
   layerCodeReviewPorts,
+  layerSourceControlPorts,
   layerPorts,
   layerWorkflowLoader,
   layerWorkflowWatcher,
@@ -57,6 +66,8 @@ import {
   type AgentLaunch,
   type AgentRunnerPort,
   type CodeReviewPort,
+  type SourceControlPort,
+  type SourceControlTarget,
   type PortsConfiguration,
   type TrackerPort,
   type WorkspaceManagerPort,
@@ -261,6 +272,7 @@ type TestPorts = Readonly<{
   makeTracker: (provider: ValidatedTrackerProvider) => TrackerPort
   /** Omit to compose no code-review services at all, which disables pull-request handoff. */
   makeCodeReview?: (provider: ValidatedTrackerProvider) => CodeReviewPort | null
+  makeSourceControl?: (provider: ValidatedTrackerProvider) => SourceControlPort | null
   makeWorkspaces: (settings: WorkspaceSettings) => WorkspaceManagerPort
   runAgent: AgentRunnerPort['run']
   agentEventSemantics: AgentEventSemantics
@@ -314,18 +326,49 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
     }),
   )
 
-const layerTestPorts = (ports: TestPorts): Layer.Layer<OrchestratorServices, TrackerError> => {
+const layerTestPorts = (
+  ports: TestPorts,
+): Layer.Layer<OrchestratorServices, TrackerError | SourceControlError> => {
   const base = layerPorts(ports.configuration, layerTestAdapters(ports))
   const makeCodeReview = ports.makeCodeReview
   if (makeCodeReview === undefined) {
     return base
   }
-  return Layer.merge(
+  const sourceControl: SourceControlPort = {
+    prepare: (_issue, workspace, target) =>
+      Effect.succeed({
+        workspace,
+        target,
+        baseBranch: 'main',
+        baseSha: 'base-head',
+        baselineSha: target._tag === 'Repair' ? target.expectedHeadSha : 'base-head',
+        expectedRemoteHead:
+          target._tag === 'Repair' ? Option.some(target.expectedHeadSha) : Option.none(),
+      }),
+    publish: (_issue, prepared) =>
+      Effect.succeed({
+        _tag: 'Published',
+        branchName: prepared.target.branchName,
+        headSha: 'published-head',
+        commitCreated: true,
+      }),
+  }
+  const makeSourceControl = ports.makeSourceControl
+  return Layer.mergeAll(
     base,
     layerCodeReviewPorts(
       ports.configuration,
       Layer.succeed(CodeReviewFactory, {
         make: (provider) => Effect.succeed(makeCodeReview(provider)),
+      }),
+    ),
+    layerSourceControlPorts(
+      ports.configuration,
+      Layer.succeed(SourceControlFactory, {
+        make: (provider) =>
+          Effect.succeed(
+            makeSourceControl === undefined ? sourceControl : makeSourceControl(provider),
+          ),
       }),
     ),
   )
@@ -338,7 +381,11 @@ const layerTestPorts = (ports: TestPorts): Layer.Layer<OrchestratorServices, Tra
 const startTestOrchestrator = (
   selectedWorkflowPath: string,
   ports: TestPorts,
-): Effect.Effect<OrchestratorControl, WorkflowError | TrackerError, Scope.Scope> =>
+): Effect.Effect<
+  OrchestratorControl,
+  WorkflowError | TrackerError | SourceControlError,
+  Scope.Scope
+> =>
   Effect.scope.pipe(
     Effect.flatMap((scope) => Layer.buildWithScope(layerTestPorts(ports), scope)),
     Effect.flatMap((services) => Effect.provide(startOrchestrator(selectedWorkflowPath), services)),
@@ -520,7 +567,7 @@ const makeHarness = (
 }
 
 const runWithTestClock = <Value>(
-  effect: Effect.Effect<Value, WorkflowError | TrackerError>,
+  effect: Effect.Effect<Value, WorkflowError | TrackerError | SourceControlError>,
 ): Promise<Value> => Effect.runPromise(effect.pipe(Effect.provide(TestContext.TestContext)))
 
 /** Models a validation race after the tick gate, without making the whole tick invalid. */
@@ -581,6 +628,132 @@ const saveRepairHandoff = (path: string, issue: Issue, headSha: string): Promise
       },
     ]),
   )
+
+describe('host-owned source-control dispatch', (): void => {
+  it('publishes a normal run without exposing a credential to the agent launch', async (): Promise<void> => {
+    const issue = {
+      ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
+      id: issueId('165'),
+    }
+    const harness = makeHarness(workflow, () => [issue])
+    const targets: SourceControlTarget[] = []
+    const publications: string[] = []
+    let launchSecretNames: readonly string[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeTracker: (provider) => ({
+        ...harness.ports.makeTracker(provider),
+        secretEnvironmentNames: ['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'],
+      }),
+      makeSourceControl: () => ({
+        prepare: (_candidate, workspace, target) => {
+          targets.push(target)
+          return Effect.succeed({
+            workspace,
+            target,
+            baseBranch: 'main',
+            baseSha: 'protected-main',
+            baselineSha: 'protected-main',
+            expectedRemoteHead: Option.none(),
+          })
+        },
+        publish: (_candidate, prepared) => {
+          publications.push(prepared.target.branchName)
+          return Effect.succeed({
+            _tag: 'Published',
+            branchName: prepared.target.branchName,
+            headSha: 'published-head',
+            commitCreated: true,
+          })
+        },
+      }),
+      runAgent: (launch) => {
+        launchSecretNames = launch.secretEnvironmentNames
+        return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+      },
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+          }
+        }),
+      ),
+    )
+
+    expect(targets).toEqual([{ _tag: 'Normal', branchName: 'symphony/issue-165' }])
+    expect(publications).toEqual(['symphony/issue-165'])
+    expect(launchSecretNames).toEqual(
+      expect.arrayContaining(['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
+    )
+  })
+
+  it('prepares and publishes a repair from the handoff exact head', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-source-control-repair-'))
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
+      id: issueId('165'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    await saveRepairHandoff(join(workspaceRoot, '.symphony', 'handoffs.json'), issue, head)
+    const harness = makeHarness(isolated, () => [issue])
+    const targets: SourceControlTarget[] = []
+    const publications: string[] = []
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      makeSourceControl: () => ({
+        prepare: (_candidate, workspace, target) => {
+          targets.push(target)
+          return Effect.succeed({
+            workspace,
+            target,
+            baseBranch: 'main',
+            baseSha: 'protected-main',
+            baselineSha: head,
+            expectedRemoteHead: Option.some(head),
+          })
+        },
+        publish: (_candidate, prepared) => {
+          publications.push(prepared.target.branchName)
+          return Effect.succeed({
+            _tag: 'Published',
+            branchName: prepared.target.branchName,
+            headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            commitCreated: true,
+          })
+        },
+      }),
+      runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+          }
+        }),
+      ),
+    )
+
+    expect(targets[0]).toEqual({
+      _tag: 'Repair',
+      branchName: 'symphony/issue-20',
+      expectedHeadSha: head,
+    })
+    expect(publications).toEqual(['symphony/issue-20'])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+})
 
 describe('restored pull request handoffs', (): void => {
   it('rediscovers open pull requests for active issue branches when the store is missing', async (): Promise<void> => {
@@ -5977,6 +6150,27 @@ describe('session telemetry accounting', (): void => {
         category: 'invalid_config',
         message:
           'pull-request handoff is enabled, but tracker provider github does not supply CodeReviewPort',
+      },
+    })
+  })
+
+  it('rejects enabled handoff when the provider does not supply SourceControlPort', async (): Promise<void> => {
+    const harness = makeHarness(workflow)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeSourceControl: () => null,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.either(Effect.scoped(startTestOrchestrator('/tmp/WORKFLOW.md', ports))),
+    )
+
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: {
+        category: 'invalid_config',
+        message:
+          'pull-request handoff is enabled, but tracker provider github does not supply SourceControlPort',
       },
     })
   })
