@@ -5,10 +5,12 @@ import {
   type Issue,
   type JsonValue,
 } from '../../domain/domain.js'
+import { Either, Schema } from 'effect'
+
 import { TrackerError } from '../../errors.js'
-import { isJsonArray } from '../../support/json.js'
+import { isJsonValue } from '../../support/json.js'
 import type { GitHubProviderConfig } from './provider.js'
-import { isJsonRecord, trackerResponseError } from './client.js'
+import { trackerResponseError } from './client.js'
 
 export type GitHubLabel = Readonly<{ name: string | null }>
 export type GitHubIssue = Readonly<{
@@ -34,14 +36,14 @@ export type GitHubDependency = Readonly<{
   htmlUrl: string
 }>
 
-const nullableString = (value: JsonValue | undefined): string | null => {
+const nullableString = (value: unknown): string | null => {
   if (typeof value !== 'string') {
     return null
   }
   return value
 }
 
-const nonEmptyString = (value: JsonValue | undefined): string | null => {
+const nonEmptyString = (value: unknown): string | null => {
   const text = nullableString(value)
   return text === null || text.length === 0 ? null : text
 }
@@ -54,88 +56,98 @@ const parseDate = (value: string | null): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
+const nonEmpty = Schema.String.pipe(Schema.filter((value) => value.length > 0))
+const positiveSafeInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isSafeInteger(value) && value > 0),
+)
+const safeInteger = Schema.Number.pipe(Schema.filter(Number.isSafeInteger))
+const jsonRecord = Schema.Record({ key: Schema.String, value: Schema.Unknown })
+const githubLabel = Schema.Union(
+  Schema.String,
+  Schema.Struct({ name: Schema.NullOr(Schema.String) }),
+)
+const githubIssue = Schema.Struct({
+  number: positiveSafeInteger,
+  node_id: nonEmpty,
+  title: nonEmpty,
+  state: nonEmpty,
+  body: Schema.optional(Schema.Unknown),
+  html_url: Schema.optional(Schema.Unknown),
+  assignee: Schema.optional(Schema.Unknown),
+  labels: Schema.optional(Schema.Array(Schema.Unknown)),
+  pull_request: Schema.optional(Schema.Unknown),
+  created_at: Schema.optional(Schema.Unknown),
+  updated_at: Schema.optional(Schema.Unknown),
+})
+const githubDependency = Schema.Struct({
+  id: safeInteger,
+  number: positiveSafeInteger,
+  title: nonEmpty,
+  state: nonEmpty,
+  repository_url: Schema.String,
+  html_url: Schema.String,
+})
+const githubIssuePage = Schema.Array(Schema.declare(isJsonValue))
+
+const decodeOrThrow = <Value, Encoded>(
+  schema: Schema.Schema<Value, Encoded>,
+  value: unknown,
+  message: string,
+): Value =>
+  Either.match(Schema.decodeUnknownEither(schema)(value), {
+    onLeft: (cause) => {
+      throw trackerResponseError(message, cause)
+    },
+    onRight: (decoded) => decoded,
+  })
+
 /** GitHub returns labels either as objects or, on some payload shapes, as bare strings. */
-const decodeGitHubLabel = (value: JsonValue): GitHubLabel | null => {
-  if (typeof value === 'string') {
-    return { name: value }
-  }
-  if (!isJsonRecord(value)) {
-    return null
-  }
-  const name = value['name']
-  return name === null || typeof name === 'string' ? { name } : null
-}
+const decodeGitHubLabel = (value: unknown): GitHubLabel | null =>
+  Either.match(Schema.decodeUnknownEither(githubLabel)(value), {
+    onLeft: () => null,
+    onRight: (label) => (typeof label === 'string' ? { name: label } : label),
+  })
 
 export const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
-  if (!isJsonRecord(value)) {
-    throw trackerResponseError('GitHub issue is not an object')
-  }
-  const number = value['number']
-  const nodeId = value['node_id']
-  const title = value['title']
-  const state = value['state']
-  if (
-    typeof number !== 'number' ||
-    !Number.isSafeInteger(number) ||
-    number <= 0 ||
-    typeof nodeId !== 'string' ||
-    nodeId.length === 0 ||
-    typeof title !== 'string' ||
-    title.length === 0 ||
-    typeof state !== 'string' ||
-    state.length === 0
-  ) {
-    throw trackerResponseError('GitHub issue is missing required fields')
-  }
-  const rawLabels = value['labels']
-  const labels = isJsonArray(rawLabels)
+  const decoded = decodeOrThrow(githubIssue, value, 'GitHub issue is missing required fields')
+  const rawLabels = decoded.labels
+  const labels = Array.isArray(rawLabels)
     ? rawLabels.flatMap((item) => {
         const label = decodeGitHubLabel(item)
         return label === null ? [] : [label]
       })
     : []
-  const rawAssignee = value['assignee']
+  const rawAssignee = decoded.assignee
+  const assignee = Either.getOrNull(Schema.decodeUnknownEither(jsonRecord)(rawAssignee))
   return {
-    number,
-    nodeId,
-    title,
-    body: nullableString(value['body']),
-    state,
-    htmlUrl: nonEmptyString(value['html_url']),
-    assigneeLogin: isJsonRecord(rawAssignee) ? nonEmptyString(rawAssignee['login']) : null,
+    number: decoded.number,
+    nodeId: decoded.node_id,
+    title: decoded.title,
+    body: nullableString(decoded.body),
+    state: decoded.state,
+    htmlUrl: nonEmptyString(decoded.html_url),
+    assigneeLogin: assignee === null ? null : nonEmptyString(assignee['login']),
     labels,
-    isPullRequest: value['pull_request'] !== undefined && value['pull_request'] !== null,
-    createdAt: nonEmptyString(value['created_at']),
-    updatedAt: nonEmptyString(value['updated_at']),
+    isPullRequest: decoded.pull_request !== undefined && decoded.pull_request !== null,
+    createdAt: nonEmptyString(decoded.created_at),
+    updatedAt: nonEmptyString(decoded.updated_at),
   }
 }
 
 export const decodeGitHubDependency = (value: JsonValue): GitHubDependency => {
-  if (!isJsonRecord(value)) {
-    throw trackerResponseError('GitHub issue dependency is not an object')
+  const decoded = decodeOrThrow(
+    githubDependency,
+    value,
+    'GitHub issue dependency is missing required fields',
+  )
+  return {
+    id: decoded.id,
+    number: decoded.number,
+    title: decoded.title,
+    state: decoded.state,
+    repositoryUrl: decoded.repository_url,
+    htmlUrl: decoded.html_url,
   }
-  const id = value['id']
-  const number = value['number']
-  const title = value['title']
-  const state = value['state']
-  const repositoryUrl = value['repository_url']
-  const htmlUrl = value['html_url']
-  if (
-    typeof id !== 'number' ||
-    !Number.isSafeInteger(id) ||
-    typeof number !== 'number' ||
-    !Number.isSafeInteger(number) ||
-    number <= 0 ||
-    typeof title !== 'string' ||
-    title.length === 0 ||
-    typeof state !== 'string' ||
-    state.length === 0 ||
-    typeof repositoryUrl !== 'string' ||
-    typeof htmlUrl !== 'string'
-  ) {
-    throw trackerResponseError('GitHub issue dependency is missing required fields')
-  }
-  return { id, number, title, state, repositoryUrl, htmlUrl }
 }
 
 export const normalizeDependency = (
@@ -218,19 +230,18 @@ export type DecodedPage = Readonly<{
 }>
 
 export const decodeIssuePage = (body: JsonValue, provider: GitHubProviderConfig): DecodedPage => {
-  if (!isJsonArray(body)) {
-    throw trackerResponseError('GitHub issue list is not an array')
-  }
+  const records = decodeOrThrow(githubIssuePage, body, 'GitHub issue list is not an array')
   const issues: Issue[] = []
   const malformed: string[] = []
-  for (const [index, item] of body.entries()) {
+  for (const [index, item] of records.entries()) {
     try {
       issues.push(normalizeIssue(decodeGitHubIssue(item), provider))
     } catch (error: unknown) {
       if (!(error instanceof TrackerError)) {
         throw error
       }
-      const candidate = isJsonRecord(item) ? item['number'] : undefined
+      const candidateRecord = Either.getOrNull(Schema.decodeUnknownEither(jsonRecord)(item))
+      const candidate = candidateRecord?.['number']
       malformed.push(
         `index ${String(index)}${typeof candidate === 'number' ? ` (number ${String(candidate)})` : ''}: ${error.message}`,
       )

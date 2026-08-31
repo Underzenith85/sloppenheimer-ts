@@ -1,30 +1,33 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, Option, Redacted } from 'effect'
+import { Effect, Option, Redacted, Schema } from 'effect'
 
-import type { Issue, JsonValue } from '../../domain/domain.js'
+import type { Issue } from '../../domain/domain.js'
 import { issueBranchName } from '../../domain/handoff.js'
 import { TrackerError } from '../../errors.js'
 import type { GitHubProviderConfig } from './provider.js'
 import type { HostToolResult, HostToolSpec } from '../../host-tools.js'
 import { unsupportedHostTool } from '../../host-tools.js'
 import type { CodeReviewPort, HandoffResult } from '../../ports/code-review.js'
-import { isJsonArray } from '../../support/json.js'
-import {
-  githubJson,
-  githubPageSize,
-  isJsonRecord,
-  trackerResponseError,
-  withBoundHttpClient,
-} from './client.js'
+import { githubJson, githubPageSize, trackerResponseError, withBoundHttpClient } from './client.js'
 import { makeGitHubPullRequestMonitor } from './pull-requests.js'
 import {
   exactObject,
   githubIssueNumber,
   githubToolValue,
   invalidToolArguments,
-  requiredResponseUrl,
   toolFailure,
 } from './tools.js'
+
+const pullRequestResponse = Schema.Struct({ html_url: Schema.String })
+const pullRequestList = Schema.Array(Schema.Unknown)
+
+const decodePullRequest = (
+  value: unknown,
+  message: string,
+): Effect.Effect<{ readonly html_url: string }, TrackerError> =>
+  Schema.decodeUnknown(pullRequestResponse)(value).pipe(
+    Effect.mapError((cause) => trackerResponseError(message, cause)),
+  )
 
 const githubCodeReviewToolSpecs: readonly HostToolSpec[] = Object.freeze([
   Object.freeze({
@@ -77,13 +80,9 @@ const makeGitHubCodeReviewToolExecutor =
         `${provider.apiBaseUrl}${prefix}/pulls/${String(pullRequestNumber)}`,
       ).pipe(
         Effect.flatMap(({ body }) =>
-          Effect.try({
-            try: () => requiredResponseUrl(body, 'html_url'),
-            catch: (cause: unknown) =>
-              cause instanceof TrackerError
-                ? cause
-                : trackerResponseError('GitHub pull request response is invalid', cause),
-          }),
+          decodePullRequest(body, 'GitHub pull request response is invalid').pipe(
+            Effect.map((pullRequest) => pullRequest.html_url),
+          ),
         ),
         Effect.flatMap((pullRequestUrl) =>
           githubJson(
@@ -129,13 +128,6 @@ const githubBranchExists = (
     [404],
   ).pipe(Effect.map(({ status }) => status !== 404))
 
-const decodePullRequestUrl = (value: JsonValue | null): string => {
-  if (!isJsonRecord(value) || typeof value['html_url'] !== 'string') {
-    throw trackerResponseError('GitHub pull request is missing html_url')
-  }
-  return value['html_url']
-}
-
 /**
  * The open pull request for `branchName`, if GitHub has one. Absence decides the next branch in
  * both handoff paths, so it is an `Option` rather than a `null` carried deeper.
@@ -149,20 +141,20 @@ const findPullRequest = (
     provider,
     `${provider.apiBaseUrl}${prefix}/pulls?state=open&head=${encodeURIComponent(`${provider.owner}:${branchName}`)}&base=${encodeURIComponent(provider.baseBranch)}&per_page=${String(githubPageSize)}`,
   ).pipe(
-    Effect.flatMap(({ body }) => {
-      if (!isJsonArray(body)) {
-        return Effect.fail(trackerResponseError('GitHub pull request list is not an array'))
-      }
-      const first = body[0]
+    Effect.flatMap(({ body }) =>
+      Schema.decodeUnknown(pullRequestList)(body).pipe(
+        Effect.mapError((cause) =>
+          trackerResponseError('GitHub pull request list is invalid', cause),
+        ),
+      ),
+    ),
+    Effect.flatMap((pullRequests) => {
+      const first = pullRequests[0]
       return first === undefined
         ? Effect.succeed(Option.none<string>())
-        : Effect.try({
-            try: () => Option.some(decodePullRequestUrl(first)),
-            catch: (cause: unknown) =>
-              cause instanceof TrackerError
-                ? cause
-                : trackerResponseError('GitHub pull request is invalid', cause),
-          })
+        : decodePullRequest(first, 'GitHub pull request is invalid').pipe(
+            Effect.map((pullRequest) => Option.some(pullRequest.html_url)),
+          )
     }),
   )
 
@@ -182,13 +174,9 @@ const createPullRequest = (
     }),
   }).pipe(
     Effect.flatMap(({ body }) =>
-      Effect.try({
-        try: () => decodePullRequestUrl(body),
-        catch: (cause: unknown) =>
-          cause instanceof TrackerError
-            ? cause
-            : trackerResponseError('GitHub pull request is invalid', cause),
-      }),
+      decodePullRequest(body, 'GitHub pull request is invalid').pipe(
+        Effect.map((pullRequest) => pullRequest.html_url),
+      ),
     ),
   )
 
