@@ -39,9 +39,9 @@ Title: {{ issue.title }}
 Description:
 {{ issue.description }}
 
-Follow the repository's TypeScript 7 conventions. Never use `any`, never omit braces around a
-control-flow body, and do not add TypeScript 6 compatibility. Implement and test the requested
-change in the prepared worktree, then run `pnpm check`. Do not create branches, commit, rebase,
+Read `AGENTS.md` at the root of the prepared worktree before you start: it states the conventions
+this repository holds, and a change that ignores them will not pass review. Implement and test the
+requested change in the worktree, then run `pnpm check`. Do not create branches, commit, rebase,
 push, or request GitHub credentials; Symphony publishes the worktree through its host credential.
 
 When the description contains a `Pull request repair` section, edit the prepared existing PR head

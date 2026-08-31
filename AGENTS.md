@@ -6,6 +6,21 @@ answer different questions, and neither substitutes for the other.
 Every rule here is one the tree already follows. Where a rule is enforced, the enforcement is named,
 so a reader knows which are checked and which are conventions held by hand.
 
+This file is also the repository's decision record. The accepted decisions from the 2026-08-30
+architecture review live in the sections below rather than in an ADR directory: the port boundary
+([#81](https://github.com/Underzenith85/symphony-ts/issues/81)) under _Architecture and ports_, the
+workspace package structure ([#82](https://github.com/Underzenith85/symphony-ts/issues/82)) under
+_Repository structure_, the layering rule
+([#86](https://github.com/Underzenith85/symphony-ts/issues/86)) under _Module import direction_, and
+the `Option`-versus-`null` boundary
+([#80](https://github.com/Underzenith85/symphony-ts/issues/80)) under _TypeScript and Effect_. Do
+not add a parallel ADR tree; extend the section that owns the decision.
+
+The prompt in `WORKFLOW.md` used to restate three of these rules inline. It now tells the dispatched
+agent to read this file in the worktree it was given instead: three rules out of the dozens here is
+an arbitrary privilege, the copy drifts from the original as soon as either moves, and the agent is
+working in a checkout that contains this file.
+
 ## Toolchain
 
 Node 24 and native TypeScript 7 only. `package.json` declares `engines.node >= 24` and pins
@@ -24,8 +39,9 @@ to find.
 - **Arrow consts, not `function` declarations.** Every top-level binding is an arrow const with an
   explicit type. The tree contains no `function` declaration at all; the keyword appears only as
   the generator `Effect.gen(function* () {...})` takes, which has no arrow form. `class` is
-  reserved for the two places Effect asks for one — `Context.Tag` service tags and `Data.TaggedError` — plus the
-  Codex connection, which owns a live subprocess and its pending requests.
+  reserved for the two places Effect asks for one — `Context.Tag` service tags and
+  `Data.TaggedError` — plus the Codex connection, which owns a live subprocess and its pending
+  requests.
 - **Explicit return types on everything**, enforced by `typescript/explicit-function-return-type`.
   The signature is the contract; inference is for call sites, not for exports.
 - **`Readonly<{...}>` on exported object types, `readonly` on their array members.** A domain value
@@ -184,16 +200,29 @@ The directories under `packages/core/src/` are layers, and imports may only ever
 support/  <-  domain/  <-  ports/  <-  core/  <-  config/
 ```
 
-- `support/` is the bottom layer. It may import only from `support/` itself and from third-party or
-  Node packages.
-- `domain/` may import from `support/` only. It holds the error vocabulary and the host-tool
-  vocabulary as well as the domain records.
-- `ports/` may import from `domain/` and `support/` only.
-- `core/` holds orchestration policy. It may import from `config/`, `ports/`, `domain/`, and
-  `support/`, and it may never name a concrete adapter — it depends on a port and lets the
-  composition root bind the implementation.
-- The adapter packages are restricted as an import target, never as a source, and the root
-  application is unrestricted.
+- `support/` is the bottom layer: JSON, logging, redaction, collections, the clock read, schema
+  combinators. It may import only from `support/` itself and from third-party or Node packages, and
+  it knows nothing about issues, trackers, or agents.
+- `domain/` may import from `support/` only. It holds the domain records and the vocabulary
+  everything above is written in: the tagged errors, the branded identifiers, the handoff snapshot,
+  the host-tool and provider vocabulary. No effects that reach the world.
+- `ports/` may import from `domain/` and `support/` only. A port is a record-of-functions type plus
+  the `Context.Tag` that names it, and nothing else: the interface the core depends on and an
+  adapter satisfies.
+- `core/` holds orchestration policy — the runtime, the event loop, dispatch, the transitions, the
+  handoff lifecycle. It may import from `config/`, `ports/`, `domain/`, and `support/`, and it may
+  never name a concrete adapter: it depends on a port and lets the composition root bind the
+  implementation. That single rule is the drift this whole programme removed, and it is one careless
+  import away from coming back.
+- `config/` holds the workflow model the layers below are written against.
+
+Above the core package, the same direction holds between packages rather than directories. The
+adapter packages — `adapter-node`, `adapter-github`, `adapter-codex` — implement ports and are
+restricted as an import target, never as a source: nothing in `packages/core` may name one. The
+repository root is the composition root and is unrestricted, because binding a port to an
+implementation is exactly its job. Under it, `src/config/` loads a workflow definition off disk,
+`src/operator/` serves the console and its HTTP API, `src/composition.ts` and the two adapter
+registries build the layers, and `src/cli.ts` runs them.
 
 `.oxlintrc.json` enforces this with `no-restricted-imports` overrides, so `pnpm lint` — and
 therefore `pnpm check` — fails on a violation. The groups match the import specifier as written
@@ -234,6 +263,82 @@ Add to an allow-list only for a type that has not moved yet; never to admit an i
 package, which stays denied at every tier.
 
 ## TypeScript and Effect
+
+### Dependency injection: `Context` and `Layer`
+
+A service is acquired from the Effect context, never handed down as a parameter. The dependency
+record the orchestrator once took — `OrchestratorDependencies` — is gone, and so is injection
+through a default parameter. Neither may come back: both let a caller pass one implementation while
+the rest of the tree reads another, and neither is visible in a type.
+
+- Every port declares a `Context.Tag` beside its interface in `packages/core/src/ports/`, and the
+  code that needs it writes `yield* CurrentTracker`. What an effect requires shows up in its `R`,
+  so a module that quietly acquires a new dependency cannot typecheck without saying so.
+- The composition root builds the layers. `src/composition.ts` merges the adapter services,
+  `src/tracker-adapters.ts` and `src/agent-runners.ts` are the only files that name a concrete kind,
+  and `src/cli.ts` provides the result — plus `NodeFileSystem.layer` and the GitHub HTTP client —
+  around the whole program.
+- A capability that may be absent is asked for with `Effect.serviceOption`. The orchestrator takes
+  `CurrentCodeReview` that way, so composing no code-review services at all _is_ handoff disabled;
+  there is no separate flag for the core to consult.
+- The environment is read through `Config` against whatever `ConfigProvider` the fiber carries.
+  `Effect.withConfigProvider(ConfigProvider.fromEnv())` in `src/cli.ts` is the one line that says
+  "the process environment", and the one line a test replaces.
+- Tests provide test layers rather than patching modules: a fake from `test/harness/` is composed in
+  where the adapter would be, and the suite runs the same wiring the host does.
+
+### State: a `Ref` with pure transitions
+
+Actor-owned state lives in one `Ref` holding one immutable value, and every change to it is a pure
+function applied through `Ref.update` or `Ref.modify`.
+
+- `packages/core/src/core/state.ts` declares `RuntimeState`; `transitions.ts` holds the transitions
+  as ordinary functions of `(state, ...) => state`. They read no clock and perform no effect: the
+  caller reads the instant and passes it in.
+- Telemetry recorders are the same shape — `recordAttemptStarted`, `recordHandoff`, and the rest
+  return a new record rather than mutating the one they were given.
+- A reader therefore sees one coherent value. Do not introduce a record of mutable containers, and
+  do not export a mutable type. The one `MutableRef` in the tree is `sessionPorts` on a running
+  entry, which a host tool reads synchronously from a callback that has no fiber to suspend in; it
+  is written only by the transition that adopts new ports.
+
+### Decoding: `Schema`, not `throw`
+
+External input is decoded with `effect/Schema` at the boundary it arrives on, and a rejection is a
+typed failure rather than a thrown value or a defect.
+
+- Workflow definitions, GitHub payloads, the persisted handoff snapshot, and the Codex protocol and
+  telemetry payloads each have a schema; `packages/core/src/support/schema.ts` holds the combinators
+  the protocol formats share.
+- A `ParseError` is mapped onto the tagged error the caller already handles — `WorkflowError` with
+  category `invalid_config`, a `TrackerError`, a `HandoffStoreError` — using
+  `ParseResult.ArrayFormatter` to state which field was wrong. A decode never reaches a caller as a
+  `ParseError`.
+- Configuration and protocol are decoded with different tolerances, deliberately. A configuration
+  document is Symphony's own and is rejected outright when it is wrong. A protocol payload comes
+  from another program at a version Symphony does not pin: a record that is not a record fails, but
+  a field that is missing or malformed reads as absent, so one unexpected field does not fail the
+  turn that carried it.
+
+### Runtime entry: one place leaves Effect
+
+`Effect.runPromiseExit` in `src/cli.ts` is the only place the application enters the Effect runtime.
+`runSync`, `runPromise`, or a fork from an arbitrary module is a defect: it starts a second runtime
+with none of the host's context, outside the scope that would interrupt it on shutdown.
+
+Three call sites cross back from a foreign boundary, and each runs on a runtime it was handed rather
+than a fresh one:
+
+- `packages/core/src/core/startup.ts` captures `Effect.runtime` and the orchestrator's scope once,
+  and hands `runFromCallback` to the code that must apply an agent runner's synchronous progress
+  report. The effect it takes must settle without suspending.
+- `packages/adapter-codex/src/codex.ts` forks its line reader the same way, into the scope that owns
+  the subprocess.
+- `packages/adapter-github/src/tools.ts` runs one host-tool request, because the host-tool port
+  answers with a `Promise` that the tool protocol requires.
+
+A new one of these needs a reason of the same kind — a callback or promise boundary that cannot be
+expressed as an effect — and it carries the runtime and scope in, rather than starting its own.
 
 ### Absence: `Option` versus `null`
 
