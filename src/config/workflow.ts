@@ -41,6 +41,7 @@ const knownSections = new Set([
   'agent',
   'codex',
   'server',
+  'handoff',
 ])
 
 /**
@@ -83,6 +84,9 @@ const portNumber = (name: string): Schema.Schema<number, number> =>
   integer(name)
     .pipe(Schema.filter((value) => value >= 0 && value <= 65_535))
     .annotations({ message: () => `${name} must be between 0 and 65535` })
+
+const booleanValue = (name: string): Schema.Schema<boolean, boolean> =>
+  Schema.Boolean.annotations({ message: () => `${name} must be a boolean` })
 
 const strings = (name: string): Schema.Schema<readonly string[], readonly string[]> => {
   const message = (): string => `${name} must be a list of strings`
@@ -185,6 +189,15 @@ const serverSection = Schema.Struct({
 }).annotations({ message: () => 'server must be a map' })
 
 /**
+ * The key that owns the pull-request handoff extension, declared here the same way `server` owns
+ * the HTTP one. It is read once, when the composition root decides which services to compose, so a
+ * document that changes it takes effect on the next start rather than on a reload.
+ */
+const handoffSection = Schema.Struct({
+  enabled: Schema.optional(booleanValue('handoff.enabled')),
+}).annotations({ message: () => 'handoff must be a map' })
+
+/**
  * The sections this core understands, keyed as the document spells them: the decoded record is the
  * authored one, and the names the rest of the program uses are given to it by {@link parseConfig}.
  * A section the document omits is absent rather than empty, so the defaults stay in one place
@@ -200,6 +213,7 @@ const workflowSections = Schema.Struct({
   agent: Schema.optional(agentSection),
   codex: Schema.optional(codexSection),
   server: Schema.optional(serverSection),
+  handoff: Schema.optional(handoffSection),
 }).annotations({ message: () => 'workflow front matter must be a map' })
 
 /**
@@ -311,7 +325,7 @@ const parseConcurrencyByState = (
  * here has already been checked by the schema, so this only applies the documented defaults.
  */
 const parseConfig = (raw: RawWorkflowConfig, workspaceRoot: string): EffectiveConfig => {
-  const { tracker, polling, hooks, agent, codex, server } = raw
+  const { tracker, polling, hooks, agent, codex, server, handoff } = raw
   return {
     tracker: {
       kind: tracker.kind,
@@ -345,6 +359,7 @@ const parseConfig = (raw: RawWorkflowConfig, workspaceRoot: string): EffectiveCo
       stallTimeoutMs: codex?.stall_timeout_ms ?? workflowDefaults.stallTimeoutMs,
     },
     serverPort: server?.port ?? null,
+    handoffEnabled: handoff?.enabled ?? workflowDefaults.handoffEnabled,
     extensions: raw.extensions,
   }
 }

@@ -72,6 +72,8 @@ const workflow: Workflow = {
       stallTimeoutMs: 30_000,
     },
     serverPort: null,
+    // The transitions under test are handoff transitions, so the workflow states the extension.
+    handoffEnabled: true,
     extensions: {},
   },
 }

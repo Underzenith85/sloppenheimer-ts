@@ -109,6 +109,11 @@ diff, rebases it onto the current protected base, verifies the remote head still
 captured lease, and pushes it with the host credential. An empty diff remains distinct from a
 publication failure, and lease or authentication failures preserve the local work for retry.
 
+Pull-request handoff is an extension the workflow turns on and off with `handoff.enabled`, which
+defaults to `true`; everything in the rest of this section describes the enabled host. With it
+disabled, Symphony composes no code-review services and follows the core continuation lifecycle
+alone.
+
 After publication, Symphony creates or reuses an open pull request and schedules the same short
 continuation retry used when no branch exists. The handoff is observation-only: only a live worker
 or queued retry owns the issue claim, and the refreshed tracker state plus routability decide
@@ -330,9 +335,9 @@ explicitly rather than being silent.
 ## Configuration
 
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are
-`tracker`, `polling`, `workspace`, `hooks`, `agent`, `codex`, and `server`. The current tracker
-profile is GitHub Issues; the orchestration interfaces keep tracker and workspace concerns separate
-so additional profiles can be implemented without weakening the domain types.
+`tracker`, `polling`, `workspace`, `hooks`, `agent`, `codex`, `server`, and `handoff`. The current
+tracker profile is GitHub Issues; the orchestration interfaces keep tracker and workspace concerns
+separate so additional profiles can be implemented without weakening the domain types.
 
 Unknown front-matter keys are preserved verbatim on `config.extensions` and otherwise ignored, so a
 newer workflow file stays loadable on an older host without weakening required-field validation. A
@@ -364,12 +369,46 @@ rather than as the first exception a decoder happened to throw.
 | `codex.read_timeout_ms`       | `5000`                                      |
 | `codex.stall_timeout_ms`      | `300000` (`0` disables stall detection)     |
 | `server.port`                 | unset (no operator console)                 |
+| `handoff.enabled`             | `true` (pull-request handoff composed)      |
 
 `codex.approval_policy` accepts `untrusted`, `on-request`, or `never`, and
 `codex.thread_sandbox` accepts `read-only`, `workspace-write`, or `danger-full-access`; both are
 Codex-owned values that must stay aligned with the generated App Server schemas.
 `codex.turn_sandbox_policy` is an escape hatch: when set, the map is passed to `turn/start` as
 `sandboxPolicy` verbatim instead of the host-derived workspace-write policy.
+
+### Pull-request handoff
+
+`handoff` owns the pull-request handoff extension the way `server` owns the HTTP status surface.
+
+| Key               | Type    | Default | Validation                          |
+| ----------------- | ------- | ------- | ----------------------------------- |
+| `handoff.enabled` | boolean | `true`  | `handoff.enabled must be a boolean` |
+
+A `handoff` that is not a map is rejected as `handoff must be a map`, and any other value for
+`handoff.enabled` — including the string `"false"` — fails configuration validation rather than
+being ignored, exactly as every other declared key does. An unknown key inside `handoff` is ignored,
+as it is in every known section; an unknown top-level key is still preserved on
+`config.extensions`.
+
+The default is enabled because handoff is observation-only: a normal worker exit schedules the
+continuation retry whether or not a pull request was opened, and no handoff holds an issue claim, so
+the extension adds a lifecycle to observe rather than replacing the core one.
+
+Setting `handoff.enabled: false` composes no code-review services at all. Branch detection, pull
+request creation and adoption, check and review monitoring, protected merge, and repair dispatch are
+all absent; `handoffs.json` is neither read at startup nor written, so a store left by an earlier
+handoff-enabled run survives untouched; and the provider's code-review tools are not advertised to
+the agent. Everything else is unchanged — the host still prepares the workspace, commits, rebases,
+and pushes the branch, because publication is a capability of its own rather than part of this
+extension. With the extension enabled, a tracker provider that supplies no `CodeReviewPort` or no
+`SourceControlPort` is an operator-visible `invalid_config` failure instead of a silently degraded
+run.
+
+Reload semantics: `handoff.enabled` is read once, at startup, when the composition root decides
+which services to compose — the same point at which `server.port` is read. Editing it in a running
+host does not take effect on the reload; restart the host. Every other key in the workflow, and the
+handoff behaviour itself, continues to follow the reloaded definition.
 
 ### Workspace hooks
 

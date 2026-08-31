@@ -50,6 +50,12 @@ export type EffectiveConfig = Readonly<{
   agent: AgentConfig
   codex: CodexConfig
   serverPort: number | null
+  /**
+   * Whether the pull-request handoff extension is composed. The composition root reads this once,
+   * at startup, and composes the code-review services when it is set; nothing below it consults the
+   * value, because the presence of those services *is* the gate.
+   */
+  handoffEnabled: boolean
   /** Unknown front-matter keys, preserved verbatim and otherwise ignored. */
   extensions: JsonObject
 }>
@@ -76,6 +82,10 @@ export const workflowDefaults = Object.freeze({
   turnTimeoutMs: 3_600_000,
   readTimeoutMs: 5_000,
   stallTimeoutMs: 300_000,
+  // Pull-request handoff is on unless a workflow turns it off. Since #70 it is observation-only —
+  // a normal exit schedules the continuation retry and the handoff holds no claim — so the default
+  // adds an extension without departing from the core lifecycle.
+  handoffEnabled: true,
   activeStates: ['open'] as readonly string[],
   terminalStates: ['closed'] as readonly string[],
 })
