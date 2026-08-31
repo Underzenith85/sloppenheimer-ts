@@ -62,6 +62,7 @@ import {
   initialState,
   type EffectiveWorkflow,
   type HandoffEntry,
+  type RefreshOperation,
   type RepairDisposition,
   type RunningEntry,
   type RuntimePorts,
@@ -87,6 +88,7 @@ export {
   type HandoffStoreError,
   type PendingRetirement,
   type PublishedDetail,
+  type RefreshOperation,
   type RetryEntry,
   type RunningEntry,
   type RuntimePorts,
@@ -100,6 +102,8 @@ export type RunningSnapshot = Readonly<{
   identifier: string
   title: string
   url: string | null
+  /** The issue state the tracker reported for this run, as the tracker spells it. */
+  state: string
   attempt: number | null
   startedAt: string
   lastEventAt: string | null
@@ -206,9 +210,27 @@ export type OrchestratorSnapshot = Readonly<{
   rateLimits: JsonObject | null
 }>
 
+/** What an accepted refresh request amounted to. */
+export type RefreshOutcome = Readonly<{
+  /**
+   * Whether the request joined a pass somebody else had already arranged, rather than bringing one
+   * into being. A burst of refreshes therefore costs one poll rather than one each, and the caller
+   * whose request created the pass is the one told so.
+   */
+  coalesced: boolean
+  /** When the host accepted the request. */
+  requestedAt: string
+  /** The stages the pass that answered this request actually reached, in order. */
+  operations: readonly RefreshOperation[]
+}>
+
 export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
-  refresh: Effect.Effect<void>
+  /**
+   * Requests a poll pass and completes when that pass has finished, so a caller that reads the
+   * snapshot afterwards sees the state the refresh produced.
+   */
+  refresh: Effect.Effect<RefreshOutcome>
   setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
   /**
    * Reads the published detail for one issue. The published index is built by the actor and is
@@ -930,20 +952,28 @@ export const startOrchestratorRuntime = (
         return Option.some(settled)
       })
 
-    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+    /** Requests a tick, and says whether this request is the one that scheduled the pass. */
+    const offerTick = (source: Transitions.TickSource): Effect.Effect<boolean> =>
       Ref.modify(state, (current) => Transitions.requestTick(current, source)).pipe(
         Effect.flatMap((decision) =>
           decision.enqueue
-            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.asVoid)
-            : Effect.void,
+            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.as(decision.scheduled))
+            : Effect.succeed(decision.scheduled),
         ),
       )
 
+    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+      Effect.asVoid(offerTick(source))
+
     const requestRefresh = Effect.gen(function* () {
-      const reply = yield* Deferred.make<void>()
+      const reply = yield* Deferred.make<readonly RefreshOperation[]>()
+      const requestedAt = yield* currentInstant
       yield* Ref.update(state, (current) => Transitions.awaitRefresh(current, reply))
-      yield* requestTick('change')
-      yield* Deferred.await(reply)
+      const scheduled = yield* offerTick('change')
+      // The pass answers with the stages it reached, so a validation failure that stopped it before
+      // dispatch is not acknowledged as a dispatch.
+      const operations = yield* Deferred.await(reply)
+      return { coalesced: !scheduled, requestedAt: requestedAt.toISOString(), operations }
     })
 
     const scheduleNextTick: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {

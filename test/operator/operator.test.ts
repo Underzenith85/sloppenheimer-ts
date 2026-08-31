@@ -128,7 +128,11 @@ const fakeOrchestrator = (
   const paused = new Set<number>()
   return {
     snapshot: Effect.sync(() => orchestratorSnapshot([...paused])),
-    refresh: Effect.void,
+    refresh: Effect.succeed({
+      coalesced: false,
+      requestedAt: '2026-08-30T00:00:00.000Z',
+      operations: [],
+    }),
     agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
     setIssuePaused: (issueNumber, isPaused) =>
       Effect.sync(() => {

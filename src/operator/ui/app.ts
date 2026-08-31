@@ -21,7 +21,7 @@ const compactWidth = 768
 
 const views: readonly WorkView[] = ['attention', 'ready', 'progress', 'finished']
 
-let state: OrchestratorSnapshot | null = null
+let state: PublishedState | null = null
 let backlog: BacklogSnapshot | null = null
 let model: WorkModel = buildWorkModel(null, null, Date.now())
 let activeView: WorkView = 'ready'
@@ -371,9 +371,9 @@ const renderSystemHealth = (): void => {
   }
   const parts = [
     String(model.capacity.running) + ' of ' + String(model.capacity.limit) + ' agents busy',
-    new Intl.NumberFormat().format(state.totals.totalTokens) + ' tokens',
-    formatDuration(state.totals.secondsRunning),
-    'updated ' + formatTime(state.generatedAt),
+    new Intl.NumberFormat().format(state.codex_totals.total_tokens) + ' tokens',
+    formatDuration(state.codex_totals.seconds_running),
+    'updated ' + formatTime(state.generated_at),
   ]
   summary.textContent = parts.join(' · ')
 }
@@ -584,7 +584,7 @@ const applyModel = (): void => {
 }
 
 const loadState = async (): Promise<void> => {
-  state = await request<OrchestratorSnapshot>('/api/v1/state')
+  state = await request<PublishedState>('/api/v1/state')
   applyModel()
 }
 
@@ -733,13 +733,15 @@ const runtimeStatus = (node: BacklogSnapshot['nodes'][number]): string => {
   if (node.readiness === 'cyclic') {
     return 'Cyclic'
   }
-  if ((state?.running ?? []).some((entry) => entry.identifier === node.identifier)) {
+  if ((state?.running ?? []).some((entry) => entry.issue_identifier === node.identifier)) {
     return 'Running'
   }
-  if ((state?.retrying ?? []).some((entry) => entry.identifier === node.identifier)) {
+  if ((state?.retrying ?? []).some((entry) => entry.issue_identifier === node.identifier)) {
     return 'Retrying'
   }
-  const handoff = (state?.handoffs ?? []).find((entry) => entry.identifier === node.identifier)
+  const handoff = (state?.handoffs ?? []).find(
+    (entry) => entry.issue_identifier === node.identifier,
+  )
   if (handoff !== undefined) {
     return phaseLabels[handoffPhases[handoff.state] ?? 'handing_off']
   }

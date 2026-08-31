@@ -602,7 +602,9 @@ describe('tick debounce', (): void => {
     const [second, still] = Transitions.requestTick(queued, 'timer')
 
     expect(first.enqueue).toBe(true)
+    expect(first.scheduled).toBe(true)
     expect(second.enqueue).toBe(false)
+    expect(second.scheduled).toBe(false)
     expect(still.tickQueued).toBe(true)
     expect(still.followUpRequested).toBe(false)
   })
@@ -612,9 +614,15 @@ describe('tick debounce', (): void => {
     const polling = Transitions.beginPoll(queued)
 
     const [decision, owed] = Transitions.requestTick(polling, 'change')
+    const [second, still] = Transitions.requestTick(owed, 'change')
 
     expect(decision.enqueue).toBe(false)
     expect(owed.followUpRequested).toBe(true)
+    // The change that first asks for the follow-up brings that pass into being; a later one only
+    // joins it, which is the difference a refresh acknowledgement reports as `coalesced`.
+    expect(decision.scheduled).toBe(true)
+    expect(second.scheduled).toBe(false)
+    expect(still.followUpRequested).toBe(true)
   })
 
   it('keeps the tick queued for the follow-up, and drains it otherwise', (): void => {
@@ -634,9 +642,10 @@ describe('tick debounce', (): void => {
   it('does not owe a follow-up for a timer that fires during a poll', (): void => {
     const [, queued] = Transitions.requestTick(emptyState(), 'startup')
 
-    const [, observed] = Transitions.requestTick(Transitions.beginPoll(queued), 'timer')
+    const [decision, observed] = Transitions.requestTick(Transitions.beginPoll(queued), 'timer')
 
     expect(observed.followUpRequested).toBe(false)
+    expect(decision.scheduled).toBe(false)
   })
 })
 
