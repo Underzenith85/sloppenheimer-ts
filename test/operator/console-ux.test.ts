@@ -280,6 +280,12 @@ describe('operator console queues', (): void => {
     })
     page = pending
     expect(pending.text('#progress-list')).toContain('No agents or handoffs are in flight')
+    // Capacity is unknown until the runtime snapshot lands. The host may be full, or this issue's
+    // state may be saturated, so the console queues rather than promising a start it cannot know
+    // is available.
+    expect(pending.card(readyTopIdentifier).querySelector('.action')?.textContent).toBe(
+      'Queue issue',
+    )
 
     await pending.close()
     const failed = await bootConsole({
@@ -296,6 +302,8 @@ describe('operator console queues', (): void => {
     })
     page = failed
     expect(failed.text('#notice')).toBe('The backlog is unavailable')
+    // The runtime half loaded, so capacity is known again and a free slot may be offered.
+    expect(failed.card(runningIdentifier).querySelector('.action')?.textContent).toBe('Pause')
     // The runtime half of the console still renders: one failing section does not blank the page.
     expect(identifiersIn(failed, '#progress-list')).toContain(runningIdentifier)
   })

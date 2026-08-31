@@ -62,7 +62,7 @@ const actionLabels: Readonly<Record<ActionKind, string>> = {
  */
 const actionDescriptions: Readonly<Record<ActionKind, string>> = {
   start: 'Makes the issue eligible and asks Symphony to reselect; a free slot starts it now.',
-  queue: 'Makes the issue eligible. No dispatch slot is free, so it starts when one is.',
+  queue: 'Makes the issue eligible. Symphony starts it as soon as a dispatch slot is free.',
   pause:
     'Removes the issue from orchestration, cancels its running agent, and drops queued retries.',
   blockers: 'Lists the unresolved dependencies that are holding this issue back.',

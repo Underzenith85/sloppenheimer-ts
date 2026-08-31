@@ -107,7 +107,12 @@ type WorkModel = Readonly<{
   finished: readonly WorkItem[]
   alerts: readonly SystemAlert[]
   counts: Readonly<{ attention: number; ready: number; progress: number; finished: number }>
-  capacity: Readonly<{ running: number; limit: number; full: boolean }>
+  /**
+   * Dispatch capacity as the console currently knows it. `known` is false until the runtime
+   * snapshot arrives: the backlog and the runtime are fetched separately, so there is a window in
+   * which the console knows what work exists but not whether anything could run.
+   */
+  capacity: Readonly<{ running: number; limit: number; full: boolean; known: boolean }>
 }>
 
 /** How far back Finished reaches. Stated once here and rendered as a label the tests can read. */
@@ -434,6 +439,11 @@ const bindingLimit = (
   capacity: WorkModel['capacity'],
   saturated: ReadonlySet<string>,
 ): string | null => {
+  if (!capacity.known) {
+    // Absent the runtime snapshot the host may be full, or this issue's state may be saturated.
+    // Promising an immediate start would be a guess, and the honest answer is that it is queued.
+    return 'Symphony’s runtime state has not loaded, so a free dispatch slot cannot be confirmed'
+  }
   if (capacity.full) {
     return (
       'Symphony is at capacity (' +
@@ -554,7 +564,7 @@ const emptyModel: WorkModel = {
   finished: [],
   alerts: [],
   counts: { attention: 0, ready: 0, progress: 0, finished: 0 },
-  capacity: { running: 0, limit: 0, full: false },
+  capacity: { running: 0, limit: 0, full: false, known: false },
 }
 
 /**
@@ -586,7 +596,7 @@ const buildWorkModel = (
   const paused = new Set(state?.pausedIssueNumbers ?? [])
   const inspectable = new Set(state?.inspectableAgents ?? [])
   const saturated = new Set(state?.saturatedStates ?? [])
-  const capacity = { running: running.length, limit, full: capacityFull }
+  const capacity = { running: running.length, limit, full: capacityFull, known: state !== null }
   for (const entry of running) {
     claim(runningItem(entry, issues.get(entry.identifier), paused, inspectable, now))
   }

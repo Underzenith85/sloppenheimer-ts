@@ -220,7 +220,9 @@ orchestration label and asks Symphony to reselect, so the control reads **Start 
 dispatch slot is free and **Queue issue** when none is; the row then says which happened, and names
 the limit that bound — the global `agent.max_concurrent_agents`, or the narrower
 `agent.max_concurrent_agents_by_state` cap for that issue's state. The runtime publishes which states
-are saturated, so the console never promises an immediate start for work the scheduler will queue. **Pause**
+are saturated, so the console never promises an immediate start for work the scheduler will queue.
+The backlog and the runtime snapshot are fetched separately, so until the runtime half arrives
+capacity is unknown rather than free, and the control reads **Queue issue** for the same reason. **Pause**
 removes the issue from orchestration eligibility, cancels the agent running for it, and drops any
 queued retry — it does not remove the Symphony label from the pull-request handoff lifecycle. Because
 pausing can interrupt live work, it asks for confirmation exactly when the issue is starting, running
