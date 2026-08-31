@@ -158,6 +158,7 @@ const perform = (
   action: HandoffAction,
   permission: RepairPermission,
   executionAttempt: Option.Option<number>,
+  repairDispatchAllowed: boolean,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const codeReview = handoff.execution.codeReview
@@ -240,6 +241,10 @@ const perform = (
         return
       }
       case 'Repair': {
+        if (!repairDispatchAllowed) {
+          yield* writeHandoff(context, id, handoff)
+          return
+        }
         if (permission._tag === 'Denied') {
           yield* writeHandoff(context, id, {
             ...handoff,
@@ -309,13 +314,23 @@ export const applyHandoffObservation = (
   observedAt: Date,
   permission: RepairPermission,
   executionAttempt: Option.Option<number>,
+  repairDispatchAllowed: boolean,
 ): Effect.Effect<void, never, Scope.Scope> => {
   const decision = observeHandoff(handoff, observation, observedAt)
-  return perform(context, id, decision.handoff, decision.action, permission, executionAttempt)
+  return perform(
+    context,
+    id,
+    decision.handoff,
+    decision.action,
+    permission,
+    executionAttempt,
+    repairDispatchAllowed,
+  )
 }
 
 export const reconcileHandoffs = (
   context: OrchestratorContext,
+  repairDispatchAllowed: boolean,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(context.state)
@@ -366,6 +381,7 @@ export const reconcileHandoffs = (
         observedAt,
         repairPermission(live, refresh),
         Option.none(),
+        repairDispatchAllowed,
       )
     }
     // One timeline entry per observed transition, not one per poll: an unchanged disposition is

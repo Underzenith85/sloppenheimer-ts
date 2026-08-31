@@ -278,7 +278,7 @@ export type OrchestratorContext = Readonly<{
   ) => Effect.Effect<void>
   persistHandoffs: Effect.Effect<void>
   recoverMissingHandoffs: Effect.Effect<void>
-  reconcile: Effect.Effect<void, never, Scope.Scope>
+  reconcile: (retryDispatchAllowed: boolean) => Effect.Effect<void, never, Scope.Scope>
   hydrateRestoredHandoffs: Effect.Effect<void>
   makeEffectiveWorkflow: (workflow: Workflow) => Effect.Effect<EffectiveWorkflow, WorkflowError>
   scheduleNextTick: Effect.Effect<void, never, Scope.Scope>
@@ -1020,82 +1020,83 @@ export const startOrchestratorRuntime = (
         ),
       )
 
-    const reconcile: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
-      const stalling = yield* Ref.get(state)
-      if (stalling.running.size === 0) {
-        return
-      }
-      const now = Date.now()
-      for (const [id, entry] of stalling.running) {
-        const stallTimeout = entry.execution.stallTimeoutMs
-        const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
-        if (stallTimeout > 0 && now - activeAt > stallTimeout) {
-          const ended = yield* cancelRunning(
-            id,
-            false,
-            `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
-            // The retry scheduled just below continues this repair from the same baseline.
-            'retain',
-          )
-          if (Option.isSome(ended)) {
-            yield* scheduleRetry(
-              ended.value.issue,
-              (ended.value.attempt ?? 0) + 1,
-              'agent stalled',
+    const reconcile = (retryDispatchAllowed: boolean): Effect.Effect<void, never, Scope.Scope> =>
+      Effect.gen(function* () {
+        const stalling = yield* Ref.get(state)
+        if (stalling.running.size === 0) {
+          return
+        }
+        const now = Date.now()
+        for (const [id, entry] of stalling.running) {
+          const stallTimeout = entry.execution.stallTimeoutMs
+          const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
+          if (retryDispatchAllowed && stallTimeout > 0 && now - activeAt > stallTimeout) {
+            const ended = yield* cancelRunning(
+              id,
               false,
+              `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
+              // The retry scheduled just below continues this repair from the same baseline.
+              'retain',
+            )
+            if (Option.isSome(ended)) {
+              yield* scheduleRetry(
+                ended.value.issue,
+                (ended.value.attempt ?? 0) + 1,
+                'agent stalled',
+                false,
+              )
+            }
+          }
+        }
+        const refreshing = yield* Ref.get(state)
+        if (refreshing.running.size === 0) {
+          return
+        }
+        for (const [id, entry] of refreshing.running) {
+          const execution = entry.execution
+          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
+            Effect.match({
+              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
+            }),
+          )
+          if (refreshResult._tag === 'Failed') {
+            yield* logWarning('reconciliation failed; keeping worker running', {
+              ...logContext(entry.issue),
+              action: 'reconciliation',
+              outcome: 'failed',
+              error: refreshResult.error.message,
+            })
+            continue
+          }
+          const issue = refreshResult.issues.find((candidate) => candidate.id === id)
+          if (issue === undefined) {
+            // The handoff outlives the issue the tracker stopped reporting, so a head this worker
+            // pushed is still the repair's to account for on the next inspection.
+            yield* cancelRunning(id, false, 'the tracker no longer reports the issue', 'settle')
+            continue
+          }
+          const terminal = stateIsIn(issue.state, execution.terminalStates)
+          if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
+            yield* cancelRunning(
+              id,
+              terminal,
+              terminal
+                ? `the issue reached the terminal state ${issue.state}`
+                : `the issue left its active states as ${issue.state}`,
+              // A worker may have pushed immediately before its issue stopped qualifying, and
+              // nothing continues it: keep the baseline for one inspection so that head is
+              // attributed. A terminal issue keeps its baseline untouched, so the next inspection
+              // still reaches the verdict for a repair that changed nothing.
+              terminal ? 'retain' : 'settle',
+            )
+          } else {
+            yield* Ref.update(state, (current) =>
+              Transitions.updateRun(current, id, (live) => ({ ...live, issue })),
             )
           }
         }
-      }
-      const refreshing = yield* Ref.get(state)
-      if (refreshing.running.size === 0) {
-        return
-      }
-      for (const [id, entry] of refreshing.running) {
-        const execution = entry.execution
-        const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
-          Effect.match({
-            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-            onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-          }),
-        )
-        if (refreshResult._tag === 'Failed') {
-          yield* logWarning('reconciliation failed; keeping worker running', {
-            ...logContext(entry.issue),
-            action: 'reconciliation',
-            outcome: 'failed',
-            error: refreshResult.error.message,
-          })
-          continue
-        }
-        const issue = refreshResult.issues.find((candidate) => candidate.id === id)
-        if (issue === undefined) {
-          // The handoff outlives the issue the tracker stopped reporting, so a head this worker
-          // pushed is still the repair's to account for on the next inspection.
-          yield* cancelRunning(id, false, 'the tracker no longer reports the issue', 'settle')
-          continue
-        }
-        const terminal = stateIsIn(issue.state, execution.terminalStates)
-        if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
-          yield* cancelRunning(
-            id,
-            terminal,
-            terminal
-              ? `the issue reached the terminal state ${issue.state}`
-              : `the issue left its active states as ${issue.state}`,
-            // A worker may have pushed immediately before its issue stopped qualifying, and
-            // nothing continues it: keep the baseline for one inspection so that head is
-            // attributed. A terminal issue keeps its baseline untouched, so the next inspection
-            // still reaches the verdict for a repair that changed nothing.
-            terminal ? 'retain' : 'settle',
-          )
-        } else {
-          yield* Ref.update(state, (current) =>
-            Transitions.updateRun(current, id, (live) => ({ ...live, issue })),
-          )
-        }
-      }
-    })
+      })
 
     /**
      * The one bridge left from a plain callback into the runtime: an agent runner reports progress
