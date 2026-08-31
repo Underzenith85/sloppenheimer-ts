@@ -330,6 +330,8 @@ class CodexConnection {
   readonly #stderr: Fiber.RuntimeFiber<void>
   readonly #state: Ref.Ref<ConnectionState>
   readonly #fork: ForkReader
+  /** Serializes response side effects with session-terminal failure. */
+  readonly #lifecycle: Effect.Semaphore
 
   constructor(
     command: string,
@@ -344,6 +346,7 @@ class CodexConnection {
     onEvent: (event: AgentEvent) => void,
     fork: ForkReader,
     state: Ref.Ref<ConnectionState>,
+    lifecycle: Effect.Semaphore,
   ) {
     // The full host environment, minus the names this session must not hand down. It is read here
     // rather than described as a `Config`, because what the child inherits is every remaining
@@ -364,6 +367,7 @@ class CodexConnection {
     this.#onEvent = onEvent
     this.#fork = fork
     this.#state = state
+    this.#lifecycle = lifecycle
 
     // stdout carries protocol framing only. Reading it as a stream keeps the framing state in
     // the pipeline rather than in the connection, and lets the framing limit end the read the way
@@ -980,71 +984,73 @@ class CodexConnection {
   }
 
   #settleResponse(id: number, parsed: JsonObject): Effect.Effect<void, AgentError> {
-    return Ref.modify(this.#state, (state) => {
-      const request = state.pending.get(id)
-      if (request === undefined || request.claimed) {
-        return [undefined, state]
-      }
-      const claimed = { ...request, claimed: true }
-      return [claimed, { ...state, pending: new Map(state.pending).set(id, claimed) }]
-    }).pipe(
-      Effect.flatMap((request) => {
-        if (request === undefined) {
-          // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
-          // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
-          return this.#emit(
-            'unmatched_response',
-            `no pending request for response id ${String(id)}`,
-          )
+    return this.#lifecycle.withPermits(1)(
+      Ref.modify(this.#state, (state) => {
+        const request = state.pending.get(id)
+        if (request === undefined || request.claimed) {
+          return [undefined, state]
         }
-        const error = parsed['error']
-        if (error !== undefined) {
-          return Deferred.fail(
-            request.reply,
-            new AgentError({
-              category: 'protocol_error',
-              message: boundedMessage(errorMessage(error), this.#knownSecretValues),
-            }),
-          ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
-        }
-        const result = parsed['result']
-        if (result === undefined) {
-          return Deferred.fail(
-            request.reply,
-            new AgentError({ category: 'protocol_error', message: 'response has no result' }),
-          ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
-        }
-        return this.#adoptIdentity(result).pipe(
-          Effect.flatMap((identity) => {
-            const events =
-              request.method === 'thread/start' && identity.threadId !== null
-                ? this.#emit('thread_started', null).pipe(
-                    Effect.zipRight(this.#emit('session_started', null)),
-                  )
-                : Effect.void
-            const turnStarted =
-              request.method === 'turn/start' &&
-              request.turnCount !== null &&
-              identity.turnId !== null
-                ? this.#turnState(identity.turnId).pipe(
-                    Effect.zipRight(
-                      this.#ensureTurnStarted(
-                        identity.turnId,
-                        request.turnCount,
-                        identity.threadId,
-                      ),
-                    ),
-                  )
-                : Effect.void
-            return events.pipe(
-              Effect.zipRight(turnStarted),
-              Effect.zipRight(Deferred.succeed(request.reply, result)),
-              Effect.zipRight(this.#removePending(id, request.reply)),
-              Effect.asVoid,
+        const claimed = { ...request, claimed: true }
+        return [claimed, { ...state, pending: new Map(state.pending).set(id, claimed) }]
+      }).pipe(
+        Effect.flatMap((request) => {
+          if (request === undefined) {
+            // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
+            // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
+            return this.#emit(
+              'unmatched_response',
+              `no pending request for response id ${String(id)}`,
             )
-          }),
-        )
-      }),
+          }
+          const error = parsed['error']
+          if (error !== undefined) {
+            return Deferred.fail(
+              request.reply,
+              new AgentError({
+                category: 'protocol_error',
+                message: boundedMessage(errorMessage(error), this.#knownSecretValues),
+              }),
+            ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
+          }
+          const result = parsed['result']
+          if (result === undefined) {
+            return Deferred.fail(
+              request.reply,
+              new AgentError({ category: 'protocol_error', message: 'response has no result' }),
+            ).pipe(Effect.zipRight(this.#removePending(id, request.reply)), Effect.asVoid)
+          }
+          return this.#adoptIdentity(result).pipe(
+            Effect.flatMap((identity) => {
+              const events =
+                request.method === 'thread/start' && identity.threadId !== null
+                  ? this.#emit('thread_started', null).pipe(
+                      Effect.zipRight(this.#emit('session_started', null)),
+                    )
+                  : Effect.void
+              const turnStarted =
+                request.method === 'turn/start' &&
+                request.turnCount !== null &&
+                identity.turnId !== null
+                  ? this.#turnState(identity.turnId).pipe(
+                      Effect.zipRight(
+                        this.#ensureTurnStarted(
+                          identity.turnId,
+                          request.turnCount,
+                          identity.threadId,
+                        ),
+                      ),
+                    )
+                  : Effect.void
+              return events.pipe(
+                Effect.zipRight(turnStarted),
+                Effect.zipRight(Deferred.succeed(request.reply, result)),
+                Effect.zipRight(this.#removePending(id, request.reply)),
+                Effect.asVoid,
+              )
+            }),
+          )
+        }),
+      ),
     )
   }
 
@@ -1411,67 +1417,69 @@ class CodexConnection {
    * relabelled as a session failure.
    */
   #fail(error: AgentError, remember = true): Effect.Effect<void> {
-    return Effect.gen(this, function* () {
-      const settlement = yield* Deferred.make<void, AgentError>()
-      const activity = yield* Queue.dropping<void>(1)
-      const candidate: TurnState = {
-        settlement,
-        activity,
-        timerStarted: false,
-        claimed: true,
-      }
-      const outstanding = yield* Ref.modify(this.#state, (state) => {
-        const turns = new Map(state.turns)
-        const claimedTurns: Array<readonly [string, TurnState]> = []
-        if (Option.isSome(state.turnId) && !turns.has(state.turnId.value)) {
-          // Publish and claim the current turn's Deferred in the same transition as the terminal
-          // error. A racing response can find it, but no lifecycle notification can win settlement.
-          turns.set(state.turnId.value, candidate)
-          claimedTurns.push([state.turnId.value, candidate])
+    return this.#lifecycle.withPermits(1)(
+      Effect.gen(this, function* () {
+        const settlement = yield* Deferred.make<void, AgentError>()
+        const activity = yield* Queue.dropping<void>(1)
+        const candidate: TurnState = {
+          settlement,
+          activity,
+          timerStarted: false,
+          claimed: true,
         }
-        for (const [turnId, turn] of turns) {
-          if (turn.claimed) {
-            continue
+        const outstanding = yield* Ref.modify(this.#state, (state) => {
+          const turns = new Map(state.turns)
+          const claimedTurns: Array<readonly [string, TurnState]> = []
+          if (Option.isSome(state.turnId) && !turns.has(state.turnId.value)) {
+            // Publish and claim the current turn's Deferred in the same transition as the terminal
+            // error. A racing response can find it, but no lifecycle notification can win settlement.
+            turns.set(state.turnId.value, candidate)
+            claimedTurns.push([state.turnId.value, candidate])
           }
-          const claimed = { ...turn, claimed: true }
-          turns.set(turnId, claimed)
-          claimedTurns.push([turnId, claimed])
-        }
-        return [
-          {
-            pending: [...state.pending.values()],
-            turns: claimedTurns,
-          },
-          {
-            ...state,
-            pending: new Map(),
-            turns,
-            terminalError:
-              remember && Option.isNone(state.terminalError)
-                ? Option.some(error)
-                : state.terminalError,
-          },
-        ]
-      })
-      yield* Effect.all(
-        [
-          ...outstanding.pending.map((request) =>
-            Deferred.fail(request.reply, error).pipe(Effect.asVoid),
-          ),
-          ...outstanding.turns.map(([id, turn]) =>
-            Deferred.fail(turn.settlement, error).pipe(
-              Effect.tap((won) =>
-                won
-                  ? this.#emit('turn/terminated', null, { threadId: null, turnId: id }, 'failed')
-                  : Effect.void,
-              ),
-              Effect.asVoid,
+          for (const [turnId, turn] of turns) {
+            if (turn.claimed) {
+              continue
+            }
+            const claimed = { ...turn, claimed: true }
+            turns.set(turnId, claimed)
+            claimedTurns.push([turnId, claimed])
+          }
+          return [
+            {
+              pending: [...state.pending.values()],
+              turns: claimedTurns,
+            },
+            {
+              ...state,
+              pending: new Map(),
+              turns,
+              terminalError:
+                remember && Option.isNone(state.terminalError)
+                  ? Option.some(error)
+                  : state.terminalError,
+            },
+          ]
+        })
+        yield* Effect.all(
+          [
+            ...outstanding.pending.map((request) =>
+              Deferred.fail(request.reply, error).pipe(Effect.asVoid),
             ),
-          ),
-        ],
-        { concurrency: 'unbounded', discard: true },
-      )
-    })
+            ...outstanding.turns.map(([id, turn]) =>
+              Deferred.fail(turn.settlement, error).pipe(
+                Effect.tap((won) =>
+                  won
+                    ? this.#emit('turn/terminated', null, { threadId: null, turnId: id }, 'failed')
+                    : Effect.void,
+                ),
+                Effect.asVoid,
+              ),
+            ),
+          ],
+          { concurrency: 'unbounded', discard: true },
+        )
+      }),
+    )
   }
 
   #failUnlessClosed(error: AgentError): Effect.Effect<void> {
@@ -1517,9 +1525,10 @@ const runVerifiedAgent = (
       Effect.all([
         sessionSecretValues(launch.secretEnvironmentNames),
         Ref.make(initialConnectionState),
+        Effect.makeSemaphore(1),
       ]).pipe(
         Effect.map(
-          ([knownSecretValues, state]) =>
+          ([knownSecretValues, state, lifecycle]) =>
             new CodexConnection(
               launch.config.command,
               verified.path,
@@ -1530,6 +1539,7 @@ const runVerifiedAgent = (
               launch.onEvent,
               (reader) => Runtime.runFork(runtime)(reader, { scope }),
               state,
+              lifecycle,
             ),
         ),
       ),
