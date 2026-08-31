@@ -104,7 +104,12 @@ type TurnState = Readonly<{
   settlement: Deferred.Deferred<void, AgentError>
   activity: Queue.Queue<void>
   timerStarted: boolean
+  claimed: boolean
 }>
+
+type TurnSettlement =
+  | Readonly<{ _tag: 'completed' }>
+  | Readonly<{ _tag: 'failed'; error: AgentError }>
 
 type TurnSelection =
   | Readonly<{ _tag: 'turn'; turn: TurnState }>
@@ -558,7 +563,7 @@ class CodexConnection {
       // Activity is an edge, not a count. Retaining a burst would replay stale progress and extend
       // the next silence window once per notification rather than once for the burst.
       const activity = yield* Queue.dropping<void>(1)
-      const candidate: TurnState = { settlement, activity, timerStarted: false }
+      const candidate: TurnState = { settlement, activity, timerStarted: false, claimed: false }
       const selected = yield* Ref.modify(
         this.#state,
         (state): readonly [TurnSelection, ConnectionState] => {
@@ -586,16 +591,16 @@ class CodexConnection {
    * Completes the turn exactly once. Deferred completion reports whether this call won, which
    * keeps a later lifecycle notification or session failure from overturning the first result.
    */
-  #settle(
-    turnId: string,
-    settlement: Readonly<{ _tag: 'completed' }> | Readonly<{ _tag: 'failed'; error: AgentError }>,
-    reported = false,
-  ): Effect.Effect<boolean> {
+  #settle(turnId: string, settlement: TurnSettlement, reported = false): Effect.Effect<boolean> {
     return this.#turnState(turnId).pipe(
       Effect.flatMap((turn) =>
-        settlement._tag === 'completed'
-          ? Deferred.succeed(turn.settlement, undefined)
-          : Deferred.fail(turn.settlement, settlement.error),
+        this.#claimTurn(turnId, turn).pipe(
+          Effect.flatMap((claimed) =>
+            claimed
+              ? this.#completeTurn(turn, settlement).pipe(Effect.as(true))
+              : Effect.succeed(false),
+          ),
+        ),
       ),
       Effect.tap((won) => {
         if (!won || reported) {
@@ -613,6 +618,30 @@ class CodexConnection {
     )
   }
 
+  #claimTurn(turnId: string, turn: TurnState): Effect.Effect<boolean> {
+    return Ref.modify(this.#state, (state) => {
+      const current = state.turns.get(turnId)
+      if (current?.settlement !== turn.settlement || current.claimed) {
+        return [false, state]
+      }
+      return [
+        true,
+        {
+          ...state,
+          turns: new Map(state.turns).set(turnId, { ...current, claimed: true }),
+        },
+      ]
+    })
+  }
+
+  #completeTurn(turn: TurnState, settlement: TurnSettlement): Effect.Effect<void> {
+    return (
+      settlement._tag === 'completed'
+        ? Deferred.succeed(turn.settlement, undefined)
+        : Deferred.fail(turn.settlement, settlement.error)
+    ).pipe(Effect.asVoid)
+  }
+
   #failCurrentTurn(error: AgentError, turnId: string | null): Effect.Effect<void> {
     return Ref.get(this.#state).pipe(
       Effect.flatMap((state) => {
@@ -627,7 +656,7 @@ class CodexConnection {
   #startTurnTimer(turnId: string, turn: TurnState): Effect.Effect<void> {
     return Ref.modify(this.#state, (state) => {
       const current = state.turns.get(turnId)
-      if (current !== turn || current.timerStarted) {
+      if (current !== turn || current.timerStarted || current.claimed) {
         return [false, state]
       }
       const started = { ...current, timerStarted: true }
@@ -692,14 +721,10 @@ class CodexConnection {
     return Ref.get(this.#state).pipe(
       Effect.flatMap((state) => {
         const turn = state.turns.get(turnId)
-        if (turn?.timerStarted !== true) {
+        if (turn?.timerStarted !== true || turn.claimed) {
           return Effect.void
         }
-        return Deferred.isDone(turn.settlement).pipe(
-          Effect.flatMap((done) =>
-            done ? Effect.void : Queue.offer(turn.activity, undefined).pipe(Effect.asVoid),
-          ),
-        )
+        return Queue.offer(turn.activity, undefined).pipe(Effect.asVoid)
       }),
       Effect.asVoid,
     )
@@ -1223,14 +1248,13 @@ class CodexConnection {
           ? (turn.status ?? (method === 'turn/failed' ? 'failed' : 'unreported'))
           : null
 
-      const initial = yield* Ref.get(this.#state)
-      const existingTurn = turn === null ? undefined : initial.turns.get(turn.id)
-      if (
-        isTerminal &&
-        existingTurn !== undefined &&
-        (yield* Deferred.isDone(existingTurn.settlement))
-      ) {
-        return
+      let reportedTurn: TurnState | undefined
+      if (isTerminal && turn !== null) {
+        const candidate = yield* this.#turnState(turn.id)
+        if (!(yield* this.#claimTurn(turn.id, candidate))) {
+          return
+        }
+        reportedTurn = candidate
       }
 
       let rateLimits = telemetry.rateLimits
@@ -1308,22 +1332,22 @@ class CodexConnection {
         turnStatus: terminalStatus,
         payload: normalizePayload(method, message['params'], this.#redact),
       })
-      if (!isTerminal || turn === null) {
+      if (!isTerminal || turn === null || reportedTurn === undefined) {
         return
       }
       if (turn.status === null && method === 'turn/completed') {
         yield* this.#emit('malformed', `${method} for turn ${turn.id} omitted status`)
       }
-      yield* this.#settle(
-        turn.id,
+      const settlement: TurnSettlement =
         terminalStatus === 'completed'
           ? { _tag: 'completed' }
           : {
               _tag: 'failed',
               error: CodexConnection.#turnFailure(turn.id, terminalStatus ?? 'unreported'),
-            },
-        true,
-      )
+            }
+      // The claim preceded every lifecycle side effect, so a concurrent session failure either
+      // won before this notification or cannot overwrite it now.
+      yield* this.#completeTurn(reportedTurn, settlement)
     })
   }
 
@@ -1390,18 +1414,33 @@ class CodexConnection {
     return Effect.gen(this, function* () {
       const settlement = yield* Deferred.make<void, AgentError>()
       const activity = yield* Queue.dropping<void>(1)
-      const candidate: TurnState = { settlement, activity, timerStarted: false }
+      const candidate: TurnState = {
+        settlement,
+        activity,
+        timerStarted: false,
+        claimed: true,
+      }
       const outstanding = yield* Ref.modify(this.#state, (state) => {
         const turns = new Map(state.turns)
+        const claimedTurns: Array<readonly [string, TurnState]> = []
         if (Option.isSome(state.turnId) && !turns.has(state.turnId.value)) {
-          // Publish the current turn's Deferred in the same transition as the terminal error. A
-          // turn/start response racing this failure can then find and await the recorded failure.
+          // Publish and claim the current turn's Deferred in the same transition as the terminal
+          // error. A racing response can find it, but no lifecycle notification can win settlement.
           turns.set(state.turnId.value, candidate)
+          claimedTurns.push([state.turnId.value, candidate])
+        }
+        for (const [turnId, turn] of turns) {
+          if (turn.claimed) {
+            continue
+          }
+          const claimed = { ...turn, claimed: true }
+          turns.set(turnId, claimed)
+          claimedTurns.push([turnId, claimed])
         }
         return [
           {
             pending: [...state.pending.values()],
-            turns: [...turns.entries()],
+            turns: claimedTurns,
           },
           {
             ...state,
