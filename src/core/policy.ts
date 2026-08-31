@@ -4,6 +4,7 @@ import { unresolvedBlockers } from '../domain/dependencies.js'
 import { normalizeState, type Issue, type IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, RuntimeState } from './state.js'
+export { retryDelayMs } from './retry.js'
 
 /**
  * The scheduler's decisions about a single issue, as pure functions of the issue, the workflow, and
@@ -166,9 +167,6 @@ export const sortIssues = (issues: readonly Issue[]): readonly Issue[] =>
     }
     return left.identifier.localeCompare(right.identifier)
   })
-
-export const retryDelayMs = (attempt: number, maximumMs: number): number =>
-  Math.min(10_000 * 2 ** Math.max(attempt - 1, 0), maximumMs)
 
 export const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
   issue_id: issue.id,
