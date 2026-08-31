@@ -407,24 +407,46 @@ const leaseFailure = (
     worktreePreserved: true,
   })
 
+/**
+ * Returns the worktree to the head the rebase started from.
+ *
+ * The abort's own outcome is discarded: after a failure the original one is the useful diagnostic,
+ * and a rebase that left no state behind needs no cleanup and says so by exiting non-zero.
+ */
+const abortRebase = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<void> =>
+  Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort']))
+
 const rebaseOntoBase = (
   settings: GitSourceControlSettings,
   prepared: PreparedRepository,
 ): Effect.Effect<void, SourceControlError> =>
   Effect.catchAll(
-    Effect.asVoid(
-      runGit(
-        settings,
-        'publish',
-        prepared.workspace.path,
-        ['rebase', '--committer-date-is-author-date', `refs/remotes/origin/${prepared.baseBranch}`],
-        gitIdentity,
+    // An interruption terminates the git process group mid-rebase, which leaves `.git/rebase-merge`
+    // and a detached head behind. `Effect.catchAll` does not see an interruption, and the next
+    // publication's rebase refuses to start on the state this one left, so the abort is also
+    // attached as a finalizer — which the runtime runs uninterruptibly, so it completes.
+    Effect.onInterrupt(
+      Effect.asVoid(
+        runGit(
+          settings,
+          'publish',
+          prepared.workspace.path,
+          [
+            'rebase',
+            '--committer-date-is-author-date',
+            `refs/remotes/origin/${prepared.baseBranch}`,
+          ],
+          gitIdentity,
+        ),
       ),
+      () => abortRebase(settings, prepared),
     ),
     (cause) =>
       Effect.zipRight(
-        // The original failure is the useful one; an absent rebase state needs no cleanup.
-        Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort'])),
+        abortRebase(settings, prepared),
         Effect.fail(
           new SourceControlError({
             category: 'rebase_conflict',
