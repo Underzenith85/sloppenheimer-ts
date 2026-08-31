@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Effect } from 'effect'
+import { Effect, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { runAgent, type AgentEvent } from '../../src/adapters/codex/codex.js'
@@ -11,7 +11,7 @@ import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
 import { makeGitHubCodeReview } from '../../src/adapters/github/code-review.js'
 import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
-import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
+import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
 
 const fakeAppServer = resolve(
@@ -53,7 +53,7 @@ const spec: HostToolSpec = {
 const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
-  token: 'host-token',
+  token: Redacted.make('host-token'),
   tokenEnvironmentName: 'SYMPHONY_HOST_TOOL_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
@@ -145,7 +145,7 @@ describe('GitHub provider-native tool extension', (): void => {
   })
 
   it('maps auth, authorization, rate-limit, and transport errors to structured failures', async (): Promise<void> => {
-    const missingAuth = makeGitHubTracker({ ...provider, token: '' })
+    const missingAuth = makeGitHubTracker({ ...provider, token: Redacted.make('') })
     await expect(
       missingAuth.executeTool('github_add_comment', { body: 'hello' }, toolContext),
     ).resolves.toMatchObject({ success: false, error: { code: 'missing_auth' } })

@@ -1,10 +1,10 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, Option } from 'effect'
+import { Effect, Option, Redacted } from 'effect'
 
 import type { Issue, JsonValue } from '../../domain/domain.js'
 import { issueBranchName } from '../../domain/handoff.js'
 import { TrackerError } from '../../errors.js'
-import type { GitHubProviderConfig } from '../../config/tracker-config.js'
+import type { GitHubProviderConfig } from './provider.js'
 import type { HostToolResult, HostToolSpec } from '../../host-tools.js'
 import { unsupportedHostTool } from '../../host-tools.js'
 import type { CodeReviewPort, HandoffResult } from '../../ports/code-review.js'
@@ -52,7 +52,7 @@ const makeGitHubCodeReviewToolExecutor =
     if (!githubCodeReviewToolSpecs.some((spec) => spec.name === name)) {
       return unsupportedHostTool(name)
     }
-    if (provider.token.length === 0) {
+    if (Redacted.value(provider.token).length === 0) {
       return toolFailure('missing_auth', 'GitHub credential is not configured')
     }
     const issueNumber = githubIssueNumber(provider, context)

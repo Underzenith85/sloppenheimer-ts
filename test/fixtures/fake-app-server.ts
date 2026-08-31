@@ -169,6 +169,15 @@ const handleInitialize = (id: unknown, params: unknown): void => {
     sendRaw(`${'x'.repeat(11 * 1024 * 1024)}\n`)
     return
   }
+  if (scenario === 'oversize-stderr') {
+    // One diagnostic record past the framing limit, from a child that then carries on serving the
+    // protocol: the overflow must stay diagnostic-only. The response waits for the write to reach
+    // the pipe, so the session cannot proceed unless the host is still emptying stderr.
+    process.stderr.write('x'.repeat(11 * 1024 * 1024), () => {
+      send({ id, result: { userAgent: 'fake-app-server/1.0' } })
+    })
+    return
+  }
   send({ id, result: { userAgent: 'fake-app-server/1.0' } })
 }
 

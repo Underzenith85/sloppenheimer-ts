@@ -1,14 +1,14 @@
-import { Effect, Logger } from 'effect'
+import { Effect, Logger, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { issueId, type JsonObject } from '../src/domain/domain.js'
 import { makeGitHubTracker } from '../src/adapters/github/issues.js'
-import type { GitHubProviderConfig } from '../src/config/tracker-config.js'
+import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
-  token: 'secret',
+  token: Redacted.make('secret'),
   tokenEnvironmentName: 'CUSTOM_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',

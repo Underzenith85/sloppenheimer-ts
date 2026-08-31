@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Layer } from 'effect'
+import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -22,16 +22,19 @@ import {
   CurrentIssueControl,
   layerCurrentIssueControl,
   layerIssueControlFactory,
+  layerWorkflowLoader,
   type IssueControlPort,
 } from '../../src/ports/index.js'
-import type { GitHubProviderConfig } from '../../src/config/tracker-config.js'
+import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
+import { trackerProviders } from '../../src/tracker-adapters.js'
+import { githubProviderOf, type GitHubProviderConfig } from '../../src/adapters/github/index.js'
 
 const temporaryDirectories: string[] = []
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
   repository: 'symphony',
-  token: 'secret',
+  token: Redacted.make('secret'),
   tokenEnvironmentName: 'TEST_OPERATOR_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
@@ -138,6 +141,12 @@ const fakeOrchestrator = (
 
 const gitHubIssueControl = layerCurrentIssueControl.pipe(Layer.provide(layerGitHubIssueControl))
 
+/** The console reads the workflow through the loader the composition root binds. */
+const workflowLoader = layerWorkflowLoader({
+  load: (path) => loadWorkflow(path, trackerProviders),
+  preflight: (workflow) => preflightWorkflow(workflow),
+})
+
 const runBackend = <Value>(
   workflowPath: string,
   orchestrator: OrchestratorControl,
@@ -148,6 +157,7 @@ const runBackend = <Value>(
     makeOperatorBackend(workflowPath, orchestrator).pipe(
       Effect.flatMap((backend) => Effect.promise(() => use(backend))),
       Effect.provide(layer),
+      Effect.provide(workflowLoader),
     ),
   )
 
@@ -290,10 +300,12 @@ describe('operator dependency graph', (): void => {
     const factory = layerIssueControlFactory({
       make: (provider) =>
         Effect.sync((): IssueControlPort => {
-          built.push(provider.provider.token)
+          built.push(Redacted.value(githubProviderOf(provider).token))
           return { listOpenIssues: () => Effect.succeed([]), addLabel: () => Effect.void }
         }),
-      serves: (left, right) => left.provider.token === right.provider.token,
+      serves: (left, right) =>
+        Redacted.value(githubProviderOf(left).token) ===
+        Redacted.value(githubProviderOf(right).token),
     })
 
     await runBackend(

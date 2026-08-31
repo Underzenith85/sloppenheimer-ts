@@ -10,9 +10,12 @@ import type { Issue, JsonObject, JsonValue } from '../domain/domain.js'
 import { expandHomePath, resolvePathReference } from './env-reference.js'
 import { WorkflowError } from '../errors.js'
 import { emptyJsonObject, JsonConversionError, toJsonObject, toJsonValue } from '../support/json.js'
-import { validateTrackerProvider, type ValidatedTrackerProvider } from './tracker-config.js'
+import type {
+  TrackerProviderRegistry,
+  ValidatedTrackerProvider,
+} from '../domain/tracker-provider.js'
 
-export type { GitHubProviderConfig, ValidatedTrackerProvider } from './tracker-config.js'
+export type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
 export type TrackerConfig = Readonly<{
   kind: string
@@ -369,14 +372,15 @@ const enumeratedValue = (
 const resolveWorkspaceRoot = (
   value: string | undefined,
   workflowPath: string,
-  environment: NodeJS.ProcessEnv,
-): string => {
-  const configured =
-    value === undefined
-      ? join(tmpdir(), workflowDefaults.workspaceRootBasename)
-      : expandHomePath(resolvePathReference(value, 'workspace.root', environment))
-  return resolve(isAbsolute(configured) ? configured : join(dirname(workflowPath), configured))
-}
+): Effect.Effect<string, WorkflowError> =>
+  (value === undefined
+    ? Effect.succeed(join(tmpdir(), workflowDefaults.workspaceRootBasename))
+    : resolvePathReference(value, 'workspace.root').pipe(Effect.map(expandHomePath))
+  ).pipe(
+    Effect.map((configured) =>
+      resolve(isAbsolute(configured) ? configured : join(dirname(workflowPath), configured)),
+    ),
+  )
 
 const parseConcurrencyByState = (
   value: Readonly<Record<string, number>> | undefined,
@@ -390,12 +394,12 @@ const parseConcurrencyByState = (
   return new Map(entries)
 }
 
-const parseConfig = (
-  raw: RawWorkflowConfig,
-  workflowPath: string,
-  environment: NodeJS.ProcessEnv,
-): EffectiveConfig => {
-  const { tracker, polling, workspace, hooks, agent, codex, server } = raw
+/**
+ * The rest of the configuration, once the one environment-dependent field is resolved. Everything
+ * here is a shape check over the authored document, so it stays synchronous.
+ */
+const parseConfig = (raw: RawWorkflowConfig, workspaceRoot: string): EffectiveConfig => {
+  const { tracker, polling, hooks, agent, codex, server } = raw
   const command = codex.command ?? workflowDefaults.codexCommand
   if (command.trim().length === 0) {
     throw new WorkflowError({
@@ -417,7 +421,7 @@ const parseConfig = (
       workflowDefaults.pollingIntervalMs,
       'polling.interval_ms',
     ),
-    workspaceRoot: resolveWorkspaceRoot(workspace.root, workflowPath, environment),
+    workspaceRoot,
     hooks: {
       afterCreate: hooks.afterCreate ?? null,
       beforeRun: hooks.beforeRun ?? null,
@@ -512,54 +516,65 @@ const splitWorkflow = (source: string): Readonly<{ config: unknown; prompt: stri
 }
 
 /**
- * Re-runs the validation that must hold before every dispatch: a supported `tracker.kind`, an
- * adapter-accepted `tracker.provider` (including its secret indirection), and a usable
- * `codex.command`.
+ * Re-runs the validation that must hold before every dispatch: an adapter-accepted
+ * `tracker.provider` (including its secret indirection) and a usable `codex.command`.
+ *
+ * The provider is re-read from the workflow, so an edit to `tracker.provider` takes effect; the
+ * adapter that validates it comes from the selection rather than from a registry looked up again by
+ * kind. A workflow loaded with a caller's own registry therefore keeps revalidating through that
+ * registry's adapter: routing this through a default registry instead would report every kind the
+ * default does not carry as unsupported, and the run would silently keep its superseded credential.
  */
 export const preflightWorkflow = (
   workflow: Workflow,
-  environment: NodeJS.ProcessEnv = process.env,
 ): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
-  Effect.try({
-    try: () => {
-      if (workflow.config.codex.command.trim().length === 0) {
-        throw new WorkflowError({
-          category: 'invalid_config',
-          message: 'codex.command must be a non-empty string',
-        })
-      }
-      return validateTrackerProvider(
-        workflow.config.tracker.kind,
-        workflow.config.tracker.provider,
-        environment,
-      )
-    },
-    catch: (cause: unknown) =>
-      cause instanceof WorkflowError
-        ? cause
-        : new WorkflowError({
+  Effect.suspend(() =>
+    workflow.config.codex.command.trim().length === 0
+      ? Effect.fail(
+          new WorkflowError({
             category: 'invalid_config',
-            message: 'workflow preflight validation failed',
-            cause,
+            message: 'codex.command must be a non-empty string',
           }),
+        )
+      : workflow.tracker.revalidate(workflow.config.tracker.provider),
+  ).pipe(
+    Effect.catchAllDefect((cause: unknown) =>
+      Effect.fail(
+        new WorkflowError({
+          category: 'invalid_config',
+          message: 'workflow preflight validation failed',
+          cause,
+        }),
+      ),
+    ),
+  )
+
+/** Any non-`WorkflowError` thrown by the synchronous decoders, reported as a load failure. */
+const failedToLoad = (cause: unknown): WorkflowError =>
+  cause instanceof WorkflowError
+    ? cause
+    : new WorkflowError({
+        category: 'workflow_parse_error',
+        message: 'failed to load workflow',
+        cause,
+      })
+
+const readWorkflowSource = (path: string): Effect.Effect<string, WorkflowError> =>
+  Effect.tryPromise({
+    try: () => readFile(path, 'utf8'),
+    catch: (cause: unknown) =>
+      new WorkflowError({
+        category: 'missing_workflow_file',
+        message: `cannot read workflow file: ${path}`,
+        cause,
+      }),
   })
 
-export const loadWorkflow = (
-  path = resolve(process.cwd(), 'WORKFLOW.md'),
-  environment: NodeJS.ProcessEnv = process.env,
-): Effect.Effect<Workflow, WorkflowError> =>
-  Effect.tryPromise({
-    try: async () => {
-      let source: string
-      try {
-        source = await readFile(path, 'utf8')
-      } catch (cause: unknown) {
-        throw new WorkflowError({
-          category: 'missing_workflow_file',
-          message: `cannot read workflow file: ${path}`,
-          cause,
-        })
-      }
+const decodeSource = (
+  source: string,
+): Effect.Effect<Readonly<{ config: RawWorkflowConfig; prompt: string }>, WorkflowError> =>
+  Effect.try({
+    try: () => {
       const definition = splitWorkflow(source)
       if (
         typeof definition.config !== 'object' ||
@@ -571,23 +586,42 @@ export const loadWorkflow = (
           message: 'workflow front matter must be a map',
         })
       }
-      const config = parseConfig(decodeRawConfig(definition.config), path, environment)
-      return {
-        path,
-        fingerprint: createHash('sha256').update(source).digest('hex'),
-        config,
-        tracker: validateTrackerProvider(config.tracker.kind, config.tracker.provider, environment),
-        promptTemplate: definition.prompt,
-      }
+      return { config: decodeRawConfig(definition.config), prompt: definition.prompt }
     },
-    catch: (cause: unknown) =>
-      cause instanceof WorkflowError
-        ? cause
-        : new WorkflowError({
-            category: 'workflow_parse_error',
-            message: 'failed to load workflow',
-            cause,
-          }),
+    catch: failedToLoad,
+  })
+
+/**
+ * Reads and validates a workflow definition.
+ *
+ * `providers` is supplied by the caller rather than defaulted here: the registry names concrete
+ * adapters, and this layer must not reach up to the composition root to find them. The selection
+ * this returns carries the adapter that validated it, so every later revalidation stays with the
+ * registry used here.
+ *
+ * The environment is read through the calling fiber's `ConfigProvider` rather than passed in, so a
+ * caller supplies a test provider the same way production supplies the process environment.
+ */
+export const loadWorkflow = (
+  path: string,
+  providers: TrackerProviderRegistry,
+): Effect.Effect<Workflow, WorkflowError> =>
+  Effect.gen(function* () {
+    const source = yield* readWorkflowSource(path)
+    const raw = yield* decodeSource(source)
+    const workspaceRoot = yield* resolveWorkspaceRoot(raw.config.workspace.root, path)
+    const config = yield* Effect.try({
+      try: () => parseConfig(raw.config, workspaceRoot),
+      catch: failedToLoad,
+    })
+    const tracker = yield* providers.validate(config.tracker.kind, config.tracker.provider)
+    return {
+      path,
+      fingerprint: createHash('sha256').update(source).digest('hex'),
+      config,
+      tracker,
+      promptTemplate: raw.prompt,
+    }
   })
 
 const liquid = new Liquid({ strictFilters: true, strictVariables: true })

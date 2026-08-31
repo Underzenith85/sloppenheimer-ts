@@ -11,3 +11,9 @@ export {
   makeGitHubIssueControl,
   makeGitHubTracker,
 } from './issues.js'
+export {
+  githubProviderOf,
+  githubTrackerProvider,
+  validateGitHubProvider,
+  type GitHubProviderConfig,
+} from './provider.js'

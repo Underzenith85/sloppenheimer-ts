@@ -1,10 +1,22 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Fiber, Layer, TestClock, TestContext, type Scope } from 'effect'
+import {
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Queue,
+  Redacted,
+  Scope,
+  Stream,
+  TestClock,
+  TestContext,
+} from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
+import { githubProviderOf, githubTrackerProvider } from '../src/adapters/github/index.js'
 import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/adapters/codex/codex.js'
 import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
 import {
@@ -50,8 +62,9 @@ import {
   type WorkspaceSettings,
 } from '../src/ports/index.js'
 import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
+import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import type { HostToolSession } from '../src/host-tools.js'
-import type { ValidatedTrackerProvider } from '../src/config/tracker-config.js'
+import type { ValidatedTrackerProvider } from '../src/domain/tracker-provider.js'
 
 const makeIssue = (
   identifier: string,
@@ -77,23 +90,20 @@ const makeIssue = (
   updatedAt: null,
 })
 
-const testEnvironment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+const testEnvironment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
 
 const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
   fingerprint: 'test',
   promptTemplate: 'test',
-  tracker: {
-    kind: 'github',
-    provider: {
+  tracker: runWithEnvironment(
+    githubTrackerProvider.validate({
       owner: 'example',
       repository: 'symphony',
-      token: 'secret',
-      tokenEnvironmentName: 'SYMPHONY_TEST_TOKEN',
-      apiBaseUrl: 'https://api.github.com',
-      baseBranch: 'main',
-    },
-  },
+      token: '$SYMPHONY_TEST_TOKEN',
+    }),
+    testEnvironment,
+  ),
   config: {
     tracker: {
       kind: 'github',
@@ -253,7 +263,10 @@ type TestPorts = Readonly<{
   runAgent: AgentRunnerPort['run']
   agentEventSemantics: AgentEventSemantics
   watchWorkflow: (path: string, onChange: () => void) => void
-  environment: NodeJS.ProcessEnv
+  /** The variables the run's `ConfigProvider` serves. Mutating one rotates that credential. */
+  environment: Record<string, string>
+  /** Observes the watcher's own teardown, which the stream's scope owns. */
+  onWatchReleased?: (path: string) => void
   onTrackerReleased?: (provider: ValidatedTrackerProvider) => void
   onWorkspacesReleased?: (settings: WorkspaceSettings) => void
 }>
@@ -279,10 +292,23 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
     }),
     layerWorkflowLoader({
       load: ports.loadWorkflow,
-      preflight: (workflow) => preflightWorkflow(workflow, ports.environment),
+      preflight: (workflow) => preflightWorkflow(workflow),
     }),
     layerWorkflowWatcher({
-      watch: (path, onChange) => Effect.sync(() => ports.watchWorkflow(path, onChange)),
+      // The harness pushes into the stream exactly as the chokidar adapter does, so a test drives
+      // the same path the composition root binds rather than a callback seam of its own.
+      changes: (path) =>
+        Effect.gen(function* () {
+          const changes = yield* Effect.acquireRelease(Queue.unbounded<void>(), (queue) =>
+            Queue.shutdown(queue).pipe(
+              Effect.zipRight(Effect.sync(() => ports.onWatchReleased?.(path))),
+            ),
+          )
+          ports.watchWorkflow(path, () => {
+            Queue.unsafeOffer(changes, undefined)
+          })
+          return Stream.fromQueue(changes)
+        }),
     }),
   )
 
@@ -314,6 +340,9 @@ const startTestOrchestrator = (
   Effect.scope.pipe(
     Effect.flatMap((scope) => Layer.buildWithScope(layerTestPorts(ports), scope)),
     Effect.flatMap((services) => Effect.provide(startOrchestrator(selectedWorkflowPath), services)),
+    // The environment reaches the run the way the composition root supplies it: as the provider the
+    // whole program is run against, rather than as a record threaded through the ports.
+    (effect) => withEnvironment(effect, ports.environment),
   )
 
 type TestHarness = Readonly<{
@@ -341,7 +370,7 @@ const makeHarness = (
     workflow: Workflow,
     states: readonly string[],
   ) => Effect.Effect<readonly Issue[], never>,
-  environment: NodeJS.ProcessEnv = testEnvironment,
+  environment: Record<string, string> = testEnvironment,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
   let notifyChanged = (): void => undefined
@@ -391,7 +420,7 @@ const makeHarness = (
         fetchIssuesByIds: () =>
           Effect.sync(() => {
             idFetchCount += 1
-            idFetchTokens.push(provider.provider.token)
+            idFetchTokens.push(Redacted.value(githubProviderOf(provider).token))
             return candidates(currentWorkflow())
           }),
         toolSpecs: [],
@@ -2662,7 +2691,9 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerProviders().at(-1)?.provider.repository).toBe('reloaded-repository')
+    expect(harness.trackerProviders().map(githubProviderOf).at(-1)?.repository).toBe(
+      'reloaded-repository',
+    )
     expect(harness.stateFetchStates().at(-1)).toEqual(['open', 'queued'])
     expect(snapshot.pollingIntervalMs).toBe(7_000)
     expect(snapshot.maxConcurrentAgents).toBe(3)
@@ -2770,9 +2801,118 @@ describe('workflow hot reload', (): void => {
     )
   })
 
+  it('reloads the workflow when the watcher reports a change', async (): Promise<void> => {
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+
+    const fingerprint = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          harness.setWorkflow(changedWorkflow({ fingerprint: 'watched' }))
+          // A change that arrives while a tick is already queued is coalesced into it by design,
+          // so the edit is signalled until the reload it asks for has actually been observed.
+          let snapshot = yield* control.snapshot
+          while (snapshot.effectiveWorkflow.fingerprint !== 'watched') {
+            harness.notifyChanged()
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          return snapshot.effectiveWorkflow.fingerprint
+        }),
+      ),
+    )
+
+    expect(fingerprint).toBe('watched')
+  })
+
+  it('installs the workflow watcher before startup returns', async (): Promise<void> => {
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+    let watchedPath: string | null = null
+    const ports: TestPorts = {
+      ...harness.ports,
+      watchWorkflow: (path, onChange) => {
+        watchedPath = path
+        harness.ports.watchWorkflow(path, onChange)
+      },
+    }
+
+    const observed = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          // Read before yielding: an edit made the instant startup returns has to find the watcher
+          // already in place, not a subscription still waiting on a fiber to be scheduled.
+          return watchedPath
+        }),
+      ),
+    )
+
+    expect(observed).toBe('/tmp/WORKFLOW.md')
+  })
+
+  it('interrupts a watcher-triggered tick when the orchestrator shuts down', async (): Promise<void> => {
+    let pollShouldBlock = false
+    let pollBlocked = false
+    let pollInterrupted = false
+    let watchReleased = false
+    const harness = makeHarness(
+      changedWorkflow({ fingerprint: 'initial' }),
+      () => [],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open') || !pollShouldBlock) {
+          return Effect.succeed([])
+        }
+        return Effect.sync(() => {
+          pollBlocked = true
+        }).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              pollInterrupted = true
+            }),
+          ),
+        )
+      },
+    )
+    const ports: TestPorts = {
+      ...harness.ports,
+      onWatchReleased: () => {
+        watchReleased = true
+      },
+    }
+
+    const loads = await runWithTestClock(
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const control = yield* Scope.extend(startTestOrchestrator('/tmp/WORKFLOW.md', ports), scope)
+        yield* control.refresh
+        pollShouldBlock = true
+        // A change that arrives while a tick is already queued is coalesced into it by design, so
+        // the edit is signalled until the poll it asks for is genuinely in flight.
+        while (!pollBlocked) {
+          harness.notifyChanged()
+          yield* Effect.yieldNow()
+        }
+        expect(pollInterrupted).toBe(false)
+        // Closing the scope is what shutdown does. It returns only once every fiber the scope owns
+        // has finished being interrupted, so the poll cannot still be running afterwards.
+        yield* Scope.close(scope, Exit.void)
+        const atShutdown = harness.loads()
+        harness.notifyChanged()
+        yield* Effect.yieldNow()
+        return { atShutdown, afterShutdown: harness.loads() }
+      }),
+    )
+
+    expect(pollInterrupted).toBe(true)
+    expect(watchReleased).toBe(true)
+    expect(loads.afterShutdown).toBe(loads.atShutdown)
+  })
+
   it('uses the provider returned by dispatch preflight', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
     const harness = makeHarness(
       workflow,
       () => [],
@@ -2792,7 +2932,8 @@ describe('workflow hot reload', (): void => {
       ),
     )
 
-    expect(harness.trackerProviders().at(-1)?.provider.token).toBe('rotated')
+    const latest = harness.trackerProviders().map(githubProviderOf).at(-1)
+    expect(latest === undefined ? null : Redacted.value(latest.token)).toBe('rotated')
   })
 
   it('cancels a running worker when the operator explicitly pauses its issue', async (): Promise<void> => {
@@ -2817,7 +2958,7 @@ describe('workflow hot reload', (): void => {
 describe('tracker credential revalidation', (): void => {
   it('updates the tracker used by an active worker issue refresh', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
     const harness = makeHarness(workflow, () => [issue])
     let refreshIssue: AgentLaunch['refreshIssue'] | null = null
     const ports: TestPorts = {
@@ -2850,7 +2991,7 @@ describe('tracker credential revalidation', (): void => {
 
   it("routes a live session's host tool calls to the tracker a rotation installed", async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
     const harness = makeHarness(workflow, () => [issue])
     const executedTokens: string[] = []
     let session: HostToolSession | null = null
@@ -2861,7 +3002,7 @@ describe('tracker credential revalidation', (): void => {
         ...harness.ports.makeTracker(provider),
         toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
         executeTool: () => {
-          executedTokens.push(provider.provider.token)
+          executedTokens.push(Redacted.value(githubProviderOf(provider).token))
           return Promise.resolve({ success: true, data: null })
         },
       }),
@@ -2896,7 +3037,7 @@ describe('tracker credential revalidation', (): void => {
   })
 
   it('rebuilds the tracker when the referenced secret is rotated in the environment', async (): Promise<void> => {
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
     const harness = makeHarness(workflow)
 
     await runWithTestClock(
@@ -2915,16 +3056,13 @@ describe('tracker credential revalidation', (): void => {
 
     // Twice at startup: the layer builds the first instance from the workflow the composition root
     // read, and the orchestrator replaces it with one built from the workflow it loaded itself.
-    expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
-      'secret',
-      'secret',
-      'first',
-      'rotated',
-    ])
+    expect(
+      harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
+    ).toEqual(['secret', 'secret', 'first', 'rotated'])
   })
 
   it('retains the last known good tracker when the secret disappears', async (): Promise<void> => {
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'first' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
     const harness = makeHarness(workflow)
 
     await runWithTestClock(
@@ -2941,18 +3079,16 @@ describe('tracker credential revalidation', (): void => {
       ),
     )
 
-    expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
-      'secret',
-      'secret',
-      'first',
-    ])
+    expect(
+      harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
+    ).toEqual(['secret', 'secret', 'first'])
   })
 })
 
 describe('rebuilt port lifecycle', (): void => {
   it('keeps the tracker a rotation replaced until the run that used it ends', async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
     let markStarted = (): void => undefined
     const started = new Promise<void>((resolve) => {
       markStarted = resolve
@@ -2979,11 +3115,9 @@ describe('rebuilt port lifecycle', (): void => {
           environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
 
-          expect(harness.trackerProviders().map((each) => each.provider.token)).toEqual([
-            'secret',
-            'secret',
-            'rotated',
-          ])
+          expect(
+            harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
+          ).toEqual(['secret', 'secret', 'rotated'])
           // Only the layer's instance, replaced at startup before any run could reach it. The
           // running worker adopted the rotated tracker, but a call it made a moment earlier may
           // still be awaiting the one it replaced.
@@ -2993,10 +3127,9 @@ describe('rebuilt port lifecycle', (): void => {
           yield* control.refresh
           yield* control.refresh
 
-          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
-            'secret',
-            'secret',
-          ])
+          expect(
+            harness.releasedTrackers().map((each) => Redacted.value(githubProviderOf(each).token)),
+          ).toEqual(['secret', 'secret'])
         }),
       ),
     )
@@ -3004,7 +3137,7 @@ describe('rebuilt port lifecycle', (): void => {
 
   it("releases a run's superseded ports when it ends, even as its handoff lives on", async (): Promise<void> => {
     const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-    const environment: NodeJS.ProcessEnv = { SYMPHONY_TEST_TOKEN: 'secret' }
+    const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
     let markStarted = (): void => undefined
     const started = new Promise<void>((resolve) => {
       markStarted = resolve
@@ -3069,10 +3202,9 @@ describe('rebuilt port lifecycle', (): void => {
           // The run has ended into a handoff under the same issue, and that handoff holds the
           // adopted tracker — so what the run superseded is free while the pull request stays open.
           expect(snapshot.handoffs).toHaveLength(1)
-          expect(harness.releasedTrackers().map((each) => each.provider.token)).toEqual([
-            'secret',
-            'secret',
-          ])
+          expect(
+            harness.releasedTrackers().map((each) => Redacted.value(githubProviderOf(each).token)),
+          ).toEqual(['secret', 'secret'])
           return snapshot
         }),
       ),
@@ -3639,6 +3771,43 @@ describe('live agent detail', (): void => {
     expect(detail.timeline.events.at(-1)).toMatchObject({ category: 'handoff', status: 'pending' })
     blockHandoff = false
     await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('applies an agent update reported in the same turn the worker settles', async (): Promise<void> => {
+    const issue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const factory = makeAgentFactory()
+
+    const detail = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
+            runAgent: factory.runAgent,
+          })
+          const agent = yield* Effect.promise(() =>
+            awaitAgent(factory.agents, 'example/symphony#21'),
+          )
+          // The offer the runner's callback makes has to be in the mailbox by the time the callback
+          // returns. If it were only scheduled, the worker's own exit could overtake it and the
+          // event loop would drop the update as belonging to a run that has already ended.
+          agent.notify('item/completed', { item: { type: 'reasoning' } })
+          agent.settle('completed')
+          return yield* Effect.promise(() =>
+            awaitDetail(
+              control,
+              'example/symphony#21',
+              (candidate) => candidate.status !== 'running',
+              'the settled record',
+            ),
+          )
+        }),
+      ),
+    )
+
+    // First in the timeline, ahead of everything the worker's exit records: the update was applied
+    // to the live run rather than dropped after it ended.
+    expect(detail.timeline.events[0]).toMatchObject({ category: 'reasoning', sequence: 1 })
   })
 
   it('answers unknown, sessionless, and starting identifiers distinctly', async (): Promise<void> => {

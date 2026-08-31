@@ -1,8 +1,9 @@
-import { Effect, Layer } from 'effect'
+import { Effect, Layer, Stream } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { HooksConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import { stubProvider } from '../harness/stub-tracker-provider.js'
 import { WorkflowError } from '../../src/errors.js'
 import {
   AgentRunner,
@@ -30,17 +31,7 @@ const hooks: HooksConfig = {
   timeoutMs: 1_000,
 }
 
-const validated: ValidatedTrackerProvider = {
-  kind: 'github',
-  provider: {
-    owner: 'example',
-    repository: 'symphony',
-    token: 'token',
-    tokenEnvironmentName: 'GITHUB_TOKEN',
-    apiBaseUrl: 'https://api.github.com',
-    baseBranch: 'main',
-  },
-}
+const validated: ValidatedTrackerProvider = stubProvider('token')
 
 /** Stand-ins for the adapter layers the adapter issues supply. */
 const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
@@ -75,7 +66,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
       ),
     preflight: () => Effect.succeed(validated),
   }),
-  layerWorkflowWatcher({ watch: () => Effect.void }),
+  layerWorkflowWatcher({ changes: () => Effect.succeed(Stream.empty) }),
 )
 
 describe('port layer composition', (): void => {
@@ -125,7 +116,7 @@ describe('port layer composition', (): void => {
             isRoutable: () => true,
             onEvent: () => {},
           })
-          yield* watcher.watch('WORKFLOW.md', () => {})
+          yield* Stream.runDrain(yield* watcher.changes('WORKFLOW.md'))
           const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
           return {
             secretEnvironmentNames: currentTracker.secretEnvironmentNames,

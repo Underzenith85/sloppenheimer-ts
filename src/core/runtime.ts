@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { Deferred, Effect, Fiber, Option, Queue, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, Runtime, Stream, type Scope } from 'effect'
 
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
@@ -22,6 +22,7 @@ import {
   recordAttemptStarted,
   recordCancellation,
   recordHandoff,
+  recordIssueRefreshed,
   recordRetryScheduled,
   type AgentDetailContext,
   type AgentDetailRecord,
@@ -228,9 +229,10 @@ export type OrchestratorEvent =
     }>
 
 /**
- * One issue's published detail. The record is an immutable copy taken by the actor; the reader
- * supplies only the current instant, so elapsed time and the stall countdown stay live without any
- * consumer touching scheduler state.
+ * One issue's published detail. The record is an immutable value the actor has finished with — a
+ * later observation produces a new record rather than editing this one — and the reader supplies
+ * only the current instant, so elapsed time and the stall countdown stay live without any consumer
+ * touching scheduler state.
  */
 export type PublishedDetail =
   | Readonly<{
@@ -686,27 +688,6 @@ export const startOrchestratorRuntime = (
       }
     }
 
-    /** An exact copy, so a published snapshot can never observe a later mutation of the original. */
-    const copyDetail = (record: AgentDetailRecord): AgentDetailRecord => ({
-      ...record,
-      events: [...record.events],
-      attempts: [...record.attempts],
-      sessions: [...record.sessions],
-      errors: [...record.errors],
-      changedPaths: new Map(record.changedPaths),
-      tokens: { ...record.tokens },
-      rateLimits: [...record.rateLimits],
-      handoff: {
-        ...record.handoff,
-        remoteBranch: { ...record.handoff.remoteBranch },
-        pullRequest: { ...record.handoff.pullRequest },
-        dispatchLabels: {
-          ...record.handoff.dispatchLabels,
-          labels: [...record.handoff.dispatchLabels.labels],
-        },
-      },
-    })
-
     const detailRecord = (
       issue: Issue,
       attempt: number | null,
@@ -718,12 +699,15 @@ export const startOrchestratorRuntime = (
       const now = new Date()
       const existing = state.details.get(issue.id)
       if (existing !== undefined) {
-        existing.title = issue.title
-        existing.url = issue.url
         // The same record carries every attempt for the issue, so ordering and session identity
         // survive the boundary that separates them.
-        recordAttemptStarted(existing, now, attempt ?? 0)
-        return existing
+        const started = recordAttemptStarted(
+          recordIssueRefreshed(existing, issue),
+          now,
+          attempt ?? 0,
+        )
+        state.details.set(issue.id, started)
+        return started
       }
       const record = createAgentDetailRecord({
         issueId: issue.id,
@@ -756,7 +740,7 @@ export const startOrchestratorRuntime = (
         }
         next.set(record.identifier, {
           _tag: 'Found',
-          record: copyDetail(record),
+          record,
           context: {
             self: agentDetailPath(record.identifier),
             status,
@@ -979,8 +963,18 @@ export const startOrchestratorRuntime = (
     const currentRefreshWaiters: Deferred.Deferred<void>[] = []
     const nextRefreshWaiters: Deferred.Deferred<void>[] = []
 
+    /**
+     * The one bridge left from a plain callback into the runtime: an agent runner reports progress
+     * synchronously, and the update has to reach the mailbox from there. The runtime is captured
+     * once here rather than re-derived per call, and the fork is attached to the orchestrator's
+     * scope, so an offer in flight is interrupted with the orchestrator instead of outliving it.
+     * Running the offer synchronously from the callback instead would discard this fiber's
+     * context, and would throw outright if offering ever became asynchronous.
+     */
+    const runtime = yield* Effect.runtime<never>()
+    const orchestratorScope = yield* Effect.scope
     const offerFromCallback = (event: OrchestratorEvent): void => {
-      Effect.runSync(Queue.offer(mailbox, event))
+      Runtime.runFork(runtime)(Queue.offer(mailbox, event), { scope: orchestratorScope })
     }
 
     const requestTick = (source: 'startup' | 'timer' | 'change'): Effect.Effect<void> =>
@@ -1008,11 +1002,12 @@ export const startOrchestratorRuntime = (
       }),
     )
 
-    yield* Effect.flatMap(WorkflowWatcher, (watcher) =>
-      watcher.watch(selectedWorkflowPath, () => {
-        Effect.runFork(requestTick('change'))
-      }),
-    )
+    // The watcher is installed before startup continues; only its consumption is forked, into the
+    // orchestrator's scope, so the tick a change requests is interrupted on shutdown rather than
+    // left running against a stopped orchestrator.
+    const workflowWatcher = yield* WorkflowWatcher
+    const workflowChanges = yield* workflowWatcher.changes(selectedWorkflowPath)
+    yield* Effect.forkScoped(Stream.runForEach(workflowChanges, () => requestTick('change')))
 
     const scheduleNextTick = (): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
@@ -1051,7 +1046,10 @@ export const startOrchestratorRuntime = (
         noteIssue(issue)
         const record = state.details.get(issue.id)
         if (record !== undefined) {
-          recordRetryScheduled(record, new Date(), attempt, new Date(dueAt), error)
+          state.details.set(
+            issue.id,
+            recordRetryScheduled(record, new Date(), attempt, new Date(dueAt), error),
+          )
         }
         yield* logInfo('action=retry outcome=scheduled', {
           issue_id: issue.id,
@@ -1074,7 +1072,7 @@ export const startOrchestratorRuntime = (
       if (record === undefined) {
         return
       }
-      recordHandoff(record, handoff.observedAt, {
+      const observed = recordHandoff(record, handoff.observedAt, {
         step: 'outcome',
         status: outcome === 'intervention_required' ? 'failed' : 'observed',
         message: handoff.reason,
@@ -1089,6 +1087,7 @@ export const startOrchestratorRuntime = (
         },
         outcome,
       })
+      state.details.set(id, observed)
     }
 
     const recoverMissingHandoffs = (): Effect.Effect<void> =>
@@ -1182,25 +1181,30 @@ export const startOrchestratorRuntime = (
                   state: 'awaiting_checks' as const,
                   reason: inspected.error.message,
                 }
-          const record = detailRecord(issue, null, requiredLabels)
-          state.details.set(issue.id, record)
-          recordHandoff(record, observedAt, {
-            step: 'remote_branch',
-            status: 'observed',
-            message: `Remote branch ${found.result.branchName} is present`,
-            remoteBranch: found.result.branchName,
-          })
-          recordHandoff(record, observedAt, {
-            step: 'pull_request',
-            status: 'observed',
-            message: 'Recovered an existing pull request during startup',
-            pullRequest: {
-              status: 'reused',
-              number: found.result.pullRequestNumber,
-              url: found.result.pullRequestUrl,
-              state: disposition.state,
+          const branchObserved = recordHandoff(
+            detailRecord(issue, null, requiredLabels),
+            observedAt,
+            {
+              step: 'remote_branch',
+              status: 'observed',
+              message: `Remote branch ${found.result.branchName} is present`,
+              remoteBranch: found.result.branchName,
             },
-          })
+          )
+          state.details.set(
+            issue.id,
+            recordHandoff(branchObserved, observedAt, {
+              step: 'pull_request',
+              status: 'observed',
+              message: 'Recovered an existing pull request during startup',
+              pullRequest: {
+                status: 'reused',
+                number: found.result.pullRequestNumber,
+                url: found.result.pullRequestUrl,
+                state: disposition.state,
+              },
+            }),
+          )
           state.handoffs.set(issue.id, {
             issue,
             execution: captureExecutionSnapshot(effective, ''),
@@ -1381,7 +1385,7 @@ export const startOrchestratorRuntime = (
         }
         const record = state.details.get(id)
         if (record !== undefined) {
-          recordCancellation(record, new Date(), reason)
+          state.details.set(id, recordCancellation(record, new Date(), reason))
         }
         state.claimed.delete(id)
         if (entry.sessionId !== null) {
