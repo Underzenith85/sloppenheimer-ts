@@ -1,5 +1,5 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, HashMap, Option, Redacted, Ref, type Layer } from 'effect'
+import { Clock, Effect, HashMap, Option, Redacted, Ref, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from '../../domain/dependencies.js'
@@ -60,15 +60,17 @@ type DependencyCacheEntry = Readonly<{
  */
 type DependencyCache = Ref.Ref<HashMap.HashMap<IssueId, DependencyCacheEntry>>
 
-/** A cache hit: present, matching the issue revision it was recorded against, and unexpired. */
+/**
+ * A cache hit: present, matching the issue revision it was recorded against, and unexpired at the
+ * instant the caller read from `Clock`.
+ */
 const liveBlockedBy = (
   entry: Option.Option<DependencyCacheEntry>,
   issueUpdatedAt: number | null,
+  now: number,
 ): Option.Option<readonly BlockerRef[]> =>
   entry.pipe(
-    Option.filter(
-      (cached) => cached.issueUpdatedAt === issueUpdatedAt && cached.expiresAt > Date.now(),
-    ),
+    Option.filter((cached) => cached.issueUpdatedAt === issueUpdatedAt && cached.expiresAt > now),
     Option.map((cached) => cached.blockedBy),
   )
 
@@ -281,49 +283,39 @@ const hydrateDependencies = (
 ): Effect.Effect<readonly Issue[], TrackerError> =>
   Effect.forEach(
     issues,
-    (issue) => {
-      const shouldHydrate =
-        issue.dispatchable &&
-        (dependencyLabels === null ||
-          (dependencyLabels.length > 0 &&
-            dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))))
-      if (!shouldHydrate) {
-        return Effect.succeed(issue)
-      }
-      const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
-      const readCache =
-        useCache && dependencyLabels === null
-          ? Ref.get(cache).pipe(
-              Effect.map((entries) =>
-                liveBlockedBy(HashMap.get(entries, issue.id), issueUpdatedAt),
-              ),
-            )
-          : Effect.succeed(Option.none<readonly BlockerRef[]>())
-      return readCache.pipe(
-        Effect.flatMap(
-          Option.match({
-            onSome: (blockedBy) => Effect.succeed({ ...issue, blockedBy }),
-            onNone: () =>
-              fetchBlockedBy(provider, prefix, issue).pipe(
-                Effect.tap((blockedBy) =>
-                  // `modifyAt` rewrites one entry in place of the whole map, and is where a field
-                  // derived from the entry it replaces would be computed if one is ever added.
-                  Ref.update(cache, (entries) =>
-                    HashMap.modifyAt(entries, issue.id, () =>
-                      Option.some<DependencyCacheEntry>({
-                        blockedBy,
-                        issueUpdatedAt,
-                        expiresAt: Date.now() + dependencyCacheTtlMs,
-                      }),
-                    ),
-                  ),
-                ),
-                Effect.map((blockedBy) => ({ ...issue, blockedBy })),
-              ),
-          }),
-        ),
-      )
-    },
+    (issue) =>
+      Effect.gen(function* () {
+        const shouldHydrate =
+          issue.dispatchable &&
+          (dependencyLabels === null ||
+            (dependencyLabels.length > 0 &&
+              dependencyLabels.every((label) => issue.labels.includes(label.trim().toLowerCase()))))
+        if (!shouldHydrate) {
+          return issue
+        }
+        const issueUpdatedAt = issue.updatedAt?.getTime() ?? null
+        const now = yield* Clock.currentTimeMillis
+        if (useCache && dependencyLabels === null) {
+          const entries = yield* Ref.get(cache)
+          const cached = liveBlockedBy(HashMap.get(entries, issue.id), issueUpdatedAt, now)
+          if (Option.isSome(cached)) {
+            return { ...issue, blockedBy: cached.value }
+          }
+        }
+        const blockedBy = yield* fetchBlockedBy(provider, prefix, issue)
+        // `modifyAt` rewrites one entry in place of the whole map, and is where a field derived
+        // from the entry it replaces would be computed if one is ever added.
+        yield* Ref.update(cache, (entries) =>
+          HashMap.modifyAt(entries, issue.id, () =>
+            Option.some<DependencyCacheEntry>({
+              blockedBy,
+              issueUpdatedAt,
+              expiresAt: now + dependencyCacheTtlMs,
+            }),
+          ),
+        )
+        return { ...issue, blockedBy }
+      }),
     { concurrency: dependencyConcurrency },
   ).pipe(Effect.map(applyDispatchEligibility))
 

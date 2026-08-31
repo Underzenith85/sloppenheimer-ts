@@ -5,6 +5,7 @@ import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
 import { AgentError, type WorkspaceError } from '../errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../host-tools.js'
+import { currentInstant } from '../support/clock.js'
 import { toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
 import {
@@ -258,6 +259,7 @@ export const dispatch = (
       }),
     )
     const fiber = yield* Effect.forkScoped(worker)
+    const startedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
       Transitions.beginRun(current, {
         runId,
@@ -266,7 +268,7 @@ export const dispatch = (
         execution,
         sessionPorts,
         attempt,
-        startedAt: new Date(),
+        startedAt,
         lastEventAt: null,
         lastEvent: null,
         lastMessage: null,

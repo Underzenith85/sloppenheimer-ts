@@ -1,8 +1,7 @@
-import { Effect } from 'effect'
+import { Clock, Effect, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
-import { FakeClock } from '../harness/fake-clock.js'
 import { FakeTracker } from '../harness/fake-tracker.js'
 import { FakeWorkspaceProcess } from '../harness/fake-workspace-process.js'
 
@@ -25,16 +24,30 @@ const issue: Issue = {
 }
 
 describe('Core Conformance typed harness boundaries', (): void => {
-  it('advances fake clock tasks deterministically in due-time and insertion order', (): void => {
-    const clock = new FakeClock(1_000)
+  it('advances scheduled work deterministically in due-time order', async (): Promise<void> => {
     const events: string[] = []
-    clock.schedule(20, () => events.push('last'))
-    clock.schedule(10, () => events.push('first'))
-    clock.schedule(10, () => events.push('second'))
+    const record = (label: string, delayMs: number): Effect.Effect<void> =>
+      Effect.sleep(delayMs).pipe(
+        Effect.zipRight(
+          Effect.sync(() => {
+            events.push(label)
+          }),
+        ),
+      )
 
-    clock.advanceBy(20)
+    const elapsed = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* TestClock.adjust(1_000)
+        yield* Effect.fork(record('last', 30))
+        yield* Effect.fork(record('first', 10))
+        yield* Effect.fork(record('second', 20))
+        // One advance drains every sleep it passes, in due order, without waiting on wall time.
+        yield* TestClock.adjust(30)
+        return yield* Clock.currentTimeMillis
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    )
 
-    expect(clock.now()).toBe(1_020)
+    expect(elapsed).toBe(1_030)
     expect(events).toEqual(['first', 'second', 'last'])
   })
 

@@ -1,6 +1,7 @@
 import { Effect, Ref } from 'effect'
 
 import { normalizeState } from '../domain/domain.js'
+import { currentInstant } from '../support/clock.js'
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
 import {
   publishedCompletedWork,
@@ -63,8 +64,11 @@ const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
  * cell in a single step, so nothing here has to defend against a container being edited underneath
  * it, and no copying is needed to hand it on.
  */
-export const createSnapshot = (state: RuntimeState, workflowPath: string): OrchestratorSnapshot => {
-  const now = Date.now()
+export const createSnapshot = (
+  state: RuntimeState,
+  workflowPath: string,
+  now: number,
+): OrchestratorSnapshot => {
   const effective = state.lastKnownGood
   const running = [...state.running.values()]
   const activeSeconds = running.reduce(
@@ -176,8 +180,8 @@ export const agentDetail = (
   context: OrchestratorContext,
   identifier: string,
 ): Effect.Effect<AgentDetailLookup> =>
-  Ref.get(context.state).pipe(
-    Effect.map((state): AgentDetailLookup => {
+  Effect.all([Ref.get(context.state), currentInstant]).pipe(
+    Effect.map(([state, now]): AgentDetailLookup => {
       const published = state.publishedDetails.get(identifier)
       if (published === undefined) {
         return { _tag: 'Unknown', identifier }
@@ -186,7 +190,7 @@ export const agentDetail = (
         case 'Found': {
           return {
             _tag: 'Found',
-            detail: buildAgentDetail(published.record, { ...published.context, now: new Date() }),
+            detail: buildAgentDetail(published.record, { ...published.context, now }),
           }
         }
         case 'Completed': {

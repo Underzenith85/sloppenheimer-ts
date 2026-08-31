@@ -116,3 +116,21 @@ snapshot fields such as `AgentEvent.message`, `sessionId`, `HandoffSnapshot.head
 This mixed style is intentional. It costs one explicit conversion at each architectural boundary,
 but keeps serialized types honest and naturally JSON-compatible while making internal absence
 composable with Effect.
+
+### Time: read the clock, do not read the ambient one
+
+Accepted 2026-08-31: an effect that needs the current instant reads it through Effect's `Clock`,
+never through `Date.now()` or `new Date()`.
+
+- `src/support/clock.ts` exports `currentInstant`, the `Clock.currentTimeMillis` read wrapped as a
+  `Date`. Use it wherever the instant is carried as a `Date`, and `Clock.currentTimeMillis` directly
+  wherever it is compared or added to as a number.
+- Pure functions keep taking the instant as a parameter — `createSnapshot`, and the transitions in
+  `src/core/transitions.ts`. The caller reads the clock; the function stays a function of its
+  inputs, and none of them acquires a `Clock` dependency.
+- `new Date(value)` stays where the instant comes from a value already in hand: a parsed wire
+  timestamp, a restored snapshot, or a deadline derived from a recorded instant.
+- `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
+
+Tests therefore drive the whole orchestrator from `TestClock` — the clock `Effect.sleep` and
+`Schedule` already run against — instead of waiting on the wall clock.

@@ -1,6 +1,7 @@
 import { Effect, Option, Ref, type Scope } from 'effect'
 
 import type { Issue, IssueId } from '../domain/domain.js'
+import { currentInstant } from '../support/clock.js'
 import { logInfo } from '../support/logging.js'
 import { dispatch } from './dispatch.js'
 import {
@@ -52,6 +53,7 @@ const finishedWork = (
   id: IssueId,
   handoff: HandoffEntry,
   mergedAt: string | null,
+  observedAt: Date,
 ): CompletedEntry => {
   const reported = mergedAt === null ? null : new Date(mergedAt)
   return {
@@ -60,7 +62,7 @@ const finishedWork = (
     title: handoff.issue.title,
     url: handoff.issue.url,
     outcome: 'merged',
-    finishedAt: reported === null || Number.isNaN(reported.getTime()) ? new Date() : reported,
+    finishedAt: reported === null || Number.isNaN(reported.getTime()) ? observedAt : reported,
     pullRequestUrl: handoff.pullRequestUrl,
   }
 }
@@ -199,7 +201,7 @@ const perform = (
       case 'Complete': {
         yield* writeHandoff(context, id, handoff)
         yield* context.noteHandoffOutcome(id, handoff, 'merged')
-        const finished = finishedWork(id, handoff, action.mergedAt)
+        const finished = finishedWork(id, handoff, action.mergedAt, yield* currentInstant)
         yield* Ref.update(context.state, (current) =>
           Transitions.completeHandoff(current, id, finished),
         )
@@ -227,7 +229,7 @@ const perform = (
         }
         yield* context.noteHandoffOutcome(id, settled, 'merged')
         // This host performed the merge just now, so the instant is its own.
-        const finished = finishedWork(id, settled, null)
+        const finished = finishedWork(id, settled, null, yield* currentInstant)
         yield* Ref.update(context.state, (current) =>
           Transitions.completeHandoff(current, id, finished),
         )
@@ -354,7 +356,7 @@ export const reconcileHandoffs = (
       if (Option.isNone(codeReview)) {
         continue
       }
-      const observedAt = new Date()
+      const observedAt = yield* currentInstant
       const inspected = yield* codeReview.value.inspectPullRequest(live.pullRequestNumber).pipe(
         Effect.match({
           onFailure: (error) => ({ _tag: 'Failed' as const, error }),
