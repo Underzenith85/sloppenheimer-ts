@@ -183,25 +183,32 @@ describe('App Server session lifecycle', (): void => {
 
   it.live(
     'redacts the resolved value of a host credential the agent echoes',
-    () =>
-      Effect.gen(function* () {
-        const previous = process.env['GITHUB_TOKEN']
-        process.env['GITHUB_TOKEN'] = 'literal-host-credential-value'
-        try {
-          const outcome = yield* runScenario('secret-environment')
-          const serialized = JSON.stringify(outcome.events)
+    () => {
+      const previous = process.env['GITHUB_TOKEN']
+      process.env['GITHUB_TOKEN'] = 'literal-host-credential-value'
 
-          expect(outcome.error).toBeNull()
-          expect(serialized).not.toContain('literal-host-credential-value')
-          expect(serialized).toContain('[REDACTED]')
-        } finally {
-          if (previous === undefined) {
-            delete process.env['GITHUB_TOKEN']
-          } else {
-            process.env['GITHUB_TOKEN'] = previous
-          }
-        }
-      }),
+      return Effect.gen(function* () {
+        const outcome = yield* runScenario('secret-environment')
+        const serialized = JSON.stringify(outcome.events)
+
+        expect(outcome.error).toBeNull()
+        expect(serialized).not.toContain('literal-host-credential-value')
+        expect(serialized).toContain('[REDACTED]')
+      }).pipe(
+        // An `Effect` finalizer rather than a JavaScript `finally`: an interruption — this case's
+        // own 30-second bound among them — never resumes the generator, so a `finally` around the
+        // `yield*` would leave the borrowed credential set for every later case.
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (previous === undefined) {
+              delete process.env['GITHUB_TOKEN']
+            } else {
+              process.env['GITHUB_TOKEN'] = previous
+            }
+          }),
+        ),
+      )
+    },
     30_000,
   )
 

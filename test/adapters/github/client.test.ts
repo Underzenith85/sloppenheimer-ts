@@ -3,7 +3,7 @@ import * as HttpClientError from '@effect/platform/HttpClientError'
 import type * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import * as HttpClientResponse from '@effect/platform/HttpClientResponse'
 import { it } from '@effect/vitest'
-import { Effect, Fiber, Layer, Redacted, TestClock } from 'effect'
+import { Clock, Effect, Fiber, Layer, Redacted, TestClock } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
 import { githubJson, type GitHubHttpResult } from '../../../src/adapters/github/client.js'
@@ -136,7 +136,10 @@ describe('GitHub transport error mapping', (): void => {
 
   it.effect('maps an exhausted primary rate limit onto its reset window', () =>
     Effect.gen(function* () {
-      const reset = Math.floor(Date.now() / 1_000) + 120
+      // The adapter subtracts the instant it reads from the clock (#184) from this reset, so the
+      // header is dated from the same clock. Taken from the ambient one it would be decades ahead
+      // of the test clock's epoch, and the window this case exists to check would go untested.
+      const reset = Math.floor((yield* Clock.currentTimeMillis) / 1_000) + 120
 
       const error = yield* runFailure(
         githubJson(provider, issuesUrl),
@@ -151,7 +154,8 @@ describe('GitHub transport error mapping', (): void => {
 
       expect(error.category).toBe('tracker_rate_limited')
       expect(error.retryable).toBe(true)
-      expect(error.retryAfterMs).toBeGreaterThan(0)
+      // Exact rather than a lower bound: the clock no longer drifts between the two reads.
+      expect(error.retryAfterMs).toBe(120_000)
     }),
   )
 
