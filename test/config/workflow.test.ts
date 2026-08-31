@@ -9,7 +9,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { githubProviderOf } from '../../src/adapters/github/index.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import { sameTrackerProvider } from '../../src/domain/tracker-provider.js'
+import type { WorkflowError } from '../../src/errors.js'
+import type { TrackerProviderRegistry } from '../../src/domain/tracker-provider.js'
 import { withEnvironment } from '../harness/environment.js'
+import { hostFileSystem } from '../harness/filesystem.js'
 import { stubProviderToken, stubTrackerProviders } from '../harness/stub-tracker-provider.js'
 import { JsonConversionError, toJsonValue } from '../../src/support/json.js'
 import {
@@ -17,7 +20,18 @@ import {
   preflightWorkflow,
   renderPrompt,
   workflowDefaults,
+  type Workflow,
 } from '../../src/config/workflow.js'
+
+/**
+ * `loadWorkflow` reads its source through `FileSystem`; every test here reads the real files it
+ * wrote, so the host filesystem is bound exactly as the composition root binds it.
+ */
+const loadHostWorkflow = (
+  path: string,
+  providers: TrackerProviderRegistry,
+): Effect.Effect<Workflow, WorkflowError> =>
+  loadWorkflow(path, providers).pipe(Effect.provide(hostFileSystem))
 
 const temporaryDirectories: string[] = []
 
@@ -73,7 +87,7 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
     )
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
     const prompt = await Effect.runPromise(renderPrompt(workflow, issue, 3))
 
@@ -111,7 +125,7 @@ Do the work
 
     const error = await Effect.runPromise(
       Effect.flip(
-        withEnvironment(loadWorkflow(path, trackerProviders), { EMPTY_TRACKER_TOKEN: '' }),
+        withEnvironment(loadHostWorkflow(path, trackerProviders), { EMPTY_TRACKER_TOKEN: '' }),
       ),
     )
 
@@ -126,7 +140,9 @@ Do the work
   it('keeps the resolved credential out of a serialized provider', async (): Promise<void> => {
     const path = await writeWorkflow(minimalTracker)
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret-value' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), {
+        TEST_TRACKER_TOKEN: 'secret-value',
+      }),
     )
 
     const provider = githubProviderOf(workflow.tracker)
@@ -154,7 +170,7 @@ Do the work
     )
 
     const error = await Effect.runPromise(
-      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+      Effect.flip(withEnvironment(loadHostWorkflow(path, trackerProviders))),
     )
 
     expect(error.category).toBe('invalid_config')
@@ -180,7 +196,7 @@ Do the work
     )
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.serverPort).toBe(0)
@@ -205,7 +221,7 @@ Do the work
     )
 
     const error = await Effect.runPromise(
-      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+      Effect.flip(withEnvironment(loadHostWorkflow(path, trackerProviders))),
     )
 
     expect(error.category).toBe('invalid_config')
@@ -236,7 +252,7 @@ Do the work
 
       const error = await Effect.runPromise(
         Effect.flip(
-          withEnvironment(loadWorkflow(path, trackerProviders), { [environmentName]: secret }),
+          withEnvironment(loadHostWorkflow(path, trackerProviders), { [environmentName]: secret }),
         ),
       )
 
@@ -267,7 +283,7 @@ describe('workflow defaults and extension keys', (): void => {
     const path = await writeWorkflow(minimalTracker)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.pollingIntervalMs).toBe(workflowDefaults.pollingIntervalMs)
@@ -308,7 +324,7 @@ workers:
 experimental: true`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.extensions).toEqual({
@@ -328,7 +344,7 @@ future_section:
 
     const error = await Effect.runPromise(
       Effect.flip(
-        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+        withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
       ),
     )
 
@@ -347,7 +363,7 @@ future_section:
       nested: [1, 2]`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.tracker.provider).toEqual({
@@ -367,7 +383,7 @@ workspace:
   root: ~/symphony-root`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.workspaceRoot).toBe(join(homedir(), 'symphony-root'))
@@ -379,7 +395,7 @@ workspace:
   root: $TEST_WORKSPACE_ROOT`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), {
+      withEnvironment(loadHostWorkflow(path, trackerProviders), {
         TEST_TRACKER_TOKEN: 'secret',
         TEST_WORKSPACE_ROOT: '/srv/symphony',
       }),
@@ -396,7 +412,7 @@ codex:
   command: $CODEX_COMMAND`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), {
+      withEnvironment(loadHostWorkflow(path, trackerProviders), {
         TEST_TRACKER_TOKEN: 'secret',
         CODEX_COMMAND: 'not-substituted',
       }),
@@ -419,7 +435,7 @@ describe('front-matter decoding messages', (): void => {
     const path = await writeWorkflow(frontMatter)
     const error = await Effect.runPromise(
       Effect.flip(
-        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+        withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
       ),
     )
     expect(error.category).toBe('invalid_config')
@@ -569,7 +585,7 @@ server:
   port: 8080`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.tracker.requiredLabels).toEqual(['symphony', 'ready'])
@@ -640,7 +656,7 @@ describe('workflow source errors', (): void => {
     const path = await writeSource(source)
 
     const error = await Effect.runPromise(
-      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+      Effect.flip(withEnvironment(loadHostWorkflow(path, trackerProviders))),
     )
 
     expect(error.category).toBe(category)
@@ -652,7 +668,7 @@ describe('workflow source errors', (): void => {
     const path = join(directory, 'absent.md')
 
     const error = await Effect.runPromise(
-      Effect.flip(withEnvironment(loadWorkflow(path, trackerProviders))),
+      Effect.flip(withEnvironment(loadHostWorkflow(path, trackerProviders))),
     )
 
     expect(error.category).toBe('missing_workflow_file')
@@ -669,7 +685,7 @@ describe('adapter-owned validation', (): void => {
 
     const error = await Effect.runPromise(
       Effect.flip(
-        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+        withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
       ),
     )
 
@@ -688,7 +704,7 @@ describe('adapter-owned validation', (): void => {
 
     const error = await Effect.runPromise(
       Effect.flip(
-        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+        withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
       ),
     )
 
@@ -706,7 +722,7 @@ describe('adapter-owned validation', (): void => {
     api_base_url: https://github.example.test/api/v3/`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://github.example.test/api/v3')
@@ -724,7 +740,7 @@ describe('adapter-owned validation', (): void => {
 
     const error = await Effect.runPromise(
       Effect.flip(
-        withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+        withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
       ),
     )
 
@@ -741,7 +757,7 @@ codex:
     networkAccess: false`)
 
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     expect(workflow.config.codex.turnSandboxPolicy).toEqual({
@@ -754,7 +770,7 @@ codex:
   it('revalidates the adapter secret on every dispatch preflight', async (): Promise<void> => {
     const path = await writeWorkflow(minimalTracker)
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, trackerProviders), { TEST_TRACKER_TOKEN: 'secret' }),
     )
 
     const validated = await Effect.runPromise(
@@ -778,7 +794,9 @@ codex:
   provider:
     token: STUB_TRACKER_TOKEN`)
     const workflow = await Effect.runPromise(
-      withEnvironment(loadWorkflow(path, stubTrackerProviders), { STUB_TRACKER_TOKEN: 'secret' }),
+      withEnvironment(loadHostWorkflow(path, stubTrackerProviders), {
+        STUB_TRACKER_TOKEN: 'secret',
+      }),
     )
 
     const validated = await Effect.runPromise(

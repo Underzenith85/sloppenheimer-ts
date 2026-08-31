@@ -1,5 +1,5 @@
+import { FileSystem } from '@effect/platform'
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Effect, Either, ParseResult, Schema } from 'effect'
@@ -500,16 +500,20 @@ export const preflightWorkflow = (
     ),
   )
 
-const readWorkflowSource = (path: string): Effect.Effect<string, WorkflowError> =>
-  Effect.tryPromise({
-    try: () => readFile(path, 'utf8'),
-    catch: (cause: unknown) =>
-      new WorkflowError({
-        category: 'missing_workflow_file',
-        message: `cannot read workflow file: ${path}`,
-        cause,
-      }),
-  })
+const readWorkflowSource = (
+  path: string,
+): Effect.Effect<string, WorkflowError, FileSystem.FileSystem> =>
+  FileSystem.FileSystem.pipe(
+    Effect.flatMap((fileSystem) => fileSystem.readFileString(path, 'utf8')),
+    Effect.mapError(
+      (cause) =>
+        new WorkflowError({
+          category: 'missing_workflow_file',
+          message: `cannot read workflow file: ${path}`,
+          cause,
+        }),
+    ),
+  )
 
 /**
  * Reads and validates a workflow definition.
@@ -525,7 +529,7 @@ const readWorkflowSource = (path: string): Effect.Effect<string, WorkflowError> 
 export const loadWorkflow = (
   path: string,
   providers: TrackerProviderRegistry,
-): Effect.Effect<Workflow, WorkflowError> =>
+): Effect.Effect<Workflow, WorkflowError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const source = yield* readWorkflowSource(path)
     const definition = yield* splitWorkflow(source)

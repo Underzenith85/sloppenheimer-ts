@@ -11,7 +11,6 @@ import {
 export {
   issueIsRoutable,
   retainedCompletedDetails,
-  retryDelayMs,
   sortIssues,
   type AgentDetailLookup,
   type OrchestratorContext,

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { FileSystem } from '@effect/platform'
+import { NodeFileSystem } from '@effect/platform-node'
 import chokidar from 'chokidar'
 import { Cause, ConfigProvider, Effect, Exit, Layer, Queue, Stream } from 'effect'
 
-import { codexAgentRunner } from './adapters/codex/agent-runner.js'
+import { layerCodexAgentRunner } from './adapters/codex/agent-runner.js'
 import { githubHttpClientLayer } from './adapters/github/index.js'
 import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
@@ -14,7 +16,7 @@ import {
   trackerFactory,
   trackerProviders,
 } from './tracker-adapters.js'
-import { startOrchestrator, type OrchestratorServices } from './core/orchestrator.js'
+import { startOrchestrator } from './core/orchestrator.js'
 import { SourceControlError, TrackerError, type WorkflowError } from './errors.js'
 import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
@@ -22,12 +24,10 @@ import {
   CodeReviewFactory,
   CurrentIssueControl,
   IssueControlFactory,
-  layerAgentRunner,
   layerCodeReviewPorts,
   layerSourceControlPorts,
   layerCurrentIssueControl,
   layerPorts,
-  layerWorkflowLoader,
   layerWorkflowWatcher,
   portsConfiguration,
   TrackerFactory,
@@ -36,6 +36,7 @@ import {
   WorkspaceManagerFactory,
   type AdapterServices,
   type CodeReviewServices,
+  type PortServices,
   type SourceControlServices,
 } from './ports/index.js'
 import { logInfo } from './support/logging.js'
@@ -49,20 +50,43 @@ import { logInfo } from './support/logging.js'
 const shutdownTimeoutMs = 10_000
 
 /**
+ * The host filesystem, named in one place. Every module below reads and writes through the
+ * `FileSystem` service, so this is the only line that says which filesystem that is — and the one
+ * line a test replaces.
+ */
+const hostFileSystem: Layer.Layer<FileSystem.FileSystem> = NodeFileSystem.layer
+
+/**
  * The concrete adapters this executable binds: GitHub for the tracker and for code review, Codex
  * for the agent runner, and the host filesystem for workflows and workspaces. Nothing below the
  * composition root names any of them.
+ *
+ * The workflow loader, the workspace manager and the agent runner are built against the filesystem
+ * rather than carrying the requirement in their ports: each binds it once here, so a port a reload
+ * rebuilds stays an ordinary effect at every call site below.
  */
-const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
-  layerAgentRunner(codexAgentRunner),
+const adapters: Layer.Layer<AdapterServices, never, FileSystem.FileSystem> = Layer.mergeAll(
+  layerCodexAgentRunner,
   Layer.succeed(TrackerFactory, trackerFactory),
-  Layer.succeed(WorkspaceManagerFactory, {
-    make: (settings) => Effect.succeed(makeWorkspaceManager(settings.root, settings.hooks)),
-  }),
-  layerWorkflowLoader({
-    load: (path) => loadWorkflow(path, trackerProviders),
-    preflight: (workflow) => preflightWorkflow(workflow),
-  }),
+  Layer.effect(
+    WorkspaceManagerFactory,
+    Effect.map(FileSystem.FileSystem, (fileSystem) => ({
+      make: (settings) =>
+        makeWorkspaceManager(settings.root, settings.hooks).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        ),
+    })),
+  ),
+  Layer.effect(
+    WorkflowLoader,
+    Effect.map(FileSystem.FileSystem, (fileSystem) => ({
+      load: (path) =>
+        loadWorkflow(path, trackerProviders).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        ),
+      preflight: (workflow) => preflightWorkflow(workflow),
+    })),
+  ),
   layerWorkflowWatcher({
     // The queue is what turns chokidar's callback into a stream: `unsafeOffer` is a write to a data
     // structure rather than an entry into the runtime, and the consuming fiber is where the change
@@ -116,8 +140,9 @@ const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.
 const ports = (
   workflowPath: string,
 ): Layer.Layer<
-  OrchestratorServices | CodeReviewServices | SourceControlServices | CurrentIssueControl,
-  WorkflowError | TrackerError | SourceControlError
+  PortServices | CodeReviewServices | SourceControlServices | CurrentIssueControl,
+  WorkflowError | TrackerError | SourceControlError,
+  FileSystem.FileSystem
 > =>
   Layer.unwrapEffect(
     loadWorkflow(workflowPath, trackerProviders).pipe(
@@ -201,6 +226,7 @@ const main = async (): Promise<number> => {
     // same context, so the client bound here reaches every request its ports make.
   ).pipe(
     Effect.provide(ports(options.workflowPath)),
+    Effect.provide(hostFileSystem),
     Effect.provide(githubHttpClientLayer),
     // The composition root states where configuration comes from. Everything below reads the
     // environment as a `Config` against whatever provider the fiber carries, so this is the one

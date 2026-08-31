@@ -64,10 +64,3 @@ export const trackerRetryDelay = (
   Schedule.run(trackerRetrySchedule(maximumMs), 0, [{ error, attempt }]).pipe(
     Effect.map((delays) => Chunk.last(delays).pipe(Option.flatten)),
   )
-
-/**
- * Compatibility wrapper for the existing tested public surface. New orchestration code consumes
- * the schedule through `agentRetryDelay` instead.
- */
-export const retryDelayMs = (attempt: number, maximumMs: number): number =>
-  Effect.runSync(agentRetryDelay(attempt, maximumMs))

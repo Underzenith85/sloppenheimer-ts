@@ -6,20 +6,81 @@ import {
   codexAgentRunner,
   layerCodexAgentRunner,
 } from '../../../src/adapters/codex/agent-runner.js'
-import { runAgent } from '../../../src/adapters/codex/codex.js'
-import { AgentRunner } from '../../../src/ports/agent-runner.js'
+import { issueId, issueIdentifier, type Issue } from '../../../src/domain/domain.js'
+import type { CodexConfig } from '../../../src/config/workflow.js'
+import type { AgentLaunch } from '../../../src/adapters/codex/codex.js'
+import { AgentRunner, type AgentRunnerPort } from '../../../src/ports/agent-runner.js'
+import { hostFileSystem } from '../../harness/filesystem.js'
+
+const codexConfig: CodexConfig = {
+  command: 'codex app-server',
+  approvalPolicy: 'never',
+  threadSandbox: 'workspace-write',
+  turnSandboxPolicy: null,
+  turnTimeoutMs: 1_000,
+  readTimeoutMs: 1_000,
+  stallTimeoutMs: 1_000,
+}
+
+const issue: Issue = {
+  id: issueId('19'),
+  nativeRef: null,
+  identifier: issueIdentifier('example/symphony#19'),
+  title: 'Bind the runner to a filesystem',
+  description: null,
+  priority: null,
+  state: 'open',
+  branchName: null,
+  url: null,
+  assigneeId: null,
+  labels: [],
+  blockedBy: [],
+  dispatchable: true,
+  createdAt: null,
+  updatedAt: null,
+}
+
+/** A launch whose workspace is not contained by its root, which launch verification refuses first. */
+const uncontainedLaunch: AgentLaunch = {
+  issue,
+  workspace: { path: '/etc', key: 'etc', createdNow: false },
+  workspaceRoot: '/tmp/symphony-agent-runner-root',
+  config: codexConfig,
+  prompt: 'work',
+  maxTurns: 1,
+  secretEnvironmentNames: [],
+  refreshIssue: () => Effect.succeed(null),
+  isRoutable: () => false,
+  onEvent: () => undefined,
+}
+
+const buildRunner = (): Promise<AgentRunnerPort> =>
+  Effect.runPromise(codexAgentRunner.pipe(Effect.provide(hostFileSystem)))
 
 describe('Codex agent runner adapter', (): void => {
-  it('satisfies the port with the App Server session', (): void => {
-    expect(codexAgentRunner.run).toBe(runAgent)
+  /*
+   * The runner binds the filesystem that launch verification reads through, so the port's own
+   * signature carries no such requirement. What `run` does before anything else is that
+   * verification, which is what this asserts it still reaches.
+   */
+  it('satisfies the port with the App Server session', async (): Promise<void> => {
+    const runner = await buildRunner()
+
+    const error = await Effect.runPromise(Effect.flip(runner.run(uncontainedLaunch)))
+
+    expect(error.category).toBe('workspace_rejected')
+    expect(runner.semantics).toBe(codexAgentEventSemantics)
   })
 
   it('provides the agent runner tag from its layer', async (): Promise<void> => {
     const provided = await Effect.runPromise(
-      AgentRunner.pipe(Effect.provide(layerCodexAgentRunner)),
+      AgentRunner.pipe(Effect.provide(layerCodexAgentRunner), Effect.provide(hostFileSystem)),
     )
 
-    expect(provided).toBe(codexAgentRunner)
+    const error = await Effect.runPromise(Effect.flip(provided.run(uncontainedLaunch)))
+
+    expect(error.category).toBe('workspace_rejected')
+    expect(provided.semantics).toBe(codexAgentEventSemantics)
   })
 
   it('reads Codex turn statuses as port outcomes', (): void => {

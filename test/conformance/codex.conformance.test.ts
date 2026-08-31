@@ -1,13 +1,25 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
-import { runAgent, type AgentEvent, type AgentResult } from '../../src/adapters/codex/codex.js'
+import {
+  runAgent,
+  type AgentEvent,
+  type AgentLaunch,
+  type AgentResult,
+} from '../../src/adapters/codex/codex.js'
+import type { AgentError } from '../../src/errors.js'
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const issue: Issue = {
   id: issueId('fake-issue'),
@@ -27,36 +39,40 @@ const issue: Issue = {
   updatedAt: null,
 }
 
-const runScenario = async (
+type ScenarioOutcome = Readonly<{ events: readonly AgentEvent[]; result: AgentResult }>
+
+const runScenario = (
   scenario: FakeAppServerScenario,
   timeoutMs = 1_000,
-): Promise<Readonly<{ events: readonly AgentEvent[]; result: AgentResult }>> => {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-conformance-'))
-  const workspacePath = join(workspaceRoot, 'fake')
-  await mkdir(workspacePath)
-  const events: AgentEvent[] = []
-  const configuredPolicies = scenario === 'configured-policies'
-  const expectation = configuredPolicies
-    ? {
-        approvalPolicy: 'on-request',
-        threadSandbox: 'read-only',
-        turnSandboxPolicy: { type: 'readOnly', networkAccess: false },
+): Effect.Effect<ScenarioOutcome, AgentError> =>
+  Effect.acquireUseRelease(
+    Effect.promise(async () => {
+      const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-conformance-'))
+      await mkdir(join(workspaceRoot, 'fake'))
+      return workspaceRoot
+    }),
+    (workspaceRoot) => {
+      const events: AgentEvent[] = []
+      const configuredPolicies = scenario === 'configured-policies'
+      const expectation = configuredPolicies
+        ? {
+            approvalPolicy: 'on-request',
+            threadSandbox: 'read-only',
+            turnSandboxPolicy: { type: 'readOnly', networkAccess: false },
+          }
+        : undefined
+      const config: CodexConfig = {
+        command: fakeAppServerCommand(scenario, expectation),
+        approvalPolicy: expectation?.approvalPolicy ?? 'never',
+        threadSandbox: expectation?.threadSandbox ?? 'workspace-write',
+        turnSandboxPolicy: expectation?.turnSandboxPolicy ?? null,
+        readTimeoutMs: scenario === 'read-timeout' ? timeoutMs : 1_000,
+        turnTimeoutMs: scenario === 'turn-timeout' ? timeoutMs : 1_000,
+        stallTimeoutMs: 0,
       }
-    : undefined
-  const config: CodexConfig = {
-    command: fakeAppServerCommand(scenario, expectation),
-    approvalPolicy: expectation?.approvalPolicy ?? 'never',
-    threadSandbox: expectation?.threadSandbox ?? 'workspace-write',
-    turnSandboxPolicy: expectation?.turnSandboxPolicy ?? null,
-    readTimeoutMs: scenario === 'read-timeout' ? timeoutMs : 1_000,
-    turnTimeoutMs: scenario === 'turn-timeout' ? timeoutMs : 1_000,
-    stallTimeoutMs: 0,
-  }
-  try {
-    const result = await Effect.runPromise(
-      runAgent({
+      return runAgentOnHost({
         issue,
-        workspace: { path: workspacePath, key: 'fake', createdNow: true },
+        workspace: { path: join(workspaceRoot, 'fake'), key: 'fake', createdNow: true },
         workspaceRoot,
         config,
         prompt: 'conformance prompt',
@@ -65,78 +81,100 @@ const runScenario = async (
         refreshIssue: () => Effect.succeed(null),
         isRoutable: () => false,
         onEvent: (event) => events.push(event),
-      }),
-    )
-    return { events, result }
-  } finally {
-    await rm(workspaceRoot, { force: true, recursive: true })
-  }
-}
+      }).pipe(Effect.map((result): ScenarioOutcome => ({ events, result })))
+    },
+    // Released on failure and interruption alike, which the `finally` this replaces could not
+    // promise once the run became an interruptible fiber.
+    (workspaceRoot) => Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true })),
+  )
 
+// `live` throughout: every scenario spawns the fake App Server as a real child process and leans
+// on real read and turn timeouts, so the suite needs the wall clock.
 describe('Core Conformance Codex App Server client', (): void => {
-  it('uses JSONL framing, extracts identities, and emits usage telemetry', async (): Promise<void> => {
-    const { events, result } = await runScenario('complete')
+  it.live('uses JSONL framing, extracts identities, and emits usage telemetry', () =>
+    Effect.gen(function* () {
+      const { events, result } = yield* runScenario('complete')
 
-    expect(result).toEqual({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ event: 'session_started', threadId: 'thread-1' }),
-        expect.objectContaining({
-          event: 'turn/usage',
-          usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
-        }),
-      ]),
-    )
-  })
+      expect(result).toEqual({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: 'session_started', threadId: 'thread-1' }),
+          expect.objectContaining({
+            event: 'turn/usage',
+            usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+          }),
+        ]),
+      )
+    }),
+  )
 
-  it('keeps diagnostic stderr separate from protocol stdout', async (): Promise<void> => {
-    const { events } = await runScenario('diagnostic')
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          event: 'diagnostic',
-          message: 'warning: this is diagnostic only',
-        }),
-      ]),
-    )
-  })
+  it.live('keeps diagnostic stderr separate from protocol stdout', () =>
+    Effect.gen(function* () {
+      const { events } = yield* runScenario('diagnostic')
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: 'diagnostic',
+            message: 'warning: this is diagnostic only',
+          }),
+        ]),
+      )
+    }),
+  )
 
-  it('answers approval requests according to the documented session policy', async (): Promise<void> => {
-    const { events } = await runScenario('approval')
-    expect(events).toEqual(
-      expect.arrayContaining([expect.objectContaining({ event: 'approval_auto_approved' })]),
-    )
-  })
+  it.live('answers approval requests according to the documented session policy', () =>
+    Effect.gen(function* () {
+      const { events } = yield* runScenario('approval')
+      expect(events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ event: 'approval_auto_approved' })]),
+      )
+    }),
+  )
 
-  it('answers file-change approval requests according to the documented session policy', async (): Promise<void> => {
-    const { events } = await runScenario('file-approval')
-    expect(events).toEqual(
-      expect.arrayContaining([expect.objectContaining({ event: 'approval_auto_approved' })]),
-    )
-  })
+  it.live('answers file-change approval requests according to the documented session policy', () =>
+    Effect.gen(function* () {
+      const { events } = yield* runScenario('file-approval')
+      expect(events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ event: 'approval_auto_approved' })]),
+      )
+    }),
+  )
 
-  it('preserves configured approval and sandbox policies', async (): Promise<void> => {
-    const { result } = await runScenario('configured-policies')
-    expect(result.turnCount).toBe(1)
-  })
+  it.live('preserves configured approval and sandbox policies', () =>
+    Effect.gen(function* () {
+      const { result } = yield* runScenario('configured-policies')
+      expect(result.turnCount).toBe(1)
+    }),
+  )
 
-  it('rejects unsupported client requests without stalling the turn', async (): Promise<void> => {
-    const { events, result } = await runScenario('unsupported-tool')
-    expect(result.turnCount).toBe(1)
-    expect(events).toEqual(
-      expect.arrayContaining([expect.objectContaining({ event: 'unsupported_tool_call' })]),
-    )
-  })
+  it.live('rejects unsupported client requests without stalling the turn', () =>
+    Effect.gen(function* () {
+      const { events, result } = yield* runScenario('unsupported-tool')
+      expect(result.turnCount).toBe(1)
+      expect(events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ event: 'unsupported_tool_call' })]),
+      )
+    }),
+  )
 
-  it('fails user-input requests immediately instead of waiting indefinitely', async (): Promise<void> => {
-    await expect(runScenario('user-input')).rejects.toThrow('Codex requested interactive input')
-  })
+  it.live('fails user-input requests immediately instead of waiting indefinitely', () =>
+    Effect.gen(function* () {
+      const failure = yield* Effect.flip(runScenario('user-input'))
+      expect(failure.message).toContain('Codex requested interactive input')
+    }),
+  )
 
-  it('enforces request and response read timeouts', async (): Promise<void> => {
-    await expect(runScenario('read-timeout', 30)).rejects.toThrow('initialize response timed out')
-  })
+  it.live('enforces request and response read timeouts', () =>
+    Effect.gen(function* () {
+      const failure = yield* Effect.flip(runScenario('read-timeout', 30))
+      expect(failure.message).toContain('initialize response timed out')
+    }),
+  )
 
-  it('enforces turn timeouts', async (): Promise<void> => {
-    await expect(runScenario('turn-timeout', 30)).rejects.toThrow('turn turn-1 produced no output')
-  })
+  it.live('enforces turn timeouts', () =>
+    Effect.gen(function* () {
+      const failure = yield* Effect.flip(runScenario('turn-timeout', 30))
+      expect(failure.message).toContain('turn turn-1 produced no output')
+    }),
+  )
 })

@@ -27,6 +27,7 @@ import {
 } from '../../src/ports/index.js'
 import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 import { trackerProviders } from '../../src/tracker-adapters.js'
+import { hostFileSystem } from '../harness/filesystem.js'
 import { githubProviderOf, type GitHubProviderConfig } from '../../src/adapters/github/index.js'
 
 const temporaryDirectories: string[] = []
@@ -146,7 +147,7 @@ const gitHubIssueControl = layerCurrentIssueControl.pipe(Layer.provide(layerGitH
 
 /** The console reads the workflow through the loader the composition root binds. */
 const workflowLoader = layerWorkflowLoader({
-  load: (path) => loadWorkflow(path, trackerProviders),
+  load: (path) => loadWorkflow(path, trackerProviders).pipe(Effect.provide(hostFileSystem)),
   preflight: (workflow) => preflightWorkflow(workflow),
 })
 

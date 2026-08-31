@@ -30,6 +30,7 @@
     "yaml": "2.9.0"
   },
   "devDependencies": {
+    "@effect/vitest": "0.30.0",
     "@types/node": "24.13.3",
     "fast-check": "4.9.0",
     "happy-dom": "20.0.11",

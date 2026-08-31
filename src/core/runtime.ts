@@ -1,3 +1,4 @@
+import { FileSystem } from '@effect/platform'
 import { resolve } from 'node:path'
 import {
   Clock,
@@ -92,7 +93,7 @@ export {
   type RuntimeState,
   type WorkflowReloadError,
 } from './state.js'
-export { issueIsRoutable, retryDelayMs, sortIssues } from './policy.js'
+export { issueIsRoutable, sortIssues } from './policy.js'
 
 export type RunningSnapshot = Readonly<{
   issueId: IssueId
@@ -246,6 +247,8 @@ export type OrchestratorServices =
   | AgentRunner
   | CurrentTracker
   | CurrentWorkspaceManager
+  /** The handoff store is read and written against the host filesystem the root bound. */
+  | FileSystem.FileSystem
   | WorkflowLoader
   | WorkflowWatcher
 
@@ -391,6 +394,16 @@ export const startOrchestratorRuntime = (
       sourceControlCell: yield* Effect.serviceOption(CurrentSourceControl),
     }
     /**
+     * Bound once here rather than read from each fiber that persists: the runtime hands its own
+     * operations out as `Effect<void>` for a callback to run, and those carry no context of their
+     * own.
+     */
+    const fileSystem = yield* FileSystem.FileSystem
+    const onHostFileSystem = <Value, Error>(
+      effect: Effect.Effect<Value, Error, FileSystem.FileSystem>,
+    ): Effect.Effect<Value, Error> =>
+      Effect.provideService(effect, FileSystem.FileSystem, fileSystem)
+    /**
      * Built from the workflow the orchestrator loaded rather than adopted from the composition
      * root's own read of it. The two are separate reads of one file, and an edit between them would
      * otherwise leave every port serving a version that nothing compares against again: the reload
@@ -421,7 +434,7 @@ export const startOrchestratorRuntime = (
           storeReadFailed: false,
           storeError: null,
         })
-      : loadHandoffs(handoffStorePath).pipe(
+      : onHostFileSystem(loadHandoffs(handoffStorePath)).pipe(
           Effect.matchEffect({
             onFailure: (error) =>
               logError('handoff store read failed; preserving store during recovery', {
@@ -507,7 +520,9 @@ export const startOrchestratorRuntime = (
       if (handoffStoreDisabled || !current.startupRecoveryFinished || current.storeReadFailed) {
         return
       }
-      yield* saveHandoffs(handoffStorePath, Transitions.handoffSnapshots(current)).pipe(
+      yield* onHostFileSystem(
+        saveHandoffs(handoffStorePath, Transitions.handoffSnapshots(current)),
+      ).pipe(
         Effect.catchAll((error) =>
           Effect.gen(function* () {
             const observedAt = yield* currentInstant

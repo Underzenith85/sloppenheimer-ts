@@ -5,7 +5,13 @@ import { fileURLToPath } from 'node:url'
 import { Effect, Option, Redacted } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { runAgent, type AgentEvent } from '../../src/adapters/codex/codex.js'
+import {
+  runAgent,
+  type AgentEvent,
+  type AgentLaunch,
+  type AgentResult,
+} from '../../src/adapters/codex/codex.js'
+import type { AgentError } from '../../src/errors.js'
 import { makeHostToolSession } from '../../src/core/dispatch.js'
 import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
 import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
@@ -14,6 +20,11 @@ import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
 import type { TrackerPort } from '../../src/ports/tracker.js'
 import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -280,7 +291,7 @@ describe('GitHub provider-native tool extension', (): void => {
     process.env['SYMPHONY_HOST_TOOL_TOKEN'] = 'host-only-secret-value'
     try {
       const result = await Effect.runPromise(
-        runAgent({
+        runAgentOnHost({
           issue,
           workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
           workspaceRoot,
@@ -335,7 +346,7 @@ describe('GitHub provider-native tool extension', (): void => {
     }
     try {
       const result = await Effect.runPromise(
-        runAgent({
+        runAgentOnHost({
           issue,
           workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
           workspaceRoot,

@@ -1,9 +1,11 @@
-import { Exit, Fiber, MutableRef, Option } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { it } from '@effect/vitest'
+import { Effect, Exit, Fiber, MutableRef, Option } from 'effect'
+import { describe, expect } from 'vitest'
 
 import type { Workflow } from '../../src/config/workflow.js'
 import { issueId, issueIdentifier, type Issue, type IssueId } from '../../src/domain/domain.js'
-import { dispatchAdmission, hasSlot, retryDelayMs } from '../../src/core/policy.js'
+import { dispatchAdmission, hasSlot } from '../../src/core/policy.js'
+import { agentRetryDelay } from '../../src/core/retry.js'
 import {
   initialState,
   retainedCompletedDetails,
@@ -507,11 +509,13 @@ describe('retry scheduling', (): void => {
     expect(drained.retries.has(issue.id)).toBe(false)
   })
 
-  it('backs off exponentially up to the configured ceiling', (): void => {
-    expect(retryDelayMs(1, 300_000)).toBe(10_000)
-    expect(retryDelayMs(3, 300_000)).toBe(40_000)
-    expect(retryDelayMs(30, 300_000)).toBe(300_000)
-  })
+  it.effect('backs off exponentially up to the configured ceiling', () =>
+    Effect.gen(function* () {
+      expect(yield* agentRetryDelay(1, 300_000)).toBe(10_000)
+      expect(yield* agentRetryDelay(3, 300_000)).toBe(40_000)
+      expect(yield* agentRetryDelay(30, 300_000)).toBe(300_000)
+    }),
+  )
 })
 
 describe('run lifecycle', (): void => {

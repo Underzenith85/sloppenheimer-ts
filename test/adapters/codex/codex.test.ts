@@ -1,25 +1,60 @@
+import type { FileSystem } from '@effect/platform'
 import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect } from 'effect'
+import { Effect, type Scope } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   boundedMessage,
   makeCodexEnvironment,
-  runAgent,
+  runAgent as runAgentAgainstFileSystem,
   sessionSecretValues,
   telemetryFrom,
   type AgentLaunch,
 } from '../../../src/adapters/codex/codex.js'
 import { runWithEnvironment } from '../../harness/environment.js'
+import { hostFileSystem } from '../../harness/filesystem.js'
 import { issueId, issueIdentifier, type Issue, type Workspace } from '../../../src/domain/domain.js'
+import type { VerifiedWorkspace } from '../../../src/domain/workspace-containment.js'
+import type { AgentError, WorkspaceError } from '../../../src/errors.js'
+import type { AgentResult } from '../../../src/ports/agent-runner.js'
 import type { CodexConfig } from '../../../src/config/workflow.js'
 import {
-  assertWorkspaceIdentity,
-  openVerifiedWorkspace,
-  verifyWorkspaceForLaunch,
+  assertWorkspaceIdentity as assertWorkspaceIdentityAgainstFileSystem,
+  openVerifiedWorkspace as openVerifiedWorkspaceAgainstFileSystem,
+  verifyWorkspaceForLaunch as verifyWorkspaceForLaunchAgainstFileSystem,
 } from '../../../src/adapters/node/workspace-identity.js'
+
+/**
+ * Launch verification reads real directories through `FileSystem`, so each entry point is bound to
+ * the host's exactly as the composition root binds it and the tests below call it unchanged.
+ */
+const onHostFileSystem = <Value, Error, Requirements>(
+  effect: Effect.Effect<Value, Error, Requirements>,
+): Effect.Effect<Value, Error, Exclude<Requirements, FileSystem.FileSystem>> =>
+  Effect.provide(effect, hostFileSystem)
+
+const runAgent = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  onHostFileSystem(runAgentAgainstFileSystem(launch))
+
+const verifyWorkspaceForLaunch = (
+  root: string,
+  workspace: Workspace,
+): Effect.Effect<VerifiedWorkspace, WorkspaceError> =>
+  onHostFileSystem(verifyWorkspaceForLaunchAgainstFileSystem(root, workspace))
+
+const assertWorkspaceIdentity = (
+  root: string,
+  verified: VerifiedWorkspace,
+): Effect.Effect<void, WorkspaceError> =>
+  onHostFileSystem(assertWorkspaceIdentityAgainstFileSystem(root, verified))
+
+const openVerifiedWorkspace = (
+  root: string,
+  workspace: Workspace,
+): Effect.Effect<VerifiedWorkspace, WorkspaceError, Scope.Scope> =>
+  onHostFileSystem(openVerifiedWorkspaceAgainstFileSystem(root, workspace))
 
 describe('Codex child environment', (): void => {
   it('removes custom tracker secrets and every GitHub authentication alias', (): void => {
