@@ -1,4 +1,4 @@
-import { Effect } from 'effect'
+import { Config, Effect, Option } from 'effect'
 
 import {
   agentRunnerSettingsOf,
@@ -8,6 +8,7 @@ import {
   type AgentRunnerRegistry,
   type ValidatedAgentRunner,
 } from '@symphony/core/domain/agent-runner-provider.js'
+import { environmentReferenceName } from '@symphony/core/config/env-reference.js'
 import { WorkflowError } from '@symphony/core/domain/errors.js'
 import type { AgentEvent, AgentLifecycle, AgentTurnOutcome } from '@symphony/core/telemetry.js'
 import { withEnvironment } from './environment.js'
@@ -42,6 +43,24 @@ export const auroraEvents = Object.freeze({
   chatter: 'aurora.chatter',
 })
 
+const invalidTempo = (): WorkflowError =>
+  new WorkflowError({
+    category: 'invalid_config',
+    message: `runner.settings.tempo must be one of: ${auroraTempos.join(', ')}`,
+  })
+
+/** `$VAR` indirection, resolved the way an adapter's own secret and path fields resolve it. */
+const resolveTempo = (authored: string): Effect.Effect<string> => {
+  const reference = environmentReferenceName(authored)
+  if (reference === null) {
+    return Effect.succeed(authored)
+  }
+  return Config.option(Config.string(reference)).pipe(
+    Effect.map(Option.getOrElse(() => 'largo')),
+    Effect.orDie,
+  )
+}
+
 const isAuroraSettings = (value: unknown): value is AuroraSettings =>
   typeof value === 'object' &&
   value !== null &&
@@ -52,19 +71,20 @@ export const auroraRunnerAdapter: AgentRunnerAdapter<AuroraSettings> = {
   defaultCommand: 'aurora --serve',
   authenticationEnvironmentNames: auroraAuthenticationEnvironmentNames,
   validate: (settings) => {
-    const tempo = settings['tempo'] ?? 'largo'
-    if (
-      typeof tempo !== 'string' ||
-      !auroraTempos.includes(tempo as (typeof auroraTempos)[number])
-    ) {
-      return Effect.fail(
-        new WorkflowError({
-          category: 'invalid_config',
-          message: `runner.settings.tempo must be one of: ${auroraTempos.join(', ')}`,
-        }),
-      )
+    const authored = settings['tempo'] ?? 'largo'
+    if (typeof authored !== 'string') {
+      return Effect.fail(invalidTempo())
     }
-    return Effect.succeed({ tempo })
+    // Resolved through the calling fiber's `ConfigProvider`, which is what makes these settings
+    // environment-dependent — and therefore what a rotation has to be able to change. A real
+    // adapter resolves a token or a path here; the shape of the problem is the same.
+    return resolveTempo(authored).pipe(
+      Effect.flatMap((tempo) =>
+        auroraTempos.includes(tempo as (typeof auroraTempos)[number])
+          ? Effect.succeed({ tempo })
+          : Effect.fail(invalidTempo()),
+      ),
+    )
   },
   isSettings: isAuroraSettings,
   same: (left, right) => left.tempo === right.tempo,

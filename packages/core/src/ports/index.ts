@@ -83,6 +83,7 @@ export {
   layerWorkflowWatcher,
   WorkflowLoader,
   WorkflowWatcher,
+  type PreflightResult,
   type WorkflowLoaderPort,
   type WorkflowWatcherPort,
 } from './workflow.js'

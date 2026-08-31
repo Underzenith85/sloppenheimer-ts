@@ -838,7 +838,7 @@ codex:
       })
       const error = yield* Effect.flip(withEnvironment(preflightWorkflow(workflow)))
 
-      expect(Redacted.value(githubProviderOf(validated).token)).toBe('rotated')
+      expect(Redacted.value(githubProviderOf(validated.tracker).token)).toBe('rotated')
       expect(error.category).toBe('invalid_config')
       expect(error.message).toContain('missing environment variable')
     }),
@@ -866,8 +866,8 @@ codex:
         })
 
         expect(stubProviderToken(workflow.tracker)).toBe('secret')
-        expect(stubProviderToken(validated)).toBe('rotated')
-        expect(sameTrackerProvider(validated, workflow.tracker)).toBe(false)
+        expect(stubProviderToken(validated.tracker)).toBe('rotated')
+        expect(sameTrackerProvider(validated.tracker, workflow.tracker)).toBe(false)
       }),
   )
 })

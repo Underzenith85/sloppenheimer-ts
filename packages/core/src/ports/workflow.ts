@@ -1,20 +1,34 @@
 import { Context, Layer, type Effect, type Scope, type Stream } from 'effect'
 
+import type { ValidatedAgentRunner } from '../domain/agent-runner-provider.js'
 import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { Workflow } from '../config/workflow.js'
 import type { WorkflowError } from '../domain/errors.js'
+
+/**
+ * Both adapter-validated selections, re-read against the environment as it stands now.
+ *
+ * Both are returned because both can go stale the same way: an adapter resolves `$VAR` indirection
+ * at validation time, so a rotated variable changes what either selection means. Returning only the
+ * tracker would leave the runner revalidated and then discarded — it would still fail preflight
+ * when the new value is invalid, but a run would launch with the superseded one.
+ */
+export type PreflightResult = Readonly<{
+  tracker: ValidatedTrackerProvider
+  runner: ValidatedAgentRunner
+}>
 
 /**
  * Reads and validates the workflow definition at a path, and re-validates a definition already in
  * force against the host environment.
  *
  * `preflight` belongs here rather than in the orchestrator because it is the environment that makes
- * a validated provider go stale: the composition root binds the environment the credentials are
- * read from, and the orchestrator only reacts to a provider that came back different.
+ * a validated selection go stale: the composition root binds the environment the credentials are
+ * read from, and the orchestrator only reacts to a selection that came back different.
  */
 export type WorkflowLoaderPort = Readonly<{
   load: (path: string) => Effect.Effect<Workflow, WorkflowError>
-  preflight: (workflow: Workflow) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
+  preflight: (workflow: Workflow) => Effect.Effect<PreflightResult, WorkflowError>
 }>
 
 export class WorkflowLoader extends Context.Tag('symphony/WorkflowLoader')<

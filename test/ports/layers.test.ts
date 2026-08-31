@@ -27,6 +27,7 @@ import {
   type AdapterServices,
 } from '@symphony/core'
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
+import { auroraRunner } from '../harness/alien-agent-runner.js'
 
 const hooks: HooksConfig = {
   afterCreate: null,
@@ -69,7 +70,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
       Effect.fail(
         new WorkflowError({ category: 'missing_workflow_file', message: `no workflow: ${path}` }),
       ),
-    preflight: () => Effect.succeed(validated),
+    preflight: () => Effect.succeed({ tracker: validated, runner: auroraRunner() }),
   }),
   layerWorkflowWatcher({ changes: () => Effect.succeed(Stream.empty) }),
 )

@@ -83,6 +83,7 @@ import {
 } from '@symphony/core'
 import type { Workflow } from '@symphony/core/config/workflow.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
+import type { PreflightResult } from '@symphony/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
@@ -121,6 +122,7 @@ import {
   auroraEvents,
   auroraRunner,
   auroraRunnerAdapter,
+  auroraRunners,
   stubRunner,
 } from './harness/alien-agent-runner.js'
 
@@ -310,7 +312,7 @@ type TestPorts = Readonly<{
   /** The configuration the composition root reads before the orchestrator loads it for itself. */
   configuration: PortsConfiguration
   loadWorkflow: (path: string) => Effect.Effect<Workflow, WorkflowError>
-  preflightWorkflow: (workflow: Workflow) => Effect.Effect<ValidatedTrackerProvider, WorkflowError>
+  preflightWorkflow: (workflow: Workflow) => Effect.Effect<PreflightResult, WorkflowError>
   makeTracker: (provider: ValidatedTrackerProvider) => TrackerPort
   /** Omit to compose no code-review services at all, which disables pull-request handoff. */
   makeCodeReview?: (provider: ValidatedTrackerProvider) => CodeReviewPort | null
@@ -4827,6 +4829,64 @@ describe('tracker credential revalidation', (): void => {
       expect(
         harness.trackerProviders().map((each) => Redacted.value(githubProviderOf(each).token)),
       ).toEqual(['secret', 'secret', 'first', 'rotated'])
+    }),
+  )
+
+  it.effect('launches with runner settings a rotation revalidated, not the startup value', () =>
+    Effect.gen(function* () {
+      // Preflight runs before every dispatch and revalidates both selections. It used to return
+      // only the tracker's, so a rotated runner credential passed preflight — it was revalidated —
+      // and the session then launched with the superseded value. Codex caught this on #218.
+      const environment: Record<string, string> = {
+        SYMPHONY_TEST_TOKEN: 'secret',
+        AURORA_TEMPO: 'largo',
+      }
+      const environmentWorkflow: Workflow = {
+        ...workflow,
+        runner: Effect.runSync(
+          withEnvironment(
+            auroraRunners.validate('aurora', { tempo: '$AURORA_TEMPO' }),
+            environment,
+          ),
+        ),
+        config: {
+          ...workflow.config,
+          runner: { ...workflow.config.runner, settings: { tempo: '$AURORA_TEMPO' } },
+        },
+      }
+      let issue = makeIssue('example/symphony#71', 1, null, ['symphony', 'ready'])
+      const harness = makeHarness(environmentWorkflow, () => [issue])
+      const launched: unknown[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        environment,
+        // Settles immediately, unlike the harness default, so a second issue can be dispatched
+        // under this workflow's concurrency limit of one.
+        runAgent: (launch) =>
+          Effect.sync(() => {
+            launched.push(launch.config.settings)
+            return { threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 }
+          }),
+      }
+      const awaitLaunch = (count: number): Effect.Effect<void> =>
+        Effect.iterate(0, {
+          while: (attempt) => launched.length < count && attempt < 200,
+          body: (attempt) => Effect.as(Effect.yieldNow(), attempt + 1),
+        }).pipe(Effect.asVoid)
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          yield* awaitLaunch(1)
+          environment['AURORA_TEMPO'] = 'presto'
+          issue = makeIssue('example/symphony#72', 1, null, ['symphony', 'ready'])
+          yield* control.refresh
+          yield* awaitLaunch(2)
+        }),
+      )
+
+      expect(launched).toEqual([{ tempo: 'largo' }, { tempo: 'presto' }])
     }),
   )
 

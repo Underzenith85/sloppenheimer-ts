@@ -18,6 +18,7 @@ import type {
   AgentRunnerRegistry,
   ValidatedAgentRunner,
 } from '@symphony/core/domain/agent-runner-provider.js'
+import type { PreflightResult } from '@symphony/core/ports/workflow.js'
 import type {
   TrackerProviderRegistry,
   ValidatedTrackerProvider,
@@ -527,7 +528,7 @@ const frontMatterMap = (value: unknown): Effect.Effect<unknown, WorkflowError> =
  */
 export const preflightWorkflow = (
   workflow: Workflow,
-): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
+): Effect.Effect<PreflightResult, WorkflowError> =>
   Effect.suspend(() =>
     workflow.config.runner.command.trim().length === 0
       ? Effect.fail(
@@ -536,13 +537,15 @@ export const preflightWorkflow = (
             message: 'runner.command must be a non-empty string',
           }),
         )
-      : // Both selections are revalidated, each through the adapter that produced it, and the
-        // credential rule between them is re-checked against the result. A rotated tracker token
-        // that collides with the runner's own authentication must fail preflight, not dispatch.
-        workflow.runner.revalidate(workflow.config.runner.settings).pipe(
-          Effect.zipRight(workflow.tracker.revalidate(workflow.config.tracker.provider)),
-          Effect.tap((tracker) => reserveRunnerCredentials(tracker, workflow.runner)),
-        ),
+      : // Both selections are revalidated, each through the adapter that produced it, and both are
+        // returned. An adapter resolves `$VAR` indirection at validation time, so discarding either
+        // would revalidate a rotated credential and then go on using the superseded one. The rule
+        // between them is re-checked against the results, so a rotated tracker token that collides
+        // with the runner's own authentication fails preflight rather than dispatch.
+        Effect.all({
+          runner: workflow.runner.revalidate(workflow.config.runner.settings),
+          tracker: workflow.tracker.revalidate(workflow.config.tracker.provider),
+        }).pipe(Effect.tap(({ tracker, runner }) => reserveRunnerCredentials(tracker, runner))),
   ).pipe(
     Effect.catchAllDefect((cause: unknown) =>
       Effect.fail(
