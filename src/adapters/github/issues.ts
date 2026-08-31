@@ -1,5 +1,5 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, Option, Redacted, Ref, type Layer } from 'effect'
+import { Effect, HashMap, Option, Redacted, Ref, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '../../domain/domain.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from '../../domain/dependencies.js'
@@ -54,18 +54,23 @@ type DependencyCacheEntry = Readonly<{
  * The tracker's dependency cache. It is a `Ref` rather than a `Map` in the constructor's closure
  * because `hydrateDependencies` runs its writes at `dependencyConcurrency`: a `Ref` update is a
  * defined transition in the effect channel, so an interrupted hydration leaves no entry behind and
- * a later read-modify-write has somewhere to happen.
+ * a later read-modify-write has somewhere to happen. `HashMap` is what keeps that affordable — it
+ * shares structure between versions, so hydrating a backlog of N issues costs N logarithmic
+ * updates rather than N copies of the whole cache.
  */
-type DependencyCache = Ref.Ref<ReadonlyMap<IssueId, DependencyCacheEntry>>
+type DependencyCache = Ref.Ref<HashMap.HashMap<IssueId, DependencyCacheEntry>>
 
 /** A cache hit: present, matching the issue revision it was recorded against, and unexpired. */
 const liveBlockedBy = (
-  entry: DependencyCacheEntry | undefined,
+  entry: Option.Option<DependencyCacheEntry>,
   issueUpdatedAt: number | null,
 ): Option.Option<readonly BlockerRef[]> =>
-  entry !== undefined && entry.issueUpdatedAt === issueUpdatedAt && entry.expiresAt > Date.now()
-    ? Option.some(entry.blockedBy)
-    : Option.none()
+  entry.pipe(
+    Option.filter(
+      (cached) => cached.issueUpdatedAt === issueUpdatedAt && cached.expiresAt > Date.now(),
+    ),
+    Option.map((cached) => cached.blockedBy),
+  )
 
 /** GitHub owns blocker and cycle eligibility; core treats `dispatchable` as authoritative. */
 const applyDispatchEligibility = (issues: readonly Issue[]): readonly Issue[] => {
@@ -289,7 +294,9 @@ const hydrateDependencies = (
       const readCache =
         useCache && dependencyLabels === null
           ? Ref.get(cache).pipe(
-              Effect.map((entries) => liveBlockedBy(entries.get(issue.id), issueUpdatedAt)),
+              Effect.map((entries) =>
+                liveBlockedBy(HashMap.get(entries, issue.id), issueUpdatedAt),
+              ),
             )
           : Effect.succeed(Option.none<readonly BlockerRef[]>())
       return readCache.pipe(
@@ -299,14 +306,17 @@ const hydrateDependencies = (
             onNone: () =>
               fetchBlockedBy(provider, prefix, issue).pipe(
                 Effect.tap((blockedBy) =>
-                  Ref.update(cache, (entries) => {
-                    const entry: DependencyCacheEntry = {
-                      blockedBy,
-                      issueUpdatedAt,
-                      expiresAt: Date.now() + dependencyCacheTtlMs,
-                    }
-                    return new Map<IssueId, DependencyCacheEntry>([...entries, [issue.id, entry]])
-                  }),
+                  // `modifyAt` rewrites one entry in place of the whole map, and is where a field
+                  // derived from the entry it replaces would be computed if one is ever added.
+                  Ref.update(cache, (entries) =>
+                    HashMap.modifyAt(entries, issue.id, () =>
+                      Option.some<DependencyCacheEntry>({
+                        blockedBy,
+                        issueUpdatedAt,
+                        expiresAt: Date.now() + dependencyCacheTtlMs,
+                      }),
+                    ),
+                  ),
                 ),
                 Effect.map((blockedBy) => ({ ...issue, blockedBy })),
               ),
@@ -328,7 +338,7 @@ export const makeGitHubTracker = (
   Effect.gen(function* () {
     const provider = Object.freeze({ ...configuredProvider })
     const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-    const dependencyCache = yield* Ref.make<ReadonlyMap<IssueId, DependencyCacheEntry>>(new Map())
+    const dependencyCache = yield* Ref.make(HashMap.empty<IssueId, DependencyCacheEntry>())
     const bindClient = withBoundHttpClient(httpClient)
     return {
       toolSpecs: githubTrackerToolSpecs,
