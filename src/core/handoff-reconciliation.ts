@@ -271,7 +271,21 @@ const perform = (
         const issue = repairIssue(handoff, permission.issue, baselineHeadSha, action.reason)
         const current = yield* Ref.get(context.state)
         if (!hasSlot(current, issue, handoff.execution.workflow)) {
-          yield* writeHandoff(context, id, awaitingSlot(handoff, action.reason))
+          if (Option.isNone(executionAttempt)) {
+            yield* writeHandoff(context, id, awaitingSlot(handoff, action.reason))
+            return
+          }
+          yield* writeHandoff(
+            context,
+            id,
+            afterRepairDispatched(handoff, false, issue, baselineHeadSha, action.reason),
+          )
+          yield* context.scheduleRetry(
+            issue,
+            executionAttempt.value,
+            'no available orchestrator slots',
+            false,
+          )
           return
         }
         yield* writeHandoff(context, id, handoff)

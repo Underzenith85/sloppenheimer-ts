@@ -419,13 +419,16 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             }),
           )
           if (refreshResult._tag === 'Failed') {
-            yield* context.scheduleRetry(
+            const scheduled = yield* context.scheduleRetry(
               due.value.issue,
               event.attempt + 1,
               `retry refresh failed: ${refreshResult.error.message}`,
               false,
               refreshResult.error,
             )
+            if (!scheduled && Option.isSome(repairHandoff)) {
+              yield* writeHandoff(context, event.issueId, settleRepair(repairHandoff.value))
+            }
             break
           }
           const issue = Option.fromNullable(

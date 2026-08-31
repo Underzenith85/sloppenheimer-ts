@@ -261,7 +261,7 @@ export type OrchestratorContext = Readonly<{
     error: string | null,
     continuation: boolean,
     trackerError?: TrackerError,
-  ) => Effect.Effect<void, never, Scope.Scope>
+  ) => Effect.Effect<boolean, never, Scope.Scope>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
   cancelRunning: (
@@ -932,7 +932,7 @@ export const startOrchestratorRuntime = (
       error: string | null,
       continuation: boolean,
       trackerError?: TrackerError,
-    ): Effect.Effect<void, never, Scope.Scope> =>
+    ): Effect.Effect<boolean, never, Scope.Scope> =>
       Effect.gen(function* () {
         const current = yield* Ref.get(state)
         const maximumMs = current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs
@@ -959,7 +959,7 @@ export const startOrchestratorRuntime = (
             attempt,
             error,
           })
-          return
+          return false
         }
         const delay = delayOption.value
         const dueAt = Date.now() + delay
@@ -990,6 +990,7 @@ export const startOrchestratorRuntime = (
           due_at: new Date(dueAt).toISOString(),
           error,
         })
+        return true
       })
 
     const noteHandoffOutcome = (
