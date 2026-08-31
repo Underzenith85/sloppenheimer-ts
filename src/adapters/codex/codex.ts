@@ -1021,25 +1021,28 @@ class CodexConnection {
           }
           return this.#adoptIdentity(result).pipe(
             Effect.flatMap((identity) => {
+              const turnCount = request.turnCount
               const events =
-                request.method === 'thread/start' && identity.threadId !== null
-                  ? this.#emit('thread_started', null).pipe(
-                      Effect.zipRight(this.#emit('session_started', null)),
-                    )
+                request.method === 'thread/start'
+                  ? Option.match(identity.threadId, {
+                      onNone: () => Effect.void,
+                      onSome: () =>
+                        this.#emit('thread_started', null).pipe(
+                          Effect.zipRight(this.#emit('session_started', null)),
+                        ),
+                    })
                   : Effect.void
               const turnStarted =
-                request.method === 'turn/start' &&
-                request.turnCount !== null &&
-                identity.turnId !== null
-                  ? this.#turnState(identity.turnId).pipe(
-                      Effect.zipRight(
-                        this.#ensureTurnStarted(
-                          identity.turnId,
-                          request.turnCount,
-                          identity.threadId,
+                request.method === 'turn/start' && turnCount !== null
+                  ? Option.match(identity.turnId, {
+                      onNone: () => Effect.void,
+                      onSome: (turnId) =>
+                        this.#turnState(turnId).pipe(
+                          Effect.zipRight(
+                            this.#ensureTurnStarted(turnId, turnCount, identity.threadId),
+                          ),
                         ),
-                      ),
-                    )
+                    })
                   : Effect.void
               return events.pipe(
                 Effect.zipRight(turnStarted),
@@ -1074,32 +1077,32 @@ class CodexConnection {
    */
   #adoptIdentity(
     result: JsonValue,
-  ): Effect.Effect<Readonly<{ threadId: string | null; turnId: string | null }>> {
+  ): Effect.Effect<Readonly<{ threadId: Option.Option<string>; turnId: Option.Option<string> }>> {
     if (!isJsonObject(result)) {
       return Ref.get(this.#state).pipe(
         Effect.map((state) => ({
-          threadId: Option.getOrNull(state.threadId),
-          turnId: Option.getOrNull(state.turnId),
+          threadId: state.threadId,
+          turnId: state.turnId,
         })),
       )
     }
     const thread = result['thread']
     const turn = result['turn']
     return Ref.modify(this.#state, (state) => {
-      const threadId =
+      const threadId: Option.Option<string> =
         isJsonObject(thread) && typeof thread['id'] === 'string'
-          ? thread['id']
-          : Option.getOrNull(state.threadId)
-      const turnId =
+          ? Option.some(thread['id'])
+          : state.threadId
+      const turnId: Option.Option<string> =
         isJsonObject(turn) && typeof turn['id'] === 'string'
-          ? turn['id']
-          : Option.getOrNull(state.turnId)
+          ? Option.some(turn['id'])
+          : state.turnId
       return [
         { threadId, turnId },
         {
           ...state,
-          threadId: Option.fromNullable(threadId),
-          turnId: Option.fromNullable(turnId),
+          threadId,
+          turnId,
         },
       ]
     })
@@ -1108,7 +1111,7 @@ class CodexConnection {
   #ensureTurnStarted(
     turnId: string,
     turnCount: number,
-    threadId: string | null,
+    threadId: Option.Option<string>,
   ): Effect.Effect<void> {
     return Ref.modify(this.#state, (state) => {
       if (state.startedTurns.has(turnId)) {
@@ -1126,7 +1129,9 @@ class CodexConnection {
       ]
     }).pipe(
       Effect.flatMap((started) =>
-        started ? this.#emit('turn_started', null, { threadId, turnId }) : Effect.void,
+        started
+          ? this.#emit('turn_started', null, { threadId: Option.getOrNull(threadId), turnId })
+          : Effect.void,
       ),
     )
   }
@@ -1294,7 +1299,11 @@ class CodexConnection {
         pendingTurnStart !== undefined
       ) {
         yield* this.#turnState(turnId)
-        yield* this.#ensureTurnStarted(turnId, pendingTurnStart.turnCount, threadId)
+        yield* this.#ensureTurnStarted(
+          turnId,
+          pendingTurnStart.turnCount,
+          Option.fromNullable(threadId),
+        )
       }
 
       let usage = telemetry.usage
