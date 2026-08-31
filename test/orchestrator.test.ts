@@ -4136,9 +4136,21 @@ describe('operator snapshots', (): void => {
           yield* Effect.promise(() => pollStarted)
           harness.setWorkflow(reloaded)
           const lateRefresh = yield* Effect.forkScoped(control.refresh)
+          // Let the request register against the running poll before the second one arrives, so
+          // the two are asserted in the order they were made rather than in a scheduling order.
+          yield* Effect.yieldNow()
+          const laterRefresh = yield* Effect.forkScoped(control.refresh)
+          yield* Effect.yieldNow()
           pollShouldBlock = false
           releasePoll()
-          yield* Fiber.join(lateRefresh)
+          const outcome = yield* Fiber.join(lateRefresh)
+          const later = yield* Fiber.join(laterRefresh)
+          // The first request is what asked the running poll for a follow-up pass, so it created
+          // work; the second only joined the pass the first had already arranged.
+          expect(outcome.coalesced).toBe(false)
+          expect(later.coalesced).toBe(true)
+          expect(outcome.operations).toContain('dispatch')
+          expect(Number.isNaN(Date.parse(outcome.requestedAt))).toBe(false)
           return yield* control.snapshot
         }),
       )
@@ -4157,10 +4169,12 @@ describe('operator snapshots', (): void => {
           yield* control.refresh
           const before = harness.stateFetches()
           const consecutiveRefreshes = yield* Effect.forkScoped(
-            control.refresh.pipe(Effect.zipRight(control.refresh)),
+            Effect.all([control.refresh, control.refresh]),
           )
-          yield* Fiber.join(consecutiveRefreshes)
+          const [first, second] = yield* Fiber.join(consecutiveRefreshes)
           expect(harness.stateFetches()).toBe(before + 2)
+          // Each request scheduled the pass it waited for, so neither was coalesced into the other.
+          expect([first.coalesced, second.coalesced]).toEqual([false, false])
         }),
       )
     }),
@@ -4279,11 +4293,12 @@ describe('workflow hot reload', (): void => {
             harness.setWorkflow(
               new WorkflowError({ category: 'invalid_config', message: 'invalid reload' }),
             )
-            yield* control.refresh
+            const refreshed = yield* control.refresh
             return {
               snapshot: yield* control.snapshot,
               candidateFetches,
               reconciliations,
+              refreshed,
             }
           }),
         )
@@ -4295,6 +4310,15 @@ describe('workflow hot reload', (): void => {
         expect(harness.agentRuns()).toHaveLength(1)
         expect(observed.snapshot.running[0]?.issueId).toBe(runningIssue.id)
         expect(observed.snapshot.retrying).toEqual([])
+        // The pass stopped before dispatch, and the refresh acknowledgement says so rather than
+        // reporting the stages a healthy pass would have reached.
+        expect(observed.refreshed.operations).toEqual([
+          'credential_revalidation',
+          'handoff_recovery',
+          'workflow_reload',
+          'handoff_reconciliation',
+          'issue_reconciliation',
+        ])
       }),
   )
 
@@ -6514,6 +6538,8 @@ describe('session telemetry accounting', (): void => {
           expect(snapshot.running[0]).toMatchObject({
             issueId: currentIssue.id,
             title: 'Updated while active',
+            // The issue state travels with the row: SPEC 13.7.2 requires it on a running entry.
+            state: 'open',
           })
           // The stall deadline is published absolutely so the console can decide the agent has
           // gone quiet without waiting for a later snapshot to say so.

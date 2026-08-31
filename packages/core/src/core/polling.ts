@@ -25,7 +25,7 @@ import {
   stateIsIn,
 } from './policy.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { HandoffEntry } from './state.js'
+import type { HandoffEntry, RefreshOperation } from './state.js'
 import * as Transitions from './transitions.js'
 import {
   drainRetirements,
@@ -55,8 +55,16 @@ const releaseHandoffRepair = (
       Option.isNone(entry.repair) ? Effect.void : writeHandoff(context, id, releaseRepair(entry)),
   })
 
-export const poll = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
+/**
+ * One reconciliation pass, answering with the stages it reached. A caller that asked for this pass
+ * — a refresh over the HTTP API — is told what it actually got: a pass whose validation failed
+ * stops before dispatch, and saying otherwise would be reporting an intention rather than an event.
+ */
+export const poll = (
+  context: OrchestratorContext,
+): Effect.Effect<readonly RefreshOperation[], never, Scope.Scope> =>
   Effect.gen(function* () {
+    const performed: RefreshOperation[] = []
     // A worker that ended since the last pass may have been the last holder of a replaced instance.
     yield* drainRetirements(context)
     let dispatchValidationFailed = false
@@ -86,8 +94,10 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
           revalidated.value.workflow.tracker.secretEnvironmentNames.join(', '),
       })
     }
+    performed.push('credential_revalidation')
     yield* context.hydrateRestoredHandoffs
     yield* context.recoverMissingHandoffs
+    performed.push('handoff_recovery')
     const reloading = yield* Ref.get(context.state)
     const reloaded = yield* context.ports.workflowLoader.load(context.selectedWorkflowPath).pipe(
       Effect.matchEffect({
@@ -139,10 +149,13 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         }
       }
     }
+    performed.push('workflow_reload')
     yield* reconcileHandoffs(context, !dispatchValidationFailed)
+    performed.push('handoff_reconciliation')
     yield* context.reconcile(!dispatchValidationFailed)
+    performed.push('issue_reconciliation')
     if (dispatchValidationFailed) {
-      return
+      return performed
     }
     yield* Ref.update(context.state, (current) => Transitions.setWorkflowReloadError(current, null))
     const dispatching = yield* Ref.get(context.state)
@@ -170,6 +183,8 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
       }
       yield* dispatch(context, issue, null)
     }
+    performed.push('dispatch')
+    return performed
   })
 
 export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, never, Scope.Scope> =>
@@ -179,9 +194,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
       switch (event._tag) {
         case 'Tick': {
           yield* Ref.update(context.state, Transitions.beginPoll)
-          yield* poll(context)
+          const performed = yield* poll(context)
           const waiters = yield* Ref.modify(context.state, Transitions.takeRefreshWaiters)
-          yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, undefined), {
+          yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, performed), {
             discard: true,
           })
           const finished = yield* Ref.modify(context.state, Transitions.finishPoll)
