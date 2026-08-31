@@ -248,9 +248,9 @@ describe('protocol normalization', (): void => {
 
 describe('agent detail records', (): void => {
   it('preserves order and bounds retention', (): void => {
-    const record = makeRecord()
+    let record = makeRecord()
     for (let index = 0; index < timelineEventLimit + 25; index += 1) {
-      recordAgentEvent(
+      record = recordAgentEvent(
         record,
         event(
           {
@@ -277,17 +277,17 @@ describe('agent detail records', (): void => {
   })
 
   it('separates attempts while keeping one rising sequence and the session identity', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(record, event({ kind: 'session' }))
-    recordRetryScheduled(
+    let record = makeRecord()
+    record = recordAgentEvent(record, event({ kind: 'session' }))
+    record = recordRetryScheduled(
       record,
       new Date('2026-08-30T10:00:10.000Z'),
       1,
       new Date('2026-08-30T10:00:20.000Z'),
       'agent stalled',
     )
-    recordAttemptStarted(record, new Date('2026-08-30T10:00:20.000Z'), 1)
-    recordAgentEvent(
+    record = recordAttemptStarted(record, new Date('2026-08-30T10:00:20.000Z'), 1)
+    record = recordAgentEvent(
       record,
       event({ kind: 'reasoning' }, { turnId: 'turn-2', sessionId: 'thread-1', turnCount: 2 }),
     )
@@ -311,8 +311,8 @@ describe('agent detail records', (): void => {
   })
 
   it('aggregates workspace diagnostics without retaining file contents', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(
+    let record = makeRecord()
+    record = recordAgentEvent(
       record,
       event({
         kind: 'file',
@@ -322,14 +322,14 @@ describe('agent detail records', (): void => {
         deletedLines: 2,
       }),
     )
-    recordAgentEvent(
+    record = recordAgentEvent(
       record,
       event(
         { kind: 'file', path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 },
         { timestamp: new Date('2026-08-30T10:00:07.000Z') },
       ),
     )
-    recordAgentEvent(
+    record = recordAgentEvent(
       record,
       event({
         kind: 'command',
@@ -357,8 +357,8 @@ describe('agent detail records', (): void => {
   })
 
   it('leaves the running phase when a tool or command finishes', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(
+    let record = makeRecord()
+    record = recordAgentEvent(
       record,
       event({
         kind: 'command',
@@ -375,7 +375,7 @@ describe('agent detail records', (): void => {
       operation: 'Running pnpm',
     })
 
-    recordAgentEvent(
+    record = recordAgentEvent(
       record,
       event(
         {
@@ -395,7 +395,7 @@ describe('agent detail records', (): void => {
       operation: 'Finished pnpm (exit 0)',
     })
 
-    recordAgentEvent(
+    record = recordAgentEvent(
       record,
       event(
         { kind: 'tool', name: 'search', state: 'completed', inputBytes: 12, outputBytes: 34 },
@@ -407,7 +407,7 @@ describe('agent detail records', (): void => {
       operation: 'Finished search',
     })
 
-    recordAgentEvent(
+    record = recordAgentEvent(
       record,
       event(
         { kind: 'tool', name: 'search', state: 'started', inputBytes: 12, outputBytes: null },
@@ -418,17 +418,21 @@ describe('agent detail records', (): void => {
   })
 
   it('counts every retry, including attempts older than the retained summaries', (): void => {
-    const record = makeRecord()
+    let record = makeRecord()
     const total = retainedAttemptLimit + 5
     for (let attempt = 1; attempt <= total; attempt += 1) {
-      recordRetryScheduled(
+      record = recordRetryScheduled(
         record,
         new Date(startedAt.getTime() + attempt * 2_000),
         attempt,
         new Date(startedAt.getTime() + attempt * 2_000 + 1_000),
         'turn failed',
       )
-      recordAttemptStarted(record, new Date(startedAt.getTime() + attempt * 2_000 + 1_000), attempt)
+      record = recordAttemptStarted(
+        record,
+        new Date(startedAt.getTime() + attempt * 2_000 + 1_000),
+        attempt,
+      )
     }
     const snapshot = snapshotOf(record, new Date(startedAt.getTime() + 120_000))
 
@@ -439,8 +443,8 @@ describe('agent detail records', (): void => {
   })
 
   it('reports the stall deadline, countdown, and stalled phase from the last activity', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(record, event({ kind: 'reasoning' }))
+    let record = makeRecord()
+    record = recordAgentEvent(record, event({ kind: 'reasoning' }))
 
     const live = snapshotOf(record, new Date('2026-08-30T10:00:35.000Z'))
     expect(live.activity).toMatchObject({
@@ -459,17 +463,17 @@ describe('agent detail records', (): void => {
   })
 
   it('keeps an attempt that is retried out of the handed-off outcome', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(record, event({ kind: 'reasoning' }))
+    let record = makeRecord()
+    record = recordAgentEvent(record, event({ kind: 'reasoning' }))
     // The worker finished, but there was no branch to hand off, so the session continues.
-    recordHandoff(record, new Date('2026-08-30T10:00:10.000Z'), {
+    record = recordHandoff(record, new Date('2026-08-30T10:00:10.000Z'), {
       step: 'remote_branch',
       status: 'absent',
       message: 'No remote branch symphony/issue-34 exists yet; continuing the session',
       remoteBranch: 'symphony/issue-34',
       outcome: 'no_branch',
     })
-    recordRetryScheduled(
+    record = recordRetryScheduled(
       record,
       new Date('2026-08-30T10:00:11.000Z'),
       1,
@@ -483,9 +487,13 @@ describe('agent detail records', (): void => {
 
     // A cancellation followed by a retry is the same story: the retry is the later, more specific
     // account of how that attempt ended.
-    const cancelled = makeRecord()
-    recordCancellation(cancelled, new Date('2026-08-30T10:00:10.000Z'), 'the agent stalled')
-    recordRetryScheduled(
+    let cancelled = makeRecord()
+    cancelled = recordCancellation(
+      cancelled,
+      new Date('2026-08-30T10:00:10.000Z'),
+      'the agent stalled',
+    )
+    cancelled = recordRetryScheduled(
       cancelled,
       new Date('2026-08-30T10:00:11.000Z'),
       1,
@@ -501,14 +509,14 @@ describe('agent detail records', (): void => {
   })
 
   it('tracks handoff progress and cancellation as explicit timeline steps', (): void => {
-    const record = makeRecord()
-    recordHandoff(record, new Date('2026-08-30T10:01:00.000Z'), {
+    let record = makeRecord()
+    record = recordHandoff(record, new Date('2026-08-30T10:01:00.000Z'), {
       step: 'remote_branch',
       status: 'observed',
       message: 'Remote branch symphony/issue-34 is present',
       remoteBranch: 'symphony/issue-34',
     })
-    recordHandoff(record, new Date('2026-08-30T10:01:01.000Z'), {
+    record = recordHandoff(record, new Date('2026-08-30T10:01:01.000Z'), {
       step: 'pull_request',
       status: 'observed',
       message: 'Opened a pull request for the completed work',
@@ -520,7 +528,7 @@ describe('agent detail records', (): void => {
       },
       outcome: 'pull_request_open',
     })
-    recordCancellation(
+    record = recordCancellation(
       record,
       new Date('2026-08-30T10:01:02.000Z'),
       'the operator paused the issue',
@@ -543,8 +551,8 @@ describe('agent detail records', (): void => {
   })
 
   it('freezes rate-limit windows wherever they are shared', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(
+    let record = makeRecord()
+    record = recordAgentEvent(
       record,
       event(
         { kind: 'none' },
@@ -567,8 +575,8 @@ describe('agent detail records', (): void => {
   })
 
   it('freezes token totals wherever they are shared', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(
+    let record = makeRecord()
+    record = recordAgentEvent(
       record,
       event(
         { kind: 'none' },
@@ -595,17 +603,20 @@ describe('agent detail records', (): void => {
   })
 
   it('starts a retried attempt with no identity carried over from the last session', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(record, event({ kind: 'session' }))
-    recordAgentEvent(record, event({ kind: 'none' }, { event: 'turn/completed', turnCount: 7 }))
-    recordRetryScheduled(
+    let record = makeRecord()
+    record = recordAgentEvent(record, event({ kind: 'session' }))
+    record = recordAgentEvent(
+      record,
+      event({ kind: 'none' }, { event: 'turn/completed', turnCount: 7 }),
+    )
+    record = recordRetryScheduled(
       record,
       new Date('2026-08-30T10:00:10.000Z'),
       1,
       new Date('2026-08-30T10:00:15.000Z'),
       'the worker exited',
     )
-    recordAttemptStarted(record, new Date('2026-08-30T10:00:20.000Z'), 1)
+    record = recordAttemptStarted(record, new Date('2026-08-30T10:00:20.000Z'), 1)
 
     const started = snapshotOf(record)
     // The retry opens a new agent connection, so nothing may still describe the previous one.
@@ -623,7 +634,7 @@ describe('agent detail records', (): void => {
       processId: 4242,
     })
 
-    recordAgentEvent(
+    record = recordAgentEvent(
       record,
       event(
         { kind: 'session' },
@@ -640,8 +651,8 @@ describe('agent detail records', (): void => {
   })
 
   it('publishes frozen snapshots that cannot be edited by a consumer', (): void => {
-    const record = makeRecord()
-    recordAgentEvent(record, event({ kind: 'reasoning' }))
+    let record = makeRecord()
+    record = recordAgentEvent(record, event({ kind: 'reasoning' }))
     const snapshot = snapshotOf(record)
 
     expect(Object.isFrozen(snapshot)).toBe(true)
@@ -653,5 +664,55 @@ describe('agent detail records', (): void => {
     expect(snapshot.errors.every((error) => Object.isFrozen(error))).toBe(true)
     const events = snapshot.timeline.events as unknown as { push: (value: unknown) => number }
     expect(() => events.push('tampered')).toThrow()
+  })
+
+  it('folds each observation into a new record, leaving the earlier value untouched', (): void => {
+    const started = makeRecord()
+    const reasoned = recordAgentEvent(started, event({ kind: 'reasoning' }))
+    const edited = recordAgentEvent(
+      reasoned,
+      event(
+        {
+          kind: 'file',
+          path: 'src/telemetry.ts',
+          change: 'update',
+          addedLines: 3,
+          deletedLines: 1,
+        },
+        { timestamp: new Date('2026-08-30T10:00:06.000Z') },
+      ),
+    )
+    // Taken from the second value, before two more observations are folded in. The orchestrator
+    // publishes the record it holds without copying it, so this is exactly what a consumer keeps.
+    const published = snapshotOf(reasoned)
+    const handed = recordHandoff(edited, new Date('2026-08-30T10:00:10.000Z'), {
+      step: 'pull_request',
+      status: 'observed',
+      message: 'Opened a pull request for the completed work',
+      pullRequest: {
+        status: 'created',
+        number: 61,
+        url: 'https://example.test/pull/61',
+        state: 'awaiting_checks',
+      },
+      outcome: 'pull_request_open',
+    })
+    const cancelled = recordCancellation(handed, new Date('2026-08-30T10:00:11.000Z'), 'stopped')
+
+    expect(started.events).toHaveLength(0)
+    expect(started.sequence).toBe(0)
+    expect(reasoned.events).toHaveLength(1)
+    expect(reasoned.sequence).toBe(1)
+    expect(reasoned.phase).toBe('reasoning')
+    expect(reasoned.changedPaths.size).toBe(0)
+    expect(edited.changedPaths.size).toBe(1)
+    expect(edited.handoff.pullRequest.status).toBe('pending')
+    expect(handed.phase).toBe('handing_off')
+    expect(cancelled.events).toHaveLength(4)
+
+    expect(published.timeline.events).toHaveLength(1)
+    expect(published.phase.phase).toBe('reasoning')
+    expect(published.workspace.dirtyFileCount).toBe(0)
+    expect(published.handoff.pullRequest.status).toBe('pending')
   })
 })

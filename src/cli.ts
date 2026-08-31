@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import chokidar from 'chokidar'
-import { Cause, ConfigProvider, Effect, Exit, Layer } from 'effect'
+import { Cause, ConfigProvider, Effect, Exit, Layer, Queue, Stream } from 'effect'
 
 import { codexAgentRunner } from './adapters/codex/agent-runner.js'
 import {
@@ -76,18 +76,33 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
     preflight: (workflow) => preflightWorkflow(workflow),
   }),
   layerWorkflowWatcher({
-    watch: (path, onChange) =>
-      Effect.acquireRelease(
-        Effect.sync(() => {
-          const watcher = chokidar.watch(path, {
-            awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
-            ignoreInitial: true,
-          })
-          watcher.on('change', onChange)
-          return watcher
-        }),
-        (watcher) => Effect.promise(() => watcher.close()),
-      ).pipe(Effect.asVoid),
+    // The queue is what turns chokidar's callback into a stream: `unsafeOffer` is a write to a data
+    // structure rather than an entry into the runtime, and the consuming fiber is where the change
+    // becomes an effect. It is unbounded because a dropped change is a reload that never happens.
+    //
+    // Both resources are acquired here rather than inside a stream the consumer starts later, so
+    // chokidar is installed before startup continues and an edit that lands before the orchestrator
+    // subscribes waits in the queue.
+    changes: (path) =>
+      Effect.gen(function* () {
+        const changes = yield* Effect.acquireRelease(Queue.unbounded<void>(), (queue) =>
+          Queue.shutdown(queue),
+        )
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const watcher = chokidar.watch(path, {
+              awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+              ignoreInitial: true,
+            })
+            watcher.on('change', () => {
+              Queue.unsafeOffer(changes, undefined)
+            })
+            return watcher
+          }),
+          (watcher) => Effect.promise(() => watcher.close()),
+        )
+        return Stream.fromQueue(changes)
+      }),
   }),
 )
 

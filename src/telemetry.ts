@@ -636,24 +636,20 @@ export type AgentDetailSnapshot = Readonly<{
   }>
 }>
 
-/**
- * Publishes an array whose elements a consumer cannot reach back through. Freezing only the array
- * would leave every element shared with the actor's own record, so a cast consumer could edit one
- * in place and have the actor carry that edit forward on its next update.
- */
-const frozen = <Value extends object>(values: readonly Value[]): readonly Value[] =>
-  Object.freeze(values.map((value) => Object.freeze({ ...value })))
-
-type ChangedPath = { addedLines: number; deletedLines: number; lastActivityAt: Date }
+type ChangedPath = Readonly<{ addedLines: number; deletedLines: number; lastActivityAt: Date }>
 
 /**
- * Actor-owned mutable telemetry for one issue. Only the orchestrator's event loop touches it, and
- * only {@link buildAgentDetail} leaves it — as a frozen value, so no consumer can observe a partial
- * update or reach the scheduler's own state through the snapshot it was handed.
+ * Actor-owned telemetry for one issue, as an immutable value. Every recorder folds one observation
+ * into a new record instead of editing this one, so the actor can publish the record it holds
+ * without copying it: a consumer that was handed an earlier value keeps exactly the reading it was
+ * given, and no later update can reach it.
+ *
+ * The arrays and summaries a record adopts are frozen as they are built, which is what lets
+ * {@link buildAgentDetail} share them rather than clone them.
  */
-export type AgentDetailRecord = {
-  readonly issueId: IssueId
-  readonly identifier: IssueIdentifier
+export type AgentDetailRecord = Readonly<{
+  issueId: IssueId
+  identifier: IssueIdentifier
   title: string
   url: string | null
   startedAt: Date
@@ -665,7 +661,7 @@ export type AgentDetailRecord = {
    * frozen at the retention limit while its attempt number kept climbing.
    */
   retries: number
-  events: AgentTimelineEvent[]
+  events: readonly AgentTimelineEvent[]
   dropped: number
   phase: AgentPhase
   phaseSince: Date
@@ -678,10 +674,10 @@ export type AgentDetailRecord = {
   turnCount: number
   tokens: TokenCounts
   rateLimits: readonly RateLimitWindow[]
-  sessions: AgentSessionSummary[]
-  attempts: AgentAttemptSummary[]
-  errors: AgentErrorSummary[]
-  changedPaths: Map<string, ChangedPath>
+  sessions: readonly AgentSessionSummary[]
+  attempts: readonly AgentAttemptSummary[]
+  errors: readonly AgentErrorSummary[]
+  changedPaths: ReadonlyMap<string, ChangedPath>
   pathsTruncated: boolean
   addedLines: number
   deletedLines: number
@@ -689,20 +685,8 @@ export type AgentDetailRecord = {
   qualityPhase: QualityPhase | null
   qualityCommandState: ToolState | null
   workspacePathKey: string
-  handoff: {
-    expectedBranch: string | null
-    remoteBranch: { status: HandoffStepStatus; name: string | null }
-    pullRequest: {
-      status: 'pending' | 'created' | 'reused' | 'absent'
-      number: number | null
-      url: string | null
-      state: string | null
-    }
-    dispatchLabels: { labels: readonly string[]; status: HandoffStepStatus; reason: string | null }
-    outcome: AgentHandoffDetail['outcome']
-    reason: string | null
-  }
-}
+  handoff: AgentHandoffDetail
+}>
 
 export type AgentDetailInput = Readonly<{
   issueId: IssueId
@@ -725,7 +709,7 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   attempt: input.attempt ?? 0,
   sequence: 0,
   retries: 0,
-  events: [],
+  events: Object.freeze([]),
   dropped: 0,
   phase: 'starting',
   phaseSince: input.startedAt,
@@ -736,21 +720,21 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   sessionId: null,
   processId: null,
   turnCount: 0,
-  tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-  rateLimits: [],
-  sessions: [],
-  attempts: [
-    {
+  tokens: Object.freeze({ inputTokens: 0, outputTokens: 0, totalTokens: 0 }),
+  rateLimits: Object.freeze([]),
+  sessions: Object.freeze([]),
+  attempts: Object.freeze([
+    Object.freeze({
       attempt: input.attempt ?? 0,
       startedAt: input.startedAt.toISOString(),
       endedAt: null,
-      outcome: 'running',
+      outcome: 'running' as const,
       reason: null,
       firstSequence: 1,
       lastSequence: 0,
-    },
-  ],
-  errors: [],
+    }),
+  ]),
+  errors: Object.freeze([]),
   changedPaths: new Map(),
   pathsTruncated: false,
   addedLines: 0,
@@ -759,56 +743,80 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   qualityPhase: null,
   qualityCommandState: null,
   workspacePathKey: input.workspacePathKey,
-  handoff: {
+  handoff: Object.freeze({
     expectedBranch: input.expectedBranch,
-    remoteBranch: { status: 'pending', name: null },
-    pullRequest: { status: 'pending', number: null, url: null, state: null },
-    dispatchLabels: {
-      labels: [...input.dispatchLabels],
-      status: 'not_performed',
+    remoteBranch: Object.freeze({ status: 'pending' as const, name: null }),
+    pullRequest: Object.freeze({
+      status: 'pending' as const,
+      number: null,
+      url: null,
+      state: null,
+    }),
+    dispatchLabels: Object.freeze({
+      labels: Object.freeze([...input.dispatchLabels]),
+      status: 'not_performed' as const,
       // Stated rather than implied: the GitHub adapter hands work off by opening a pull request and
       // leaves the dispatch label in place, so an operator is not left waiting for a removal that
       // is never going to be observed.
       reason: 'The tracker adapter does not remove dispatch labels at handoff',
-    },
-    outcome: 'in_progress',
+    }),
+    outcome: 'in_progress' as const,
     reason: null,
-  },
+  }),
 })
 
-const push = (record: AgentDetailRecord, event: AgentTimelineEvent): void => {
-  record.events.push(Object.freeze(event))
-  if (record.events.length > timelineEventLimit) {
-    record.dropped += record.events.length - timelineEventLimit
-    record.events = record.events.slice(-timelineEventLimit)
-  }
+/**
+ * Restates the issue fields that the tracker can change between attempts. The rest of the record —
+ * the timeline, the attempt history, the sequence — is what makes it worth keeping across them.
+ */
+export const recordIssueRefreshed = (
+  record: AgentDetailRecord,
+  issue: Readonly<{ title: string; url: string | null }>,
+): AgentDetailRecord => ({ ...record, title: issue.title, url: issue.url })
+
+/**
+ * Appends one timeline event, bounded by {@link timelineEventLimit}, and extends the current
+ * attempt's sequence span to cover it.
+ *
+ * The event carries the sequence that {@link nextSequence} drew from this record, and every
+ * recorder appends exactly one event, so adopting it here is what advances the record's counter.
+ */
+const push = (record: AgentDetailRecord, event: AgentTimelineEvent): AgentDetailRecord => {
+  const appended = [...record.events, Object.freeze(event)]
+  const dropped = Math.max(appended.length - timelineEventLimit, 0)
   const attempt = record.attempts.at(-1)
-  if (attempt !== undefined && attempt.attempt === event.attempt) {
-    record.attempts[record.attempts.length - 1] = {
-      ...attempt,
-      firstSequence: attempt.lastSequence === 0 ? event.sequence : attempt.firstSequence,
-      lastSequence: event.sequence,
-    }
+  const attempts =
+    attempt !== undefined && attempt.attempt === event.attempt
+      ? Object.freeze([
+          ...record.attempts.slice(0, -1),
+          Object.freeze({
+            ...attempt,
+            firstSequence: attempt.lastSequence === 0 ? event.sequence : attempt.firstSequence,
+            lastSequence: event.sequence,
+          }),
+        ])
+      : record.attempts
+  return {
+    ...record,
+    sequence: event.sequence,
+    events: Object.freeze(dropped === 0 ? appended : appended.slice(-timelineEventLimit)),
+    dropped: record.dropped + dropped,
+    attempts,
   }
 }
 
-const nextSequence = (record: AgentDetailRecord): number => {
-  record.sequence += 1
-  return record.sequence
-}
+/** The sequence number the next appended event takes. */
+const nextSequence = (record: AgentDetailRecord): number => record.sequence + 1
 
 const setPhase = (
   record: AgentDetailRecord,
   phase: AgentPhase,
   operation: string | null,
   at: Date,
-): void => {
-  if (record.phase !== phase) {
-    record.phase = phase
-    record.phaseSince = at
-  }
-  record.operation = operation
-}
+): AgentDetailRecord =>
+  record.phase === phase
+    ? { ...record, operation }
+    : { ...record, phase, phaseSince: at, operation }
 
 const noteError = (
   record: AgentDetailRecord,
@@ -816,16 +824,16 @@ const noteError = (
   severity: ErrorSeverity,
   code: string | null,
   message: string,
-): void => {
-  record.errors.push({
-    at: at.toISOString(),
-    attempt: record.attempt,
-    severity,
-    code,
-    message,
-  })
-  if (record.errors.length > retainedErrorLimit) {
-    record.errors = record.errors.slice(-retainedErrorLimit)
+): AgentDetailRecord => {
+  const errors = [
+    ...record.errors,
+    Object.freeze({ at: at.toISOString(), attempt: record.attempt, severity, code, message }),
+  ]
+  return {
+    ...record,
+    errors: Object.freeze(
+      errors.length > retainedErrorLimit ? errors.slice(-retainedErrorLimit) : errors,
+    ),
   }
 }
 
@@ -835,151 +843,165 @@ const noteChangedPath = (
   addedLines: number | null,
   deletedLines: number | null,
   at: Date,
-): void => {
+): AgentDetailRecord => {
   const existing = record.changedPaths.get(path)
-  if (existing === undefined && record.changedPaths.size >= changedPathLimit) {
-    record.pathsTruncated = true
-  } else {
-    record.changedPaths.set(path, {
-      addedLines: (existing?.addedLines ?? 0) + (addedLines ?? 0),
-      deletedLines: (existing?.deletedLines ?? 0) + (deletedLines ?? 0),
-      lastActivityAt: at,
-    })
+  const truncated = existing === undefined && record.changedPaths.size >= changedPathLimit
+  const changedPaths = truncated
+    ? record.changedPaths
+    : new Map(record.changedPaths).set(
+        path,
+        Object.freeze({
+          addedLines: (existing?.addedLines ?? 0) + (addedLines ?? 0),
+          deletedLines: (existing?.deletedLines ?? 0) + (deletedLines ?? 0),
+          lastActivityAt: at,
+        }),
+      )
+  return {
+    ...record,
+    changedPaths,
+    pathsTruncated: record.pathsTruncated || truncated,
+    addedLines: record.addedLines + (addedLines ?? 0),
+    deletedLines: record.deletedLines + (deletedLines ?? 0),
+    lastFileActivityAt: at,
   }
-  record.addedLines += addedLines ?? 0
-  record.deletedLines += deletedLines ?? 0
-  record.lastFileActivityAt = at
+}
+
+/** Opens a session summary for the thread the agent has just identified itself with. */
+const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  const sessions = [
+    ...record.sessions,
+    Object.freeze({
+      attempt: record.attempt,
+      threadId: record.threadId,
+      sessionId: record.sessionId,
+      processId: record.processId,
+      startedAt: at.toISOString(),
+      endedAt: null,
+    }),
+  ]
+  return {
+    ...record,
+    sessions: Object.freeze(
+      sessions.length > retainedAttemptLimit ? sessions.slice(-retainedAttemptLimit) : sessions,
+    ),
+  }
 }
 
 const messageOperation = (text: string | null): string =>
   text === null || text.length === 0 ? 'Writing a reply' : `Replying: ${bound(text, 80).text}`
 
 /**
- * Folds one normalized agent event into the record. Every retained string arrived already redacted
- * and bounded from the parser; nothing here widens it.
+ * Folds one normalized agent event into the record and returns the result. Every retained string
+ * arrived already redacted and bounded from the parser; nothing here widens it.
  */
-export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): void => {
+export const recordAgentEvent = (
+  record: AgentDetailRecord,
+  event: AgentEvent,
+): AgentDetailRecord => {
   const at = event.timestamp
-  record.lastActivityAt = at
-  record.processId = event.processId ?? record.processId
-  record.threadId = event.threadId ?? record.threadId
-  record.turnId = event.turnId ?? record.turnId
-  record.sessionId = event.sessionId ?? record.sessionId
   // Turn count, token totals, and rate limits are already normalized by the client; this layer
-  // consumes them rather than deriving its own.
-  record.turnCount = Math.max(record.turnCount, event.turnCount)
-  if (event.usage !== null) {
-    // The same counts reach the record and the usage timeline event, and a timeline event is only
-    // frozen shallowly, so the object they share is frozen here rather than left reachable through
-    // `events[i].tokens` — a mutation there would otherwise be carried forward by the record.
-    record.tokens = Object.freeze({ ...event.usage })
-  }
-  if (event.rateLimits !== null) {
-    record.rateLimits = decodeRateLimits(event.rateLimits)
+  // consumes them rather than deriving its own. The same token counts reach the record and the
+  // usage timeline event, and a timeline event is only frozen shallowly, so the object they share
+  // is frozen here rather than left reachable through `events[i].tokens`.
+  const observed: AgentDetailRecord = {
+    ...record,
+    lastActivityAt: at,
+    processId: event.processId ?? record.processId,
+    threadId: event.threadId ?? record.threadId,
+    turnId: event.turnId ?? record.turnId,
+    sessionId: event.sessionId ?? record.sessionId,
+    turnCount: Math.max(record.turnCount, event.turnCount),
+    tokens: event.usage === null ? record.tokens : Object.freeze({ ...event.usage }),
+    rateLimits: event.rateLimits === null ? record.rateLimits : decodeRateLimits(event.rateLimits),
   }
   const base = {
-    sequence: nextSequence(record),
-    attempt: record.attempt,
+    sequence: nextSequence(observed),
+    attempt: observed.attempt,
     at: at.toISOString(),
     event: event.event,
     truncated: false,
   }
   const payload = event.payload
   if (event.usage !== null || event.rateLimits !== null) {
-    push(record, {
+    return push(observed, {
       ...base,
-      operation: record.operation,
+      operation: observed.operation,
       category: 'usage',
-      tokens: event.usage === null ? null : record.tokens,
-      rateLimits: record.rateLimits,
+      tokens: event.usage === null ? null : observed.tokens,
+      rateLimits: observed.rateLimits,
     })
-    return
   }
   switch (payload.kind) {
     case 'session': {
-      if (record.threadId !== null && record.sessions.at(-1)?.threadId !== record.threadId) {
-        record.sessions.push({
-          attempt: record.attempt,
-          threadId: record.threadId,
-          sessionId: record.sessionId,
-          processId: record.processId,
-          startedAt: at.toISOString(),
-          endedAt: null,
-        })
-        if (record.sessions.length > retainedAttemptLimit) {
-          record.sessions = record.sessions.slice(-retainedAttemptLimit)
-        }
-      }
-      if (record.phase === 'starting') {
-        setPhase(record, 'awaiting_model', 'Waiting for the model', at)
-      }
-      push(record, {
+      const sessioned =
+        observed.threadId !== null && observed.sessions.at(-1)?.threadId !== observed.threadId
+          ? openSession(observed, at)
+          : observed
+      const next =
+        sessioned.phase === 'starting'
+          ? setPhase(sessioned, 'awaiting_model', 'Waiting for the model', at)
+          : sessioned
+      return push(next, {
         ...base,
-        operation: record.operation,
+        operation: next.operation,
         category: 'session',
-        threadId: record.threadId,
-        turnId: record.turnId,
-        sessionId: record.sessionId,
-        turnNumber: record.turnCount,
-        processId: record.processId,
+        threadId: next.threadId,
+        turnId: next.turnId,
+        sessionId: next.sessionId,
+        turnNumber: next.turnCount,
+        processId: next.processId,
       })
-      return
     }
     case 'reasoning': {
-      setPhase(record, 'reasoning', 'Thinking', at)
-      push(record, { ...base, operation: record.operation, category: 'reasoning' })
-      return
+      const next = setPhase(observed, 'reasoning', 'Thinking', at)
+      return push(next, { ...base, operation: next.operation, category: 'reasoning' })
     }
     case 'message': {
-      setPhase(record, 'responding', messageOperation(payload.text), at)
-      push(record, {
+      const next = setPhase(observed, 'responding', messageOperation(payload.text), at)
+      return push(next, {
         ...base,
         truncated: payload.truncated,
-        operation: record.operation,
+        operation: next.operation,
         category: 'message',
         role: payload.role,
         text: payload.text,
       })
-      return
     }
     case 'tool': {
       // A finished tool call is not a running one. Leaving the phase at `running_tool` would keep
       // the inspector reporting "Calling …" for work that already returned, and eventually report
       // that finished call as stalled while the model is simply deciding what to do next.
-      if (payload.state === 'completed') {
-        setPhase(record, 'awaiting_model', `Finished ${payload.name}`, at)
-      } else if (payload.state === 'failed') {
-        setPhase(record, 'awaiting_model', `${payload.name} failed`, at)
-      } else {
-        setPhase(record, 'running_tool', `Calling ${payload.name}`, at)
-      }
-      push(record, {
+      const next =
+        payload.state === 'completed'
+          ? setPhase(observed, 'awaiting_model', `Finished ${payload.name}`, at)
+          : payload.state === 'failed'
+            ? setPhase(observed, 'awaiting_model', `${payload.name} failed`, at)
+            : setPhase(observed, 'running_tool', `Calling ${payload.name}`, at)
+      return push(next, {
         ...base,
-        operation: record.operation,
+        operation: next.operation,
         category: 'tool',
         name: payload.name,
         state: payload.state,
         inputBytes: payload.inputBytes,
         outputBytes: payload.outputBytes,
       })
-      return
     }
     case 'command': {
-      if (payload.quality !== null) {
-        record.qualityPhase = payload.quality
-        record.qualityCommandState = payload.state
-      }
+      const quality =
+        payload.quality === null
+          ? observed
+          : { ...observed, qualityPhase: payload.quality, qualityCommandState: payload.state }
       const exit = payload.exitCode === null ? '' : ` (exit ${String(payload.exitCode)})`
-      if (payload.state === 'completed') {
-        setPhase(record, 'awaiting_model', `Finished ${payload.program}${exit}`, at)
-      } else if (payload.state === 'failed') {
-        setPhase(record, 'awaiting_model', `${payload.program} failed${exit}`, at)
-      } else {
-        setPhase(record, 'running_command', `Running ${payload.program}`, at)
-      }
-      push(record, {
+      const next =
+        payload.state === 'completed'
+          ? setPhase(quality, 'awaiting_model', `Finished ${payload.program}${exit}`, at)
+          : payload.state === 'failed'
+            ? setPhase(quality, 'awaiting_model', `${payload.program} failed${exit}`, at)
+            : setPhase(quality, 'running_command', `Running ${payload.program}`, at)
+      return push(next, {
         ...base,
-        operation: record.operation,
+        operation: next.operation,
         category: 'command',
         program: payload.program,
         argumentCount: payload.argumentCount,
@@ -988,58 +1010,59 @@ export const recordAgentEvent = (record: AgentDetailRecord, event: AgentEvent): 
         exitCode: payload.exitCode,
         durationMs: payload.durationMs,
       })
-      return
     }
     case 'file': {
-      noteChangedPath(record, payload.path, payload.addedLines, payload.deletedLines, at)
-      setPhase(record, 'editing', `Editing ${payload.path}`, at)
-      push(record, {
+      const changed = noteChangedPath(
+        observed,
+        payload.path,
+        payload.addedLines,
+        payload.deletedLines,
+        at,
+      )
+      const next = setPhase(changed, 'editing', `Editing ${payload.path}`, at)
+      return push(next, {
         ...base,
-        operation: record.operation,
+        operation: next.operation,
         category: 'file',
         path: payload.path,
         change: payload.change,
         addedLines: payload.addedLines,
         deletedLines: payload.deletedLines,
       })
-      return
     }
     case 'error': {
-      noteError(record, at, payload.severity, payload.code, payload.message)
-      push(record, {
+      const next = noteError(observed, at, payload.severity, payload.code, payload.message)
+      return push(next, {
         ...base,
         truncated: payload.truncated,
-        operation: record.operation,
+        operation: next.operation,
         category: 'error',
         severity: payload.severity,
         code: payload.code,
         message: payload.message,
       })
-      return
     }
     case 'cancellation': {
-      setPhase(record, 'cancelled', payload.reason, at)
-      push(record, {
+      const next = setPhase(observed, 'cancelled', payload.reason, at)
+      return push(next, {
         ...base,
-        operation: record.operation,
+        operation: next.operation,
         category: 'cancellation',
         reason: payload.reason,
       })
-      return
     }
     case 'none': {
       // An unrecognized message is still evidence of life, so it is retained by method name only.
-      push(record, {
+      return push(observed, {
         ...base,
-        operation: record.operation,
+        operation: observed.operation,
         category: 'session',
-        threadId: record.threadId,
-        turnId: record.turnId,
-        sessionId: record.sessionId,
-        turnNumber: record.turnCount,
-        processId: record.processId,
+        threadId: observed.threadId,
+        turnId: observed.turnId,
+        sessionId: observed.sessionId,
+        turnNumber: observed.turnCount,
+        processId: observed.processId,
       })
-      return
     }
   }
 }
@@ -1058,20 +1081,29 @@ const endAttempt = (
   outcome: AgentAttemptSummary['outcome'],
   reason: string | null,
   relabel = false,
-): void => {
+): AgentDetailRecord => {
   const attempt = record.attempts.at(-1)
-  if (attempt !== undefined && (attempt.endedAt === null || relabel)) {
-    record.attempts[record.attempts.length - 1] = {
-      ...attempt,
-      endedAt: attempt.endedAt ?? at.toISOString(),
-      outcome,
-      reason,
-    }
-  }
+  const attempts =
+    attempt !== undefined && (attempt.endedAt === null || relabel)
+      ? Object.freeze([
+          ...record.attempts.slice(0, -1),
+          Object.freeze({
+            ...attempt,
+            endedAt: attempt.endedAt ?? at.toISOString(),
+            outcome,
+            reason,
+          }),
+        ])
+      : record.attempts
   const session = record.sessions.at(-1)
-  if (session !== undefined && session.endedAt === null) {
-    record.sessions[record.sessions.length - 1] = { ...session, endedAt: at.toISOString() }
-  }
+  const sessions =
+    session !== undefined && session.endedAt === null
+      ? Object.freeze([
+          ...record.sessions.slice(0, -1),
+          Object.freeze({ ...session, endedAt: at.toISOString() }),
+        ])
+      : record.sessions
+  return { ...record, attempts, sessions }
 }
 
 /**
@@ -1084,25 +1116,23 @@ export const recordRetryScheduled = (
   attemptNumber: number,
   dueAt: Date,
   reason: string | null,
-): void => {
+): AgentDetailRecord => {
   const summary = reason === null ? null : boundRedacted(reason).text
-  endAttempt(record, at, 'retrying', summary, true)
-  setPhase(record, 'retrying', summary ?? 'Waiting to retry', at)
-  push(record, {
-    sequence: nextSequence(record),
-    attempt: record.attempt,
+  const ended = endAttempt(record, at, 'retrying', summary, true)
+  const next = setPhase(ended, 'retrying', summary ?? 'Waiting to retry', at)
+  const pushed = push(next, {
+    sequence: nextSequence(next),
+    attempt: next.attempt,
     at: at.toISOString(),
     event: 'retry/scheduled',
-    operation: record.operation,
+    operation: next.operation,
     truncated: false,
     category: 'retry',
     attemptNumber,
     dueAt: dueAt.toISOString(),
     reason: summary,
   })
-  if (summary !== null) {
-    noteError(record, at, 'error', 'retry', summary)
-  }
+  return summary === null ? pushed : noteError(pushed, at, 'error', 'retry', summary)
 }
 
 /** Opens a new attempt for the same issue, preserving the timeline that led to it. */
@@ -1110,47 +1140,53 @@ export const recordAttemptStarted = (
   record: AgentDetailRecord,
   at: Date,
   attemptNumber: number,
-): void => {
-  record.attempt = attemptNumber
-  record.retries += 1
-  record.startedAt = at
-  record.lastActivityAt = null
+): AgentDetailRecord => {
+  const attempts = [
+    ...record.attempts,
+    Object.freeze({
+      attempt: attemptNumber,
+      startedAt: at.toISOString(),
+      endedAt: null,
+      outcome: 'running' as const,
+      reason: null,
+      firstSequence: record.sequence + 1,
+      lastSequence: record.sequence,
+    }),
+  ]
   // A new attempt is a new agent connection, so every session-scoped field is cleared rather than
   // left to describe the previous one: identity is only refilled by events the new session emits,
   // and the turn count starts over — it is folded forward with `Math.max`, so a session beginning
   // again at turn one could never displace a larger count carried over from the last. The session
   // this replaces is preserved in full by the retained session summaries.
-  record.threadId = null
-  record.turnId = null
-  record.sessionId = null
-  record.processId = null
-  record.turnCount = 0
-  record.attempts.push({
+  const started: AgentDetailRecord = {
+    ...record,
     attempt: attemptNumber,
-    startedAt: at.toISOString(),
-    endedAt: null,
-    outcome: 'running',
-    reason: null,
-    firstSequence: record.sequence + 1,
-    lastSequence: record.sequence,
-  })
-  if (record.attempts.length > retainedAttemptLimit) {
-    record.attempts = record.attempts.slice(-retainedAttemptLimit)
+    retries: record.retries + 1,
+    startedAt: at,
+    lastActivityAt: null,
+    threadId: null,
+    turnId: null,
+    sessionId: null,
+    processId: null,
+    turnCount: 0,
+    attempts: Object.freeze(
+      attempts.length > retainedAttemptLimit ? attempts.slice(-retainedAttemptLimit) : attempts,
+    ),
   }
-  setPhase(record, 'starting', 'Starting the agent', at)
-  push(record, {
-    sequence: nextSequence(record),
+  const next = setPhase(started, 'starting', 'Starting the agent', at)
+  return push(next, {
+    sequence: nextSequence(next),
     attempt: attemptNumber,
     at: at.toISOString(),
     event: 'attempt/started',
-    operation: record.operation,
+    operation: next.operation,
     truncated: false,
     category: 'session',
-    threadId: record.threadId,
+    threadId: next.threadId,
     turnId: null,
-    sessionId: record.sessionId,
-    turnNumber: record.turnCount,
-    processId: record.processId,
+    sessionId: next.sessionId,
+    turnNumber: next.turnCount,
+    processId: next.processId,
   })
 }
 
@@ -1164,16 +1200,16 @@ export const recordCancellation = (
   at: Date,
   reason: string,
   relabelEndedAttempt = false,
-): void => {
+): AgentDetailRecord => {
   const summary = boundRedacted(reason).text
-  endAttempt(record, at, 'cancelled', summary, relabelEndedAttempt)
-  setPhase(record, /stall/iu.test(reason) ? 'stalled' : 'cancelled', summary, at)
-  push(record, {
-    sequence: nextSequence(record),
-    attempt: record.attempt,
+  const ended = endAttempt(record, at, 'cancelled', summary, relabelEndedAttempt)
+  const next = setPhase(ended, /stall/iu.test(reason) ? 'stalled' : 'cancelled', summary, at)
+  return push(next, {
+    sequence: nextSequence(next),
+    attempt: next.attempt,
     at: at.toISOString(),
     event: 'agent/cancelled',
-    operation: record.operation,
+    operation: next.operation,
     truncated: false,
     category: 'cancellation',
     reason: summary,
@@ -1205,31 +1241,36 @@ export const recordHandoff = (
   record: AgentDetailRecord,
   at: Date,
   observation: HandoffObservation,
-): void => {
+): AgentDetailRecord => {
   const summary = observation.message === null ? null : boundRedacted(observation.message).text
-  if (observation.remoteBranch !== undefined) {
-    record.handoff.remoteBranch = { status: observation.status, name: observation.remoteBranch }
-  }
-  if (observation.pullRequest !== undefined) {
-    record.handoff.pullRequest = { ...observation.pullRequest }
-  }
-  if (observation.outcome !== undefined) {
-    record.handoff.outcome = observation.outcome
-    // Only an outcome that actually ends the work closes the attempt. A missing branch or a failed
-    // handoff is followed by another attempt, so closing it here would label a retrying attempt as
-    // handed off — and the retry that follows could no longer correct it.
-    if (handedOffOutcomes.has(observation.outcome)) {
-      endAttempt(record, at, 'handed_off', summary)
-    }
-  }
-  record.handoff.reason = summary
-  setPhase(record, 'handing_off', summary ?? 'Handing off completed work', at)
-  push(record, {
-    sequence: nextSequence(record),
-    attempt: record.attempt,
+  const handoff: AgentHandoffDetail = Object.freeze({
+    ...record.handoff,
+    remoteBranch:
+      observation.remoteBranch === undefined
+        ? record.handoff.remoteBranch
+        : Object.freeze({ status: observation.status, name: observation.remoteBranch }),
+    pullRequest:
+      observation.pullRequest === undefined
+        ? record.handoff.pullRequest
+        : Object.freeze({ ...observation.pullRequest }),
+    outcome: observation.outcome ?? record.handoff.outcome,
+    reason: summary,
+  })
+  // Only an outcome that actually ends the work closes the attempt. A missing branch or a failed
+  // handoff is followed by another attempt, so closing it here would label a retrying attempt as
+  // handed off — and the retry that follows could no longer correct it.
+  const observed: AgentDetailRecord = { ...record, handoff }
+  const ended =
+    observation.outcome !== undefined && handedOffOutcomes.has(observation.outcome)
+      ? endAttempt(observed, at, 'handed_off', summary)
+      : observed
+  const next = setPhase(ended, 'handing_off', summary ?? 'Handing off completed work', at)
+  return push(next, {
+    sequence: nextSequence(next),
+    attempt: next.attempt,
     at: at.toISOString(),
     event: `handoff/${observation.step}`,
-    operation: record.operation,
+    operation: next.operation,
     truncated: false,
     category: 'handoff',
     step: observation.step,
@@ -1248,7 +1289,15 @@ export type AgentDetailContext = Readonly<{
   retry: Readonly<{ attempt: number; dueAt: Date; reason: string | null }> | null
 }>
 
-/** Builds the exact, immutable snapshot published to operator consumers. */
+/**
+ * Builds the exact, immutable snapshot published to operator consumers.
+ *
+ * Only the objects assembled here are frozen. Everything taken straight from the record — the
+ * timeline, the attempt and session histories, the retained errors, the rate-limit windows, the
+ * token counts, and the handoff detail — was frozen as the record adopted it and is shared rather
+ * than copied: the record is a value that no recorder edits, so there is nothing for a consumer to
+ * observe changing underneath it and nothing reachable to write through.
+ */
 export const buildAgentDetail = (
   record: AgentDetailRecord,
   context: AgentDetailContext,
@@ -1286,8 +1335,8 @@ export const buildAgentDetail = (
     attempt: Object.freeze({
       current: record.attempt,
       retries: record.retries,
-      attempts: frozen(record.attempts),
-      sessions: frozen(record.sessions),
+      attempts: record.attempts,
+      sessions: record.sessions,
     }),
     phase: Object.freeze({
       phase,
@@ -1304,8 +1353,8 @@ export const buildAgentDetail = (
       stallCountdownMs: stallDeadline === null ? null : Math.max(stallDeadline.getTime() - now, 0),
       stalled,
     }),
-    usage: Object.freeze({ ...record.tokens }),
-    rateLimits: frozen(record.rateLimits),
+    usage: record.tokens,
+    rateLimits: record.rateLimits,
     workspace: Object.freeze({
       pathKey: record.workspacePathKey,
       branch: context.branch ?? record.handoff.expectedBranch,
@@ -1317,17 +1366,7 @@ export const buildAgentDetail = (
       qualityCommandState: record.qualityCommandState,
       pathsTruncated: record.pathsTruncated,
     }),
-    handoff: Object.freeze({
-      expectedBranch: record.handoff.expectedBranch,
-      remoteBranch: Object.freeze({ ...record.handoff.remoteBranch }),
-      pullRequest: Object.freeze({ ...record.handoff.pullRequest }),
-      dispatchLabels: Object.freeze({
-        ...record.handoff.dispatchLabels,
-        labels: Object.freeze([...record.handoff.dispatchLabels.labels]),
-      }),
-      outcome: record.handoff.outcome,
-      reason: record.handoff.reason,
-    }),
+    handoff: record.handoff,
     retry:
       context.retry === null
         ? null
@@ -1336,10 +1375,9 @@ export const buildAgentDetail = (
             dueAt: context.retry.dueAt.toISOString(),
             reason: context.retry.reason === null ? null : boundRedacted(context.retry.reason).text,
           }),
-    errors: frozen(record.errors),
+    errors: record.errors,
     timeline: Object.freeze({
-      // Timeline events are frozen as they are appended, so the array copy is enough here.
-      events: Object.freeze([...record.events]),
+      events: record.events,
       retained: record.events.length,
       dropped: record.dropped,
       limit: timelineEventLimit,
