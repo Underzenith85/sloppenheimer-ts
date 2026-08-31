@@ -1,6 +1,6 @@
 import { Effect, Option, Ref, type Scope } from 'effect'
 
-import type { IssueId } from '../domain/domain.js'
+import type { Issue, IssueId } from '../domain/domain.js'
 import { logInfo } from '../support/logging.js'
 import { dispatch } from './dispatch.js'
 import {
@@ -14,7 +14,14 @@ import {
   repairIssue,
   type HandoffAction,
 } from './handoff-decision.js'
-import { hasSlot, identifierIssueNumber, logContext } from './policy.js'
+import {
+  hasSlot,
+  identifierIssueNumber,
+  issueIsActive,
+  issueIsRoutable,
+  logContext,
+  stateIsIn,
+} from './policy.js'
 import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
@@ -65,6 +72,93 @@ const writeHandoff = (
 ): Effect.Effect<void> =>
   Ref.update(context.state, (current) => Transitions.putHandoff(current, id, handoff))
 
+type IssueRefresh =
+  | Readonly<{ _tag: 'Failed'; reason: string }>
+  | Readonly<{ _tag: 'Succeeded'; issue: Option.Option<Issue> }>
+
+export type RepairPermission =
+  | Readonly<{ _tag: 'Allowed'; issue: Issue }>
+  | Readonly<{ _tag: 'Denied'; reason: string }>
+
+/**
+ * A handoff keeps the workflow that created its pull request. A freshly fetched issue is evaluated
+ * against that same workflow before new agent work starts, while review and merge observation stay
+ * independent of issue eligibility. Removing a label therefore stops repairs without stranding a
+ * pull request that is already green.
+ */
+export const repairPermission = (
+  handoff: HandoffEntry,
+  refresh: IssueRefresh,
+): RepairPermission => {
+  if (refresh._tag === 'Failed') {
+    return { _tag: 'Denied', reason: `Cannot confirm repair eligibility. ${refresh.reason}` }
+  }
+  if (Option.isNone(refresh.issue)) {
+    return {
+      _tag: 'Denied',
+      reason: 'Repair paused because the tracker no longer reports the issue.',
+    }
+  }
+  const issue = refresh.issue.value
+  const workflow = handoff.execution.workflow
+  if (stateIsIn(issue.state, workflow.config.tracker.terminalStates)) {
+    return { _tag: 'Denied', reason: 'Repair paused because the issue is terminal.' }
+  }
+  if (!issueIsActive(issue, workflow) || !issueIsRoutable(issue, workflow)) {
+    return {
+      _tag: 'Denied',
+      reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
+    }
+  }
+  return { _tag: 'Allowed', issue }
+}
+
+/** Fetch current issue records once per captured tracker, not once per pull request. */
+const refreshHandoffIssues = (
+  handoffs: ReadonlyMap<IssueId, HandoffEntry>,
+): Effect.Effect<ReadonlyMap<IssueId, IssueRefresh>, never> =>
+  Effect.gen(function* () {
+    type TrackerGroup = Readonly<{
+      tracker: HandoffEntry['execution']['tracker']
+      ids: readonly IssueId[]
+    }>
+    const groups = new Map<HandoffEntry['execution']['tracker'], IssueId[]>()
+    for (const [id, handoff] of handoffs) {
+      const existing = Option.fromNullable(groups.get(handoff.execution.tracker))
+      if (Option.isSome(existing)) {
+        existing.value.push(id)
+      } else {
+        groups.set(handoff.execution.tracker, [id])
+      }
+    }
+    const fetched = yield* Effect.forEach(
+      [...groups].map<TrackerGroup>(([tracker, ids]) => ({ tracker, ids })),
+      (group) =>
+        group.tracker.fetchIssuesByIds(group.ids).pipe(
+          Effect.match({
+            onFailure: (error) => ({ group, error: Option.some(error.message), issues: [] }),
+            onSuccess: (issues) => ({ group, error: Option.none<string>(), issues }),
+          }),
+        ),
+    )
+    const refreshed = new Map<IssueId, IssueRefresh>()
+    for (const result of fetched) {
+      if (Option.isSome(result.error)) {
+        for (const id of result.group.ids) {
+          refreshed.set(id, { _tag: 'Failed', reason: result.error.value })
+        }
+        continue
+      }
+      for (const id of result.group.ids) {
+        refreshed.set(id, {
+          _tag: 'Succeeded',
+          issue: Option.fromNullable(result.issues.find((issue) => issue.id === id)),
+        })
+      }
+    }
+    return refreshed
+  })
+
 /**
  * Carries out the one call an observation asked for and folds its result back into the handoff.
  * Every branch ends with the handoff written, so the state after a pass reflects what actually
@@ -75,6 +169,7 @@ const perform = (
   id: IssueId,
   handoff: HandoffEntry,
   action: HandoffAction,
+  permission: RepairPermission,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const codeReview = handoff.execution.codeReview
@@ -157,6 +252,13 @@ const perform = (
         return
       }
       case 'Repair': {
+        if (permission._tag === 'Denied') {
+          yield* writeHandoff(context, id, {
+            ...handoff,
+            reason: permission.reason,
+          })
+          return
+        }
         const baselineHeadSha = action.headSha
         if (baselineHeadSha === null) {
           yield* writeHandoff(context, id, {
@@ -165,7 +267,7 @@ const perform = (
           })
           return
         }
-        const issue = repairIssue(handoff, handoff.issue, baselineHeadSha, action.reason)
+        const issue = repairIssue(handoff, permission.issue, baselineHeadSha, action.reason)
         const current = yield* Ref.get(context.state)
         if (!hasSlot(current, issue, handoff.execution.workflow)) {
           yield* writeHandoff(context, id, awaitingSlot(handoff, action.reason))
@@ -190,11 +292,25 @@ const perform = (
     }
   })
 
+/** Run the one handoff state machine and its one action interpreter for an observed pull request. */
+export const applyHandoffObservation = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+  observation: Parameters<typeof observeHandoff>[1],
+  observedAt: Date,
+  permission: RepairPermission,
+): Effect.Effect<void, never, Scope.Scope> => {
+  const decision = observeHandoff(handoff, observation, observedAt)
+  return perform(context, id, decision.handoff, decision.action, permission)
+}
+
 export const reconcileHandoffs = (
   context: OrchestratorContext,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(context.state)
+    const refreshedIssues = yield* refreshHandoffIssues(opening.handoffs)
     for (const id of opening.handoffs.keys()) {
       // Re-read: an earlier handoff in this pass may have taken the last agent slot, or dispatched
       // a repair for this very issue.
@@ -222,8 +338,20 @@ export const reconcileHandoffs = (
         )
         continue
       }
-      const decision = observeHandoff(live, inspected.observation, observedAt)
-      yield* perform(context, id, decision.handoff, decision.action)
+      const refresh = Option.fromNullable(refreshedIssues.get(id)).pipe(
+        Option.getOrElse<IssueRefresh>(() => ({
+          _tag: 'Failed',
+          reason: 'The handoff issue was not included in the eligibility refresh.',
+        })),
+      )
+      yield* applyHandoffObservation(
+        context,
+        id,
+        live,
+        inspected.observation,
+        observedAt,
+        repairPermission(live, refresh),
+      )
     }
     // One timeline entry per observed transition, not one per poll: an unchanged disposition is
     // not news, and the timeline is a bounded resource.

@@ -2,21 +2,16 @@ import { Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
 
 import { cyclicIssueIdentifiers } from '../domain/dependencies.js'
 import type { Issue, IssueId } from '../domain/domain.js'
-import { classifyPullRequest } from '../domain/handoff.js'
 import type { Workflow } from '../config/workflow.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
 import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetry.js'
 import { dispatch } from './dispatch.js'
+import { releaseRepair, settleRepair } from './handoff-decision.js'
 import {
-  afterRepairDispatched,
-  attributeRepairHead,
-  gateReview,
-  releaseRepair,
-  repairIssue,
-  repairLimit,
-  settleRepair,
-} from './handoff-decision.js'
-import { reconcileHandoffs } from './handoff-reconciliation.js'
+  applyHandoffObservation,
+  reconcileHandoffs,
+  repairPermission,
+} from './handoff-reconciliation.js'
 import {
   dispatchAdmission,
   hasSlot,
@@ -29,7 +24,7 @@ import {
   stateIsIn,
 } from './policy.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { EffectiveWorkflow, HandoffEntry } from './state.js'
+import type { HandoffEntry } from './state.js'
 import * as Transitions from './transitions.js'
 import {
   drainRetirements,
@@ -47,160 +42,16 @@ const writeHandoff = (
     Effect.zipRight(context.persistHandoffs),
   )
 
-/** Keeps a repair's baseline across an interruption that is not the repair ending. */
-const settleHandoffRepair = (
-  context: OrchestratorContext,
-  id: IssueId,
-  handoff: HandoffEntry | undefined,
-): Effect.Effect<void> =>
-  handoff === undefined || Option.isNone(handoff.repair)
-    ? Effect.void
-    : writeHandoff(context, id, settleRepair(handoff))
-
 /** Ends a repair: whatever identity it was carrying goes with it. */
 const releaseHandoffRepair = (
   context: OrchestratorContext,
   id: IssueId,
-  handoff: HandoffEntry | undefined,
+  handoff: Option.Option<HandoffEntry>,
 ): Effect.Effect<void> =>
-  handoff === undefined || Option.isNone(handoff.repair)
-    ? Effect.void
-    : writeHandoff(context, id, releaseRepair(handoff))
-
-const markRepairWorkerStarted = (
-  context: OrchestratorContext,
-  id: IssueId,
-  reason: string,
-): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const current = yield* Ref.get(context.state)
-    const handoff = current.handoffs.get(id)
-    if (handoff === undefined || Option.isNone(handoff.repair)) {
-      return
-    }
-    yield* writeHandoff(context, id, {
-      ...handoff,
-      repair: Option.some({ ...handoff.repair.value, workerStarted: true }),
-      reason,
-    })
-  })
-
-/** What a due retry should dispatch: the issue, and the workflow it belongs to when it is a repair. */
-type RepairRetry = Readonly<{
-  issue: Issue
-  effective: EffectiveWorkflow | undefined
-  /** What the handoff should read once a worker really starts from this baseline. */
-  runningReason: string
-}>
-
-/**
- * Settles the repair attempt that queued this retry, and re-baselines the next one.
- *
- * Every repair retry re-inspects the pull request first: a refused dispatch may be queued behind a
- * manual push, and a worker that pushed before it failed leaves a head that is its output and
- * nobody else's. Reconciliation skips a handoff whose retry is queued, so this is the only place
- * that head can be attributed; without it the next attempt's head would stand in for two. None
- * means the retry is abandoned, the handoff having been written with why.
- */
-const prepareRepairRetry = (
-  context: OrchestratorContext,
-  id: IssueId,
-  issue: Issue,
-  handoff: HandoffEntry | undefined,
-  attempt: Readonly<{ attempt: number }>,
-): Effect.Effect<Option.Option<RepairRetry>, never, Scope.Scope> =>
-  Effect.gen(function* () {
-    const plain: Option.Option<RepairRetry> = Option.some({
-      issue,
-      effective: undefined,
-      runningReason: '',
-    })
-    if (handoff === undefined || Option.isNone(handoff.repair) || !handoff.repair.value.inFlight) {
-      return plain
-    }
-    const repair = handoff.repair.value
-    const codeReview = handoff.execution.codeReview
-    if (codeReview === null) {
-      yield* writeHandoff(context, id, releaseRepair(handoff))
-      return Option.none()
-    }
-    const inspected = yield* codeReview.inspectPullRequest(handoff.pullRequestNumber).pipe(
-      Effect.match({
-        onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-        onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-      }),
-    )
-    if (inspected._tag === 'Failed') {
-      yield* context.scheduleRetry(
-        repair.issue,
-        attempt.attempt + 1,
-        `repair baseline refresh failed: ${inspected.error.message}`,
-        false,
-      )
-      return Option.none()
-    }
-    if (inspected.observation.state !== 'open') {
-      yield* writeHandoff(context, id, releaseRepair(handoff))
-      return Option.none()
-    }
-    const observedHeadSha = inspected.observation.headSha
-    // The attempt that queued this retry pushed and then failed, so that head is its output and
-    // spends the budget here, where reconciliation cannot see it: a handoff whose retry is queued
-    // is skipped by every pass. What the head costs is `attributeRepairHead`'s to say.
-    const produced = repair.workerStarted && observedHeadSha !== repair.startedHeadSha
-    const attribution = produced
-      ? Option.some(attributeRepairHead(handoff, observedHeadSha))
-      : Option.none()
-    if (Option.isSome(attribution) && attribution.value._tag === 'Cycled') {
-      yield* writeHandoff(context, id, attribution.value.handoff)
-      return Option.none()
-    }
-    const attributed: HandoffEntry = Option.isSome(attribution)
-      ? attribution.value.handoff
-      : handoff
-    // The same gate reconciliation applies before it repairs anything: a head this attempt just
-    // pushed has no completed review yet, and repairing it would spend one of the budget with no
-    // review feedback to work from. Standing down leaves the next pass to request that review.
-    if (Option.isSome(gateReview(attributed, inspected.observation))) {
-      yield* writeHandoff(context, id, releaseRepair(attributed))
-      return Option.none()
-    }
-    const disposition = classifyPullRequest(inspected.observation)
-    if (disposition.state !== 'repair_needed') {
-      yield* writeHandoff(context, id, releaseRepair(attributed))
-      return Option.none()
-    }
-    if (attributed.repairHeadShas.length >= repairLimit) {
-      yield* writeHandoff(context, id, {
-        ...releaseRepair(attributed),
-        state: 'intervention_required',
-        headSha: observedHeadSha,
-        reason: `Repair limit reached. ${disposition.reason}`,
-      })
-      return Option.none()
-    }
-    // Built on the record this retry just refetched, not the one the handoff stored: the worker
-    // gets current fields, and admission buckets the run by the state the issue is in now.
-    const dispatchIssue = repairIssue(attributed, issue, observedHeadSha, disposition.reason)
-    yield* writeHandoff(
-      context,
-      id,
-      afterRepairDispatched(attributed, false, dispatchIssue, observedHeadSha, disposition.reason),
-    )
-    // A repair belongs to the workflow its pull request was handed off under, the way
-    // reconciliation dispatches the first attempt. A reload between the refusal and this retry
-    // must not re-render the repair through a template that drops the instructions.
-    return Option.some({
-      issue: dispatchIssue,
-      runningReason: `Repair agent running. ${disposition.reason}`,
-      effective: {
-        workflow: handoff.execution.workflow,
-        tracker: handoff.execution.tracker,
-        codeReview,
-        workspaces: handoff.execution.workspaces,
-        loadedAt: handoff.observedAt,
-      },
-    })
+  Option.match(handoff, {
+    onNone: () => Effect.void,
+    onSome: (entry) =>
+      Option.isNone(entry.repair) ? Effect.void : writeHandoff(context, id, releaseRepair(entry)),
   })
 
 export const poll = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
@@ -553,7 +404,15 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           }
           const current = yield* Ref.get(context.state)
           const effective = current.lastKnownGood
-          const refreshResult = yield* effective.tracker.fetchIssuesByIds([event.issueId]).pipe(
+          const handoff = Option.fromNullable(current.handoffs.get(event.issueId))
+          const repairHandoff = Option.filter(handoff, (entry) =>
+            Option.exists(entry.repair, (repair) => repair.inFlight),
+          )
+          const refreshTracker = Option.match(repairHandoff, {
+            onNone: () => effective.tracker,
+            onSome: (entry) => entry.execution.tracker,
+          })
+          const refreshResult = yield* refreshTracker.fetchIssuesByIds([event.issueId]).pipe(
             Effect.match({
               onFailure: (error) => ({ _tag: 'Failed' as const, error }),
               onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
@@ -568,84 +427,103 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             )
             break
           }
-          const handoff = current.handoffs.get(event.issueId)
-          const issue = refreshResult.issues.find((candidate) => candidate.id === event.issueId)
-          if (issue === undefined) {
-            // The handoff outlives an issue the tracker stopped reporting, so a head the worker
-            // pushed is still the repair's to account for on the next inspection.
-            yield* settleHandoffRepair(context, event.issueId, handoff)
+          const issue = Option.fromNullable(
+            refreshResult.issues.find((candidate) => candidate.id === event.issueId),
+          )
+          if (Option.isSome(repairHandoff)) {
+            const entry = repairHandoff.value
+            const repair = entry.repair
+            if (Option.isNone(repair)) {
+              break
+            }
+            const codeReview = entry.execution.codeReview
+            if (codeReview === null) {
+              yield* releaseHandoffRepair(context, event.issueId, repairHandoff)
+              break
+            }
+            const terminalIssue = Option.filter(issue, (record) =>
+              stateIsIn(record.state, entry.execution.workflow.config.tracker.terminalStates),
+            )
+            if (Option.isSome(terminalIssue)) {
+              yield* entry.execution.workspaces.remove(terminalIssue.value.identifier).pipe(
+                Effect.catchAll((error) =>
+                  logWarning('terminal workspace cleanup failed', {
+                    ...logContext(terminalIssue.value),
+                    action: 'workspace_cleanup',
+                    outcome: 'failed',
+                    error: error.message,
+                  }),
+                ),
+              )
+            }
+            const inspected = yield* codeReview.inspectPullRequest(entry.pullRequestNumber).pipe(
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+              }),
+            )
+            if (inspected._tag === 'Failed') {
+              yield* context.scheduleRetry(
+                repair.value.issue,
+                event.attempt + 1,
+                `repair baseline refresh failed: ${inspected.error.message}`,
+                false,
+              )
+              break
+            }
+            const settled = settleRepair(entry)
+            yield* applyHandoffObservation(
+              context,
+              event.issueId,
+              settled,
+              inspected.observation,
+              new Date(),
+              repairPermission(settled, { _tag: 'Succeeded', issue }),
+            )
+            break
+          }
+          if (Option.isNone(issue)) {
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),
             )
             break
           }
-          if (stateIsIn(issue.state, effective.workflow.config.tracker.terminalStates)) {
-            // The checkout to remove is the one the work ran in. A reload can replace the workspace
-            // manager while the retry waits, and a repair retry dispatches into the handoff's
-            // manager, so its cleanup has to reach there rather than the newer root.
-            const workspaces = handoff?.execution.workspaces ?? effective.workspaces
-            yield* workspaces.remove(issue.identifier).pipe(
+          if (stateIsIn(issue.value.state, effective.workflow.config.tracker.terminalStates)) {
+            yield* effective.workspaces.remove(issue.value.identifier).pipe(
               Effect.catchAll((error) =>
                 logWarning('terminal workspace cleanup failed', {
-                  ...logContext(issue),
+                  ...logContext(issue.value),
                   action: 'workspace_cleanup',
                   outcome: 'failed',
                   error: error.message,
                 }),
               ),
             )
-            // The repair identity is deliberately left alone: the handoff outlives the issue, and
-            // the next inspection is what resolves the baseline -- attributing a head the worker
-            // pushed, or escalating a repair that changed nothing. Releasing it here would erase
-            // that verdict and let reconciliation dispatch another repair for abandoned work.
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),
             )
             break
           }
           if (
-            !issueIsActive(issue, effective.workflow) ||
-            !issueIsRoutable(issue, effective.workflow)
+            !issueIsActive(issue.value, effective.workflow) ||
+            !issueIsRoutable(issue.value, effective.workflow)
           ) {
-            // The continuation cannot be routed right now, but that does not end the repair.
-            yield* settleHandoffRepair(context, event.issueId, handoff)
             yield* Ref.update(context.state, (pending) =>
               Transitions.releaseClaim(pending, event.issueId),
             )
             break
           }
-          const repaired = yield* prepareRepairRetry(context, event.issueId, issue, handoff, {
-            attempt: event.attempt,
-          })
-          if (Option.isNone(repaired)) {
-            break
-          }
-          // Admission is judged against the workflow the run will actually be dispatched under,
-          // the way reconciliation admits the first repair, and against state re-read after the
-          // refresh above, which awaited a pull-request inspection another dispatch could span.
           const admitting = yield* Ref.get(context.state)
-          const admissionWorkflow = repaired.value.effective?.workflow ?? effective.workflow
-          // Deferred with the refreshed repair identity, not the one this retry arrived with:
-          // waiting for a slot is not a reason to re-run the attribution on the next attempt.
-          if (!hasSlot(admitting, repaired.value.issue, admissionWorkflow)) {
+          if (!hasSlot(admitting, issue.value, effective.workflow)) {
             yield* context.scheduleRetry(
-              repaired.value.issue,
+              issue.value,
               event.attempt + 1,
               'no available orchestrator slots',
               false,
             )
             break
           }
-          // An ordinary worker continuation has no repair identity and establishes no baseline.
-          const started = yield* dispatch(
-            context,
-            repaired.value.issue,
-            event.attempt,
-            repaired.value.effective,
-          )
-          if (started && repaired.value.effective !== undefined) {
-            yield* markRepairWorkerStarted(context, event.issueId, repaired.value.runningReason)
-          }
+          yield* dispatch(context, issue.value, event.attempt)
           break
         }
         case 'SetIssuePaused': {
@@ -668,7 +546,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               yield* Fiber.interrupt(retry.value.fiber)
               // An operator pause is a decision to stop, not an interruption to recover from:
               // the repair identity goes with the run the operator ended.
-              yield* releaseHandoffRepair(context, id, retrying.handoffs.get(id))
+              yield* releaseHandoffRepair(
+                context,
+                id,
+                Option.fromNullable(retrying.handoffs.get(id)),
+              )
               // Dropping the queued retry ends the agent, so its detail has to say so: without
               // this the record would publish as completed while still claiming to be waiting
               // to retry, and the retry it pointed at would never arrive.

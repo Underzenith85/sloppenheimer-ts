@@ -2060,9 +2060,7 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
-          expect(current.handoffs[0]?.repairStartedHeadSha).toBe(originalHead)
-          yield* control.refresh
-          return yield* control.snapshot
+          return current
         }),
       ),
     )
@@ -2129,12 +2127,10 @@ describe('restored pull request handoffs', (): void => {
           }
           // The head it pushed has no review of its own yet, so the retry stands down rather than
           // repairing it blind -- but the head is already counted before it does.
-          expect(launchedDescriptions).toHaveLength(1)
           expect(current.handoffs[0]).toMatchObject({
             repairAttempts: 1,
             repairHeadShas: [intermediateHead],
             repairObservedHeadShas: [originalHead, intermediateHead],
-            repairStartedHeadSha: null,
           })
           // Reconciliation picks the head up, settles its review, and repairs it from there, so
           // standing down defers the work rather than stranding it.
@@ -2175,6 +2171,7 @@ describe('restored pull request handoffs', (): void => {
       config: {
         ...isolated.config,
         agent: { ...isolated.config.agent, maxConcurrentAgents: 0 },
+        tracker: { ...isolated.config.tracker, requiredLabels: ['new-policy'] },
       },
     }
     const issue = {
@@ -2212,7 +2209,8 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
-          // The concurrency limit drops to nothing while the repair retry is queued.
+          // Live admission and eligibility both reject the issue while the repair retry is queued.
+          // The captured handoff workflow still permits it and is the one that will run it.
           harness.setWorkflow(reloaded)
           harness.notifyChanged()
           while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
@@ -2293,7 +2291,7 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
-  it('keeps the refreshed repair identity when a retry defers for capacity', async (): Promise<void> => {
+  it('returns a repair retry to handoff polling when capacity is unavailable', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
     const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
@@ -2345,9 +2343,7 @@ describe('restored pull request handoffs', (): void => {
             current = yield* control.snapshot
           }
           yield* TestClock.adjust('30 seconds')
-          while (
-            !current.retrying.some((entry) => entry.error === 'no available orchestrator slots')
-          ) {
+          while (!current.handoffs[0]?.reason?.startsWith('Waiting for an agent slot.')) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -2357,12 +2353,12 @@ describe('restored pull request handoffs', (): void => {
       ),
     )
 
-    // Waiting for a slot is not a reason to forget which repair this is: the deferred attempt still
-    // holds the baseline, so the next one continues the repair rather than dispatching a bare issue.
-    expect(snapshot.retrying.map((entry) => entry.issueId)).toContain(repaired.id)
+    // Capacity is handoff state, not a second retry lifecycle. The next poll applies the same
+    // observation and admission path again without pretending a worker is in flight.
+    expect(snapshot.retrying).toEqual([])
     expect(snapshot.handoffs[0]).toMatchObject({
       repairAttempts: 0,
-      repairStartedHeadSha: head,
+      repairStartedHeadSha: null,
     })
     await rm(workspaceRoot, { force: true, recursive: true })
   })
@@ -2632,14 +2628,71 @@ describe('restored pull request handoffs', (): void => {
       ),
     )
 
-    // The handoff outlives the issue, so the baseline the stood-down retry left behind is what the
-    // next inspection reads: a repair that changed nothing is an operator's problem, not grounds
-    // for another agent and another checkout of work that was just abandoned.
+    // Nothing ran after the issue became terminal, so the unchanged head is not reported as a
+    // no-op repair. The handoff remains observable, but new agent work is paused.
     expect(launches).toBe(1)
     expect(workspacesCreated).toBe(1)
     expect(snapshot.handoffs[0]).toMatchObject({
-      state: 'intervention_required',
+      state: 'repair_needed',
       repairAttempts: 0,
+      repairStartedHeadSha: null,
+      reason: 'Repair paused because the issue is terminal.',
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('does not dispatch repairs for an idle handoff whose issue is no longer eligible', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-ineligible-handoff-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const handedOffIssue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const currentIssue = { ...handedOffIssue, labels: ['symphony'] }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let launches = 0
+    await saveRepairHandoff(handoffStorePath, handedOffIssue, head)
+    const harness = makeHarness(isolated, () => [currentIssue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      runAgent: () =>
+        Effect.sync(() => {
+          launches += 1
+        }).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    const snapshot = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (
+            current.handoffs[0]?.reason !==
+            'Repair paused because the issue is not eligible under its handoff workflow.'
+          ) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(launches).toBe(0)
+    expect(snapshot.running).toEqual([])
+    expect(snapshot.retrying).toEqual([])
+    expect(snapshot.handoffs[0]).toMatchObject({
+      state: 'repair_needed',
+      repairAttempts: 0,
+      repairStartedHeadSha: null,
+      reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
     })
     await rm(workspaceRoot, { force: true, recursive: true })
   })
@@ -2812,9 +2865,7 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
-          expect(current.handoffs[0]?.repairStartedHeadSha).toBe(originalHead)
           while (current.handoffs[0]?.repairAttempts !== 1) {
-            yield* control.refresh
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -2870,6 +2921,57 @@ describe('restored pull request handoffs', (): void => {
     await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
       expect.objectContaining({ repairStartedHeadSha: head, repairWorkerStarted: false }),
     ])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('does not escalate a refused repair when its issue becomes terminal before retry', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-terminal-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let currentIssue = issue
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    // No credential is available, so dispatch refuses before a worker starts and queues a retry.
+    const harness = makeHarness(isolated, () => [currentIssue], undefined, {})
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          currentIssue = { ...issue, state: 'closed' }
+          yield* TestClock.adjust('20 seconds')
+          while (current.retrying.length !== 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs[0]).toMatchObject({
+      state: 'repair_needed',
+      repairAttempts: 0,
+      repairStartedHeadSha: null,
+      repairWorkerStarted: false,
+      reason: 'Repair paused because the issue is terminal.',
+    })
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
