@@ -101,7 +101,18 @@ export const nonEmptyString = Schema.String.pipe(Schema.filter((value) => value.
 /** Excludes `NaN` and the infinities, which no reading an operator should see ever is. */
 export const finiteNumber = Schema.Number.pipe(Schema.filter(Number.isFinite))
 
+/** A whole number JavaScript can represent exactly: an id, a count, or a resource number. */
+export const safeInteger = Schema.Number.pipe(Schema.filter(Number.isSafeInteger))
+
 /** A count: token totals and byte sizes are never negative and never fractional. */
-export const nonNegativeInteger = Schema.Number.pipe(
-  Schema.filter((value) => Number.isSafeInteger(value) && value >= 0),
-)
+export const nonNegativeInteger = safeInteger.pipe(Schema.filter((value) => value >= 0))
+
+/** A one-based number: an issue or pull-request number is never zero. */
+export const positiveInteger = safeInteger.pipe(Schema.filter((value) => value > 0))
+
+/**
+ * A record whose keys are read but whose values are not yet judged. Distinct from
+ * {@link protocolRecord}, which is a bare structural test: this one is a `Record` schema, so it
+ * composes as a field inside a struct.
+ */
+export const unknownRecord = Schema.Record({ key: Schema.String, value: Schema.Unknown })

@@ -7,8 +7,8 @@ import {
   githubJson,
   githubMaxPages,
   parseNextUrl,
+  trackerCause,
   trackerPaginationError,
-  trackerResponseError,
 } from './client.js'
 
 /**
@@ -47,10 +47,7 @@ export const paginate = <Value>(
               value: decode(body ?? null),
               nextUrl: parseNextUrl(linkHeader, url, provider.apiBaseUrl),
             }),
-            catch: (cause: unknown) =>
-              cause instanceof TrackerError
-                ? cause
-                : trackerResponseError('GitHub returned an undecodable page', cause),
+            catch: trackerCause('GitHub returned an undecodable page'),
           }),
         ),
         Effect.flatMap(({ value, nextUrl }) =>

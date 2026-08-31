@@ -9,8 +9,14 @@ import { Either, Schema } from 'effect'
 
 import { TrackerError } from '@symphony/core/domain/errors.js'
 import { isJsonValue } from '@symphony/core/support/json.js'
+import {
+  nonEmptyString,
+  positiveInteger,
+  safeInteger,
+  unknownRecord,
+} from '@symphony/core/support/schema.js'
 import type { GitHubProviderConfig } from './provider.js'
-import { trackerResponseError } from './client.js'
+import { decodeTrackerOrThrow, trackerCause } from './client.js'
 
 export type GitHubLabel = Readonly<{ name: string | null }>
 export type GitHubIssue = Readonly<{
@@ -43,7 +49,8 @@ const nullableString = (value: unknown): string | null => {
   return value
 }
 
-const nonEmptyString = (value: unknown): string | null => {
+/** Coerces a payload value to text, treating a non-string and the empty string alike as absent. */
+const nonEmptyText = (value: unknown): string | null => {
   const text = nullableString(value)
   return text === null || text.length === 0 ? null : text
 }
@@ -56,21 +63,15 @@ const parseDate = (value: string | null): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-const nonEmpty = Schema.String.pipe(Schema.filter((value) => value.length > 0))
-const positiveSafeInteger = Schema.Number.pipe(
-  Schema.filter((value) => Number.isSafeInteger(value) && value > 0),
-)
-const safeInteger = Schema.Number.pipe(Schema.filter(Number.isSafeInteger))
-const jsonRecord = Schema.Record({ key: Schema.String, value: Schema.Unknown })
 const githubLabel = Schema.Union(
   Schema.String,
   Schema.Struct({ name: Schema.NullOr(Schema.String) }),
 )
 const githubIssue = Schema.Struct({
-  number: positiveSafeInteger,
-  node_id: nonEmpty,
-  title: nonEmpty,
-  state: nonEmpty,
+  number: positiveInteger,
+  node_id: nonEmptyString,
+  title: nonEmptyString,
+  state: nonEmptyString,
   body: Schema.optional(Schema.Unknown),
   html_url: Schema.optional(Schema.Unknown),
   assignee: Schema.optional(Schema.Unknown),
@@ -81,25 +82,13 @@ const githubIssue = Schema.Struct({
 })
 const githubDependency = Schema.Struct({
   id: safeInteger,
-  number: positiveSafeInteger,
-  title: nonEmpty,
-  state: nonEmpty,
+  number: positiveInteger,
+  title: nonEmptyString,
+  state: nonEmptyString,
   repository_url: Schema.String,
   html_url: Schema.String,
 })
 const githubIssuePage = Schema.Array(Schema.declare(isJsonValue))
-
-const decodeOrThrow = <Value, Encoded>(
-  schema: Schema.Schema<Value, Encoded>,
-  value: unknown,
-  message: string,
-): Value =>
-  Either.match(Schema.decodeUnknownEither(schema)(value), {
-    onLeft: (cause) => {
-      throw trackerResponseError(message, cause)
-    },
-    onRight: (decoded) => decoded,
-  })
 
 /** GitHub returns labels either as objects or, on some payload shapes, as bare strings. */
 const decodeGitHubLabel = (value: unknown): GitHubLabel | null =>
@@ -109,7 +98,11 @@ const decodeGitHubLabel = (value: unknown): GitHubLabel | null =>
   })
 
 export const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
-  const decoded = decodeOrThrow(githubIssue, value, 'GitHub issue is missing required fields')
+  const decoded = decodeTrackerOrThrow(
+    githubIssue,
+    value,
+    trackerCause('GitHub issue is missing required fields'),
+  )
   const rawLabels = decoded.labels
   const labels = Array.isArray(rawLabels)
     ? rawLabels.flatMap((item) => {
@@ -118,27 +111,27 @@ export const decodeGitHubIssue = (value: JsonValue): GitHubIssue => {
       })
     : []
   const rawAssignee = decoded.assignee
-  const assignee = Either.getOrNull(Schema.decodeUnknownEither(jsonRecord)(rawAssignee))
+  const assignee = Either.getOrNull(Schema.decodeUnknownEither(unknownRecord)(rawAssignee))
   return {
     number: decoded.number,
     nodeId: decoded.node_id,
     title: decoded.title,
     body: nullableString(decoded.body),
     state: decoded.state,
-    htmlUrl: nonEmptyString(decoded.html_url),
-    assigneeLogin: assignee === null ? null : nonEmptyString(assignee['login']),
+    htmlUrl: nonEmptyText(decoded.html_url),
+    assigneeLogin: assignee === null ? null : nonEmptyText(assignee['login']),
     labels,
     isPullRequest: decoded.pull_request !== undefined && decoded.pull_request !== null,
-    createdAt: nonEmptyString(decoded.created_at),
-    updatedAt: nonEmptyString(decoded.updated_at),
+    createdAt: nonEmptyText(decoded.created_at),
+    updatedAt: nonEmptyText(decoded.updated_at),
   }
 }
 
 export const decodeGitHubDependency = (value: JsonValue): GitHubDependency => {
-  const decoded = decodeOrThrow(
+  const decoded = decodeTrackerOrThrow(
     githubDependency,
     value,
-    'GitHub issue dependency is missing required fields',
+    trackerCause('GitHub issue dependency is missing required fields'),
   )
   return {
     id: decoded.id,
@@ -173,7 +166,7 @@ export const normalizeDependency = (
       url: source.htmlUrl,
     }
   } catch (cause: unknown) {
-    throw trackerResponseError('GitHub issue dependency has an invalid repository URL', cause)
+    throw trackerCause('GitHub issue dependency has an invalid repository URL')(cause)
   }
 }
 
@@ -230,7 +223,11 @@ export type DecodedPage = Readonly<{
 }>
 
 export const decodeIssuePage = (body: JsonValue, provider: GitHubProviderConfig): DecodedPage => {
-  const records = decodeOrThrow(githubIssuePage, body, 'GitHub issue list is not an array')
+  const records = decodeTrackerOrThrow(
+    githubIssuePage,
+    body,
+    trackerCause('GitHub issue list is not an array'),
+  )
   const issues: Issue[] = []
   const malformed: string[] = []
   for (const [index, item] of records.entries()) {
@@ -240,7 +237,7 @@ export const decodeIssuePage = (body: JsonValue, provider: GitHubProviderConfig)
       if (!(error instanceof TrackerError)) {
         throw error
       }
-      const candidateRecord = Either.getOrNull(Schema.decodeUnknownEither(jsonRecord)(item))
+      const candidateRecord = Either.getOrNull(Schema.decodeUnknownEither(unknownRecord)(item))
       const candidate = candidateRecord?.['number']
       malformed.push(
         `index ${String(index)}${typeof candidate === 'number' ? ` (number ${String(candidate)})` : ''}: ${error.message}`,

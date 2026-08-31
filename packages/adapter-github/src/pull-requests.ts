@@ -2,14 +2,16 @@ import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Schema } from 'effect'
 
 import type { JsonValue } from '@symphony/core/domain/domain.js'
+import { unknownRecord } from '@symphony/core/support/schema.js'
 import { TrackerError } from '@symphony/core/domain/errors.js'
 import {
+  decodeTracker,
   githubJson,
   githubMaxPages,
   githubPageSize,
   parseNextUrl,
+  trackerCause,
   trackerPaginationError,
-  trackerResponseError,
   withBoundHttpClient,
   type GitHubHttpResult,
   type GitHubRequestInit,
@@ -20,7 +22,6 @@ import type {
 } from '@symphony/core/domain/handoff.js'
 import type { GitHubProviderConfig } from './provider.js'
 
-const jsonRecord = Schema.Record({ key: Schema.String, value: Schema.Unknown })
 const checkRun = Schema.Struct({
   name: Schema.String,
   status: Schema.Literal('queued', 'in_progress', 'completed'),
@@ -50,10 +51,7 @@ const decode = <Value, Encoded>(
   schema: Schema.Schema<Value, Encoded>,
   value: unknown,
   message: string,
-): Effect.Effect<Value, TrackerError> =>
-  Schema.decodeUnknown(schema)(value).pipe(
-    Effect.mapError((cause) => trackerResponseError(message, cause)),
-  )
+): Effect.Effect<Value, TrackerError> => decodeTracker(schema, value, trackerCause(message))
 
 const safeValueType = (value: JsonValue | undefined): string => {
   if (value === undefined) {
@@ -80,6 +78,7 @@ const pullRequestFieldError = (
     retryable: false,
   })
 
+/** {@link decode} for one field, reporting the key it was read under rather than the whole record. */
 const field = <Value, Encoded>(
   schema: Schema.Schema<Value, Encoded>,
   number: number,
@@ -87,9 +86,7 @@ const field = <Value, Encoded>(
   expected: string,
   value: JsonValue | undefined,
 ): Effect.Effect<Value, TrackerError> =>
-  Schema.decodeUnknown(schema)(value).pipe(
-    Effect.mapError(() => pullRequestFieldError(number, name, expected, value)),
-  )
+  decodeTracker(schema, value, () => pullRequestFieldError(number, name, expected, value))
 
 const json = (
   provider: GitHubProviderConfig,
@@ -125,7 +122,7 @@ const decodeThreads = (
             ? null
             : yield* decode(reviewComment, first, 'GitHub review comment is invalid')
         const commit =
-          comment === null ? null : Schema.decodeUnknownOption(jsonRecord)(comment.commit)
+          comment === null ? null : Schema.decodeUnknownOption(unknownRecord)(comment.commit)
         return {
           id: thread.id,
           resolved: thread.isResolved,
@@ -153,7 +150,7 @@ const decodeCodexReview = (
       const comment = yield* decode(codexComment, item, 'GitHub pull request comment is invalid')
       const author = comment.author ?? comment.user
       const body = comment.body
-      const authorRecord = Schema.decodeUnknownOption(jsonRecord)(author)
+      const authorRecord = Schema.decodeUnknownOption(unknownRecord)(author)
       if (authorRecord._tag === 'None' || typeof body !== 'string') {
         continue
       }
@@ -202,13 +199,10 @@ const fetchCodexReview = (
       nextUrl = yield* Effect.try({
         try: (): string | null =>
           parseNextUrl(response.linkHeader, requestUrl, provider.apiBaseUrl),
-        catch: (cause: unknown) =>
-          cause instanceof TrackerError
-            ? cause
-            : trackerPaginationError(
-                'GitHub pull request comment pagination could not be decoded',
-                cause,
-              ),
+        catch: trackerCause(
+          'GitHub pull request comment pagination could not be decoded',
+          trackerPaginationError,
+        ),
       })
       pages += 1
     }
@@ -233,7 +227,7 @@ export const makeGitHubPullRequestMonitor = (
       bindClient(
         Effect.gen(function* () {
           const pullValue = yield* json(provider, `${prefix}/pulls/${String(number)}`)
-          const pull = yield* field(jsonRecord, number, 'response', 'object', pullValue)
+          const pull = yield* field(unknownRecord, number, 'response', 'object', pullValue)
           const state = yield* field(
             Schema.Literal('open', 'closed'),
             number,
@@ -254,7 +248,7 @@ export const makeGitHubPullRequestMonitor = (
                 pullRequestFieldError(number, 'state', '"closed" for a merged pull request', state),
               )
             }
-            const head = Schema.decodeUnknownOption(jsonRecord)(pull['head'])
+            const head = Schema.decodeUnknownOption(unknownRecord)(pull['head'])
             const headSha =
               head._tag === 'Some' && typeof head.value['sha'] === 'string'
                 ? head.value['sha']
@@ -284,7 +278,7 @@ export const makeGitHubPullRequestMonitor = (
             }
           }
           if (state === 'closed') {
-            const head = Schema.decodeUnknownOption(jsonRecord)(pull['head'])
+            const head = Schema.decodeUnknownOption(unknownRecord)(pull['head'])
             return {
               number,
               state,
@@ -310,7 +304,7 @@ export const makeGitHubPullRequestMonitor = (
           }
           const headValue = pull['head']
           const head = yield* field(
-            jsonRecord,
+            unknownRecord,
             number,
             'head',
             'object',
@@ -352,7 +346,7 @@ export const makeGitHubPullRequestMonitor = (
             pull['mergeable_state'] as JsonValue | undefined,
           )
           const checksResponse = yield* decode(
-            jsonRecord,
+            unknownRecord,
             yield* json(
               provider,
               `${prefix}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=${String(githubPageSize)}`,
@@ -361,7 +355,7 @@ export const makeGitHubPullRequestMonitor = (
           )
           const codexReview = yield* fetchCodexReview(provider, prefix, number)
           const graphResponse = yield* decode(
-            jsonRecord,
+            unknownRecord,
             yield* json(provider, `${provider.apiBaseUrl.replace(/\/$/u, '')}/graphql`, {
               method: 'POST',
               body: JSON.stringify({
@@ -373,17 +367,17 @@ export const makeGitHubPullRequestMonitor = (
             'GitHub GraphQL response is invalid',
           )
           const data = yield* decode(
-            jsonRecord,
+            unknownRecord,
             graphResponse['data'],
             'GitHub GraphQL data is missing',
           )
           const repository = yield* decode(
-            jsonRecord,
+            unknownRecord,
             data['repository'],
             'GitHub GraphQL repository is missing',
           )
           const graphPull = yield* decode(
-            jsonRecord,
+            unknownRecord,
             repository['pullRequest'],
             'GitHub GraphQL pull request is missing',
           )
@@ -393,7 +387,7 @@ export const makeGitHubPullRequestMonitor = (
             'GitHub review decision is invalid',
           )
           const threads = yield* decode(
-            jsonRecord,
+            unknownRecord,
             graphPull['reviewThreads'],
             'GitHub review threads are missing',
           )
@@ -420,7 +414,7 @@ export const makeGitHubPullRequestMonitor = (
             method: 'PUT',
             body: JSON.stringify({ sha: expectedHeadSha, merge_method: 'squash' }),
           })
-          const response = yield* decode(jsonRecord, value, 'GitHub merge response is invalid')
+          const response = yield* decode(unknownRecord, value, 'GitHub merge response is invalid')
           const merged = response['merged']
           const sha = response['sha']
           const message = response['message']
@@ -441,12 +435,12 @@ export const makeGitHubPullRequestMonitor = (
       bindClient(
         Effect.gen(function* () {
           const pull = yield* decode(
-            jsonRecord,
+            unknownRecord,
             yield* json(provider, `${prefix}/pulls/${String(number)}`),
             'GitHub pull request response is invalid',
           )
           const head = yield* decode(
-            jsonRecord,
+            unknownRecord,
             pull['head'],
             'GitHub pull request head is missing',
           )
