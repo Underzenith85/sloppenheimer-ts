@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect, Fiber, Layer, TestClock, TestContext, type Scope } from 'effect'
+import { Effect, Exit, Fiber, Layer, Scope, Stream, TestClock, TestContext } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
@@ -254,6 +254,8 @@ type TestPorts = Readonly<{
   agentEventSemantics: AgentEventSemantics
   watchWorkflow: (path: string, onChange: () => void) => void
   environment: NodeJS.ProcessEnv
+  /** Observes the watcher's own teardown, which the stream's scope owns. */
+  onWatchReleased?: (path: string) => void
   onTrackerReleased?: (provider: ValidatedTrackerProvider) => void
   onWorkspacesReleased?: (settings: WorkspaceSettings) => void
 }>
@@ -282,7 +284,21 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
       preflight: (workflow) => preflightWorkflow(workflow, ports.environment),
     }),
     layerWorkflowWatcher({
-      watch: (path, onChange) => Effect.sync(() => ports.watchWorkflow(path, onChange)),
+      // The harness pushes into the stream exactly as the chokidar adapter does, so a test drives
+      // the same path the composition root binds rather than a callback seam of its own.
+      changes: (path) =>
+        Stream.asyncPush<void>(
+          (emit) =>
+            Effect.acquireRelease(
+              Effect.sync(() => {
+                ports.watchWorkflow(path, () => {
+                  emit.single(undefined)
+                })
+              }),
+              () => Effect.sync(() => ports.onWatchReleased?.(path)),
+            ),
+          { bufferSize: 'unbounded' },
+        ),
     }),
   )
 
@@ -344,7 +360,12 @@ const makeHarness = (
   environment: NodeJS.ProcessEnv = testEnvironment,
 ): TestHarness => {
   let selected: Workflow | WorkflowError = initial
-  let notifyChanged = (): void => undefined
+  // A change signalled before the orchestrator has subscribed is held rather than lost: the stream
+  // registers on its consuming fiber, which is scheduled after the call that forked it returns.
+  let pendingChanges = 0
+  let notifyChanged = (): void => {
+    pendingChanges += 1
+  }
   let loadCount = 0
   let stateFetchCount = 0
   const stateFetchStates: (readonly string[])[] = []
@@ -444,6 +465,11 @@ const makeHarness = (
     environment,
     watchWorkflow: (_path, onChange) => {
       notifyChanged = onChange
+      const held = pendingChanges
+      pendingChanges = 0
+      for (let index = 0; index < held; index += 1) {
+        onChange()
+      }
     },
     onTrackerReleased: (provider) => {
       releasedTrackers.push(provider)
@@ -2449,6 +2475,90 @@ describe('workflow hot reload', (): void => {
         }),
       ),
     )
+  })
+
+  it('reloads the workflow when the watcher reports a change', async (): Promise<void> => {
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+
+    const fingerprint = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          harness.setWorkflow(changedWorkflow({ fingerprint: 'watched' }))
+          // A change that arrives while a tick is already queued is coalesced into it by design,
+          // so the edit is signalled until the reload it asks for has actually been observed.
+          let snapshot = yield* control.snapshot
+          while (snapshot.effectiveWorkflow.fingerprint !== 'watched') {
+            harness.notifyChanged()
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          return snapshot.effectiveWorkflow.fingerprint
+        }),
+      ),
+    )
+
+    expect(fingerprint).toBe('watched')
+  })
+
+  it('interrupts a watcher-triggered tick when the orchestrator shuts down', async (): Promise<void> => {
+    let pollShouldBlock = false
+    let pollBlocked = false
+    let pollInterrupted = false
+    let watchReleased = false
+    const harness = makeHarness(
+      changedWorkflow({ fingerprint: 'initial' }),
+      () => [],
+      (_effectiveWorkflow, states) => {
+        if (!states.includes('open') || !pollShouldBlock) {
+          return Effect.succeed([])
+        }
+        return Effect.sync(() => {
+          pollBlocked = true
+        }).pipe(
+          Effect.zipRight(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              pollInterrupted = true
+            }),
+          ),
+        )
+      },
+    )
+    const ports: TestPorts = {
+      ...harness.ports,
+      onWatchReleased: () => {
+        watchReleased = true
+      },
+    }
+
+    const loads = await runWithTestClock(
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const control = yield* Scope.extend(startTestOrchestrator('/tmp/WORKFLOW.md', ports), scope)
+        yield* control.refresh
+        pollShouldBlock = true
+        // A change that arrives while a tick is already queued is coalesced into it by design, so
+        // the edit is signalled until the poll it asks for is genuinely in flight.
+        while (!pollBlocked) {
+          harness.notifyChanged()
+          yield* Effect.yieldNow()
+        }
+        expect(pollInterrupted).toBe(false)
+        // Closing the scope is what shutdown does. It returns only once every fiber the scope owns
+        // has finished being interrupted, so the poll cannot still be running afterwards.
+        yield* Scope.close(scope, Exit.void)
+        const atShutdown = harness.loads()
+        harness.notifyChanged()
+        yield* Effect.yieldNow()
+        return { atShutdown, afterShutdown: harness.loads() }
+      }),
+    )
+
+    expect(pollInterrupted).toBe(true)
+    expect(watchReleased).toBe(true)
+    expect(loads.afterShutdown).toBe(loads.atShutdown)
   })
 
   it('uses the provider returned by dispatch preflight', async (): Promise<void> => {

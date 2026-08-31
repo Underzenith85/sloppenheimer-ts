@@ -1,4 +1,4 @@
-import { Effect, Layer } from 'effect'
+import { Effect, Layer, Stream } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { HooksConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
@@ -75,7 +75,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
       ),
     preflight: () => Effect.succeed(validated),
   }),
-  layerWorkflowWatcher({ watch: () => Effect.void }),
+  layerWorkflowWatcher({ changes: () => Stream.empty }),
 )
 
 describe('port layer composition', (): void => {
@@ -125,7 +125,7 @@ describe('port layer composition', (): void => {
             isRoutable: () => true,
             onEvent: () => {},
           })
-          yield* watcher.watch('WORKFLOW.md', () => {})
+          yield* Stream.runDrain(watcher.changes('WORKFLOW.md'))
           const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
           return {
             secretEnvironmentNames: currentTracker.secretEnvironmentNames,
