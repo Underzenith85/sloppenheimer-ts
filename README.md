@@ -483,12 +483,15 @@ list hydrates none — which is what a startup terminal sweep wants.
 | `assigneeId`              | `assignee.login`                | Nullable; empty becomes `null`                              |
 | `labels`                  | `labels`                        | Object or string entries, trimmed, lowercased, deduplicated |
 | `blockedBy`               | `dependencies/blocked_by`       | Collection; scope-checked repository URLs                   |
-| `dispatchable`            | `pull_request`                  | `false` when the record is a pull request                   |
+| `dispatchable`            | provider eligibility            | `false` for pull requests, open blockers, or cycle members  |
 | `createdAt` / `updatedAt` | `created_at` / `updated_at`     | Nullable; unparsable becomes `null`                         |
 
-**Dispatchability.** State-list reads return every normalized record in scope, including
-`dispatchable=false`; the orchestrator owns filtering. Dependency hydration is skipped for
-non-dispatchable records, and the operator backlog filters them out for display.
+**Dispatchability.** The GitHub adapter derives blocker and dependency-cycle eligibility into
+`dispatchable`; the generic scheduler combines that value only with configured required labels.
+State-list reads still return every normalized record in scope, including `dispatchable=false`, so
+the scheduler owns the final dispatch filter. Dependency hydration is skipped for pull-request
+records. The operator backlog retains blocked and cyclic issues for readiness diagnostics while
+excluding pull requests.
 
 **Malformed records.** A malformed record in a state-list read is skipped with a warning naming its
 index and reason; valid records on the same page are preserved. A malformed record in an identity
