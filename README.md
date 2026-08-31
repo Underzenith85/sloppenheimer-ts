@@ -326,6 +326,43 @@ SPEC suggests — so a caller that reads `/api/v1/state` next sees the state the
 `GET /api/v1/backlog` is the console's own endpoint rather than a SPEC route, and stays in the
 internal vocabulary its consumer is written against.
 
+### The two per-issue resources
+
+`GET /api/v1/<url-encoded issue identifier>` is the SPEC 13.7.2 per-issue baseline, in the field
+names the SPEC documents: `status`, `tracked`, `workspace.path`, `attempts.restart_count` and
+`attempts.current_retry_attempt`, `running`, `retry`, `logs`, `recent_events`, and `last_error`,
+with a `detail_url` pointing at the other one. Everything in it is sourced from the agent detail
+record the runtime already publishes, so the two resources cannot disagree.
+
+`GET /api/v1/agents/<url-encoded issue identifier>` is a documented **superset** rather than an
+alias: it publishes the whole `AgentDetailSnapshot` — the complete timeline, the attempt and session
+histories, per-category workspace and handoff detail — and it keeps the four distinguished outcomes
+described under "Live agent inspection". Collapsing the two would cost either the baseline's
+interoperability or the superset's precision, so both are published and `src/operator/api.ts` is the
+single place internal records are mapped onto published names.
+
+The two also differ on what counts as missing, deliberately. The baseline resource answers `404
+issue_not_found` only for an identifier unknown to the current in-memory state, so an issue whose
+work has moved to the pull-request handoff lifecycle resolves with `status: "handoff"` instead of
+being reported absent — the host can disprove that absence. The superset keeps its narrower reading,
+where an issue with no live agent session is `409 agent_not_active`, because that is the question an
+inspector is asking.
+
+Neither resource matches its identifier against a shape. `IssueIdentifier` is an unconstrained
+branded string and the port boundary is tracker-neutral, so a tracker is free to spell one `GH-7`;
+deciding syntactically which spellings are addressable would make both resources unreachable for a
+provider whose identifiers carry no `#`. Existence is the only question, and in-memory state answers
+it — which also keeps a published `detail_url` followable, since the link and its target read the
+identifier the same way.
+
+Three baseline fields are mapped rather than stored under those names. `workspace.path` publishes
+the deterministic workspace key, not the host absolute path: the path is a filesystem detail the
+console never needs, and the detail pipeline redacts it before retention, so there is no absolute
+path to publish. `logs` is timeline retention accounting — retained, dropped, the bound, and how
+many events this response carries — because Symphony retains a bounded, redacted event timeline
+rather than raw agent logs. `tracked` says the orchestrator holds this issue as live work (starting,
+running, retrying, or handed off) rather than as retained history.
+
 ### Why a refresh needs the console's token
 
 `POST /api/v1/refresh` requires the `X-Symphony-CSRF` header, so the plain empty-body POST SPEC
@@ -374,6 +411,9 @@ agent_not_active` for an issue with no live session, `410 agent_session_complete
 session's timeline has aged out of retention, and `503 agent_detail_unavailable` while a dispatch is
 still starting. A finished session that is still retained answers `200` with `status: "completed"`,
 so a post-mortem is available for the most recent agents.
+
+`/api/v1/agents/<identifier>` is a documented superset of the SPEC per-issue resource rather than
+an alias of it; the Operator HTTP API section above says how the two divide.
 
 Handoff detail tracks the expected branch, whether the remote branch was found, whether the pull
 request was opened by this handoff or adopted from an existing one, its observed disposition through
