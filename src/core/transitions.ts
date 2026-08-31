@@ -480,7 +480,9 @@ export const publishDetails = (state: RuntimeState): RuntimeState => {
         workerHost: 'local',
         // Read from the execution the agent is running under, falling back to the workflow in
         // force: composing no code-review services at all is what "handoff disabled" means.
-        handoffEnabled: (running?.execution.codeReview ?? state.lastKnownGood.codeReview) !== null,
+        handoffEnabled: Option.isSome(
+          running?.execution.codeReview ?? state.lastKnownGood.codeReview,
+        ),
         branch: record.handoff.expectedBranch,
         retry:
           retry === undefined
@@ -731,13 +733,11 @@ export const adoptExecutions = (
     }
     // Recorded before the swap: this run's own fibers may still be awaiting a call that read
     // these, and nothing else will remember they were ever in use.
-    updated = noteSupersededPorts(
-      updated,
-      entry.runId,
-      [entry.execution.tracker, entry.execution.codeReview, entry.execution.sourceControl].filter(
-        (instance) => instance !== null,
-      ),
-    )
+    updated = noteSupersededPorts(updated, entry.runId, [
+      entry.execution.tracker,
+      ...Option.toArray(entry.execution.codeReview),
+      ...(entry.execution.sourceControl === null ? [] : [entry.execution.sourceControl]),
+    ])
     updated = {
       ...updated,
       running: withEntry(updated.running, id, {

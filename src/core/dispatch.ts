@@ -34,7 +34,10 @@ export const makeHostToolSession = (
   Object.freeze({
     specs: Object.freeze([
       ...execution.tracker.toolSpecs,
-      ...(execution.codeReview?.toolSpecs ?? []),
+      ...Option.match(execution.codeReview, {
+        onNone: () => [],
+        onSome: (codeReview) => codeReview.toolSpecs,
+      }),
     ]),
     context: Object.freeze({
       issueId: issue.id,
@@ -48,8 +51,11 @@ export const makeHostToolSession = (
         return ports.tracker.executeTool(name, argumentsValue, context)
       }
       const codeReview = ports.codeReview
-      if (codeReview?.toolSpecs.some((spec) => spec.name === name) === true) {
-        return codeReview.executeTool(name, argumentsValue, context)
+      if (
+        Option.isSome(codeReview) &&
+        codeReview.value.toolSpecs.some((spec) => spec.name === name)
+      ) {
+        return codeReview.value.executeTool(name, argumentsValue, context)
       }
       return unsupportedHostTool(name)
     },

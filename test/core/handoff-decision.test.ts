@@ -45,7 +45,7 @@ const issue: Issue = {
 }
 
 /** Never called: the decision is pure, so the ports only have to be of the right shape. */
-const execution = { codeReview: {}, workflow: {} } as unknown as ExecutionSnapshot
+const execution = { codeReview: Option.some({}), workflow: {} } as unknown as ExecutionSnapshot
 
 /**
  * A repair that owns `startedHeadSha`. `workerStarted` false is a dispatch refused before launch,
