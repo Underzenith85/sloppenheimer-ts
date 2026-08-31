@@ -5738,87 +5738,95 @@ describe('live agent detail', (): void => {
 })
 
 describe('aged-out agent detail', (): void => {
-  it.scoped('keeps reporting an evicted session as completed on later publications', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-aged-out-')
-      const total = retainedCompletedDetails + 1
-      const issues = Array.from({ length: total }, (_unused, index) => ({
-        ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
-        id: issueId(String(index + 20)),
-      }))
-      const isolated: Workflow = {
-        ...workflow,
-        config: {
-          ...workflow.config,
-          workspaceRoot,
-          agent: { ...workflow.config.agent, maxConcurrentAgents: total },
-        },
-      }
-      let active = true
-      const harness = makeHarness(isolated, () => (active ? issues : []))
-      const factory = makeAgentFactory()
-      const ports: TestPorts = {
-        ...harness.ports,
-        runAgent: factory.runAgent,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          handoffCompletedWork: (issue) =>
-            Effect.succeed({
-              _tag: 'PullRequest',
-              branchName: `symphony/issue-${issue.id}`,
-              pullRequestUrl: `https://example.test/pull/${issue.id}`,
-              pullRequestNumber: Number(issue.id),
-              created: true,
-            }),
-          inspectPullRequest: (number) =>
-            Effect.succeed({
-              number,
-              url: `https://example.test/pull/${String(number)}`,
-              headSha: `head-${String(number)}`,
-              merged: false,
-              state: 'open',
-              mergeCommitSha: null,
-              mergeable: null,
-              mergeState: 'unknown',
-              checks: [],
-              reviewDecision: null,
-              reviewThreads: [],
-              codexReview: { headShaPrefix: `head-${String(number)}`, status: 'pending' },
-            }),
-        }),
-      }
+  it.scoped(
+    'keeps reporting an evicted session as completed on later publications',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-aged-out-')
+        const total = retainedCompletedDetails + 1
+        const issues = Array.from({ length: total }, (_unused, index) => ({
+          ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
+          id: issueId(String(index + 20)),
+        }))
+        const isolated: Workflow = {
+          ...workflow,
+          config: {
+            ...workflow.config,
+            workspaceRoot,
+            agent: { ...workflow.config.agent, maxConcurrentAgents: total },
+          },
+        }
+        let active = true
+        const harness = makeHarness(isolated, () => (active ? issues : []))
+        const factory = makeAgentFactory()
+        const ports: TestPorts = {
+          ...harness.ports,
+          runAgent: factory.runAgent,
+          makeCodeReview: (provider) => ({
+            ...requireCodeReview(harness.ports, provider),
+            handoffCompletedWork: (issue) =>
+              Effect.succeed({
+                _tag: 'PullRequest',
+                branchName: `symphony/issue-${issue.id}`,
+                pullRequestUrl: `https://example.test/pull/${issue.id}`,
+                pullRequestNumber: Number(issue.id),
+                created: true,
+              }),
+            inspectPullRequest: (number) =>
+              Effect.succeed({
+                number,
+                url: `https://example.test/pull/${String(number)}`,
+                headSha: `head-${String(number)}`,
+                merged: false,
+                state: 'open',
+                mergeCommitSha: null,
+                mergeable: null,
+                mergeState: 'unknown',
+                checks: [],
+                reviewDecision: null,
+                reviewThreads: [],
+                codexReview: { headShaPrefix: `head-${String(number)}`, status: 'pending' },
+              }),
+          }),
+        }
 
-      const observed = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          for (const issue of issues) {
-            const agent = yield* Effect.promise(() => awaitAgent(factory.agents, issue.identifier))
-            agent.settle('completed')
-          }
-          let pending = yield* control.snapshot
-          while (pending.retrying.length !== total) {
-            yield* Effect.yieldNow()
-            pending = yield* control.snapshot
-          }
-          active = false
-          yield* TestClock.adjust('1 second')
-          yield* Effect.yieldNow()
-          const evicted = yield* Effect.promise(() =>
-            waitUntil(() => {
-              const aged = issues.filter(
-                (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
+        const observed = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            for (const issue of issues) {
+              const agent = yield* Effect.promise(() =>
+                awaitAgent(factory.agents, issue.identifier),
               )
-              return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
-            }, 'the oldest detail to age out'),
-          )
-          // Any later publication must not downgrade the aged-out answer to "no session".
-          yield* control.setIssuePaused(9_999, true)
-          return { evicted, after: readDetail(control, evicted) }
-        }),
-      )
+              agent.settle('completed')
+            }
+            let pending = yield* control.snapshot
+            while (pending.retrying.length !== total) {
+              yield* Effect.yieldNow()
+              pending = yield* control.snapshot
+            }
+            active = false
+            yield* TestClock.adjust('1 second')
+            yield* Effect.yieldNow()
+            const evicted = yield* Effect.promise(() =>
+              waitUntil(() => {
+                const aged = issues.filter(
+                  (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
+                )
+                return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
+              }, 'the oldest detail to age out'),
+            )
+            // Any later publication must not downgrade the aged-out answer to "no session".
+            yield* control.setIssuePaused(9_999, true)
+            return { evicted, after: readDetail(control, evicted) }
+          }),
+        )
 
-      expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
-    }),
+        expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
+      }),
+    // This one drives `retainedCompletedDetails + 1` agents, each through a real temporary
+    // workspace, and needs six to eight seconds on an unloaded machine. The 5s default left
+    // no margin: it passes on a fast runner and times out on a slow one.
+    30_000,
   )
 })
 
