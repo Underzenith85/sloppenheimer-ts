@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { Effect } from 'effect'
+import * as NodeStream from '@effect/platform-node/NodeStream'
+import { Effect, Fiber, Stream } from 'effect'
 
 import type { JsonObject, JsonValue } from '../../domain/domain.js'
 import { codexAuthenticationEnvironmentNames } from '../../config/env-reference.js'
@@ -17,6 +18,7 @@ import {
   type AgentEventPayload,
 } from '../../telemetry.js'
 import { assertWorkspaceIdentity, openVerifiedWorkspace } from '../node/workspace-identity.js'
+import { diagnosticLines, diagnosticRecords, protocolLines } from './framing.js'
 import type { VerifiedWorkspace } from '../../domain/workspace-containment.js'
 
 export const makeCodexEnvironment = (
@@ -37,6 +39,8 @@ const shutdownGraceMs = 5_000
 /** After `SIGKILL`, how long to wait for the group to vanish, and how often to look. */
 const groupReapDeadlineMs = 2_000
 const groupReapPollMs = 25
+/** How long a stopping session waits for the diagnostic reader to drain and flush. */
+const diagnosticDrainDeadlineMs = 1_000
 
 /** Session identity remains stable for the lifetime of the App Server thread. */
 export const composeSessionId = (threadId: string, _turnId: string | null): string => threadId
@@ -191,71 +195,6 @@ const messageFrom = (message: JsonObject, knownSecretValues: readonly string[]):
 }
 
 /**
- * Splits a byte stream into protocol lines while enforcing the framing limit on the *pending*
- * buffer, so an unterminated line can never grow without bound before it is rejected.
- */
-export const makeLineReader = (
-  limitBytes: number,
-  onLine: (line: string) => void,
-  onOverflow: () => void,
-): ((chunk: Buffer) => void) => {
-  let pending: Buffer[] = []
-  let pendingBytes = 0
-  let overflowed = false
-  // A pending buffer may hold a full-length payload plus the CR of a CRLF whose LF has not arrived
-  // yet. Stripping happens once the line is complete, so the pending limit allows that one byte;
-  // otherwise a valid maximum-length line would be rejected purely for where a chunk boundary fell.
-  const pendingLimitBytes = limitBytes + 1
-  const overflow = (): void => {
-    overflowed = true
-    pending = []
-    pendingBytes = 0
-    onOverflow()
-  }
-  return (chunk: Buffer): void => {
-    if (overflowed) {
-      return
-    }
-    pending.push(chunk)
-    pendingBytes += chunk.byteLength
-    if (chunk.indexOf(0x0a) < 0) {
-      // No frame boundary here, so hold the chunk whole. Concatenating on every chunk would make
-      // framing quadratic in line size: a permitted 10 MB frame arriving in pipe-sized chunks
-      // would copy hundreds of megabytes before its terminator ever showed up.
-      if (pendingBytes > pendingLimitBytes) {
-        overflow()
-      }
-      return
-    }
-    let buffer = pending.length === 1 ? chunk : Buffer.concat(pending, pendingBytes)
-    pending = []
-    pendingBytes = 0
-    for (;;) {
-      const index = buffer.indexOf(0x0a)
-      if (index < 0) {
-        break
-      }
-      const raw = buffer.subarray(0, index)
-      buffer = buffer.subarray(index + 1)
-      const line = raw.at(-1) === 0x0d ? raw.subarray(0, raw.byteLength - 1) : raw
-      if (line.byteLength > limitBytes) {
-        overflow()
-        return
-      }
-      onLine(line.toString('utf8'))
-    }
-    if (buffer.byteLength > pendingLimitBytes) {
-      overflow()
-      return
-    }
-    if (buffer.byteLength > 0) {
-      pending.push(buffer)
-      pendingBytes = buffer.byteLength
-    }
-  }
-}
-
-/**
  * Identity a notification carries itself. Item and delta notifications declare `threadId` and
  * `turnId` directly under `params`, so they attribute correctly even out of order; the turn
  * lifecycle notifications carry the turn nested under `params.turn` instead.
@@ -314,7 +253,10 @@ class CodexConnection {
    * retain it.
    */
   readonly #redact: Redactor
-  readonly #flushStderr: () => void
+  /** The fiber reading protocol lines from the child's stdout. */
+  readonly #stdout: Fiber.RuntimeFiber<void>
+  /** The fiber reading diagnostic records from the child's stderr. */
+  readonly #stderr: Fiber.RuntimeFiber<void>
   readonly #pending = new Map<number, PendingRequest>()
   /** The one record of how each turn ended. Authoritative, and written at most once per turn. */
   readonly #settled = new Map<string, TurnSettlement>()
@@ -362,74 +304,61 @@ class CodexConnection {
     this.#turnTimeoutMs = config.turnTimeoutMs
     this.#onEvent = onEvent
 
-    // stdout carries protocol framing only.
-    const readStdout = makeLineReader(
-      codexMaxLineBytes,
-      (line) => {
-        this.#receiveLine(line)
-      },
-      () => {
-        this.#fail(
-          new AgentError({
-            category: 'protocol_error',
-            message: `Codex protocol line exceeds ${String(codexMaxLineBytes)} bytes`,
+    // stdout carries protocol framing only. Reading it as a stream keeps the framing state in
+    // the pipeline rather than in the connection, and lets the framing limit end the read the way
+    // any other protocol error does.
+    this.#stdout = Effect.runFork(
+      NodeStream.fromReadable<AgentError>(
+        () => this.#process.stdout,
+        (cause) =>
+          new AgentError({ category: 'protocol_error', message: 'Codex stdout failed', cause }),
+      ).pipe(
+        protocolLines(codexMaxLineBytes),
+        Stream.runForEach((line) =>
+          Effect.sync(() => {
+            // A closed session has already reported how it ended; nothing still in the pipe can
+            // change that, and dispatching it would answer requests that were failed on close.
+            if (!this.#closed) {
+              this.#receiveLine(line)
+            }
           }),
-        )
-      },
+        ),
+        Effect.catchAll((error) =>
+          Effect.sync(() => {
+            if (!this.#closed) {
+              this.#fail(error)
+            }
+          }),
+        ),
+      ),
     )
-    this.#process.stdout.on('data', (chunk: Buffer) => {
-      readStdout(chunk)
-    })
 
-    // stderr is diagnostic only and never parsed as protocol. Buffer complete records before
-    // redaction: a chunk boundary between `Authorization:` and its value must not turn the value
-    // into an unkeyed fragment that can escape the header redactor.
-    let pemEndMarker: string | null = null
-    let pemPrefix = ''
-    const emitDiagnosticLine = (line: string): void => {
-      if (pemEndMarker !== null) {
-        if (line.includes(pemEndMarker)) {
-          this.#emit('diagnostic', `${pemPrefix}[REDACTED PEM PRIVATE KEY]`)
-          pemEndMarker = null
-          pemPrefix = ''
-        }
-        return
-      }
-      const pemStart = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----/u.exec(line)
-      const label = pemStart?.[1]
-      if (pemStart !== null && label !== undefined) {
-        const endMarker = `-----END ${label}-----`
-        if (line.slice(pemStart.index + pemStart[0].length).includes(endMarker)) {
-          this.#emit('diagnostic', line.trim())
-          return
-        }
-        pemPrefix = line.slice(0, pemStart.index)
-        pemEndMarker = endMarker
-        return
-      }
-      const message = line.trim()
-      if (message.length > 0) {
-        this.#emit('diagnostic', message)
-      }
-    }
-    const readStderr = makeLineReader(codexMaxLineBytes, emitDiagnosticLine, () => {
-      this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
-    })
-    this.#flushStderr = (): void => {
-      readStderr(Buffer.from('\n'))
-      if (pemEndMarker !== null) {
-        this.#emit('diagnostic', `${pemPrefix}[REDACTED PEM PRIVATE KEY]`)
-        pemEndMarker = null
-        pemPrefix = ''
-      }
-    }
-    this.#process.stderr.on('data', (chunk: Buffer) => {
-      readStderr(chunk)
-    })
-    this.#process.stderr.once('end', () => {
-      // Treat an unterminated final diagnostic as a complete record once the stream closes.
-      this.#flushStderr()
-    })
+    // stderr is diagnostic only and never parsed as protocol. Complete records are assembled
+    // before redaction: a chunk boundary between `Authorization:` and its value must not turn the
+    // value into an unkeyed fragment that can escape the header redactor. A read that fails is the
+    // end of the diagnostics rather than a session failure, and ends the stream so that whatever
+    // record was still open is flushed.
+    this.#stderr = Effect.runFork(
+      NodeStream.fromReadable<AgentError>(
+        () => this.#process.stderr,
+        (cause) =>
+          new AgentError({ category: 'protocol_error', message: 'Codex stderr failed', cause }),
+      ).pipe(
+        Stream.catchAll(() => Stream.empty),
+        diagnosticLines(codexMaxLineBytes),
+        diagnosticRecords,
+        Stream.runForEach((message) =>
+          Effect.sync(() => {
+            this.#emit('diagnostic', message)
+          }),
+        ),
+        Effect.catchAll(() =>
+          Effect.sync(() => {
+            this.#emit('diagnostic', 'Codex diagnostic line exceeded the framing limit')
+          }),
+        ),
+      ),
+    )
 
     this.#process.once('error', (cause) => {
       this.#fail(
@@ -650,19 +579,36 @@ class CodexConnection {
     if (this.#closed) {
       return
     }
-    this.#flushStderr()
     this.#emit('session_stopped', null)
     this.#closed = true
     this.#fail(
       new AgentError({ category: 'process_exited', message: 'Codex session was closed' }),
       false,
     )
-    this.#process.stdout.removeAllListeners('data')
-    this.#process.stderr.removeAllListeners('data')
-    this.#process.stderr.removeAllListeners('end')
+    await Effect.runPromise(Fiber.interrupt(this.#stdout))
     this.#process.stdin.end()
     this.#terminate('SIGTERM')
     await this.#reapGroup()
+    await this.#drainDiagnostics()
+  }
+
+  /**
+   * Lets the diagnostic reader finish. The child's death closes stderr, which ends the stream and
+   * flushes the record it was still assembling — an unterminated final line, or a PEM block whose
+   * end marker never arrived — so the last thing a failing session said is reported before the
+   * session is torn down.
+   *
+   * Bounded, because a descendant that inherited the pipe and outlived the reap would otherwise
+   * hold the session open indefinitely. A diagnostic lost to that bound is diagnostic only.
+   */
+  async #drainDiagnostics(): Promise<void> {
+    await Effect.runPromise(
+      Fiber.await(this.#stderr).pipe(
+        Effect.timeout(diagnosticDrainDeadlineMs),
+        Effect.catchAll(() => Fiber.interrupt(this.#stderr)),
+        Effect.asVoid,
+      ),
+    )
   }
 
   /**
