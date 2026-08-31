@@ -28,6 +28,7 @@ import {
 } from '@symphony/core'
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
+import { anIssue } from '../harness/fixtures.js'
 
 const hooks: HooksConfig = {
   afterCreate: null,
@@ -86,23 +87,12 @@ describe('port layer composition', (): void => {
         const watcher = yield* WorkflowWatcher
         const workspace = yield* currentWorkspaces.create(issueIdentifier('example/symphony#1'))
         const result = yield* runner.run({
-          issue: {
+          issue: anIssue({
             id: issueId('1'),
-            nativeRef: null,
             identifier: issueIdentifier('example/symphony#1'),
             title: 'title',
-            description: null,
-            priority: null,
-            state: 'open',
-            branchName: null,
-            url: null,
-            assigneeId: null,
             labels: [],
-            blockedBy: [],
-            dispatchable: true,
-            createdAt: null,
-            updatedAt: null,
-          },
+          }),
           workspace,
           workspaceRoot: '/workspaces',
           config: codexRunnerConfig({

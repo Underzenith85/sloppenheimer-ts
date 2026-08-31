@@ -68,7 +68,15 @@ const finishedWork = (
   }
 }
 
-const writeHandoff = (
+/**
+ * Records one handoff in the state cell without persisting it.
+ *
+ * A reconciliation pass rewrites many handoffs, and `reconcileHandoffs` flushes all of them with a
+ * single `persistHandoffs` at the end rather than writing the store once per change. Staging is
+ * therefore what every write in this module wants — deliberately not `writeHandoff` in
+ * `polling.ts`, which persists as it writes because the changes it makes stand alone.
+ */
+const stageHandoff = (
   context: OrchestratorContext,
   id: IssueId,
   handoff: HandoffEntry,
@@ -169,20 +177,20 @@ const perform = (
   Effect.gen(function* () {
     const codeReview = handoff.execution.codeReview
     if (Option.isNone(codeReview)) {
-      yield* writeHandoff(context, id, handoff)
+      yield* stageHandoff(context, id, handoff)
       return
     }
     const capability = codeReview.value
     switch (action._tag) {
       case 'None': {
-        yield* writeHandoff(context, id, handoff)
+        yield* stageHandoff(context, id, handoff)
         return
       }
       case 'RequestReview': {
         const requested = yield* capability
           .requestPullRequestReview(handoff.pullRequestNumber, action.headSha)
           .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
-        yield* writeHandoff(context, id, afterReviewRequested(handoff, action.headSha, requested))
+        yield* stageHandoff(context, id, afterReviewRequested(handoff, action.headSha, requested))
         if (requested === null) {
           yield* logInfo('Codex review requested for pull request head', {
             ...logContext(handoff.issue),
@@ -199,11 +207,11 @@ const perform = (
         const resolved = yield* capability
           .resolveReviewThreads(action.threadIds)
           .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
-        yield* writeHandoff(context, id, afterThreadsResolved(handoff, resolved))
+        yield* stageHandoff(context, id, afterThreadsResolved(handoff, resolved))
         return
       }
       case 'Complete': {
-        yield* writeHandoff(context, id, handoff)
+        yield* stageHandoff(context, id, handoff)
         yield* context.noteHandoffOutcome(id, handoff, 'merged')
         const finished = finishedWork(id, handoff, action.mergedAt, yield* currentInstant)
         yield* Ref.update(context.state, (current) =>
@@ -212,17 +220,17 @@ const perform = (
         return
       }
       case 'NoteClosed': {
-        yield* writeHandoff(context, id, handoff)
+        yield* stageHandoff(context, id, handoff)
         yield* context.noteHandoffOutcome(id, handoff, 'intervention_required')
         return
       }
       case 'Merge': {
-        yield* writeHandoff(context, id, handoff)
+        yield* stageHandoff(context, id, handoff)
         const merged = yield* capability
           .mergePullRequest(handoff.pullRequestNumber, action.headSha)
           .pipe(asSettled)
         const settled = afterMerge(handoff, merged._tag === 'Failed' ? merged.error.message : null)
-        yield* writeHandoff(context, id, settled)
+        yield* stageHandoff(context, id, settled)
         if (merged._tag === 'Failed') {
           return
         }
@@ -244,11 +252,11 @@ const perform = (
       }
       case 'Repair': {
         if (!repairDispatchAllowed) {
-          yield* writeHandoff(context, id, handoff)
+          yield* stageHandoff(context, id, handoff)
           return
         }
         if (permission._tag === 'Denied') {
-          yield* writeHandoff(context, id, {
+          yield* stageHandoff(context, id, {
             ...handoff,
             reason: permission.reason,
           })
@@ -256,7 +264,7 @@ const perform = (
         }
         const baselineHeadSha = action.headSha
         if (baselineHeadSha === null) {
-          yield* writeHandoff(context, id, {
+          yield* stageHandoff(context, id, {
             ...handoff,
             reason: `Cannot dispatch a repair without a pull request head. ${action.reason}`,
           })
@@ -266,10 +274,10 @@ const perform = (
         const current = yield* Ref.get(context.state)
         if (!hasSlot(current, issue, handoff.execution.workflow)) {
           if (Option.isNone(executionAttempt)) {
-            yield* writeHandoff(context, id, awaitingSlot(handoff, action.reason))
+            yield* stageHandoff(context, id, awaitingSlot(handoff, action.reason))
             return
           }
-          yield* writeHandoff(
+          yield* stageHandoff(
             context,
             id,
             afterRepairDispatched(handoff, false, issue, baselineHeadSha, action.reason),
@@ -282,7 +290,7 @@ const perform = (
           )
           return
         }
-        yield* writeHandoff(context, id, handoff)
+        yield* stageHandoff(context, id, handoff)
         const effective: EffectiveWorkflow = {
           workflow: handoff.execution.workflow,
           tracker: handoff.execution.tracker,
@@ -297,7 +305,7 @@ const perform = (
           branchName: handoff.branchName,
           expectedHeadSha: baselineHeadSha,
         })
-        yield* writeHandoff(
+        yield* stageHandoff(
           context,
           id,
           afterRepairDispatched(handoff, started, issue, baselineHeadSha, action.reason),
@@ -368,7 +376,7 @@ export const reconcileHandoffs = (
         .inspectPullRequest(live.pullRequestNumber)
         .pipe(asSettled)
       if (inspected._tag === 'Failed') {
-        yield* writeHandoff(
+        yield* stageHandoff(
           context,
           id,
           afterInspectionFailed(live, observedAt, inspected.error.message),

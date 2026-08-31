@@ -380,7 +380,10 @@ describe('CLI host lifecycle', (): void => {
 
     await waitForReady(operatorPort)
     process_.child.kill('SIGINT')
-    const outcome = await waitForExit(process_.child)
+    // Booting and tearing down a whole host takes ~2s on an idle machine, but this suite runs
+    // beside every other, so the budget matches the stubborn-worker cases below rather than the
+    // default meant for a process that fails before it starts.
+    const outcome = await waitForExit(process_.child, 25_000)
 
     expect(outcome).toEqual({ code: 0, signal: null })
     expect(process_.stderr()).toBe('')
@@ -394,7 +397,7 @@ describe('CLI host lifecycle', (): void => {
 
     await waitForReady(operatorPort)
     process_.child.kill('SIGTERM')
-    const outcome = await waitForExit(process_.child)
+    const outcome = await waitForExit(process_.child, 25_000)
 
     expect(outcome).toEqual({ code: 0, signal: null })
     expect(process_.stderr()).toBe('')

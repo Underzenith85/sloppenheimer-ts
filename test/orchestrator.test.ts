@@ -87,6 +87,7 @@ import type { PreflightResult } from '@symphony/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
+import { anIssue, anOpenPullRequest } from './harness/fixtures.js'
 
 /**
  * A temp directory the enclosing scope owns, for the runs that read and write a real handoff store.
@@ -132,23 +133,14 @@ const makeIssue = (
   createdAt: string | null,
   labels: readonly string[] = ['symphony'],
   blockedBy: readonly BlockerRef[] = [],
-): Issue => ({
-  id: issueId(identifier),
-  nativeRef: null,
-  identifier: issueIdentifier(identifier),
-  title: identifier,
-  description: null,
-  priority,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels,
-  blockedBy,
-  dispatchable: true,
-  createdAt: createdAt === null ? null : new Date(createdAt),
-  updatedAt: null,
-})
+): Issue =>
+  anIssue({
+    identifier: issueIdentifier(identifier),
+    priority,
+    labels,
+    blockedBy,
+    createdAt: createdAt === null ? null : new Date(createdAt),
+  })
 
 const testEnvironment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
 
@@ -665,20 +657,16 @@ const requireCodeReview = (
   return codeReview
 }
 
-const repairObservation = (number: number, headSha: string): PullRequestObservation => ({
-  number,
-  state: 'open',
-  url: 'https://github.test/example/symphony/pull/65',
-  headSha,
-  merged: false,
-  mergeCommitSha: null,
-  mergeable: false,
-  mergeState: 'dirty',
-  checks: [],
-  reviewDecision: null,
-  reviewThreads: [],
-  codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
-})
+const repairObservation = (number: number, headSha: string): PullRequestObservation =>
+  anOpenPullRequest({
+    number,
+    url: 'https://github.test/example/symphony/pull/65',
+    headSha,
+    mergeable: false,
+    mergeState: 'dirty',
+    checks: [],
+    codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
+  })
 
 const saveRepairHandoff = (
   path: string,

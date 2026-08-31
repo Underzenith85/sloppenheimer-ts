@@ -5,10 +5,10 @@ import { it } from '@effect/vitest'
 import { Effect, Option, Redacted } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
 import { SourceControlError } from '@symphony/core/domain/errors.js'
 import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
 import { commitFile, git, makeGitRepository } from '../harness/git-repository.js'
+import { anIssue, sourceControlFor } from '../harness/fixtures.js'
 
 const roots: string[] = []
 const servers: Server[] = []
@@ -22,23 +22,12 @@ afterEach(async (): Promise<void> => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })))
 })
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('165'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#165'),
   title: 'Host publication conformance',
-  description: null,
   priority: 1,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 /** The git fixture is promise-shaped; this lifts one of its calls into the effect under test. */
 const host = <Value>(work: () => Promise<Value>): Effect.Effect<Value> => Effect.promise(work)
@@ -63,11 +52,7 @@ describe('SourceControlPort conformance', (): void => {
           commitFile(fixture.seed, 'protected.ts', 'protected\n', 'advance main'),
         )
         yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
-        const sourceControl = makeGitSourceControl({
-          remoteUrl: fixture.remote,
-          baseBranch: 'main',
-          credential: Option.none(),
-        })
+        const sourceControl = sourceControlFor(fixture)
         const prepared = yield* sourceControl.prepare(
           issue,
           { path: fixture.workspace, key: 'issue-165', createdNow: true },
@@ -98,11 +83,7 @@ describe('SourceControlPort conformance', (): void => {
       const expectedHead = yield* host(() =>
         git(fixture.remote, ['rev-parse', 'refs/heads/symphony/issue-165']),
       )
-      const sourceControl = makeGitSourceControl({
-        remoteUrl: fixture.remote,
-        baseBranch: 'main',
-        credential: Option.none(),
-      })
+      const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
         { path: fixture.workspace, key: 'issue-165', createdNow: true },
@@ -130,9 +111,7 @@ describe('SourceControlPort conformance', (): void => {
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
-      const sourceControl = makeGitSourceControl({
-        remoteUrl: fixture.remote,
-        baseBranch: 'main',
+      const sourceControl = sourceControlFor(fixture, {
         credential: Option.some({ username: 'x-access-token', password: Redacted.make('secret') }),
       })
       const prepared = yield* sourceControl.prepare(

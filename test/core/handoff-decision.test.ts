@@ -17,6 +17,7 @@ import {
   repairLimit,
 } from '@symphony/core/core/handoff-decision.js'
 import type { ExecutionSnapshot, HandoffEntry, RepairEntry } from '@symphony/core/core/state.js'
+import { anIssue } from '../harness/fixtures.js'
 
 /**
  * Handoff reconciliation, exercised as what it is: a function from one observation of a pull
@@ -26,23 +27,12 @@ import type { ExecutionSnapshot, HandoffEntry, RepairEntry } from '@symphony/cor
 
 const observedAt = new Date('2026-02-01T00:00:00.000Z')
 
-const issue: Issue = {
+const issue: Issue = anIssue({
   id: issueId('example/symphony#1'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#1'),
   title: 'example/symphony#1',
   description: 'the original description',
-  priority: null,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 /** Never called: the decision is pure, so the ports only have to be of the right shape. */
 const execution = { codeReview: Option.some({}), workflow: {} } as unknown as ExecutionSnapshot

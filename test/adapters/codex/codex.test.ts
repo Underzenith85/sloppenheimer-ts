@@ -31,6 +31,7 @@ import {
   verifyWorkspaceForLaunch as verifyWorkspaceForLaunchAgainstFileSystem,
 } from '@symphony/adapter-node/workspace-identity.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
+import { anIssue } from '../../harness/fixtures.js'
 
 /**
  * Launch verification reads real directories through `FileSystem`, so each entry point is bound to
@@ -261,23 +262,11 @@ const codexConfig = codexRunnerConfig({
   stallTimeoutMs: 0,
 })
 
-const launchIssue: Issue = {
+const launchIssue: Issue = anIssue({
   id: issueId('13'),
-  nativeRef: null,
   identifier: issueIdentifier('example/symphony#13'),
   title: 'Revalidate containment',
-  description: null,
-  priority: null,
-  state: 'open',
-  branchName: null,
-  url: null,
-  assigneeId: null,
-  labels: ['symphony'],
-  blockedBy: [],
-  dispatchable: true,
-  createdAt: null,
-  updatedAt: null,
-}
+})
 
 const launchFor = (root: string, workspace: Workspace): AgentLaunch => ({
   issue: launchIssue,
