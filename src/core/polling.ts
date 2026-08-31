@@ -1,7 +1,8 @@
-import { Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
+import { Clock, Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
 
 import type { Issue, IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
+import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
 import { recordAgentEvent, recordCancellation, recordHandoff } from '../telemetry.js'
 import { dispatch } from './dispatch.js'
@@ -67,7 +68,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
     )
     if (revalidated._tag === 'Failed') {
       dispatchValidationFailed = true
-      const observedAt = new Date()
+      const observedAt = yield* currentInstant
       yield* Ref.update(context.state, (current) =>
         Transitions.setWorkflowReloadError(current, {
           message: revalidated.error.message,
@@ -97,7 +98,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         onFailure: (error) =>
           Effect.gen(function* () {
             dispatchValidationFailed = true
-            const observedAt = new Date()
+            const observedAt = yield* currentInstant
             yield* Ref.update(context.state, (current) =>
               Transitions.setWorkflowReloadError(current, { message: error.message, observedAt }),
             )
@@ -124,7 +125,7 @@ export const poll = (context: OrchestratorContext): Effect.Effect<void, never, S
         )
         if (configured._tag === 'Failed') {
           dispatchValidationFailed = true
-          const observedAt = new Date()
+          const observedAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>
             Transitions.setWorkflowReloadError(current, {
               message: configured.error.message,
@@ -261,8 +262,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           const settled = yield* Ref.modify(context.state, (current) =>
             Transitions.applyPendingTelemetry(current, event.issueId, ended.value),
           )
+          const endedAt = yield* Clock.currentTimeMillis
           yield* Ref.update(context.state, (current) =>
-            Transitions.accountEndedRun(current, settled, Date.now()),
+            Transitions.accountEndedRun(current, settled, endedAt),
           )
           if (settled.sessionId !== null) {
             yield* (event.outcome === 'normal' ? logInfo : logError)(
@@ -295,7 +297,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           // running map, so an open detail panel would otherwise keep reading the previous
           // snapshot as running — and count it down to stalled — for as long as the handoff
           // request takes.
-          const handingOffAt = new Date()
+          const handingOffAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>
             Transitions.updateDetail(current, event.issueId, (record) =>
               recordHandoff(record, handingOffAt, {
@@ -313,7 +315,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             }),
           )
           if (handoff._tag === 'Failed') {
-            const failedAt = new Date()
+            const failedAt = yield* currentInstant
             yield* Ref.update(context.state, (current) =>
               Transitions.updateDetail(current, event.issueId, (record) =>
                 recordHandoff(record, failedAt, {
@@ -334,7 +336,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           }
           const result = handoff.result
           if (result._tag === 'NoBranch') {
-            const absentAt = new Date()
+            const absentAt = yield* currentInstant
             yield* Ref.update(context.state, (current) =>
               Transitions.updateDetail(current, event.issueId, (record) =>
                 recordHandoff(record, absentAt, {
@@ -349,7 +351,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
             yield* context.scheduleRetry(settled.issue, 1, null, true)
             break
           }
-          const observedAt = new Date()
+          const observedAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>
             Transitions.updateDetail(current, event.issueId, (record) => {
               const branchObserved = recordHandoff(record, observedAt, {
@@ -379,7 +381,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               })
             }),
           )
-          const handedOffAt = new Date()
+          const handedOffAt = yield* currentInstant
           yield* Ref.update(context.state, (current) => {
             // Carried over, not reset: the worker attempt number is not a repair count, and an
             // existing handoff already holds the heads that were actually observed.
@@ -499,12 +501,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               break
             }
             const settled = settleRepair(entry)
+            const inspectedAt = yield* currentInstant
             yield* applyHandoffObservation(
               context,
               event.issueId,
               settled,
               inspected.observation,
-              new Date(),
+              inspectedAt,
               repairPermission(settled, { _tag: 'Succeeded', issue }),
               Option.some(event.attempt),
               true,
@@ -584,7 +587,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               // Dropping the queued retry ends the agent, so its detail has to say so: without
               // this the record would publish as completed while still claiming to be waiting
               // to retry, and the retry it pointed at would never arrive.
-              const cancelledAt = new Date()
+              const cancelledAt = yield* currentInstant
               yield* Ref.update(context.state, (current) =>
                 Transitions.updateDetail(Transitions.releaseClaim(current, id), id, (record) =>
                   recordCancellation(record, cancelledAt, 'the operator paused the issue', true),

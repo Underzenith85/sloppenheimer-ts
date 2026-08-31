@@ -1,9 +1,11 @@
-import { Exit, Fiber, MutableRef, Option } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { it } from '@effect/vitest'
+import { Effect, Exit, Fiber, MutableRef, Option } from 'effect'
+import { describe, expect } from 'vitest'
 
 import type { Workflow } from '../../src/config/workflow.js'
 import { issueId, issueIdentifier, type Issue, type IssueId } from '../../src/domain/domain.js'
-import { dispatchAdmission, hasSlot, retryDelayMs } from '../../src/core/policy.js'
+import { dispatchAdmission, hasSlot } from '../../src/core/policy.js'
+import { agentRetryDelay } from '../../src/core/retry.js'
 import {
   initialState,
   retainedCompletedDetails,
@@ -15,7 +17,13 @@ import {
   type RuntimeState,
 } from '../../src/core/state.js'
 import * as Transitions from '../../src/core/transitions.js'
-import { createAgentDetailRecord, type AgentDetailRecord } from '../../src/telemetry.js'
+import {
+  createAgentDetailRecord,
+  recordAgentEvent,
+  recordAttemptStarted,
+  type AgentDetailRecord,
+  type AgentEvent,
+} from '../../src/telemetry.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
 
 /**
@@ -195,6 +203,182 @@ const detailFor = (issue: Issue): AgentDetailRecord =>
     dispatchLabels: [],
   })
 
+const agentEvent = (
+  turnId: string | null,
+  sessionId: string | null,
+  turnCount: number,
+  overrides: Partial<AgentEvent> = {},
+): AgentEvent => ({
+  event: 'item/agentMessage',
+  timestamp: new Date('2026-01-01T00:00:05.000Z'),
+  processId: 42,
+  message: null,
+  usage: null,
+  rateLimits: null,
+  threadId: 'thread-1',
+  turnId,
+  sessionId,
+  turnCount,
+  turnStatus: null,
+  payload: { kind: 'session' },
+  ...overrides,
+})
+
+/** The event that ends a turn, at a later instant than the activity that preceded it. */
+const turnCompleted = (turnId: string, sessionId: string, turnCount: number): AgentEvent =>
+  agentEvent(turnId, sessionId, turnCount, {
+    event: 'turn/completed',
+    turnStatus: 'completed',
+    timestamp: new Date('2026-01-01T00:00:08.000Z'),
+  })
+
+describe('turn identity', (): void => {
+  it('adopts the composed session id of the turn an event belongs to', (): void => {
+    const entry = runningEntry(makeIssue('example/symphony#1'))
+
+    const applied = Transitions.applyRunEvent(entry, agentEvent('turn-1', 'thread-1-turn-1', 1))
+
+    expect(applied.turnId).toBe('turn-1')
+    expect(applied.sessionId).toBe('thread-1-turn-1')
+    expect(applied.turnCount).toBe(1)
+  })
+
+  it('takes the session id of a session-scoped event that carries no turn', (): void => {
+    const entry = runningEntry(makeIssue('example/symphony#1'))
+
+    const applied = Transitions.applyRunEvent(entry, agentEvent(null, 'thread-1', 0))
+
+    expect(applied.turnId).toBeNull()
+    expect(applied.sessionId).toBe('thread-1')
+  })
+
+  it('holds both surfaces on the current turn when a superseded turn reports late', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const turnTwo = agentEvent('turn-2', 'thread-1-turn-2', 2)
+    const lateTurnOne = agentEvent('turn-1', 'thread-1-turn-1', 1)
+
+    const entry = Transitions.applyRunEvent(
+      Transitions.applyRunEvent(runningEntry(issue), turnTwo),
+      lateTurnOne,
+    )
+    const detail = recordAgentEvent(recordAgentEvent(detailFor(issue), turnTwo), lateTurnOne)
+
+    // The turn count already folded forward, so a session id from turn one here would report an
+    // older turn's identity beside `turnNumber: 2` on `/api/v1/agents/...`.
+    expect(entry.turnId).toBe('turn-2')
+    expect(entry.sessionId).toBe('thread-1-turn-2')
+    expect(entry.turnCount).toBe(2)
+    expect(detail.turnId).toBe('turn-2')
+    expect(detail.sessionId).toBe('thread-1-turn-2')
+    expect(detail.turnCount).toBe(2)
+  })
+
+  it('retains one session summary per composed session id', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    let detail = recordAgentEvent(detailFor(issue), agentEvent(null, 'thread-1', 0))
+
+    // The thread is known before any turn runs, so the summary opened there is completed by the
+    // first turn rather than left beside a second one describing the same stretch of work.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1'])
+
+    detail = recordAgentEvent(detail, agentEvent('turn-1', 'thread-1-turn-1', 1))
+
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1-turn-1'])
+    expect(detail.sessions.at(-1)?.endedAt).toBeNull()
+
+    detail = recordAgentEvent(detail, turnCompleted('turn-1', 'thread-1-turn-1', 1))
+
+    // The turn's own completion ends its session, so the gap before the next turn starts — where a
+    // continuation decides whether to run again — belongs to no session.
+    expect(detail.sessions.at(-1)?.endedAt).toBe('2026-01-01T00:00:08.000Z')
+
+    detail = recordAgentEvent(detail, agentEvent('turn-2', 'thread-1-turn-2', 2))
+
+    // Each continuation turn is its own session, and the one it succeeds is closed rather than
+    // left open beside it.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual([
+      'thread-1-turn-1',
+      'thread-1-turn-2',
+    ])
+    expect(detail.sessions.at(0)?.endedAt).toBe('2026-01-01T00:00:08.000Z')
+    expect(detail.sessions.at(-1)?.endedAt).toBeNull()
+    expect(detail.sessions.every((session) => session.threadId === 'thread-1')).toBe(true)
+    expect(detail.sessionId).toBe('thread-1-turn-2')
+  })
+
+  it('does not reopen or close a session for a superseded turn reporting late', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const running = recordAgentEvent(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      agentEvent('turn-2', 'thread-1-turn-2', 2),
+    )
+
+    const detail = recordAgentEvent(
+      recordAgentEvent(running, agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      turnCompleted('turn-1', 'thread-1-turn-1', 1),
+    )
+
+    // Turn one's late completion names a session that is already history; the one running now is
+    // still open.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual([
+      'thread-1-turn-1',
+      'thread-1-turn-2',
+    ])
+    expect(detail.sessions.at(-1)?.endedAt).toBeNull()
+  })
+
+  it('records a superseded turn on the timeline against the turn that produced it', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const running = recordAgentEvent(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      agentEvent('turn-2', 'thread-1-turn-2', 2),
+    )
+
+    const detail = recordAgentEvent(running, turnCompleted('turn-1', 'thread-1-turn-1', 1))
+
+    // The record has moved on, but the timeline is a log of what arrived: turn one's completion is
+    // turn one's, not a `turn/completed` attributed to the turn still running.
+    const last = detail.events.at(-1)
+    expect(last).toMatchObject({
+      event: 'turn/completed',
+      turnId: 'turn-1',
+      sessionId: 'thread-1-turn-1',
+      turnNumber: 1,
+    })
+    expect(detail.turnId).toBe('turn-2')
+    expect(detail.sessionId).toBe('thread-1-turn-2')
+  })
+
+  it('keeps one summary for a turn that reports activity after it completed', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const completed = recordAgentEvent(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
+      turnCompleted('turn-1', 'thread-1-turn-1', 1),
+    )
+
+    const detail = recordAgentEvent(completed, agentEvent('turn-1', 'thread-1-turn-1', 1))
+
+    // The history is keyed on the composed id, so a trailing event for a session that already
+    // ended does not start a second summary naming it.
+    expect(detail.sessions.map((session) => session.sessionId)).toEqual(['thread-1-turn-1'])
+    expect(detail.sessions.at(-1)?.endedAt).toBe('2026-01-01T00:00:08.000Z')
+  })
+
+  it('lets a new attempt start again at turn one after the count was reset', (): void => {
+    const issue = makeIssue('example/symphony#1')
+    const restarted = recordAttemptStarted(
+      recordAgentEvent(detailFor(issue), agentEvent('turn-2', 'thread-1-turn-2', 2)),
+      new Date('2026-01-01T00:00:10.000Z'),
+      1,
+    )
+
+    const detail = recordAgentEvent(restarted, agentEvent('turn-1', 'thread-2-turn-1', 1))
+
+    expect(detail.sessionId).toBe('thread-2-turn-1')
+    expect(detail.turnCount).toBe(1)
+  })
+})
+
 describe('claim lifecycle', (): void => {
   it('claims an issue and remembers its identifier for later detail requests', (): void => {
     const issue = makeIssue('example/symphony#1')
@@ -347,11 +531,13 @@ describe('retry scheduling', (): void => {
     expect(drained.retries.has(issue.id)).toBe(false)
   })
 
-  it('backs off exponentially up to the configured ceiling', (): void => {
-    expect(retryDelayMs(1, 300_000)).toBe(10_000)
-    expect(retryDelayMs(3, 300_000)).toBe(40_000)
-    expect(retryDelayMs(30, 300_000)).toBe(300_000)
-  })
+  it.effect('backs off exponentially up to the configured ceiling', () =>
+    Effect.gen(function* () {
+      expect(yield* agentRetryDelay(1, 300_000)).toBe(10_000)
+      expect(yield* agentRetryDelay(3, 300_000)).toBe(40_000)
+      expect(yield* agentRetryDelay(30, 300_000)).toBe(300_000)
+    }),
+  )
 })
 
 describe('run lifecycle', (): void => {

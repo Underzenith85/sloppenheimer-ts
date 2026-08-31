@@ -2,17 +2,35 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { it } from '@effect/vitest'
 import { Effect, Option, Redacted } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
-import { runAgent, type AgentEvent } from '../../src/adapters/codex/codex.js'
+import {
+  runAgent,
+  type AgentEvent,
+  type AgentLaunch,
+  type AgentResult,
+} from '../../src/adapters/codex/codex.js'
+import type { AgentError } from '../../src/errors.js'
 import { makeHostToolSession } from '../../src/core/dispatch.js'
 import { issueId, issueIdentifier, type Issue, type JsonValue } from '../../src/domain/domain.js'
-import type { HostToolContext, HostToolSession, HostToolSpec } from '../../src/host-tools.js'
+import type {
+  HostToolContext,
+  HostToolResult,
+  HostToolSession,
+  HostToolSpec,
+} from '../../src/host-tools.js'
 import { makeGitHubCodeReview } from '../../src/adapters/github/code-review.js'
 import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
+import type { TrackerPort } from '../../src/ports/tracker.js'
 import type { GitHubProviderConfig } from '../../src/adapters/github/index.js'
 import type { CodexConfig } from '../../src/config/workflow.js'
+import { hostFileSystem } from '../harness/filesystem.js'
+
+/** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
+const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
+  runAgent(launch).pipe(Effect.provide(hostFileSystem))
 
 const fakeAppServer = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -75,59 +93,82 @@ const configFor = (scenario: string, dynamicTools: readonly JsonValue[]): CodexC
   stallTimeoutMs: 0,
 })
 
+/**
+ * Tracker construction is an effect only because it allocates the dependency cache `Ref`, so it
+ * is yielded in the test's own fiber rather than run out to a value.
+ */
+const trackerOf = (config: GitHubProviderConfig): Effect.Effect<TrackerPort> =>
+  makeGitHubTracker(config)
+
+/**
+ * The host-tool boundary answers either synchronously or with a promise, so this normalizes one
+ * call into the effect under test.
+ */
+const executed = (
+  work: () => HostToolResult | Promise<HostToolResult>,
+): Effect.Effect<HostToolResult> => Effect.promise(async () => work())
+
 describe('GitHub provider-native tool extension', (): void => {
-  it('publishes capability-scoped profiles and rejects disabled code-review tools', async (): Promise<void> => {
-    const tracker = makeGitHubTracker(provider)
-    const codeReview = makeGitHubCodeReview(provider)
+  it.effect('publishes capability-scoped profiles and rejects disabled code-review tools', () =>
+    Effect.gen(function* () {
+      const tracker = yield* trackerOf(provider)
+      const codeReview = makeGitHubCodeReview(provider)
 
-    expect(tracker.toolSpecs.map((tool) => tool.name)).toEqual([
-      'github_add_comment',
-      'github_handoff_issue',
-    ])
-    expect(codeReview.toolSpecs.map((tool) => tool.name)).toEqual(['github_link_pull_request'])
-
-    const disabledSession = makeHostToolSession({ tracker, codeReview: Option.none() }, issue)
-    expect(disabledSession.specs.map((tool) => tool.name)).toEqual([
-      'github_add_comment',
-      'github_handoff_issue',
-    ])
-    expect(
-      await disabledSession.execute(
-        'github_link_pull_request',
-        { pull_request_number: 7 },
-        toolContext,
-      ),
-    ).toMatchObject({
-      success: false,
-      error: { code: 'unsupported_tool', retryable: false },
-    })
-
-    const enabledSession = makeHostToolSession(
-      { tracker, codeReview: Option.some(codeReview) },
-      issue,
-    )
-    expect(enabledSession.specs.map((tool) => tool.name)).toEqual([
-      'github_add_comment',
-      'github_handoff_issue',
-      'github_link_pull_request',
-    ])
-    await expect(
-      enabledSession.execute(
+      expect(tracker.toolSpecs.map((tool) => tool.name)).toEqual([
         'github_add_comment',
-        { body: 'hello', token: 'model-value' },
-        toolContext,
-      ),
-    ).resolves.toMatchObject({
-      success: false,
-      error: { code: 'invalid_arguments', retryable: false },
-    })
-    expect(await enabledSession.execute('github_unknown', {}, toolContext)).toMatchObject({
-      success: false,
-      error: { code: 'unsupported_tool', retryable: false },
-    })
-  })
+        'github_handoff_issue',
+      ])
+      expect(codeReview.toolSpecs.map((tool) => tool.name)).toEqual(['github_link_pull_request'])
 
-  it.each([
+      const disabledSession = makeHostToolSession({ tracker, codeReview: Option.none() }, issue)
+      expect(disabledSession.specs.map((tool) => tool.name)).toEqual([
+        'github_add_comment',
+        'github_handoff_issue',
+      ])
+      expect(
+        yield* executed(() =>
+          disabledSession.execute(
+            'github_link_pull_request',
+            { pull_request_number: 7 },
+            toolContext,
+          ),
+        ),
+      ).toMatchObject({
+        success: false,
+        error: { code: 'unsupported_tool', retryable: false },
+      })
+
+      const enabledSession = makeHostToolSession(
+        { tracker, codeReview: Option.some(codeReview) },
+        issue,
+      )
+      expect(enabledSession.specs.map((tool) => tool.name)).toEqual([
+        'github_add_comment',
+        'github_handoff_issue',
+        'github_link_pull_request',
+      ])
+      expect(
+        yield* executed(() =>
+          enabledSession.execute(
+            'github_add_comment',
+            { body: 'hello', token: 'model-value' },
+            toolContext,
+          ),
+        ),
+      ).toMatchObject({
+        success: false,
+        error: { code: 'invalid_arguments', retryable: false },
+      })
+      expect(
+        yield* executed(() => enabledSession.execute('github_unknown', {}, toolContext)),
+      ).toMatchObject({
+        success: false,
+        error: { code: 'unsupported_tool', retryable: false },
+      })
+    }),
+  )
+
+  it.effect.each([
     {
       name: 'case-insensitive duplicate labels',
       argumentsValue: { add_labels: ['Ready', 'ready'] },
@@ -136,72 +177,69 @@ describe('GitHub provider-native tool extension', (): void => {
       name: 'case-insensitive overlap between added and removed labels',
       argumentsValue: { add_labels: ['Ready'], remove_labels: ['ready'] },
     },
-  ])('rejects $name', async ({ argumentsValue }): Promise<void> => {
-    const tracker = makeGitHubTracker(provider)
+  ])('rejects $name', ({ argumentsValue }) =>
+    Effect.gen(function* () {
+      const tracker = yield* trackerOf(provider)
 
-    await expect(
-      tracker.executeTool('github_handoff_issue', argumentsValue, toolContext),
-    ).resolves.toMatchObject({
-      success: false,
-      error: { code: 'invalid_arguments', retryable: false },
-    })
-  })
+      expect(
+        yield* executed(() =>
+          tracker.executeTool('github_handoff_issue', argumentsValue, toolContext),
+        ),
+      ).toMatchObject({
+        success: false,
+        error: { code: 'invalid_arguments', retryable: false },
+      })
+    }),
+  )
 
-  it('maps auth, authorization, rate-limit, and transport errors to structured failures', async (): Promise<void> => {
-    const missingAuth = makeGitHubTracker({ ...provider, token: Redacted.make('') })
-    await expect(
-      missingAuth.executeTool('github_add_comment', { body: 'hello' }, toolContext),
-    ).resolves.toMatchObject({ success: false, error: { code: 'missing_auth' } })
+  it.effect(
+    'maps auth, authorization, rate-limit, and transport errors to structured failures',
+    () => {
+      const originalFetch = globalThis.fetch
+      const comment = (tracker: TrackerPort): Effect.Effect<HostToolResult> =>
+        executed(() => tracker.executeTool('github_add_comment', { body: 'hello' }, toolContext))
 
-    const originalFetch = globalThis.fetch
-    try {
-      globalThis.fetch = async (): Promise<Response> =>
-        new Response(null, {
-          status: 429,
-          headers: { 'retry-after': '2' },
+      return Effect.gen(function* () {
+        const missingAuth = yield* trackerOf({ ...provider, token: Redacted.make('') })
+        expect(yield* comment(missingAuth)).toMatchObject({
+          success: false,
+          error: { code: 'missing_auth' },
         })
-      await expect(
-        makeGitHubTracker(provider).executeTool(
-          'github_add_comment',
-          { body: 'hello' },
-          toolContext,
-        ),
-      ).resolves.toMatchObject({
-        success: false,
-        error: { code: 'rate_limited', retryable: true, retryAfterMs: 2_000 },
-      })
 
-      globalThis.fetch = async (): Promise<Response> => new Response(null, { status: 403 })
-      await expect(
-        makeGitHubTracker(provider).executeTool(
-          'github_add_comment',
-          { body: 'hello' },
-          toolContext,
-        ),
-      ).resolves.toMatchObject({
-        success: false,
-        error: { code: 'authorization_failed', retryable: false },
-      })
+        globalThis.fetch = async (): Promise<Response> =>
+          new Response(null, {
+            status: 429,
+            headers: { 'retry-after': '2' },
+          })
+        expect(yield* comment(yield* trackerOf(provider))).toMatchObject({
+          success: false,
+          error: { code: 'rate_limited', retryable: true, retryAfterMs: 2_000 },
+        })
 
-      globalThis.fetch = async (): Promise<Response> => {
-        throw new TypeError('offline')
-      }
-      await expect(
-        makeGitHubTracker(provider).executeTool(
-          'github_add_comment',
-          { body: 'hello' },
-          toolContext,
-        ),
-      ).resolves.toMatchObject({
-        success: false,
-        error: { code: 'transport_error', retryable: true },
-      })
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
+        globalThis.fetch = async (): Promise<Response> => new Response(null, { status: 403 })
+        expect(yield* comment(yield* trackerOf(provider))).toMatchObject({
+          success: false,
+          error: { code: 'authorization_failed', retryable: false },
+        })
 
-  it('performs only scoped comment, handoff, and pull-request linkage mutations', async (): Promise<void> => {
+        globalThis.fetch = async (): Promise<Response> => {
+          throw new TypeError('offline')
+        }
+        expect(yield* comment(yield* trackerOf(provider))).toMatchObject({
+          success: false,
+          error: { code: 'transport_error', retryable: true },
+        })
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            globalThis.fetch = originalFetch
+          }),
+        ),
+      )
+    },
+  )
+
+  it.effect('performs only scoped comment, handoff, and pull-request linkage mutations', () => {
     const requests: Array<
       Readonly<{ url: string; method: string; body: string | null; auth: string | null }>
     > = []
@@ -226,23 +264,29 @@ describe('GitHub provider-native tool extension', (): void => {
       }
       return Response.json({ ok: true })
     }
-    try {
-      const tracker = makeGitHubTracker(provider)
+    return Effect.gen(function* () {
+      const tracker = yield* trackerOf(provider)
       const codeReview = makeGitHubCodeReview(provider)
       const hostTools = makeHostToolSession({ tracker, codeReview: Option.some(codeReview) }, issue)
-      await expect(
-        hostTools.execute('github_add_comment', { body: 'status update' }, toolContext),
-      ).resolves.toMatchObject({ success: true })
-      await expect(
-        hostTools.execute(
-          'github_handoff_issue',
-          { state: 'closed', add_labels: ['done'], remove_labels: ['symphony'] },
-          toolContext,
+      expect(
+        yield* executed(() =>
+          hostTools.execute('github_add_comment', { body: 'status update' }, toolContext),
         ),
-      ).resolves.toMatchObject({ success: true })
-      await expect(
-        hostTools.execute('github_link_pull_request', { pull_request_number: 7 }, toolContext),
-      ).resolves.toMatchObject({
+      ).toMatchObject({ success: true })
+      expect(
+        yield* executed(() =>
+          hostTools.execute(
+            'github_handoff_issue',
+            { state: 'closed', add_labels: ['done'], remove_labels: ['symphony'] },
+            toolContext,
+          ),
+        ),
+      ).toMatchObject({ success: true })
+      expect(
+        yield* executed(() =>
+          hostTools.execute('github_link_pull_request', { pull_request_number: 7 }, toolContext),
+        ),
+      ).toMatchObject({
         success: true,
         data: { issue_number: 20, pull_request_number: 7 },
       })
@@ -257,37 +301,46 @@ describe('GitHub provider-native tool extension', (): void => {
       ])
       expect(requests.every((request) => request.auth === 'Bearer host-token')).toBe(true)
       expect(JSON.stringify(requests.map((request) => request.body))).not.toContain('host-token')
-    } finally {
-      globalThis.fetch = originalFetch
-    }
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          globalThis.fetch = originalFetch
+        }),
+      ),
+    )
   })
 
-  it('advertises the selected profile and executes with frozen host context and no child secret', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-github-tools-'))
-    const workspacePath = join(workspaceRoot, 'issue-20')
-    await mkdir(workspacePath)
-    const calls: Array<Readonly<{ argumentsValue: JsonValue; context: HostToolContext }>> = []
-    const context: HostToolContext = Object.freeze({
-      issueId: issue.id,
-      issueIdentifier: issue.identifier,
-      nativeRef: issue.nativeRef,
-    })
-    const hostTools: HostToolSession = Object.freeze({
-      specs: Object.freeze([spec]),
-      context,
-      execute: (name, argumentsValue, toolContext) => {
-        expect(name).toBe('github_add_comment')
-        calls.push({ argumentsValue, context: toolContext })
-        return { success: true, data: { comment_url: 'https://example.test/comment/1' } }
-      },
-    })
-    const dynamicTools: readonly JsonValue[] = [{ type: 'function', ...spec }]
-    const events: AgentEvent[] = []
-    const previous = process.env['SYMPHONY_HOST_TOOL_TOKEN']
-    process.env['SYMPHONY_HOST_TOOL_TOKEN'] = 'host-only-secret-value'
-    try {
-      const result = await Effect.runPromise(
-        runAgent({
+  // `live` for both: the Codex session under test is a real child process on real turn timeouts.
+  it.live(
+    'advertises the selected profile and executes with frozen host context and no child secret',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), 'symphony-github-tools-')),
+        )
+        const workspacePath = join(workspaceRoot, 'issue-20')
+        yield* Effect.promise(() => mkdir(workspacePath))
+        const calls: Array<Readonly<{ argumentsValue: JsonValue; context: HostToolContext }>> = []
+        const context: HostToolContext = Object.freeze({
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          nativeRef: issue.nativeRef,
+        })
+        const hostTools: HostToolSession = Object.freeze({
+          specs: Object.freeze([spec]),
+          context,
+          execute: (name, argumentsValue, toolContext) => {
+            expect(name).toBe('github_add_comment')
+            calls.push({ argumentsValue, context: toolContext })
+            return { success: true, data: { comment_url: 'https://example.test/comment/1' } }
+          },
+        })
+        const dynamicTools: readonly JsonValue[] = [{ type: 'function', ...spec }]
+        const events: AgentEvent[] = []
+        const previous = process.env['SYMPHONY_HOST_TOOL_TOKEN']
+        process.env['SYMPHONY_HOST_TOOL_TOKEN'] = 'host-only-secret-value'
+
+        const result = yield* runAgentOnHost({
           issue,
           workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
           workspaceRoot,
@@ -299,50 +352,60 @@ describe('GitHub provider-native tool extension', (): void => {
           refreshIssue: () => Effect.succeed(null),
           isRoutable: () => false,
           onEvent: (event) => events.push(event),
-        }),
-      )
+        }).pipe(
+          // The `finally` this replaces: the borrowed environment variable is put back and the
+          // workspace removed however the run ends, interruption included.
+          Effect.ensuring(
+            Effect.promise(async () => {
+              if (previous === undefined) {
+                delete process.env['SYMPHONY_HOST_TOOL_TOKEN']
+              } else {
+                process.env['SYMPHONY_HOST_TOOL_TOKEN'] = previous
+              }
+              await rm(workspaceRoot, { force: true, recursive: true })
+            }),
+          ),
+        )
 
-      expect(result.turnCount).toBe(1)
-      expect(calls).toEqual([{ argumentsValue: { body: 'host-side comment' }, context }])
-      expect(JSON.stringify({ calls, events, dynamicTools })).not.toContain(
-        'host-only-secret-value',
-      )
-      expect(events).toEqual(
-        expect.arrayContaining([expect.objectContaining({ event: 'host_tool_succeeded' })]),
-      )
-    } finally {
-      if (previous === undefined) {
-        delete process.env['SYMPHONY_HOST_TOOL_TOKEN']
-      } else {
-        process.env['SYMPHONY_HOST_TOOL_TOKEN'] = previous
-      }
-      await rm(workspaceRoot, { force: true, recursive: true })
-    }
-  }, 30_000)
-
-  it('returns a structured unsupported-name failure without stalling the turn', async (): Promise<void> => {
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-github-tools-'))
-    const workspacePath = join(workspaceRoot, 'issue-20')
-    await mkdir(workspacePath)
-    const hostTools: HostToolSession = {
-      specs: [spec],
-      context: {
-        issueId: issue.id,
-        issueIdentifier: issue.identifier,
-        nativeRef: issue.nativeRef,
-      },
-      execute: async (name) => ({
-        success: false,
-        error: {
-          code: 'unsupported_tool',
-          message: `Unsupported host tool: ${name}`,
-          retryable: false,
-        },
+        expect(result.turnCount).toBe(1)
+        expect(calls).toEqual([{ argumentsValue: { body: 'host-side comment' }, context }])
+        expect(JSON.stringify({ calls, events, dynamicTools })).not.toContain(
+          'host-only-secret-value',
+        )
+        expect(events).toEqual(
+          expect.arrayContaining([expect.objectContaining({ event: 'host_tool_succeeded' })]),
+        )
       }),
-    }
-    try {
-      const result = await Effect.runPromise(
-        runAgent({
+    30_000,
+  )
+
+  it.live(
+    'returns a structured unsupported-name failure without stalling the turn',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), 'symphony-github-tools-')),
+        )
+        const workspacePath = join(workspaceRoot, 'issue-20')
+        yield* Effect.promise(() => mkdir(workspacePath))
+        const hostTools: HostToolSession = {
+          specs: [spec],
+          context: {
+            issueId: issue.id,
+            issueIdentifier: issue.identifier,
+            nativeRef: issue.nativeRef,
+          },
+          execute: async (name) => ({
+            success: false,
+            error: {
+              code: 'unsupported_tool',
+              message: `Unsupported host tool: ${name}`,
+              retryable: false,
+            },
+          }),
+        }
+
+        const result = yield* runAgentOnHost({
           issue,
           workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
           workspaceRoot,
@@ -354,11 +417,14 @@ describe('GitHub provider-native tool extension', (): void => {
           refreshIssue: () => Effect.succeed(null),
           isRoutable: () => false,
           onEvent: () => undefined,
-        }),
-      )
-      expect(result.turnCount).toBe(1)
-    } finally {
-      await rm(workspaceRoot, { force: true, recursive: true })
-    }
-  }, 30_000)
+        }).pipe(
+          Effect.ensuring(
+            Effect.promise(() => rm(workspaceRoot, { force: true, recursive: true })),
+          ),
+        )
+
+        expect(result.turnCount).toBe(1)
+      }),
+    30_000,
+  )
 })

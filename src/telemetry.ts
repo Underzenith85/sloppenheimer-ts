@@ -9,8 +9,17 @@
  * {@link AgentDetailSnapshot} values built from it.
  */
 
+import { Schema } from 'effect'
+
 import type { IssueId, IssueIdentifier, JsonObject, JsonValue } from './domain/domain.js'
-import { isJsonArray, isJsonObject } from './support/json.js'
+import {
+  decodeOrNull,
+  finiteNumber,
+  nonEmptyString,
+  protocolRecord,
+  protocolStruct,
+  tolerant,
+} from './support/schema.js'
 import {
   bound,
   boundRedacted,
@@ -131,34 +140,95 @@ export type AgentEvent = Readonly<{
 
 const noPayload: AgentEventPayload = Object.freeze({ kind: 'none' })
 
-const numberOf = (value: JsonValue | undefined): number | null =>
-  typeof value === 'number' && Number.isFinite(value) ? value : null
+/**
+ * The protocol shapes this module reads. Every field is tolerant and every record is normalized to
+ * one casing by {@link protocolStruct}, so the App Server's habit of reporting the same value as
+ * `used_percent` on one notification and `usedPercent` on the next is answered here rather than at
+ * each field read. Alternatives that are genuinely different names, not different casings, stay
+ * visible as the fields they are and are chosen between where they are read.
+ *
+ * These schemas decode the *protocol* shape only. Redaction and bounding stay in the payload
+ * builders below, so no retained value is ever constructed before the redactor has seen it.
+ */
+const rateLimitWindowSource = protocolStruct({
+  usedPercent: tolerant(finiteNumber),
+  windowMinutes: tolerant(finiteNumber),
+  resetsInSeconds: tolerant(finiteNumber),
+})
 
-const stringOf = (value: JsonValue | undefined): string | null =>
-  typeof value === 'string' && value.length > 0 ? value : null
+/** A command is reported either as one line or as its already-split words. */
+const commandSource = Schema.Union(
+  nonEmptyString,
+  Schema.transform(Schema.Array(Schema.Unknown), Schema.String, {
+    strict: false,
+    decode: (parts: readonly unknown[]) =>
+      parts.filter((part) => typeof part === 'string').join(' '),
+    encode: (text: string) => [text],
+  }).pipe(Schema.filter((text) => text.length > 0)),
+)
 
-const firstNumber = (source: JsonObject, keys: readonly string[]): number | null => {
-  for (const key of keys) {
-    const value = numberOf(source[key])
-    if (value !== null) {
-      return value
-    }
-  }
-  return null
-}
+/**
+ * One protocol item, in the union of every shape the App Server reports. The type word decides
+ * which fields the payload below reads; the rest are simply absent.
+ *
+ * `input`, `arguments`, `args`, `output`, and `result` are deliberately left unread: only their
+ * serialized size is retained, so the values reach {@link byteLength} as they arrived.
+ */
+const itemSource = protocolStruct({
+  type: tolerant(nonEmptyString),
+  itemType: tolerant(nonEmptyString),
+  status: tolerant(nonEmptyString),
+  state: tolerant(nonEmptyString),
+  text: tolerant(nonEmptyString),
+  content: tolerant(nonEmptyString),
+  message: tolerant(nonEmptyString),
+  error: tolerant(nonEmptyString),
+  code: tolerant(nonEmptyString),
+  name: tolerant(nonEmptyString),
+  tool: tolerant(nonEmptyString),
+  server: tolerant(nonEmptyString),
+  command: tolerant(commandSource),
+  commandLine: tolerant(commandSource),
+  exitCode: tolerant(finiteNumber),
+  durationMs: tolerant(finiteNumber),
+  changes: tolerant(Schema.Array(Schema.Unknown)),
+  input: Schema.optional(Schema.Unknown),
+  arguments: Schema.optional(Schema.Unknown),
+  args: Schema.optional(Schema.Unknown),
+  output: Schema.optional(Schema.Unknown),
+  result: Schema.optional(Schema.Unknown),
+})
 
-const firstString = (source: JsonObject, keys: readonly string[]): string | null => {
-  for (const key of keys) {
-    const value = stringOf(source[key])
-    if (value !== null) {
-      return value
-    }
-  }
-  return null
-}
+/** The file an item reports changing, either as the item itself or as its first listed change. */
+const fileTargetSource = protocolStruct({
+  path: tolerant(nonEmptyString),
+  file: tolerant(nonEmptyString),
+  filePath: tolerant(nonEmptyString),
+  kind: tolerant(nonEmptyString),
+  type: tolerant(nonEmptyString),
+  change: tolerant(nonEmptyString),
+  changeKind: tolerant(nonEmptyString),
+  addedLines: tolerant(finiteNumber),
+  additions: tolerant(finiteNumber),
+  deletedLines: tolerant(finiteNumber),
+  deletions: tolerant(finiteNumber),
+})
+
+/** A notification's parameters, as far as the retained payload is concerned. */
+const notificationSource = protocolStruct({
+  item: Schema.optional(Schema.Unknown),
+  text: tolerant(nonEmptyString),
+  message: tolerant(nonEmptyString),
+})
+
+const decodeRateLimitWindow = decodeOrNull(rateLimitWindowSource)
+const decodeRateLimitReport = decodeOrNull(protocolRecord)
+const decodeItem = decodeOrNull(itemSource)
+const decodeFileTarget = decodeOrNull(fileTargetSource)
+const decodeNotification = decodeOrNull(notificationSource)
 
 /** The size of a payload we deliberately do not retain, so an operator still sees its scale. */
-const byteLength = (value: JsonValue | undefined): number | null => {
+const byteLength = (value: unknown): number | null => {
   if (value === undefined) {
     return null
   }
@@ -179,32 +249,20 @@ export const qualityPhaseOf = (command: string): QualityPhase | null => {
   )
 }
 
-const commandText = (value: JsonValue | undefined): string | null => {
-  if (typeof value === 'string') {
-    return value
-  }
-  if (isJsonArray(value)) {
-    const parts = value.filter((part): part is string => typeof part === 'string')
-    return parts.length === 0 ? null : parts.join(' ')
-  }
-  return null
-}
-
 export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLimitWindow[] => {
-  if (!isJsonObject(value)) {
+  const report = decodeRateLimitReport(value)
+  if (report === null) {
     return []
   }
   const windows: RateLimitWindow[] = []
-  for (const [name, window] of Object.entries(value)) {
-    if (!isJsonObject(window)) {
+  // The report's own keys name the windows, so they are not casing-normalized: a window is
+  // whatever the server called it.
+  for (const [name, window] of Object.entries(report)) {
+    const decoded = decodeRateLimitWindow(window)
+    if (decoded === null) {
       continue
     }
-    windows.push({
-      name: bound(redact(name), 40).text,
-      usedPercent: firstNumber(window, ['usedPercent', 'used_percent']),
-      windowMinutes: firstNumber(window, ['windowMinutes', 'window_minutes']),
-      resetsInSeconds: firstNumber(window, ['resetsInSeconds', 'resets_in_seconds']),
-    })
+    windows.push({ name: bound(redact(name), 40).text, ...decoded })
   }
   // Frozen on construction, so the copies a timeline event and a published snapshot each hold
   // cannot be edited into the actor's own reading.
@@ -215,12 +273,12 @@ export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLim
   )
 }
 
-const itemState = (method: string, item: JsonObject): ToolState => {
-  const status = firstString(item, ['status', 'state'])?.toLowerCase() ?? null
-  if (status === 'failed' || status === 'error') {
+const itemState = (method: string, status: string | null): ToolState => {
+  const reported = status?.toLowerCase() ?? null
+  if (reported === 'failed' || reported === 'error') {
     return 'failed'
   }
-  if (status === 'completed' || status === 'succeeded' || method.endsWith('/completed')) {
+  if (reported === 'completed' || reported === 'succeeded' || method.endsWith('/completed')) {
     return 'completed'
   }
   return 'started'
@@ -244,30 +302,24 @@ const fileChangeKinds = new Map<string, FileChangeKind>([
 const changeKind = (value: string | null): FileChangeKind =>
   fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
 
-const fileTarget = (item: JsonObject): JsonObject => {
-  const changes = item['changes']
-  if (isJsonArray(changes)) {
-    const first = changes[0]
-    if (isJsonObject(first)) {
-      return first
-    }
-  }
-  return item
-}
-
 const itemPayload = (
   method: string,
-  item: JsonObject,
+  source: unknown,
   redactor: Redactor,
 ): AgentEventPayload | null => {
-  const type = (firstString(item, ['type', 'itemType', 'item_type']) ?? '').toLowerCase()
+  const item = decodeItem(source)
+  if (item === null) {
+    return null
+  }
+  const type = (item.type ?? item.itemType ?? '').toLowerCase()
+  const status = item.status ?? item.state
   if (type.includes('reasoning')) {
     // Private reasoning is never retained, not even truncated: the fact that the agent is thinking
     // is the whole of the signal an operator is entitled to.
     return { kind: 'reasoning' }
   }
   if (type.includes('message')) {
-    const raw = firstString(item, ['text', 'content', 'message'])
+    const raw = item.text ?? item.content ?? item.message
     const summary = raw === null ? null : boundRedacted(raw, redactor)
     return {
       kind: 'message',
@@ -277,46 +329,50 @@ const itemPayload = (
     }
   }
   if (type.includes('command') || type.includes('exec') || type.includes('shell')) {
-    const raw = commandText(item['command'] ?? item['commandLine'])
+    const raw = item.command ?? item.commandLine
     const summary = commandSummary(raw ?? 'unknown', redactor)
     return {
       kind: 'command',
       program: summary.program,
       argumentCount: summary.argumentCount,
       quality: raw === null ? null : qualityPhaseOf(raw),
-      state: itemState(method, item),
-      exitCode: firstNumber(item, ['exitCode', 'exit_code']),
-      durationMs: firstNumber(item, ['durationMs', 'duration_ms']),
+      state: itemState(method, status),
+      exitCode: item.exitCode,
+      durationMs: item.durationMs,
     }
   }
   if (type.includes('file') || type.includes('patch') || type.includes('diff')) {
-    const target = fileTarget(item)
-    const path = firstString(target, ['path', 'file', 'filePath', 'file_path'])
+    // The change list is authoritative when it carries one; an item that reports the file inline
+    // is read directly.
+    const target = decodeFileTarget(item.changes?.[0]) ?? decodeFileTarget(source)
+    const path = target?.path ?? target?.file ?? target?.filePath ?? null
     return {
       kind: 'file',
       path: path === null ? 'unknown' : pathKey(redactor(path)),
-      change: changeKind(firstString(target, ['kind', 'type', 'change', 'changeKind'])),
-      addedLines: firstNumber(target, ['addedLines', 'added_lines', 'additions']),
-      deletedLines: firstNumber(target, ['deletedLines', 'deleted_lines', 'deletions']),
+      change: changeKind(
+        target?.kind ?? target?.type ?? target?.change ?? target?.changeKind ?? null,
+      ),
+      addedLines: target?.addedLines ?? target?.additions ?? null,
+      deletedLines: target?.deletedLines ?? target?.deletions ?? null,
     }
   }
   if (type.includes('tool') || type.includes('search') || type.includes('mcp')) {
     return {
       kind: 'tool',
-      name: bound(redactor(firstString(item, ['name', 'tool', 'server']) ?? 'tool'), 80).text,
-      state: itemState(method, item),
+      name: bound(redactor(item.name ?? item.tool ?? item.server ?? 'tool'), 80).text,
+      state: itemState(method, status),
       // Tool arguments and results routinely carry file contents and credentials, so only their
       // scale is kept.
-      inputBytes: byteLength(item['input'] ?? item['arguments'] ?? item['args']),
-      outputBytes: byteLength(item['output'] ?? item['result']),
+      inputBytes: byteLength(item.input ?? item.arguments ?? item.args),
+      outputBytes: byteLength(item.output ?? item.result),
     }
   }
   if (type.includes('error')) {
-    const summary = boundRedacted(firstString(item, ['message', 'error']) ?? method, redactor)
+    const summary = boundRedacted(item.message ?? item.error ?? method, redactor)
     return {
       kind: 'error',
       severity: 'error',
-      code: firstString(item, ['code']),
+      code: item.code,
       message: summary.text,
       truncated: summary.truncated,
     }
@@ -334,16 +390,13 @@ export const normalizePayload = (
   params: JsonValue | undefined,
   redactor: Redactor = redact,
 ): AgentEventPayload => {
-  const source = isJsonObject(params) ? params : null
+  const source = decodeNotification(params)
   if (source !== null) {
-    const item = source['item']
-    if (isJsonObject(item)) {
-      const payload = itemPayload(method, item, redactor)
-      if (payload !== null) {
-        return payload
-      }
+    const payload = itemPayload(method, source.item, redactor)
+    if (payload !== null) {
+      return payload
     }
-    const text = stringOf(source['text'] ?? source['message'])
+    const text = source.text ?? source.message
     if (text !== null && /message/iu.test(method)) {
       const summary = boundRedacted(text, redactor)
       return {
@@ -872,7 +925,7 @@ const noteChangedPath = (
   }
 }
 
-/** Opens a session summary for the thread the agent has just identified itself with. */
+/** Opens a session summary for the identity the agent has just reported. */
 const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
   const sessions = [
     ...record.sessions,
@@ -893,8 +946,96 @@ const openSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => 
   }
 }
 
+const replaceLastSession = (
+  record: AgentDetailRecord,
+  summary: AgentSessionSummary,
+): AgentDetailRecord => ({
+  ...record,
+  sessions: Object.freeze([...record.sessions.slice(0, -1), Object.freeze(summary)]),
+})
+
+/** Ends the open session summary, if one is still open. Closing an ended session changes nothing. */
+const closeSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  const open = record.sessions.at(-1)
+  return open === undefined || open.endedAt !== null
+    ? record
+    : replaceLastSession(record, { ...open, endedAt: at.toISOString() })
+}
+
+/**
+ * Keeps the retained session history on the same identity the record reports. A session is one turn
+ * on a thread, so each turn is its own retained session, and the history is keyed on the composed
+ * id rather than on whether a summary is still open: an event for the session the last summary
+ * already names changes nothing, whether that summary is open or was ended by its turn.
+ *
+ * The first turn on a thread is the exception — it completes the summary `session_started` opened
+ * while only the thread was known, because there was no session before that turn, only the thread
+ * that would run it. Any other new identity ends whatever is still open and starts its own summary.
+ */
+const alignSession = (record: AgentDetailRecord, at: Date): AgentDetailRecord => {
+  if (record.threadId === null) {
+    return record
+  }
+  const last = record.sessions.at(-1)
+  if (last === undefined) {
+    return openSession(record, at)
+  }
+  if (last.threadId === record.threadId && last.sessionId === record.sessionId) {
+    return record
+  }
+  if (
+    last.endedAt === null &&
+    last.threadId === record.threadId &&
+    last.sessionId === record.threadId
+  ) {
+    return replaceLastSession(record, {
+      ...last,
+      sessionId: record.sessionId,
+      processId: record.processId,
+    })
+  }
+  return openSession(closeSession(record, at), at)
+}
+
+/**
+ * Whether an event reports the end of the turn it names. A session is one turn, so its retained
+ * summary ends here rather than whenever the next turn happens to start or the attempt is torn
+ * down — the gap where a continuation decides whether to run again belongs to no session.
+ */
+const endsTurn = (event: AgentEvent): boolean =>
+  event.turnStatus !== null &&
+  (event.event === 'turn/completed' ||
+    event.event === 'turn/failed' ||
+    event.event === 'turn/terminated')
+
 const messageOperation = (text: string | null): string =>
   text === null || text.length === 0 ? 'Writing a reply' : `Replying: ${bound(text, 80).text}`
+
+/** The turn half of a session identity, held by both the runtime snapshot and the agent detail. */
+export type TurnIdentity = Readonly<{
+  turnId: string | null
+  sessionId: string | null
+  turnCount: number
+}>
+
+/**
+ * The turn identity a holder should carry after one event. A session id names a turn, so both
+ * halves move together: an event from a turn the run has already moved past restores neither, and
+ * the runtime snapshot and the agent detail can never disagree about which turn is current. The one
+ * event carrying no turn at all is `session_started`, and it precedes every turn on the thread.
+ *
+ * Both holders reset the count when a new attempt opens its own connection, so a fresh session
+ * starting again at turn one is never held back by the count the previous one reached.
+ */
+export const foldTurnIdentity = (held: TurnIdentity, event: AgentEvent): TurnIdentity => {
+  const supersedes = event.turnId !== null && event.turnCount >= held.turnCount
+  return {
+    turnId: supersedes ? event.turnId : held.turnId,
+    sessionId:
+      supersedes || event.turnId === null ? (event.sessionId ?? held.sessionId) : held.sessionId,
+    turnCount: Math.max(held.turnCount, event.turnCount),
+  }
+}
 
 /**
  * Folds one normalized agent event into the record and returns the result. Every retained string
@@ -909,17 +1050,24 @@ export const recordAgentEvent = (
   // consumes them rather than deriving its own. The same token counts reach the record and the
   // usage timeline event, and a timeline event is only frozen shallowly, so the object they share
   // is frozen here rather than left reachable through `events[i].tokens`.
-  const observed: AgentDetailRecord = {
+  const reported: AgentDetailRecord = {
     ...record,
     lastActivityAt: at,
     processId: event.processId ?? record.processId,
     threadId: event.threadId ?? record.threadId,
-    turnId: event.turnId ?? record.turnId,
-    sessionId: event.sessionId ?? record.sessionId,
-    turnCount: Math.max(record.turnCount, event.turnCount),
+    ...foldTurnIdentity(record, event),
     tokens: event.usage === null ? record.tokens : Object.freeze({ ...event.usage }),
     rateLimits: event.rateLimits === null ? record.rateLimits : decodeRateLimits(event.rateLimits),
   }
+  // Every event, not only a session-scoped one: whichever event first reports a turn's identity
+  // is the one the retained history has to follow, or the summaries drift from `identity`.
+  const aligned = alignSession(reported, at)
+  // Only the turn the record is actually on: a superseded turn reporting its end late names a
+  // session that already closed, and must not end the one running now.
+  const observed =
+    endsTurn(event) && event.turnId !== null && event.turnId === aligned.turnId
+      ? closeSession(aligned, at)
+      : aligned
   const base = {
     sequence: nextSequence(observed),
     attempt: observed.attempt,
@@ -939,22 +1087,23 @@ export const recordAgentEvent = (
   }
   switch (payload.kind) {
     case 'session': {
-      const sessioned =
-        observed.threadId !== null && observed.sessions.at(-1)?.threadId !== observed.threadId
-          ? openSession(observed, at)
-          : observed
       const next =
-        sessioned.phase === 'starting'
-          ? setPhase(sessioned, 'awaiting_model', 'Waiting for the model', at)
-          : sessioned
+        observed.phase === 'starting'
+          ? setPhase(observed, 'awaiting_model', 'Waiting for the model', at)
+          : observed
       return push(next, {
         ...base,
         operation: next.operation,
         category: 'session',
-        threadId: next.threadId,
-        turnId: next.turnId,
-        sessionId: next.sessionId,
-        turnNumber: next.turnCount,
+        // The timeline is a log of what arrived, so an entry names the turn its own event belongs
+        // to. Only the record's current identity is folded forward: a superseded turn reporting
+        // late is still recorded here against the turn that produced it, rather than being
+        // relabelled as the turn running now. An event that carries no identity of its own — the
+        // client's own session-level notices — takes the record's.
+        threadId: event.threadId ?? next.threadId,
+        turnId: event.turnId ?? next.turnId,
+        sessionId: event.sessionId ?? next.sessionId,
+        turnNumber: event.turnId === null ? next.turnCount : event.turnCount,
         processId: next.processId,
       })
     }

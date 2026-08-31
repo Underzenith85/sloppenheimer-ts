@@ -1,5 +1,6 @@
+import { it } from '@effect/vitest'
 import { Effect } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import { parseCliArguments } from '../../src/config/cli-options.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
@@ -52,20 +53,17 @@ describe('Extension Conformance: HTTP status surface', (): void => {
     expect(parseCliArguments(['--port', '4321', './workflow.md']).port).toBe(4_321)
   })
 
-  it('binds loopback and serves state owned by the orchestrator', async (): Promise<void> => {
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const server = yield* startOperatorServer(0, backend)
-          expect(new URL(server.url).hostname).toBe('127.0.0.1')
-          const response = yield* Effect.promise(() => fetch(`${server.url}/api/v1/state`))
-          const payload = yield* Effect.promise(() => response.json())
-          expect(payload).toMatchObject({
-            workflowPath: '/isolated/WORKFLOW.md',
-            counts: { running: 0 },
-          })
-        }),
-      ),
-    )
-  })
+  // `scopedLive`: the server binds a real loopback socket that a real `fetch` then calls.
+  it.scopedLive('binds loopback and serves state owned by the orchestrator', () =>
+    Effect.gen(function* () {
+      const server = yield* startOperatorServer(0, backend)
+      expect(new URL(server.url).hostname).toBe('127.0.0.1')
+      const response = yield* Effect.promise(() => fetch(`${server.url}/api/v1/state`))
+      const payload = yield* Effect.promise(() => response.json())
+      expect(payload).toMatchObject({
+        workflowPath: '/isolated/WORKFLOW.md',
+        counts: { running: 0 },
+      })
+    }),
+  )
 })

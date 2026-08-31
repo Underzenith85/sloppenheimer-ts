@@ -8,12 +8,12 @@
  * through {@link AgentEventSemantics} rather than matching Codex's own status strings.
  */
 
-import type { Layer } from 'effect'
+import { FileSystem } from '@effect/platform'
+import { Effect, Layer } from 'effect'
 
 import {
-  layerAgentRunner,
+  AgentRunner,
   type AgentEventSemantics,
-  type AgentRunner,
   type AgentRunnerPort,
 } from '../../ports/agent-runner.js'
 import { isCancelledTurnStatus, runAgent } from './codex.js'
@@ -27,11 +27,20 @@ export const codexAgentEventSemantics: AgentEventSemantics = {
     status === 'completed' ? 'completed' : isCancelledTurnStatus(status) ? 'cancelled' : 'failed',
 }
 
-/** The Codex agent runner, satisfying the port with the App Server session as its one operation. */
-export const codexAgentRunner: AgentRunnerPort = {
-  run: runAgent,
-  semantics: codexAgentEventSemantics,
-}
+/**
+ * The Codex agent runner, satisfying the port with the App Server session as its one operation.
+ *
+ * Launch verification reads the workspace through `FileSystem`, so the runner is built against the
+ * filesystem the composition root bound rather than reaching for `node:fs` itself. Binding it once
+ * here keeps the port's own signature free of the requirement.
+ */
+export const codexAgentRunner: Effect.Effect<AgentRunnerPort, never, FileSystem.FileSystem> =
+  Effect.map(FileSystem.FileSystem, (fileSystem) => ({
+    run: (launch) =>
+      runAgent(launch).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem)),
+    semantics: codexAgentEventSemantics,
+  }))
 
 /** Provides {@link AgentRunner} from this adapter, for a composition root that selects Codex. */
-export const layerCodexAgentRunner: Layer.Layer<AgentRunner> = layerAgentRunner(codexAgentRunner)
+export const layerCodexAgentRunner: Layer.Layer<AgentRunner, never, FileSystem.FileSystem> =
+  Layer.effect(AgentRunner, codexAgentRunner)

@@ -2,8 +2,9 @@ import * as HttpClient from '@effect/platform/HttpClient'
 import * as HttpClientError from '@effect/platform/HttpClientError'
 import type * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import * as HttpClientResponse from '@effect/platform/HttpClientResponse'
-import { Effect, Fiber, Layer, Redacted, TestClock, TestContext } from 'effect'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { it } from '@effect/vitest'
+import { Clock, Effect, Fiber, Layer, Redacted, TestClock } from 'effect'
+import { afterEach, describe, expect, vi } from 'vitest'
 
 import { githubJson, type GitHubHttpResult } from '../../../src/adapters/github/client.js'
 import { makeGitHubTracker } from '../../../src/adapters/github/issues.js'
@@ -33,258 +34,291 @@ const clientLayer = (
     ),
   )
 
+/** The request under test, against the client layer this case installs. */
 const run = (
   effect: Effect.Effect<GitHubHttpResult, TrackerError>,
   layer: Layer.Layer<HttpClient.HttpClient>,
-): Promise<GitHubHttpResult> => Effect.runPromise(effect.pipe(Effect.provide(layer)))
+): Effect.Effect<GitHubHttpResult, TrackerError> => effect.pipe(Effect.provide(layer))
 
+/** The same, read off the error channel for a case that expects the transport to refuse. */
 const runFailure = (
   effect: Effect.Effect<GitHubHttpResult, TrackerError>,
   layer: Layer.Layer<HttpClient.HttpClient>,
-): Promise<TrackerError> => Effect.runPromise(Effect.flip(effect).pipe(Effect.provide(layer)))
+): Effect.Effect<TrackerError, GitHubHttpResult> => Effect.flip(effect).pipe(Effect.provide(layer))
 
 afterEach((): void => {
   vi.unstubAllGlobals()
 })
 
 describe('GitHub transport client injection', (): void => {
-  it('sends every request through the provided client rather than global fetch', async (): Promise<void> => {
-    const unusable = vi.fn((): never => {
-      throw new Error('global fetch must not be used')
-    })
-    vi.stubGlobal('fetch', unusable)
-    const requests: HttpClientRequest.HttpClientRequest[] = []
+  it.effect('sends every request through the provided client rather than global fetch', () =>
+    Effect.gen(function* () {
+      const unusable = vi.fn((): never => {
+        throw new Error('global fetch must not be used')
+      })
+      vi.stubGlobal('fetch', unusable)
+      const requests: HttpClientRequest.HttpClientRequest[] = []
 
-    const result = await run(
-      githubJson(provider, issuesUrl),
-      clientLayer((request) => {
-        requests.push(request)
-        return Response.json([], { headers: { Link: `<${issuesUrl}?page=2>; rel="next"` } })
-      }),
-    )
+      const result = yield* run(
+        githubJson(provider, issuesUrl),
+        clientLayer((request) => {
+          requests.push(request)
+          return Response.json([], { headers: { Link: `<${issuesUrl}?page=2>; rel="next"` } })
+        }),
+      )
 
-    expect(unusable).not.toHaveBeenCalled()
-    expect(requests).toHaveLength(1)
-    expect(result).toEqual({
-      status: 200,
-      body: [],
-      linkHeader: `<${issuesUrl}?page=2>; rel="next"`,
-    })
-  })
+      expect(unusable).not.toHaveBeenCalled()
+      expect(requests).toHaveLength(1)
+      expect(result).toEqual({
+        status: 200,
+        body: [],
+        linkHeader: `<${issuesUrl}?page=2>; rel="next"`,
+      })
+    }),
+  )
 
-  it('applies the GitHub authentication, agent, and API version headers', async (): Promise<void> => {
-    const observed: HttpClientRequest.HttpClientRequest[] = []
+  it.effect('applies the GitHub authentication, agent, and API version headers', () =>
+    Effect.gen(function* () {
+      const observed: HttpClientRequest.HttpClientRequest[] = []
 
-    await run(
-      githubJson(provider, issuesUrl),
-      clientLayer((request) => {
-        observed.push(request)
-        return Response.json([])
-      }),
-    )
+      yield* run(
+        githubJson(provider, issuesUrl),
+        clientLayer((request) => {
+          observed.push(request)
+          return Response.json([])
+        }),
+      )
 
-    expect(observed[0]?.headers).toMatchObject({
-      accept: 'application/vnd.github+json',
-      authorization: 'Bearer secret',
-      'user-agent': 'symphony-ts/0.1',
-      'x-github-api-version': '2026-03-10',
-    })
-    expect(observed[0]?.headers['content-type']).toBeUndefined()
-  })
+      expect(observed[0]?.headers).toMatchObject({
+        accept: 'application/vnd.github+json',
+        authorization: 'Bearer secret',
+        'user-agent': 'symphony-ts/0.1',
+        'x-github-api-version': '2026-03-10',
+      })
+      expect(observed[0]?.headers['content-type']).toBeUndefined()
+    }),
+  )
 
-  it('declares a JSON content type only for a request that carries a body', async (): Promise<void> => {
-    const observed: HttpClientRequest.HttpClientRequest[] = []
+  it.effect('declares a JSON content type only for a request that carries a body', () =>
+    Effect.gen(function* () {
+      const observed: HttpClientRequest.HttpClientRequest[] = []
 
-    await run(
-      githubJson(provider, `${issuesUrl}/1/comments`, {
-        method: 'POST',
-        body: JSON.stringify({ body: 'hello' }),
-      }),
-      clientLayer((request) => {
-        observed.push(request)
-        return Response.json({ html_url: 'https://example.test/comment/1' }, { status: 201 })
-      }),
-    )
+      yield* run(
+        githubJson(provider, `${issuesUrl}/1/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ body: 'hello' }),
+        }),
+        clientLayer((request) => {
+          observed.push(request)
+          return Response.json({ html_url: 'https://example.test/comment/1' }, { status: 201 })
+        }),
+      )
 
-    expect(observed[0]?.method).toBe('POST')
-    expect(observed[0]?.headers['content-type']).toBe('application/json')
-  })
+      expect(observed[0]?.method).toBe('POST')
+      expect(observed[0]?.headers['content-type']).toBe('application/json')
+    }),
+  )
 })
 
 describe('GitHub transport error mapping', (): void => {
-  it('maps a secondary rate limit onto its advertised delay', async (): Promise<void> => {
-    const error = await runFailure(
-      githubJson(provider, issuesUrl),
-      clientLayer(() => new Response(null, { status: 429, headers: { 'Retry-After': '30' } })),
-    )
+  it.effect('maps a secondary rate limit onto its advertised delay', () =>
+    Effect.gen(function* () {
+      const error = yield* runFailure(
+        githubJson(provider, issuesUrl),
+        clientLayer(() => new Response(null, { status: 429, headers: { 'Retry-After': '30' } })),
+      )
 
-    expect(error.category).toBe('tracker_rate_limited')
-    expect(error.retryable).toBe(true)
-    expect(error.retryAfterMs).toBe(30_000)
-  })
+      expect(error.category).toBe('tracker_rate_limited')
+      expect(error.retryable).toBe(true)
+      expect(error.retryAfterMs).toBe(30_000)
+    }),
+  )
 
-  it('maps an exhausted primary rate limit onto its reset window', async (): Promise<void> => {
-    const reset = Math.floor(Date.now() / 1_000) + 120
+  it.effect('maps an exhausted primary rate limit onto its reset window', () =>
+    Effect.gen(function* () {
+      // The adapter subtracts the instant it reads from the clock (#184) from this reset, so the
+      // header is dated from the same clock. Taken from the ambient one it would be decades ahead
+      // of the test clock's epoch, and the window this case exists to check would go untested.
+      const reset = Math.floor((yield* Clock.currentTimeMillis) / 1_000) + 120
 
-    const error = await runFailure(
-      githubJson(provider, issuesUrl),
-      clientLayer(
-        () =>
-          new Response(null, {
-            status: 403,
-            headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) },
-          }),
-      ),
-    )
-
-    expect(error.category).toBe('tracker_rate_limited')
-    expect(error.retryable).toBe(true)
-    expect(error.retryAfterMs).toBeGreaterThan(0)
-  })
-
-  it('keeps server statuses retryable and client statuses terminal', async (): Promise<void> => {
-    const serverError = await runFailure(
-      githubJson(provider, issuesUrl),
-      clientLayer(() => new Response(null, { status: 502 })),
-    )
-    const clientError = await runFailure(
-      githubJson(provider, issuesUrl),
-      clientLayer(() => new Response(null, { status: 404 })),
-    )
-
-    expect(serverError.category).toBe('tracker_status')
-    expect(serverError.retryable).toBe(true)
-    expect(clientError.category).toBe('tracker_status')
-    expect(clientError.message).toBe('GitHub returned HTTP 404')
-    expect(clientError.retryable).toBe(false)
-  })
-
-  it('returns an accepted non-success status without decoding its body', async (): Promise<void> => {
-    const result = await run(
-      githubJson(provider, `${issuesUrl}/1/labels/bug`, { method: 'DELETE' }, [404]),
-      clientLayer(() => new Response('not json', { status: 404 })),
-    )
-
-    expect(result).toEqual({ status: 404, body: null, linkHeader: null })
-  })
-
-  it('returns an empty body for a no-content response', async (): Promise<void> => {
-    const result = await run(
-      githubJson(provider, `${issuesUrl}/1`, { method: 'PATCH', body: '{}' }),
-      clientLayer(() => new Response(null, { status: 204 })),
-    )
-
-    expect(result).toEqual({ status: 204, body: null, linkHeader: null })
-  })
-
-  it('rejects a malformed JSON payload as a response failure', async (): Promise<void> => {
-    const error = await runFailure(
-      githubJson(provider, issuesUrl),
-      clientLayer(
-        () => new Response('not json', { headers: { 'Content-Type': 'application/json' } }),
-      ),
-    )
-
-    expect(error.category).toBe('tracker_response')
-    expect(error.retryable).toBe(false)
-  })
-
-  it('reports a transport failure as retryable', async (): Promise<void> => {
-    const error = await runFailure(
-      githubJson(provider, issuesUrl),
-      Layer.succeed(
-        HttpClient.HttpClient,
-        HttpClient.make((request) =>
-          Effect.fail(
-            new HttpClientError.RequestError({
-              request,
-              reason: 'Transport',
-              cause: new Error('connection reset'),
+      const error = yield* runFailure(
+        githubJson(provider, issuesUrl),
+        clientLayer(
+          () =>
+            new Response(null, {
+              status: 403,
+              headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) },
             }),
-          ),
         ),
-      ),
-    )
+      )
 
-    expect(error.category).toBe('tracker_request')
-    expect(error.message).toBe('GitHub request failed')
-    expect(error.retryable).toBe(true)
-  })
+      expect(error.category).toBe('tracker_rate_limited')
+      expect(error.retryable).toBe(true)
+      // Exact rather than a lower bound: the clock no longer drifts between the two reads.
+      expect(error.retryAfterMs).toBe(120_000)
+    }),
+  )
 
-  it('fails a request that outlives the transport deadline', async (): Promise<void> => {
-    const error = await Effect.runPromise(
-      Effect.gen(function* () {
-        const attempt = yield* Effect.fork(
-          Effect.flip(githubJson(provider, issuesUrl)).pipe(
-            Effect.provide(
-              Layer.succeed(
-                HttpClient.HttpClient,
-                HttpClient.make(() => Effect.never),
-              ),
+  it.effect('keeps server statuses retryable and client statuses terminal', () =>
+    Effect.gen(function* () {
+      const serverError = yield* runFailure(
+        githubJson(provider, issuesUrl),
+        clientLayer(() => new Response(null, { status: 502 })),
+      )
+      const clientError = yield* runFailure(
+        githubJson(provider, issuesUrl),
+        clientLayer(() => new Response(null, { status: 404 })),
+      )
+
+      expect(serverError.category).toBe('tracker_status')
+      expect(serverError.retryable).toBe(true)
+      expect(clientError.category).toBe('tracker_status')
+      expect(clientError.message).toBe('GitHub returned HTTP 404')
+      expect(clientError.retryable).toBe(false)
+    }),
+  )
+
+  it.effect('returns an accepted non-success status without decoding its body', () =>
+    Effect.gen(function* () {
+      const result = yield* run(
+        githubJson(provider, `${issuesUrl}/1/labels/bug`, { method: 'DELETE' }, [404]),
+        clientLayer(() => new Response('not json', { status: 404 })),
+      )
+
+      expect(result).toEqual({ status: 404, body: null, linkHeader: null })
+    }),
+  )
+
+  it.effect('returns an empty body for a no-content response', () =>
+    Effect.gen(function* () {
+      const result = yield* run(
+        githubJson(provider, `${issuesUrl}/1`, { method: 'PATCH', body: '{}' }),
+        clientLayer(() => new Response(null, { status: 204 })),
+      )
+
+      expect(result).toEqual({ status: 204, body: null, linkHeader: null })
+    }),
+  )
+
+  it.effect('rejects a malformed JSON payload as a response failure', () =>
+    Effect.gen(function* () {
+      const error = yield* runFailure(
+        githubJson(provider, issuesUrl),
+        clientLayer(
+          () => new Response('not json', { headers: { 'Content-Type': 'application/json' } }),
+        ),
+      )
+
+      expect(error.category).toBe('tracker_response')
+      expect(error.retryable).toBe(false)
+    }),
+  )
+
+  it.effect('reports a transport failure as retryable', () =>
+    Effect.gen(function* () {
+      const error = yield* runFailure(
+        githubJson(provider, issuesUrl),
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.fail(
+              new HttpClientError.RequestError({
+                request,
+                reason: 'Transport',
+                cause: new Error('connection reset'),
+              }),
             ),
           ),
-        )
-        yield* TestClock.adjust('31 seconds')
-        return yield* Fiber.join(attempt)
-      }).pipe(Effect.provide(TestContext.TestContext)),
-    )
+        ),
+      )
 
-    expect(error.category).toBe('tracker_request')
-    expect(error.retryable).toBe(true)
-  })
+      expect(error.category).toBe('tracker_request')
+      expect(error.message).toBe('GitHub request failed')
+      expect(error.retryable).toBe(true)
+    }),
+  )
+
+  it.effect('fails a request that outlives the transport deadline', () =>
+    Effect.gen(function* () {
+      const attempt = yield* Effect.fork(
+        Effect.flip(githubJson(provider, issuesUrl)).pipe(
+          Effect.provide(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make(() => Effect.never),
+            ),
+          ),
+        ),
+      )
+      yield* TestClock.adjust('31 seconds')
+      const error = yield* Fiber.join(attempt)
+
+      expect(error.category).toBe('tracker_request')
+      expect(error.retryable).toBe(true)
+    }),
+  )
 })
 
 describe('GitHub adapter client binding', (): void => {
-  it('runs promise-shaped tool requests through the bound client', async (): Promise<void> => {
-    const unusable = vi.fn((): never => {
-      throw new Error('global fetch must not be used')
-    })
-    vi.stubGlobal('fetch', unusable)
-    const requests: HttpClientRequest.HttpClientRequest[] = []
-    const client = HttpClient.make((request) => {
-      requests.push(request)
-      return Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          Response.json({ html_url: 'https://example.test/comment/1' }, { status: 201 }),
+  it.effect('runs promise-shaped tool requests through the bound client', () =>
+    Effect.gen(function* () {
+      const unusable = vi.fn((): never => {
+        throw new Error('global fetch must not be used')
+      })
+      vi.stubGlobal('fetch', unusable)
+      const requests: HttpClientRequest.HttpClientRequest[] = []
+      const client = HttpClient.make((request) => {
+        requests.push(request)
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({ html_url: 'https://example.test/comment/1' }, { status: 201 }),
+          ),
+        )
+      })
+
+      const tracker = yield* makeGitHubTracker(provider, client)
+      // `executeTool` is the promise-shaped host-tool boundary, so it is awaited rather than
+      // yielded even here.
+      const result = yield* Effect.promise(() =>
+        tracker.executeTool(
+          'github_add_comment',
+          { body: 'hello' },
+          {
+            issueId: issueId('7'),
+            issueIdentifier: issueIdentifier('example/symphony#7'),
+            nativeRef: { owner: 'example', repository: 'symphony', issue_number: 7 },
+          },
         ),
       )
-    })
 
-    const result = await makeGitHubTracker(provider, client).executeTool(
-      'github_add_comment',
-      { body: 'hello' },
-      {
-        issueId: issueId('7'),
-        issueIdentifier: issueIdentifier('example/symphony#7'),
-        nativeRef: { owner: 'example', repository: 'symphony', issue_number: 7 },
-      },
-    )
+      expect(unusable).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        success: true,
+        data: { issue_number: 7, comment_url: 'https://example.test/comment/1' },
+      })
+      expect(requests[0]?.url).toBe(
+        'https://api.example.test/repos/example/symphony/issues/7/comments',
+      )
+    }),
+  )
 
-    expect(unusable).not.toHaveBeenCalled()
-    expect(result).toEqual({
-      success: true,
-      data: { issue_number: 7, comment_url: 'https://example.test/comment/1' },
-    })
-    expect(requests[0]?.url).toBe(
-      'https://api.example.test/repos/example/symphony/issues/7/comments',
-    )
-  })
+  it.effect('binds the same client to the operations that stay in Effect', () =>
+    Effect.gen(function* () {
+      const unusable = vi.fn((): never => {
+        throw new Error('global fetch must not be used')
+      })
+      vi.stubGlobal('fetch', unusable)
+      const client = HttpClient.make((request) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, Response.json([]))),
+      )
 
-  it('binds the same client to the operations that stay in Effect', async (): Promise<void> => {
-    const unusable = vi.fn((): never => {
-      throw new Error('global fetch must not be used')
-    })
-    vi.stubGlobal('fetch', unusable)
-    const client = HttpClient.make((request) =>
-      Effect.succeed(HttpClientResponse.fromWeb(request, Response.json([]))),
-    )
+      const issues = yield* makeGitHubTracker(provider, client).pipe(
+        Effect.flatMap((tracker) => tracker.fetchIssuesByStates(['open'], null)),
+      )
 
-    const issues = await Effect.runPromise(
-      makeGitHubTracker(provider, client).fetchIssuesByStates(['open'], null),
-    )
-
-    expect(unusable).not.toHaveBeenCalled()
-    expect(issues).toEqual([])
-  })
+      expect(unusable).not.toHaveBeenCalled()
+      expect(issues).toEqual([])
+    }),
+  )
 })

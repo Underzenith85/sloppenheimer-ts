@@ -139,11 +139,15 @@ export const portsConfiguration = (workflow: Workflow): PortsConfiguration => ({
  * The wiring shape: adapter layers supply the factories, the cells turn them into the instances in
  * force, and both halves are visible to the orchestrator. The adapter layers themselves belong to
  * the adapter issues that follow; nothing here selects a provider.
+ *
+ * An adapter set may carry requirements of its own — the host filesystem, say — and they travel out
+ * unchanged for the composition root to discharge, so binding one here never becomes this module's
+ * business.
  */
-export const layerPorts = (
+export const layerPorts = <Requirements = never>(
   configuration: PortsConfiguration,
-  adapters: Layer.Layer<AdapterServices>,
-): Layer.Layer<PortServices, TrackerError> =>
+  adapters: Layer.Layer<AdapterServices, never, Requirements>,
+): Layer.Layer<PortServices, TrackerError, Requirements> =>
   Layer.mergeAll(
     layerCurrentTracker(configuration.tracker),
     layerCurrentWorkspaceManager(configuration.workspaces),

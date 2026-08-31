@@ -1,8 +1,8 @@
-import { Effect } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { it } from '@effect/vitest'
+import { Clock, Effect, TestClock } from 'effect'
+import { describe, expect } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
-import { FakeClock } from '../harness/fake-clock.js'
 import { FakeTracker } from '../harness/fake-tracker.js'
 import { FakeWorkspaceProcess } from '../harness/fake-workspace-process.js'
 
@@ -25,49 +25,64 @@ const issue: Issue = {
 }
 
 describe('Core Conformance typed harness boundaries', (): void => {
-  it('advances fake clock tasks deterministically in due-time and insertion order', (): void => {
-    const clock = new FakeClock(1_000)
+  it.effect('advances scheduled work deterministically in due-time order', () => {
     const events: string[] = []
-    clock.schedule(20, () => events.push('last'))
-    clock.schedule(10, () => events.push('first'))
-    clock.schedule(10, () => events.push('second'))
+    const record = (label: string, delayMs: number): Effect.Effect<void> =>
+      Effect.sleep(delayMs).pipe(
+        Effect.zipRight(
+          Effect.sync(() => {
+            events.push(label)
+          }),
+        ),
+      )
 
-    clock.advanceBy(20)
+    return Effect.gen(function* () {
+      yield* TestClock.adjust(1_000)
+      yield* Effect.fork(record('last', 30))
+      yield* Effect.fork(record('first', 10))
+      yield* Effect.fork(record('second', 20))
+      // One advance drains every sleep it passes, in due order, without waiting on wall time.
+      yield* TestClock.adjust(30)
 
-    expect(clock.now()).toBe(1_020)
-    expect(events).toEqual(['first', 'second', 'last'])
+      expect(yield* Clock.currentTimeMillis).toBe(1_030)
+      expect(events).toEqual(['first', 'second', 'last'])
+    })
   })
 
-  it('implements the exact tracker adapter boundary and records typed calls', async (): Promise<void> => {
-    const tracker = new FakeTracker([issue], ['FAKE_TRACKER_TOKEN'])
+  it.effect('implements the exact tracker adapter boundary and records typed calls', () =>
+    Effect.gen(function* () {
+      const tracker = new FakeTracker([issue], ['FAKE_TRACKER_TOKEN'])
 
-    const selected = await Effect.runPromise(tracker.fetchIssuesByStates([' open '], null))
-    const refreshed = await Effect.runPromise(tracker.fetchIssuesByIds([issue.id]))
+      const selected = yield* tracker.fetchIssuesByStates([' open '], null)
+      const refreshed = yield* tracker.fetchIssuesByIds([issue.id])
 
-    expect(selected).toEqual([issue])
-    expect(refreshed).toEqual([issue])
-    expect(tracker.calls.map((call) => call.operation)).toEqual([
-      'fetchIssuesByStates',
-      'fetchIssuesByIds',
-    ])
-  })
+      expect(selected).toEqual([issue])
+      expect(refreshed).toEqual([issue])
+      expect(tracker.calls.map((call) => call.operation)).toEqual([
+        'fetchIssuesByStates',
+        'fetchIssuesByIds',
+      ])
+    }),
+  )
 
-  it('implements workspace creation, reuse, hooks, and removal without host IO', async (): Promise<void> => {
-    const workspaces = new FakeWorkspaceProcess()
-    const first = await Effect.runPromise(workspaces.create(issue.identifier))
-    const second = await Effect.runPromise(workspaces.create(issue.identifier))
-    await Effect.runPromise(workspaces.beforeRun(second))
-    await Effect.runPromise(workspaces.afterRun(second))
-    await Effect.runPromise(workspaces.remove(issue.identifier))
+  it.effect('implements workspace creation, reuse, hooks, and removal without host IO', () =>
+    Effect.gen(function* () {
+      const workspaces = new FakeWorkspaceProcess()
+      const first = yield* workspaces.create(issue.identifier)
+      const second = yield* workspaces.create(issue.identifier)
+      yield* workspaces.beforeRun(second)
+      yield* workspaces.afterRun(second)
+      yield* workspaces.remove(issue.identifier)
 
-    expect(first.createdNow).toBe(true)
-    expect(second.createdNow).toBe(false)
-    expect(workspaces.operations.map((operation) => operation.operation)).toEqual([
-      'create',
-      'create',
-      'beforeRun',
-      'afterRun',
-      'remove',
-    ])
-  })
+      expect(first.createdNow).toBe(true)
+      expect(second.createdNow).toBe(false)
+      expect(workspaces.operations.map((operation) => operation.operation)).toEqual([
+        'create',
+        'create',
+        'beforeRun',
+        'afterRun',
+        'remove',
+      ])
+    }),
+  )
 })

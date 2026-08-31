@@ -222,6 +222,68 @@ describe('protocol normalization', (): void => {
     ).toEqual({ kind: 'error', severity: 'error', code: null, message: 'boom', truncated: false })
   })
 
+  it('reads the same item under either casing the protocol reports it in', (): void => {
+    // The App Server reports these fields as `item_type`/`exit_code` on one build and
+    // `itemType`/`exitCode` on another. The schema layer answers that once, so both spellings
+    // produce the identical payload.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          item_type: 'commandExecution',
+          command: ['pnpm', 'test'],
+          status: 'completed',
+          exit_code: 0,
+          duration_ms: 1_200,
+        },
+      }),
+    ).toEqual({
+      kind: 'command',
+      program: 'pnpm',
+      argumentCount: 1,
+      quality: 'test',
+      state: 'completed',
+      exitCode: 0,
+      durationMs: 1_200,
+    })
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          changes: [
+            { file_path: '/home/agent/work/src/telemetry.ts', kind: 'added', added_lines: 4 },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      path: 'work/src/telemetry.ts',
+      change: 'add',
+      addedLines: 4,
+      deletedLines: null,
+    })
+  })
+
+  it('keeps an item whose fields are reported in shapes it does not recognize', (): void => {
+    // Tolerance is the point: an unusable field is absent, never a failed turn.
+    expect(
+      normalizePayload('item/completed', {
+        item: { type: 'commandExecution', command: 42, exitCode: 'zero', status: [] },
+      }),
+    ).toEqual({
+      kind: 'command',
+      program: 'unknown',
+      argumentCount: 0,
+      quality: null,
+      state: 'completed',
+      exitCode: null,
+      durationMs: null,
+    })
+    // An unrecognized item type still reaches the timeline by method name.
+    expect(normalizePayload('item/completed', { item: { type: 'vendorSpecific' } })).toEqual({
+      kind: 'none',
+    })
+  })
+
   it('degrades an unrecognized message to its method name alone', (): void => {
     const payload = normalizePayload('vendor/unknown', {
       prompt: 'the full rendered prompt that must never be retained',

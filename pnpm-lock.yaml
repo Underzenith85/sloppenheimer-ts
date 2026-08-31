@@ -27,6 +27,9 @@ importers:
         specifier: 2.9.0
         version: 2.9.0
     devDependencies:
+      '@effect/vitest':
+        specifier: 0.30.0
+        version: 0.30.0(effect@3.22.1)(vitest@4.1.11(@types/node@24.13.3)(happy-dom@20.0.11)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0)))
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
@@ -114,6 +117,12 @@ packages:
       '@effect/experimental': ^0.61.1
       '@effect/platform': ^0.97.1
       effect: ^3.22.1
+
+  '@effect/vitest@0.30.0':
+    resolution: {integrity: sha512-2qcK7F4XSwOn7Ye9vgEkrndHiiHVf9Nl+U5jvvLBKeYx4+8++O5Y8RFezaQzs/rWx8GkdlStv/s+HYMHZ/2/AQ==}
+    peerDependencies:
+      effect: ^3.22.0
+      vitest: ^3.2.0
 
   '@effect/workflow@0.19.1':
     resolution: {integrity: sha512-irU6ddHdIxYOhv0cJiJTk2AUxRmPYjRJ5JdB5UCvpJC4vLCyR2XyKspiCNDiEX1aSGPhVWEXhVMWXR1cErMS3A==}
@@ -1424,6 +1433,11 @@ snapshots:
       '@effect/platform': 0.97.1(effect@3.22.1)
       effect: 3.22.1
       uuid: 11.1.1
+
+  '@effect/vitest@0.30.0(effect@3.22.1)(vitest@4.1.11(@types/node@24.13.3)(happy-dom@20.0.11)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0)))':
+    dependencies:
+      effect: 3.22.1
+      vitest: 4.1.11(@types/node@24.13.3)(happy-dom@20.0.11)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0))
 
   '@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)':
     dependencies:

@@ -57,7 +57,11 @@ export const stubTrackerProviders: TrackerProviderRegistry = makeTrackerProvider
   stubTrackerProviderEntry,
 ])
 
-/** A validated stub selection whose token is the literal given, resolved against no environment. */
+/**
+ * A validated stub selection whose token is the literal given, resolved against no environment.
+ * Run here rather than yielded: every caller is a module-scope fixture constant, and validation
+ * against a fixed literal reads no environment and cannot fail.
+ */
 export const stubProvider = (token: string): ValidatedTrackerProvider =>
   Effect.runSync(withEnvironment(stubTrackerProviders.validate('stub', { token })))
 

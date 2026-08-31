@@ -1,5 +1,17 @@
+import { FileSystem } from '@effect/platform'
 import { resolve } from 'node:path'
-import { Deferred, Effect, Fiber, Option, Queue, Ref, Runtime, Stream, type Scope } from 'effect'
+import {
+  Clock,
+  Deferred,
+  Effect,
+  Fiber,
+  Option,
+  Queue,
+  Ref,
+  Runtime,
+  Stream,
+  type Scope,
+} from 'effect'
 
 import {
   issueId,
@@ -11,6 +23,7 @@ import {
 import { WorkflowError, type TrackerError } from '../errors.js'
 import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
+import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
 import {
   createAgentDetailRecord,
@@ -80,7 +93,7 @@ export {
   type RuntimeState,
   type WorkflowReloadError,
 } from './state.js'
-export { issueIsRoutable, retryDelayMs, sortIssues } from './policy.js'
+export { issueIsRoutable, sortIssues } from './policy.js'
 
 export type RunningSnapshot = Readonly<{
   issueId: IssueId
@@ -234,6 +247,8 @@ export type OrchestratorServices =
   | AgentRunner
   | CurrentTracker
   | CurrentWorkspaceManager
+  /** The handoff store is read and written against the host filesystem the root bound. */
+  | FileSystem.FileSystem
   | WorkflowLoader
   | WorkflowWatcher
 
@@ -379,6 +394,16 @@ export const startOrchestratorRuntime = (
       sourceControlCell: yield* Effect.serviceOption(CurrentSourceControl),
     }
     /**
+     * Bound once here rather than read from each fiber that persists: the runtime hands its own
+     * operations out as `Effect<void>` for a callback to run, and those carry no context of their
+     * own.
+     */
+    const fileSystem = yield* FileSystem.FileSystem
+    const onHostFileSystem = <Value, Error>(
+      effect: Effect.Effect<Value, Error, FileSystem.FileSystem>,
+    ): Effect.Effect<Value, Error> =>
+      Effect.provideService(effect, FileSystem.FileSystem, fileSystem)
+    /**
      * Built from the workflow the orchestrator loaded rather than adopted from the composition
      * root's own read of it. The two are separate reads of one file, and an edit between them would
      * otherwise leave every port serving a version that nothing compares against again: the reload
@@ -409,7 +434,7 @@ export const startOrchestratorRuntime = (
           storeReadFailed: false,
           storeError: null,
         })
-      : loadHandoffs(handoffStorePath).pipe(
+      : onHostFileSystem(loadHandoffs(handoffStorePath)).pipe(
           Effect.matchEffect({
             onFailure: (error) =>
               logError('handoff store read failed; preserving store during recovery', {
@@ -418,15 +443,16 @@ export const startOrchestratorRuntime = (
                 path: handoffStorePath,
                 error: error.message,
               }).pipe(
-                Effect.as({
+                Effect.zipRight(currentInstant),
+                Effect.map((observedAt) => ({
                   handoffs: [] as readonly HandoffSnapshot[],
                   storeReadFailed: true,
                   storeError: {
                     operation: error.operation,
                     message: error.message,
-                    observedAt: new Date(),
+                    observedAt,
                   },
-                }),
+                })),
               ),
             onSuccess: (handoffs) =>
               Effect.succeed({ handoffs, storeReadFailed: false, storeError: null }),
@@ -457,10 +483,10 @@ export const startOrchestratorRuntime = (
       attempt: number | null,
       dispatchLabels: readonly string[],
     ): Effect.Effect<AgentDetailRecord> =>
-      Effect.suspend(() => {
+      Effect.gen(function* () {
         // Read before the transition, not inside it: a transition is a function of its inputs.
-        const now = new Date()
-        return Ref.modify(state, (current) => {
+        const now = yield* currentInstant
+        return yield* Ref.modify(state, (current) => {
           // A new session supersedes whatever aged out for this issue.
           const noted = Transitions.revivedDetail(Transitions.noteIssue(current, issue), issue.id)
           const existing = noted.details.get(issue.id)
@@ -494,26 +520,27 @@ export const startOrchestratorRuntime = (
       if (handoffStoreDisabled || !current.startupRecoveryFinished || current.storeReadFailed) {
         return
       }
-      yield* saveHandoffs(handoffStorePath, Transitions.handoffSnapshots(current)).pipe(
-        Effect.catchAll((error) => {
-          const observedAt = new Date()
-          return Ref.update(state, (failing) =>
-            Transitions.setHandoffStoreError(Transitions.noteRecovery(failing, { failed: 1 }), {
-              operation: error.operation,
-              message: error.message,
-              observedAt,
-            }),
-          ).pipe(
-            Effect.zipRight(
-              logError('handoff store write failed', {
-                action: 'handoff_store_write',
-                outcome: 'failed',
-                path: handoffStorePath,
-                error: error.message,
+      yield* onHostFileSystem(
+        saveHandoffs(handoffStorePath, Transitions.handoffSnapshots(current)),
+      ).pipe(
+        Effect.catchAll((error) =>
+          Effect.gen(function* () {
+            const observedAt = yield* currentInstant
+            yield* Ref.update(state, (failing) =>
+              Transitions.setHandoffStoreError(Transitions.noteRecovery(failing, { failed: 1 }), {
+                operation: error.operation,
+                message: error.message,
+                observedAt,
               }),
-            ),
-          )
-        }),
+            )
+            yield* logError('handoff store write failed', {
+              action: 'handoff_store_write',
+              outcome: 'failed',
+              path: handoffStorePath,
+              error: error.message,
+            })
+          }),
+        ),
       )
     })
 
@@ -694,7 +721,7 @@ export const startOrchestratorRuntime = (
           )
           continue
         }
-        const observedAt = new Date()
+        const observedAt = yield* currentInstant
         const inspected = yield* capability.inspectPullRequest(foundResult.pullRequestNumber).pipe(
           Effect.match({
             onFailure: (error) => ({ _tag: 'Failed' as const, error }),
@@ -852,7 +879,7 @@ export const startOrchestratorRuntime = (
         const settled = yield* Ref.modify(state, (current) =>
           Transitions.applyPendingTelemetry(current, id, entry),
         )
-        const endedAt = new Date()
+        const endedAt = yield* currentInstant
         yield* Ref.update(state, (current) => {
           const [, ended] = Transitions.endRun(current, id, null)
           const accounted = Transitions.accountEndedRun(ended, settled, endedAt.getTime())
@@ -945,7 +972,7 @@ export const startOrchestratorRuntime = (
             ? Option.some(yield* agentRetryDelay(attempt, maximumMs))
             : yield* trackerRetryDelay(trackerError, attempt, maximumMs)
         if (Option.isNone(delayOption)) {
-          const cancelledAt = new Date()
+          const cancelledAt = yield* currentInstant
           const reason = error ?? 'the tracker rejected the retry'
           yield* Ref.update(state, (pending) =>
             Transitions.updateDetail(
@@ -965,7 +992,7 @@ export const startOrchestratorRuntime = (
           return false
         }
         const delay = delayOption.value
-        const dueAt = Date.now() + delay
+        const dueAt = (yield* Clock.currentTimeMillis) + delay
         const fiber = yield* Effect.forkScoped(
           Effect.sleep(delay).pipe(
             Effect.zipRight(Queue.offer(mailbox, { _tag: 'RetryDue', issueId: issue.id, attempt })),
@@ -978,7 +1005,7 @@ export const startOrchestratorRuntime = (
         if (Option.isSome(displaced)) {
           yield* Fiber.interrupt(displaced.value.fiber)
         }
-        const scheduledAt = new Date()
+        const scheduledAt = yield* currentInstant
         yield* Ref.update(state, (pending) =>
           Transitions.updateDetail(pending, issue.id, (record) =>
             recordRetryScheduled(record, scheduledAt, attempt, new Date(dueAt), error),
@@ -1027,7 +1054,7 @@ export const startOrchestratorRuntime = (
         if (stalling.running.size === 0) {
           return
         }
-        const now = Date.now()
+        const now = yield* Clock.currentTimeMillis
         for (const [id, entry] of stalling.running) {
           const stallTimeout = entry.execution.stallTimeoutMs
           const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
@@ -1151,8 +1178,9 @@ export const startOrchestratorRuntime = (
     yield* requestTick('startup')
 
     return {
-      snapshot: Ref.get(state).pipe(
-        Effect.map((current) => createSnapshot(current, selectedWorkflowPath)),
+      snapshot: Effect.map(
+        Effect.all([Ref.get(state), Clock.currentTimeMillis]),
+        ([current, now]) => createSnapshot(current, selectedWorkflowPath, now),
       ),
       refresh: requestRefresh,
       agentDetail: (identifier) => agentDetail(context, identifier),
