@@ -1,8 +1,10 @@
-import { Effect } from 'effect'
 import { createServer, request } from 'node:http'
-import { describe, expect, it, vi } from 'vitest'
+import { it } from '@effect/vitest'
+import { Effect } from 'effect'
+import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import type { ServerError } from '../../src/errors.js'
 import { TrackerError } from '../../src/errors.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '../../src/core/orchestrator.js'
@@ -197,22 +199,24 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
     }),
 })
 
+/**
+ * Serves the console on a loopback socket for the length of the case. The callback stays
+ * promise-shaped: what it does is `fetch` against a real server, which is a promise boundary.
+ */
 const withServer = <Value>(
   backend: OperatorBackend,
   use: (url: string) => Promise<Value>,
-): Promise<Value> =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const server = yield* startOperatorServer(0, backend)
-        return yield* Effect.promise(() => use(server.url))
-      }),
-    ),
+): Effect.Effect<Value, ServerError> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* startOperatorServer(0, backend)
+      return yield* Effect.promise(() => use(server.url))
+    }),
   )
 
 describe('operator server', (): void => {
-  it('serves the console and versioned runtime state on loopback', async (): Promise<void> => {
-    await withServer(makeBackend(), async (url) => {
+  it.live('serves the console and versioned runtime state on loopback', () =>
+    withServer(makeBackend(), async (url) => {
       const page = await fetch(url)
       const state = await fetch(`${url}/api/v1/state`)
       const backlog = await fetch(`${url}/api/v1/backlog`)
@@ -245,11 +249,11 @@ describe('operator server', (): void => {
       expect(source.indexOf('const buildWorkModel =')).toBeLessThan(
         source.indexOf('const installDetailControls ='),
       )
-    })
-  })
+    }),
+  )
 
-  it('serves agent detail for a running agent without leaking the workspace or prompt', async (): Promise<void> => {
-    await withServer(makeBackend(), async (url) => {
+  it.live('serves agent detail for a running agent without leaking the workspace or prompt', () =>
+    withServer(makeBackend(), async (url) => {
       const response = await fetch(
         `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
       )
@@ -274,69 +278,73 @@ describe('operator server', (): void => {
         },
       })
       expect(body).not.toContain('/tmp/')
-    })
-  })
+    }),
+  )
 
-  it('distinguishes retrying, completed, sessionless, unavailable, missing, and malformed detail requests', async (): Promise<void> => {
-    await withServer(makeBackend(), async (url) => {
-      const detailFor = (identifier: string): Promise<Response> =>
-        fetch(`${url}/api/v1/agents/${encodeURIComponent(identifier)}`)
-      const retrying = await detailFor('example/symphony#18')
-      const completed = await detailFor('example/symphony#19')
-      const sessionless = await detailFor('example/symphony#20')
-      const unavailable = await detailFor('example/symphony#21')
-      const missing = await detailFor('example/symphony#99')
-      const malformed = await detailFor('not an identifier')
-      const longIdentifier = await detailFor(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`)
-      const wrongMethod = await fetch(
-        `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
-        { method: 'POST' },
-      )
+  it.live(
+    'distinguishes retrying, completed, sessionless, unavailable, missing, and malformed detail requests',
+    () =>
+      withServer(makeBackend(), async (url) => {
+        const detailFor = (identifier: string): Promise<Response> =>
+          fetch(`${url}/api/v1/agents/${encodeURIComponent(identifier)}`)
+        const retrying = await detailFor('example/symphony#18')
+        const completed = await detailFor('example/symphony#19')
+        const sessionless = await detailFor('example/symphony#20')
+        const unavailable = await detailFor('example/symphony#21')
+        const missing = await detailFor('example/symphony#99')
+        const malformed = await detailFor('not an identifier')
+        const longIdentifier = await detailFor(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`)
+        const wrongMethod = await fetch(
+          `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
+          { method: 'POST' },
+        )
 
-      expect(retrying.status).toBe(200)
-      expect(await retrying.json()).toMatchObject({ detail: { status: 'retrying' } })
-      expect(completed.status).toBe(410)
-      expect(await completed.json()).toMatchObject({
-        version: 'v1',
-        error: { code: 'agent_session_completed' },
+        expect(retrying.status).toBe(200)
+        expect(await retrying.json()).toMatchObject({ detail: { status: 'retrying' } })
+        expect(completed.status).toBe(410)
+        expect(await completed.json()).toMatchObject({
+          version: 'v1',
+          error: { code: 'agent_session_completed' },
+        })
+        expect(sessionless.status).toBe(409)
+        expect(await sessionless.json()).toMatchObject({ error: { code: 'agent_not_active' } })
+        expect(unavailable.status).toBe(503)
+        expect(unavailable.headers.get('retry-after')).toBe('1')
+        expect(await unavailable.json()).toMatchObject({
+          error: { code: 'agent_detail_unavailable' },
+        })
+        expect(missing.status).toBe(404)
+        expect(await missing.json()).toMatchObject({ error: { code: 'agent_not_found' } })
+        expect(malformed.status).toBe(400)
+        expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_identifier' } })
+        expect(longIdentifier.status).toBe(200)
+        expect(wrongMethod.status).toBe(405)
+      }),
+  )
+
+  it.live('requires its page token before changing issue eligibility', () =>
+    Effect.gen(function* () {
+      const setIssueEnabled = vi.fn()
+      yield* withServer(makeBackend(setIssueEnabled), async (url) => {
+        const rejected = await fetch(`${url}/api/v1/issues/17/pause`, { method: 'POST' })
+        expect(rejected.status).toBe(403)
+
+        const page = await (await fetch(url)).text()
+        const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1]
+        expect(token).toBeDefined()
+        const accepted = await fetch(`${url}/api/v1/issues/17/pause`, {
+          method: 'POST',
+          headers: { 'X-Symphony-CSRF': token ?? '' },
+        })
+
+        expect(accepted.status).toBe(202)
+        expect(setIssueEnabled).toHaveBeenCalledWith(17, false)
       })
-      expect(sessionless.status).toBe(409)
-      expect(await sessionless.json()).toMatchObject({ error: { code: 'agent_not_active' } })
-      expect(unavailable.status).toBe(503)
-      expect(unavailable.headers.get('retry-after')).toBe('1')
-      expect(await unavailable.json()).toMatchObject({
-        error: { code: 'agent_detail_unavailable' },
-      })
-      expect(missing.status).toBe(404)
-      expect(await missing.json()).toMatchObject({ error: { code: 'agent_not_found' } })
-      expect(malformed.status).toBe(400)
-      expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_identifier' } })
-      expect(longIdentifier.status).toBe(200)
-      expect(wrongMethod.status).toBe(405)
-    })
-  })
+    }),
+  )
 
-  it('requires its page token before changing issue eligibility', async (): Promise<void> => {
-    const setIssueEnabled = vi.fn()
-    await withServer(makeBackend(setIssueEnabled), async (url) => {
-      const rejected = await fetch(`${url}/api/v1/issues/17/pause`, { method: 'POST' })
-      expect(rejected.status).toBe(403)
-
-      const page = await (await fetch(url)).text()
-      const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1]
-      expect(token).toBeDefined()
-      const accepted = await fetch(`${url}/api/v1/issues/17/pause`, {
-        method: 'POST',
-        headers: { 'X-Symphony-CSRF': token ?? '' },
-      })
-
-      expect(accepted.status).toBe(202)
-      expect(setIssueEnabled).toHaveBeenCalledWith(17, false)
-    })
-  })
-
-  it('returns explicit 404 and 405 responses', async (): Promise<void> => {
-    await withServer(makeBackend(), async (url) => {
+  it.live('returns explicit 404 and 405 responses', () =>
+    withServer(makeBackend(), async (url) => {
       const missing = await fetch(`${url}/missing`)
       const wrongMethod = await fetch(`${url}/api/v1/state`, { method: 'POST' })
       const invalidAction = await fetch(`${url}/api/v1/issues/not-a-number/start`, {
@@ -347,11 +355,11 @@ describe('operator server', (): void => {
       expect(wrongMethod.status).toBe(405)
       expect(wrongMethod.headers.get('allow')).toBe('GET')
       expect(invalidAction.status).toBe(404)
-    })
-  })
+    }),
+  )
 
-  it('rejects non-loopback host headers', async (): Promise<void> => {
-    await withServer(makeBackend(), async (url) => {
+  it.live('rejects non-loopback host headers', () =>
+    withServer(makeBackend(), async (url) => {
       const target = new URL(url)
       const status = await new Promise<number>((resolve, reject) => {
         const outgoing = request(
@@ -370,93 +378,104 @@ describe('operator server', (): void => {
       })
 
       expect(status).toBe(421)
-    })
-  })
+    }),
+  )
 
-  it('sanitizes typed backend failures as versioned 502 responses', async (): Promise<void> => {
-    const backend: OperatorBackend = {
-      ...makeBackend(),
-      backlog: Effect.fail(
-        new TrackerError({
-          category: 'tracker_request',
-          message: 'sensitive backend detail',
-          retryable: true,
-        }),
-      ),
-    }
-
-    await withServer(backend, async (url) => {
-      const response = await fetch(`${url}/api/v1/backlog`)
-      const body = await response.text()
-
-      expect(response.status).toBe(502)
-      expect(JSON.parse(body)).toEqual({
-        version: 'v1',
-        error: {
-          code: 'backend_error',
-          message: 'The operator backend could not complete the request',
-        },
-      })
-      expect(body).not.toContain('sensitive backend detail')
-    })
-  })
-
-  it('sanitizes unexpected defects as versioned 500 responses', async (): Promise<void> => {
-    const backend: OperatorBackend = {
-      ...makeBackend(),
-      snapshot: Effect.die(new Error('sensitive defect detail')),
-    }
-
-    await withServer(backend, async (url) => {
-      const response = await fetch(`${url}/api/v1/state`)
-      const body = await response.text()
-
-      expect(response.status).toBe(500)
-      expect(JSON.parse(body)).toEqual({
-        version: 'v1',
-        error: { code: 'internal_error', message: 'The request could not be completed' },
-      })
-      expect(body).not.toContain('sensitive defect detail')
-    })
-  })
-
-  it('represents listen failures as ServerError', async (): Promise<void> => {
-    const occupied = createServer()
-    await new Promise<void>((resolve, reject) => {
-      occupied.once('error', reject)
-      occupied.listen(0, '127.0.0.1', resolve)
-    })
-    const address = occupied.address()
-    if (address === null || typeof address === 'string') {
-      throw new Error('test server did not expose a TCP address')
-    }
-
-    try {
-      const result = await Effect.runPromise(
-        Effect.either(Effect.scoped(startOperatorServer(address.port, makeBackend()))),
-      )
-      expect(result._tag).toBe('Left')
-      if (result._tag === 'Left') {
-        expect(result.left._tag).toBe('ServerError')
-        expect(result.left.category).toBe('listen_failed')
+  it.live('sanitizes typed backend failures as versioned 502 responses', () =>
+    Effect.gen(function* () {
+      const backend: OperatorBackend = {
+        ...makeBackend(),
+        backlog: Effect.fail(
+          new TrackerError({
+            category: 'tracker_request',
+            message: 'sensitive backend detail',
+            retryable: true,
+          }),
+        ),
       }
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        occupied.close((error) => (error === undefined ? resolve() : reject(error)))
+
+      yield* withServer(backend, async (url) => {
+        const response = await fetch(`${url}/api/v1/backlog`)
+        const body = await response.text()
+
+        expect(response.status).toBe(502)
+        expect(JSON.parse(body)).toEqual({
+          version: 'v1',
+          error: {
+            code: 'backend_error',
+            message: 'The operator backend could not complete the request',
+          },
+        })
+        expect(body).not.toContain('sensitive backend detail')
       })
-    }
+    }),
+  )
+
+  it.live('sanitizes unexpected defects as versioned 500 responses', () =>
+    Effect.gen(function* () {
+      const backend: OperatorBackend = {
+        ...makeBackend(),
+        snapshot: Effect.die(new Error('sensitive defect detail')),
+      }
+
+      yield* withServer(backend, async (url) => {
+        const response = await fetch(`${url}/api/v1/state`)
+        const body = await response.text()
+
+        expect(response.status).toBe(500)
+        expect(JSON.parse(body)).toEqual({
+          version: 'v1',
+          error: { code: 'internal_error', message: 'The request could not be completed' },
+        })
+        expect(body).not.toContain('sensitive defect detail')
+      })
+    }),
+  )
+
+  it.live('represents listen failures as ServerError', () => {
+    const occupied = createServer()
+
+    return Effect.gen(function* () {
+      yield* Effect.promise(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            occupied.once('error', reject)
+            occupied.listen(0, '127.0.0.1', resolve)
+          }),
+      )
+      const address = occupied.address()
+      if (address === null || typeof address === 'string') {
+        throw new Error('test server did not expose a TCP address')
+      }
+
+      const failure = yield* Effect.flip(
+        Effect.scoped(startOperatorServer(address.port, makeBackend())),
+      )
+
+      expect(failure._tag).toBe('ServerError')
+      expect(failure.category).toBe('listen_failed')
+    }).pipe(
+      Effect.ensuring(
+        Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              occupied.close((error) => (error === undefined ? resolve() : reject(error)))
+            }),
+        ),
+      ),
+    )
   })
 
-  it('stops accepting connections when its scope closes', async (): Promise<void> => {
-    let url = ''
-    await Effect.runPromise(
-      Effect.scoped(
+  it.live('stops accepting connections when its scope closes', () =>
+    Effect.gen(function* () {
+      let url = ''
+      yield* Effect.scoped(
         Effect.map(startOperatorServer(0, makeBackend()), (server) => {
           url = server.url
         }),
-      ),
-    )
+      )
 
-    await expect(fetch(url)).rejects.toThrow()
-  })
+      yield* Effect.promise(() => expect(fetch(url)).rejects.toThrow())
+    }),
+  )
 })
