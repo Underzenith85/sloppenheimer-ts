@@ -231,7 +231,13 @@ profile is GitHub Issues; the orchestration interfaces keep tracker and workspac
 so additional profiles can be implemented without weakening the domain types.
 
 Unknown front-matter keys are preserved verbatim on `config.extensions` and otherwise ignored, so a
-newer workflow file stays loadable on an older host without weakening required-field validation.
+newer workflow file stays loadable on an older host without weakening required-field validation. A
+value that cannot round-trip through JSON is the one thing such a key is rejected for, and it is
+reported against the key that carried it.
+
+The front matter is declared as a schema, so a rejected document is reported as one `invalid_config`
+failure naming the key as the file spells it — `polling.interval_ms must be a positive integer` —
+rather than as the first exception a decoder happened to throw.
 
 ### Defaults
 
