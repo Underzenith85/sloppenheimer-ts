@@ -2,12 +2,12 @@ import { it } from '@effect/vitest'
 import { Effect, Redacted } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import { makeGitHubPullRequestMonitor } from '../src/adapters/github/pull-requests.js'
-import { issueId, issueIdentifier, type Issue } from '../src/domain/domain.js'
-import { classifyPullRequest } from '../src/domain/handoff.js'
-import { makeGitHubCodeReview } from '../src/adapters/github/code-review.js'
-import { issueBranchName } from '../src/domain/handoff.js'
-import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
+import { makeGitHubPullRequestMonitor } from '@symphony/adapter-github/pull-requests.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { classifyPullRequest } from '@symphony/core/domain/handoff.js'
+import { makeGitHubCodeReview } from '@symphony/adapter-github/code-review.js'
+import { issueBranchName } from '@symphony/core/domain/handoff.js'
+import type { GitHubProviderConfig } from '@symphony/adapter-github'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

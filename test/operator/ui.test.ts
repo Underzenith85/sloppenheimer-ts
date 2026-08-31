@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { HTMLInputElement } from 'happy-dom'
 
-import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
 import {
   buildAgentDetail,
   timelineCategories,
@@ -11,7 +11,7 @@ import {
   recordRetryScheduled,
   type AgentDetailRecord,
   type AgentDetailSnapshot,
-} from '../../src/telemetry.js'
+} from '@symphony/core/telemetry.js'
 import {
   bootConsole,
   jsonResponse,

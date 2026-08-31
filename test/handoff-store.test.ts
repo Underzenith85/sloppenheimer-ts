@@ -6,8 +6,8 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { loadHandoffs, saveHandoffs } from '../src/handoff-store.js'
-import type { HandoffSnapshot } from '../src/domain/handoff.js'
+import { loadHandoffs, saveHandoffs } from '@symphony/core/core/handoff-store.js'
+import type { HandoffSnapshot } from '@symphony/core/domain/handoff.js'
 import { hostFileSystem } from './harness/filesystem.js'
 
 /** The store reads and writes through `FileSystem`; these tests exercise it against real files. */

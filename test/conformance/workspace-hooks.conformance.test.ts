@@ -5,10 +5,10 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { issueIdentifier } from '../../src/domain/domain.js'
-import type { HooksConfig } from '../../src/config/workflow.js'
-import { makeWorkspaceManager } from '../../src/adapters/node/workspace-manager.js'
-import type { WorkspaceManagerPort } from '../../src/ports/workspace.js'
+import { issueIdentifier } from '@symphony/core/domain/domain.js'
+import type { HooksConfig } from '@symphony/core/config/workflow.js'
+import { makeWorkspaceManager } from '@symphony/adapter-node/workspace-manager.js'
+import type { WorkspaceManagerPort } from '@symphony/core/ports/workspace.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
 /**

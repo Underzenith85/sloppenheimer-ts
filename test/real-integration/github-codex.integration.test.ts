@@ -5,12 +5,12 @@ import { it } from '@effect/vitest'
 import { Effect, Redacted } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { runAgent, type AgentLaunch, type AgentResult } from '../../src/adapters/codex/codex.js'
-import type { AgentError } from '../../src/errors.js'
-import { issueId, issueIdentifier, type Issue } from '../../src/domain/domain.js'
-import { makeGitHubTracker } from '../../src/adapters/github/issues.js'
-import { githubProviderDefaults } from '../../src/adapters/github/provider.js'
-import type { CodexConfig } from '../../src/config/workflow.js'
+import { runAgent, type AgentLaunch, type AgentResult } from '@symphony/adapter-codex/codex.js'
+import type { AgentError } from '@symphony/core/domain/errors.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
+import { githubProviderDefaults } from '@symphony/adapter-github/provider.js'
+import type { CodexConfig } from '@symphony/core/config/workflow.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */

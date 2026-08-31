@@ -2,7 +2,7 @@
 // formats the whole console uses. Nothing here knows what the console is for.
 
 type DetailPayload = Readonly<{
-  detail?: import('../../telemetry.js').AgentDetailSnapshot
+  detail?: import('@symphony/core/telemetry.js').AgentDetailSnapshot
   error?: Readonly<{ message?: string }>
 }>
 

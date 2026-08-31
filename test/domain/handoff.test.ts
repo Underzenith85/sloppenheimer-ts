@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifyPullRequest, type PullRequestObservation } from '../../src/domain/handoff.js'
+import { classifyPullRequest, type PullRequestObservation } from '@symphony/core/domain/handoff.js'
 
 type OpenPullRequestObservation = Extract<PullRequestObservation, { state: 'open' }>
 

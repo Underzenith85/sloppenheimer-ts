@@ -18,10 +18,10 @@ import {
 } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { codexAgentEventSemantics } from '../src/adapters/codex/agent-runner.js'
-import { githubProviderOf, githubTrackerProvider } from '../src/adapters/github/index.js'
-import { telemetryFrom, type AgentEvent, type AgentResult } from '../src/adapters/codex/codex.js'
-import { cyclicIssueIdentifiers, findDependencyCycles } from '../src/domain/dependencies.js'
+import { codexAgentEventSemantics } from '@symphony/adapter-codex/agent-runner.js'
+import { githubProviderOf, githubTrackerProvider } from '@symphony/adapter-github'
+import { telemetryFrom, type AgentEvent, type AgentResult } from '@symphony/adapter-codex/codex.js'
+import { cyclicIssueIdentifiers, findDependencyCycles } from '@symphony/core/domain/dependencies.js'
 import {
   issueId,
   issueIdentifier,
@@ -29,7 +29,7 @@ import {
   type Issue,
   type IssueId,
   type JsonObject,
-} from '../src/domain/domain.js'
+} from '@symphony/core/domain/domain.js'
 import {
   AgentError,
   SourceControlError,
@@ -37,16 +37,16 @@ import {
   WorkflowError,
   WorkspaceError,
   type HandoffStoreError,
-} from '../src/errors.js'
+} from '@symphony/core/domain/errors.js'
 import {
   loadHandoffs as loadHandoffsAgainstFileSystem,
   saveHandoffs as saveHandoffsAgainstFileSystem,
-} from '../src/handoff-store.js'
+} from '@symphony/core/core/handoff-store.js'
 import type {
   CodexReviewObservation,
   HandoffSnapshot,
   PullRequestObservation,
-} from '../src/domain/handoff.js'
+} from '@symphony/core/domain/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -55,9 +55,9 @@ import {
   type AgentDetailLookup,
   type OrchestratorControl,
   type OrchestratorServices,
-} from '../src/core/orchestrator.js'
-import { makeRedactor } from '../src/support/redaction.js'
-import { normalizePayload, type AgentDetailSnapshot } from '../src/telemetry.js'
+} from '@symphony/core'
+import { makeRedactor } from '@symphony/core/support/redaction.js'
+import { normalizePayload, type AgentDetailSnapshot } from '@symphony/core/telemetry.js'
 import {
   CodeReviewFactory,
   SourceControlFactory,
@@ -81,8 +81,9 @@ import {
   type TrackerPort,
   type WorkspaceManagerPort,
   type WorkspaceSettings,
-} from '../src/ports/index.js'
-import { preflightWorkflow, type Workflow } from '../src/config/workflow.js'
+} from '@symphony/core'
+import type { Workflow } from '@symphony/core/config/workflow.js'
+import { preflightWorkflow } from '../src/config/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
@@ -115,8 +116,8 @@ const saveHandoffs = (
   handoffs: readonly HandoffSnapshot[],
 ): Effect.Effect<void, HandoffStoreError> =>
   onHostFileSystem(saveHandoffsAgainstFileSystem(path, handoffs))
-import type { HostToolSession } from '../src/host-tools.js'
-import type { ValidatedTrackerProvider } from '../src/domain/tracker-provider.js'
+import type { HostToolSession } from '@symphony/core/domain/host-tools.js'
+import type { ValidatedTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
 
 const makeIssue = (
   identifier: string,

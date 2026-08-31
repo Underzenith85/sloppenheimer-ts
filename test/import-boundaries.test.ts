@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 const repoRoot = resolve(import.meta.dirname, '..')
 
 /**
- * Fixture modules laid out like `src/`, each one either a deliberate violation of the import
+ * Fixture modules laid out like the workspace, each one either a deliberate violation of the import
  * direction or the permitted case that must stay quiet.  Linting them with the repository's own
  * `.oxlintrc.json` is what proves the rule fires; asserting on the rule text alone would not.
  *
@@ -15,68 +15,85 @@ const repoRoot = resolve(import.meta.dirname, '..')
  */
 const fixtures: Readonly<Record<string, string>> = {
   // support/ is the bottom layer and may reach nothing above it.
-  'src/support/violates-domain.ts': "import '../domain/domain.js'\n",
-  'src/support/violates-root.ts': "import '../errors.js'\n",
-  'src/support/permitted.ts': "import 'node:path'\nimport './json.js'\n",
+  'packages/core/src/support/violates-domain.ts': "import '../domain/domain.js'\n",
+  'packages/core/src/support/violates-package-root.ts': "import '../telemetry.js'\n",
+  'packages/core/src/support/violates-adapter-package.ts':
+    "import '@symphony/adapter-github/issues.js'\n",
+  'packages/core/src/support/permitted.ts': "import 'node:path'\nimport './json.js'\n",
 
   // domain/ may use support/ and nothing else.
-  'src/domain/violates-core.ts': "import '../core/runtime.js'\n",
-  'src/domain/violates-adapters.ts': "import '../adapters/github/tracker.js'\n",
-  'src/domain/violates-config.ts': "import '../config/workflow.js'\n",
-  'src/domain/violates-operator.ts': "import '../operator/operator.js'\n",
-  'src/domain/violates-root.ts': "import '../telemetry.js'\n",
-  'src/domain/permitted.ts': "import '../support/json.js'\n",
-  // The migration allow-list keeps the error vocabulary reachable from domain/.  #91 put the
-  // workspace containment rules here and they reject by constructing a `WorkspaceError`, so this
-  // entry admits a runtime import; the rest of the `src/` root stays denied above.
-  'src/domain/permitted-allow-list.ts':
+  'packages/core/src/domain/violates-core.ts': "import '../core/runtime.js'\n",
+  'packages/core/src/domain/violates-ports.ts': "import '../ports/tracker.js'\n",
+  'packages/core/src/domain/violates-config.ts': "import '../config/workflow.js'\n",
+  'packages/core/src/domain/violates-package-root.ts': "import '../telemetry.js'\n",
+  'packages/core/src/domain/violates-adapter-package.ts':
+    "import '@symphony/adapter-codex/codex.js'\n",
+  'packages/core/src/domain/permitted.ts': "import '../support/json.js'\nimport './errors.js'\n",
+  // #109 retired the error vocabulary's entry by moving it into domain/, where the containment
+  // rules #91 put here reach it as a sibling rather than through an exemption.
+  'packages/core/src/domain/violates-retired-errors-allow-list.ts':
     "import { WorkspaceError } from '../errors.js'\n\nexport const reject = WorkspaceError\n",
 
   // ports/ may use domain/ and support/ and nothing else.
-  'src/ports/violates-config.ts': "import '../config/cli-options.js'\n",
-  'src/ports/violates-root.ts': "import '../tracker.js'\n",
-  'src/ports/permitted.ts': "import '../domain/domain.js'\nimport '../support/json.js'\n",
+  'packages/core/src/ports/violates-config.ts': "import '../config/env-reference.js'\n",
+  'packages/core/src/ports/violates-core.ts': "import '../core/runtime.js'\n",
+  'packages/core/src/ports/violates-adapter-package.ts':
+    "import '@symphony/adapter-github/issues.js'\n",
+  'packages/core/src/ports/permitted.ts':
+    "import '../domain/domain.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps the vocabulary #88 declared the ports against reachable, but
-  // only as types: a port must not acquire a runtime dependency on configuration or on root
-  // infrastructure under cover of the exemption.
-  'src/ports/permitted-allow-list.ts':
-    "import type { Workflow } from '../config/workflow.js'\nimport type { TrackerError } from '../errors.js'\nimport type { HostToolSpec } from '../host-tools.js'\nimport type { AgentEvent } from '../telemetry.js'\n\nexport type Vocabulary = [Workflow, TrackerError, HostToolSpec, AgentEvent]\n",
+  // only as types: a port must not acquire a runtime dependency on configuration or on the
+  // package root under cover of the exemption.
+  'packages/core/src/ports/permitted-allow-list.ts':
+    "import type { Workflow } from '../config/workflow.js'\nimport type { AgentEvent } from '../telemetry.js'\n\nexport type Vocabulary = [Workflow, AgentEvent]\n",
   // #94 retired the tracker-configuration entry: the validated tracker selection is domain
   // vocabulary now, so a port reaches it through domain/ rather than through configuration.
-  'src/ports/violates-retired-tracker-config-allow-list.ts':
+  'packages/core/src/ports/violates-retired-tracker-config-allow-list.ts':
     "import type { ValidatedTrackerProvider } from '../config/tracker-config.js'\n\nexport type V = ValidatedTrackerProvider\n",
-  'src/ports/violates-allow-list-value.ts':
-    "import { loadWorkflow } from '../config/workflow.js'\n\nexport const load = loadWorkflow\n",
-  'src/ports/violates-allow-list-side-effect.ts': "import '../telemetry.js'\n",
+  // #109 retired the error and host-tool entries the same way, by moving both into domain/.
+  'packages/core/src/ports/violates-retired-errors-allow-list.ts':
+    "import type { TrackerError } from '../errors.js'\n\nexport type E = TrackerError\n",
+  'packages/core/src/ports/violates-retired-host-tools-allow-list.ts':
+    "import type { HostToolSpec } from '../host-tools.js'\n\nexport type S = HostToolSpec\n",
+  'packages/core/src/ports/violates-allow-list-value.ts':
+    "import { renderPrompt } from '../config/workflow.js'\n\nexport const render = renderPrompt\n",
+  'packages/core/src/ports/violates-allow-list-side-effect.ts': "import '../telemetry.js'\n",
 
   // core/ holds policy and may not name a concrete adapter.  This is the drift the rule exists to
-  // stop: the composition root importing `makeGitHubTracker` by name from inside core.
-  'src/core/violates-adapters.ts':
-    "import { makeGitHubTracker } from '../adapters/github/tracker.js'\n\nexport const bound = makeGitHubTracker\n",
-  'src/core/violates-adapters-reexport.ts': "export * from '../adapters/github/tracker.js'\n",
-  'src/core/violates-adapters-dynamic.ts':
-    "export const load = async (): Promise<unknown> => import('../adapters/codex/agent.js')\n",
-  'src/core/violates-operator.ts': "import '../operator/operator.js'\n",
-  'src/core/permitted.ts':
-    "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
-  // The migration allow-list keeps the modules #84 left at the `src/` root reachable from core/.
-  'src/core/permitted-allow-list.ts':
-    "import '../handoff-store.js'\nimport '../host-tools.js'\nimport '../telemetry.js'\n",
-  // #89 retired Codex's entry: the backend now lives under adapters/ behind the agent-runner port,
-  // so a root module of that name is no longer a module core may reach for.
-  'src/core/violates-retired-codex-allow-list.ts': "import '../codex.js'\n",
+  // stop: the orchestration policy importing `makeGitHubTracker` by name.  The adapter package is
+  // also absent from `packages/core/package.json`, so this does not resolve either.
+  'packages/core/src/core/violates-adapter-package.ts':
+    "import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'\n\nexport const bound = makeGitHubTracker\n",
+  'packages/core/src/core/violates-adapter-package-reexport.ts':
+    "export * from '@symphony/adapter-github/issues.js'\n",
+  'packages/core/src/core/violates-adapter-package-dynamic.ts':
+    "export const load = async (): Promise<unknown> => import('@symphony/adapter-codex/codex.js')\n",
+  'packages/core/src/core/permitted.ts':
+    "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../domain/errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
+  // The migration allow-list keeps telemetry, the one module still at the core package root,
+  // reachable from core/.
+  'packages/core/src/core/permitted-allow-list.ts': "import '../telemetry.js'\n",
+  // #89 retired Codex's entry: the backend now lives in its own package behind the agent-runner
+  // port, so a package-root module of that name is no longer something core may reach for.
+  'packages/core/src/core/violates-retired-codex-allow-list.ts': "import '../codex.js'\n",
   // #90 retired the tracker's entry for the same reason: the GitHub tracker and code-review
-  // implementations now live under adapters/ behind their ports.
-  'src/core/violates-retired-tracker-allow-list.ts': "import '../tracker.js'\n",
-  // #91 retired the workspace entry the same way: the manager and the hooks live under adapters/,
-  // and the containment rules core still calls moved down into domain/.
-  'src/core/violates-retired-workspace-allow-list.ts': "import '../workspace.js'\n",
+  // implementations now live in the GitHub adapter package behind their ports.
+  'packages/core/src/core/violates-retired-tracker-allow-list.ts': "import '../tracker.js'\n",
+  // #91 retired the workspace entry the same way: the manager and the hooks live in the Node
+  // adapter package, and the containment rules core still calls moved down into domain/.
+  'packages/core/src/core/violates-retired-workspace-allow-list.ts': "import '../workspace.js'\n",
+  // #109 retired the last three: the error and host-tool vocabulary moved into domain/, and the
+  // handoff store moved into core/ beside the runtime that is its only caller.
+  'packages/core/src/core/violates-retired-errors-allow-list.ts': "import '../errors.js'\n",
+  'packages/core/src/core/violates-retired-host-tools-allow-list.ts': "import '../host-tools.js'\n",
+  'packages/core/src/core/violates-retired-handoff-store-allow-list.ts':
+    "import '../handoff-store.js'\n",
 
-  // adapters/ is restricted as an import target, never as a source, and the `src/` root is the
-  // composition root that deliberately binds concrete adapters.
-  'src/adapters/github/permitted.ts':
-    "import '../../core/runtime.js'\nimport '../../ports/tracker.js'\n",
-  'src/composition-root.ts': "import './adapters/github/tracker.js'\nimport './core/runtime.js'\n",
+  // The adapter packages are restricted as an import target, never as a source, and the root
+  // application is the composition root that deliberately binds them.
+  'packages/adapter-github/src/permitted.ts':
+    "import '@symphony/core'\nimport '@symphony/core/ports/tracker.js'\n",
+  'src/composition-root.ts': "import '@symphony/adapter-github'\nimport '@symphony/core'\n",
 
   /*
    * Nested modules.  The layers are flat today, but a rule that rejects a compliant directory
@@ -84,18 +101,21 @@ const fixtures: Readonly<Record<string, string>> = {
    * module must still be denied the layers above it and must keep its same-layer and lower-layer
    * imports.  These specifiers carry an extra `../` that the depth-one patterns do not match.
    */
-  'src/support/nested/violates-domain.ts': "import '../../domain/domain.js'\n",
-  'src/support/nested/permitted.ts': "import '../json.js'\n",
-  'src/domain/nested/violates-core.ts': "import '../../core/runtime.js'\n",
-  'src/domain/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
-  'src/domain/nested/permitted.ts': "import '../domain.js'\nimport '../../support/json.js'\n",
-  'src/ports/nested/violates-config.ts': "import '../../config/cli-options.js'\n",
-  'src/ports/nested/violates-config-allow-listed.ts':
+  'packages/core/src/support/nested/violates-domain.ts': "import '../../domain/domain.js'\n",
+  'packages/core/src/support/nested/permitted.ts': "import '../json.js'\n",
+  'packages/core/src/domain/nested/violates-core.ts': "import '../../core/runtime.js'\n",
+  'packages/core/src/domain/nested/violates-adapter-package.ts':
+    "import '@symphony/adapter-github/issues.js'\n",
+  'packages/core/src/domain/nested/permitted.ts':
+    "import '../domain.js'\nimport '../../support/json.js'\n",
+  'packages/core/src/ports/nested/violates-config.ts': "import '../../config/env-reference.js'\n",
+  'packages/core/src/ports/nested/violates-config-allow-listed.ts':
     "import type { Workflow } from '../../config/workflow.js'\n\nexport type W = Workflow\n",
-  'src/ports/nested/permitted.ts':
+  'packages/core/src/ports/nested/permitted.ts':
     "import '../../domain/domain.js'\nimport '../../support/json.js'\n",
-  'src/core/nested/violates-adapters.ts': "import '../../adapters/github/tracker.js'\n",
-  'src/core/nested/permitted.ts':
+  'packages/core/src/core/nested/violates-adapter-package.ts':
+    "import '@symphony/adapter-github/issues.js'\n",
+  'packages/core/src/core/nested/permitted.ts':
     "import '../runtime.js'\nimport '../../domain/domain.js'\nimport '../../support/json.js'\n",
 }
 

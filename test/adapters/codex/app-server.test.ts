@@ -14,10 +14,10 @@ import {
   type AgentEvent,
   type AgentLaunch,
   type AgentResult,
-} from '../../../src/adapters/codex/codex.js'
-import { issueId, issueIdentifier, type Issue } from '../../../src/domain/domain.js'
-import type { AgentError } from '../../../src/errors.js'
-import type { CodexConfig } from '../../../src/config/workflow.js'
+} from '@symphony/adapter-codex/codex.js'
+import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import type { AgentError } from '@symphony/core/domain/errors.js'
+import type { CodexConfig } from '@symphony/core/config/workflow.js'
 import { processIsAlive } from '../../harness/processes.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 

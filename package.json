@@ -8,7 +8,7 @@
   },
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs",
+    "build": "tsc -b tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "dev": "tsx src/cli.ts",
     "format": "oxfmt .",
@@ -24,9 +24,12 @@
   "dependencies": {
     "@effect/platform": "0.97.1",
     "@effect/platform-node": "0.108.1",
+    "@symphony/adapter-codex": "workspace:*",
+    "@symphony/adapter-github": "workspace:*",
+    "@symphony/adapter-node": "workspace:*",
+    "@symphony/core": "workspace:*",
     "chokidar": "5.0.0",
     "effect": "3.22.1",
-    "liquidjs": "10.29.0",
     "yaml": "2.9.0"
   },
   "devDependencies": {

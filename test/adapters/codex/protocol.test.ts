@@ -8,7 +8,7 @@ import {
   responseIdentity,
   telemetryFrom,
   turnFrom,
-} from '../../../src/adapters/codex/protocol.js'
+} from '@symphony/adapter-codex/protocol.js'
 
 describe('Codex protocol decoding', (): void => {
   it('reports no usage at all rather than a partial reading', (): void => {

@@ -1,27 +1,28 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2024",
-    "lib": ["ES2024"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "allowUnreachableCode": false,
-    "allowUnusedLabels": false,
-    "exactOptionalPropertyTypes": true,
-    "forceConsistentCasingInFileNames": true,
-    "isolatedModules": true,
     "noEmit": true,
-    "noFallthroughCasesInSwitch": true,
-    "noImplicitOverride": true,
-    "noImplicitReturns": true,
-    "noPropertyAccessFromIndexSignature": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "skipLibCheck": true,
-    "useUnknownInCatchVariables": true,
-    "verbatimModuleSyntax": true
+
+    /*
+     * Resolve the workspace packages to their sources.
+     *
+     * Their `exports` send the runtime entry to `dist/`, which is what the installed `symphony`
+     * executable loads, and that is also what `tsx` resolves when it runs `src/cli.ts` for
+     * `pnpm dev` and for the tests that spawn the CLI. Without these mappings both would need a
+     * build first, and would then run yesterday's build. The compiler already resolved types this
+     * way through each package's `exports`; naming it here makes `tsx` agree.
+     */
+    "paths": {
+      "@symphony/core": ["./packages/core/src/index.ts"],
+      "@symphony/core/*.js": ["./packages/core/src/*.ts"],
+      "@symphony/adapter-node": ["./packages/adapter-node/src/index.ts"],
+      "@symphony/adapter-node/*.js": ["./packages/adapter-node/src/*.ts"],
+      "@symphony/adapter-github": ["./packages/adapter-github/src/index.ts"],
+      "@symphony/adapter-github/*.js": ["./packages/adapter-github/src/*.ts"],
+      "@symphony/adapter-codex": ["./packages/adapter-codex/src/index.ts"],
+      "@symphony/adapter-codex/*.js": ["./packages/adapter-codex/src/*.ts"]
+    }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts", "vitest*.ts"],
   "exclude": ["src/operator/ui/*.ts"]
 }

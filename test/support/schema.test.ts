@@ -9,7 +9,7 @@ import {
   protocolRecord,
   protocolStruct,
   tolerant,
-} from '../../src/support/schema.js'
+} from '@symphony/core/support/schema.js'
 
 const window = protocolStruct({
   usedPercent: tolerant(finiteNumber),

@@ -4,17 +4,13 @@ import {
   findDependencyCycles,
   unresolvedBlockers,
   type DependencyCycle,
-} from '../domain/dependencies.js'
-import { normalizeState, type Issue } from '../domain/domain.js'
-import type {
-  AgentDetailLookup,
-  OrchestratorControl,
-  OrchestratorSnapshot,
-} from '../core/orchestrator.js'
-import { CurrentIssueControl, type IssueControlPort } from '../ports/issue-control.js'
-import { WorkflowLoader } from '../ports/workflow.js'
-import { TrackerError, WorkflowError } from '../errors.js'
-import type { Workflow } from '../config/workflow.js'
+} from '@symphony/core/domain/dependencies.js'
+import { normalizeState, type Issue } from '@symphony/core/domain/domain.js'
+import type { AgentDetailLookup, OrchestratorControl, OrchestratorSnapshot } from '@symphony/core'
+import { CurrentIssueControl, type IssueControlPort } from '@symphony/core/ports/issue-control.js'
+import { WorkflowLoader } from '@symphony/core/ports/workflow.js'
+import { TrackerError, WorkflowError } from '@symphony/core/domain/errors.js'
+import type { Workflow } from '@symphony/core/config/workflow.js'
 
 export type BacklogIssue = Readonly<{
   number: number

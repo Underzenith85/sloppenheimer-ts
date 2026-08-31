@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "ignorePatterns": ["coverage/**", "dist/**", "node_modules/**"],
+  "ignorePatterns": ["coverage/**", "**/dist/**", "node_modules/**"],
   "options": {
     "typeAware": true
   },
@@ -21,12 +21,16 @@
     "typescript/switch-exhaustiveness-check": "error"
   },
 
-  // Module import direction (#86).
+  // Module import direction (#86), inside the core package (#109).
   //
-  //   support/  <-  domain/  <-  ports/  <-  core/  <-  config/, operator/, adapters/, src root
+  //   support/  <-  domain/  <-  ports/  <-  core/  <-  config/
   //
-  // `src/` root is the composition root: it binds concrete adapters and is deliberately
-  // unrestricted.  `adapters/` is restricted only as an import target, never as a source.
+  // The layers live in `packages/core/src`.  The adapter packages and the root application sit
+  // above the whole of it, and #109 made that a resolution boundary: `packages/core/package.json`
+  // depends on no adapter package, so `@symphony/adapter-*` does not resolve from inside core at
+  // all.  The groups below still name them, because a rule that reports the boundary by name is a
+  // better error than a module-not-found, and because an adapter package added to the manifest by
+  // mistake would otherwise pass silently.
   //
   // These groups match the import specifier as written, not its resolved target, so each layer
   // takes two overrides.  The later override wins outright for the files it matches; oxlint does
@@ -37,12 +41,12 @@
   //      `../../core/x.js` from a nested module.
   //   2. Files directly in the layer are denied everything that leaves it, with the layers below
   //      re-admitted by negation.  At depth one `../` unambiguously means "out of the layer", so
-  //      this also catches the `src/` root and any directory not named in rule 1.
+  //      this also catches the package root and any directory not named in rule 1.
   //
-  // Rule 2 cannot be extended to nested modules: from `src/support/parsers/value.ts`, `../json.js`
-  // is a same-layer import, while from `src/support/json.ts` the identical specifier escapes to the
-  // `src/` root.  Nested modules therefore keep rule 1 only, which trades an undetected import of a
-  // root module for never rejecting a compliant one.  Prefer flat layers.
+  // Rule 2 cannot be extended to nested modules: from `support/parsers/value.ts`, `../json.js` is
+  // a same-layer import, while from `support/json.ts` the identical specifier escapes to the
+  // package root.  Nested modules therefore keep rule 1 only, which trades an undetected import of
+  // a package-root module for never rejecting a compliant one.  Prefer flat layers.
   "overrides": [
     {
       // The console's browser sources are classic scripts, not modules: they share one global
@@ -55,7 +59,7 @@
       }
     },
     {
-      "files": ["src/support/**"],
+      "files": ["packages/core/src/support/**"],
       "rules": {
         "no-restricted-imports": [
           "error",
@@ -63,11 +67,10 @@
             "patterns": [
               {
                 "group": [
-                  "**/adapters/**",
+                  "@symphony/**",
                   "**/config/**",
                   "**/core/**",
                   "**/domain/**",
-                  "**/operator/**",
                   "**/ports/**"
                 ],
                 "message": "support/ is the bottom layer: it may import only from support/ itself and from third-party or Node packages."
@@ -78,14 +81,14 @@
       }
     },
     {
-      "files": ["src/support/*"],
+      "files": ["packages/core/src/support/*"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
             "patterns": [
               {
-                "group": ["../**"],
+                "group": ["../**", "@symphony/**"],
                 "message": "support/ is the bottom layer: it may import only from support/ itself and from third-party or Node packages."
               }
             ]
@@ -94,21 +97,15 @@
       }
     },
     {
-      "files": ["src/domain/**"],
+      "files": ["packages/core/src/domain/**"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
             "patterns": [
               {
-                "group": [
-                  "**/adapters/**",
-                  "**/config/**",
-                  "**/core/**",
-                  "**/operator/**",
-                  "**/ports/**"
-                ],
-                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, operator/, adapters/, or the composition root."
+                "group": ["@symphony/**", "**/config/**", "**/core/**", "**/ports/**"],
+                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, an adapter package, or the composition root."
               }
             ]
           }
@@ -116,25 +113,15 @@
       }
     },
     {
-      "files": ["src/domain/*"],
+      "files": ["packages/core/src/domain/*"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
             "patterns": [
               {
-                "group": [
-                  "../**",
-                  "!../support/**",
-
-                  // Migration allow-list.  The error vocabulary is domain vocabulary that still
-                  // sits at the `src/` root; #91 moved the workspace containment rules into
-                  // domain/ and they reject by constructing a `WorkspaceError`, so unlike the
-                  // ports/ exemption this one cannot be held to `import type`.  It names one file,
-                  // so the rest of the root stays denied.
-                  "!../errors.js" // #109 moves the remaining root modules into their layers
-                ],
-                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, operator/, adapters/, or the composition root."
+                "group": ["../**", "!../support/**", "@symphony/**"],
+                "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, an adapter package, or the composition root."
               }
             ]
           }
@@ -142,14 +129,14 @@
       }
     },
     {
-      "files": ["src/ports/**"],
+      "files": ["packages/core/src/ports/**"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
             "patterns": [
               {
-                "group": ["**/adapters/**", "**/config/**", "**/core/**", "**/operator/**"],
+                "group": ["@symphony/**", "**/config/**", "**/core/**"],
                 "message": "ports/ may import only from domain/ and support/. The migration allow-list covers the flat port modules that exist today; a nested port has no exemption."
               }
             ]
@@ -158,32 +145,25 @@
       }
     },
     {
-      "files": ["src/ports/*"],
+      "files": ["packages/core/src/ports/*"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
-            // Migration allow-list.  #88 declared the ports against configuration and error
+            // Migration allow-list.  #88 declared the ports against configuration and telemetry
             // vocabulary that has not been placed in a layer yet.  `patterns` exempts these
             // modules from the escape rule below; `paths` then holds them to `import type`, so a
-            // port cannot quietly acquire a runtime dependency on configuration or on root
-            // infrastructure.  The two compose: a second `patterns` group would not, because a
-            // negation there suppresses any later group for the same specifier.
+            // port cannot quietly acquire a runtime dependency on either.  The two compose: a
+            // second `patterns` group would not, because a negation there suppresses any later
+            // group for the same specifier.
+            //
+            // #109 retired the entries for the error and host-tool vocabulary by moving both into
+            // domain/, where the ports reach them with no exemption at all.
             "paths": [
               {
                 "name": "../config/workflow.js",
                 "allowTypeImports": true,
                 "message": "ports/ may reference this only as a type until #105 settles the workflow configuration type surface."
-              },
-              {
-                "name": "../errors.js",
-                "allowTypeImports": true,
-                "message": "ports/ may reference this only as a type until #109 moves the remaining root modules into their layers."
-              },
-              {
-                "name": "../host-tools.js",
-                "allowTypeImports": true,
-                "message": "ports/ may reference this only as a type until #109 moves the remaining root modules into their layers."
               },
               {
                 "name": "../telemetry.js",
@@ -198,9 +178,8 @@
                   "!../domain/**",
                   "!../support/**",
                   "!../config/workflow.js",
-                  "!../errors.js",
-                  "!../host-tools.js",
-                  "!../telemetry.js"
+                  "!../telemetry.js",
+                  "@symphony/**"
                 ],
                 "message": "ports/ may import only from domain/ and support/."
               }
@@ -210,14 +189,14 @@
       }
     },
     {
-      "files": ["src/core/**"],
+      "files": ["packages/core/src/core/**"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
             "patterns": [
               {
-                "group": ["**/adapters/**", "**/operator/**"],
+                "group": ["@symphony/**"],
                 "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
               }
             ]
@@ -226,7 +205,7 @@
       }
     },
     {
-      "files": ["src/core/*"],
+      "files": ["packages/core/src/core/*"],
       "rules": {
         "no-restricted-imports": [
           "error",
@@ -240,14 +219,14 @@
                   "!../ports/**",
                   "!../support/**",
 
-                  // Migration allow-list.  These modules are adapters and infrastructure that still
-                  // sit at the `src/` root because #84 moved only the leaf modules.  Each entry is
-                  // removed by the issue under #76 named beside it; none of them may be replaced by
-                  // an import of `../adapters/**`, which stays denied above.
-                  "!../telemetry.js", // #98 converts the telemetry record to pure reducers
-                  "!../errors.js", // #109 moves the remaining root modules into their layers
-                  "!../handoff-store.js", // #109 moves the remaining root modules into their layers
-                  "!../host-tools.js" // #109 moves the remaining root modules into their layers
+                  // Migration allow-list.  Telemetry is the one module still sitting at the core
+                  // package root; #98 converts the telemetry record to pure reducers and removes
+                  // this entry.  #109 retired the rest by moving the error and host-tool
+                  // vocabulary into domain/ and the handoff store into core/ itself.  None of
+                  // these may be replaced by an import of an adapter package, which stays denied
+                  // above.
+                  "!../telemetry.js",
+                  "@symphony/**"
                 ],
                 "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
               }

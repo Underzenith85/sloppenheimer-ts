@@ -6,11 +6,11 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, Fiber, Layer, Redacted, TestClock } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import { githubJson, type GitHubHttpResult } from '../../../src/adapters/github/client.js'
-import { makeGitHubTracker } from '../../../src/adapters/github/issues.js'
-import { issueId, issueIdentifier } from '../../../src/domain/domain.js'
-import type { GitHubProviderConfig } from '../../../src/adapters/github/index.js'
-import type { TrackerError } from '../../../src/errors.js'
+import { githubJson, type GitHubHttpResult } from '@symphony/adapter-github/client.js'
+import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
+import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
+import type { GitHubProviderConfig } from '@symphony/adapter-github'
+import type { TrackerError } from '@symphony/core/domain/errors.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

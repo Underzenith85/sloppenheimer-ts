@@ -2,7 +2,7 @@ import { Window, type HTMLElement } from 'happy-dom'
 
 import { appJavaScript, appTemplate } from '../../src/operator/ui-assets.js'
 import type { BacklogSnapshot } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '../../src/core/orchestrator.js'
+import type { OrchestratorSnapshot } from '@symphony/core'
 
 export type DetailResponse = Readonly<{ status: number; body: unknown }>
 

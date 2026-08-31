@@ -11,6 +11,14 @@ import { processIsAlive } from './harness/processes.js'
 
 const cliPath = resolve('src/cli.ts')
 const tsxImport = import.meta.resolve('tsx')
+/*
+ * The CLI is spawned with a temporary directory as its working directory, so `tsx` would look
+ * for a `tsconfig.json` there and find none. Naming the repository's own is what maps
+ * `@symphony/*` onto the workspace sources: without it the child resolves each package's
+ * `exports` to `dist/`, and these tests would need a build first and would then exercise it
+ * rather than the tree under test.
+ */
+const tsxConfigPath = resolve('tsconfig.json')
 const temporaryDirectories: string[] = []
 const servers: Server[] = []
 const children: ChildProcess[] = []
@@ -118,6 +126,7 @@ const spawnCli = (cwd: string, arguments_: readonly string[], detached = false):
       ...process.env,
       GIT_CONFIG_GLOBAL: join(cwd, '.gitconfig'),
       SYMPHONY_CLI_TEST_TOKEN: 'test-token',
+      TSX_TSCONFIG_PATH: tsxConfigPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })

@@ -3,7 +3,7 @@
 // what is ready, what is running, and what finished — without touching the DOM. Classification and
 // ranking live here so they can be reasoned about, and tested, apart from rendering.
 
-type OrchestratorSnapshot = import('../../core/orchestrator.js').OrchestratorSnapshot
+type OrchestratorSnapshot = import('@symphony/core').OrchestratorSnapshot
 type BacklogSnapshot = import('../operator.js').BacklogSnapshot
 type BacklogIssue = BacklogSnapshot['issues'][number]
 type RunningEntry = OrchestratorSnapshot['running'][number]

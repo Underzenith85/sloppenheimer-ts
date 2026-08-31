@@ -2,10 +2,10 @@ import { it } from '@effect/vitest'
 import { Effect, Layer, Option, Stream } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { HooksConfig, ValidatedTrackerProvider } from '../../src/config/workflow.js'
-import { issueId, issueIdentifier } from '../../src/domain/domain.js'
+import type { HooksConfig, ValidatedTrackerProvider } from '@symphony/core/config/workflow.js'
+import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
-import { WorkflowError } from '../../src/errors.js'
+import { WorkflowError } from '@symphony/core/domain/errors.js'
 import {
   AgentRunner,
   codeReview,
@@ -25,7 +25,7 @@ import {
   WorkflowWatcher,
   WorkspaceManagerFactory,
   type AdapterServices,
-} from '../../src/ports/index.js'
+} from '@symphony/core'
 
 const hooks: HooksConfig = {
   afterCreate: null,

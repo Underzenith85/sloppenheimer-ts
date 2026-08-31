@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier } from '../src/domain/domain.js'
-import { bound, commandSummary, makeRedactor, redact } from '../src/support/redaction.js'
+import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
+import { bound, commandSummary, makeRedactor, redact } from '@symphony/core/support/redaction.js'
 import {
   buildAgentDetail,
   clientPayload,
@@ -19,7 +19,7 @@ import {
   type AgentDetailSnapshot,
   type AgentEvent,
   type AgentEventPayload,
-} from '../src/telemetry.js'
+} from '@symphony/core/telemetry.js'
 
 const startedAt = new Date('2026-08-30T10:00:00.000Z')
 

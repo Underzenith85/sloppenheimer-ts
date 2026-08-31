@@ -2,11 +2,11 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, Logger, Redacted } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import { issueId, type JsonObject } from '../src/domain/domain.js'
-import { makeGitHubIssueControl, makeGitHubTracker } from '../src/adapters/github/issues.js'
-import type { IssueControlPort } from '../src/ports/issue-control.js'
-import type { TrackerPort } from '../src/ports/tracker.js'
-import type { GitHubProviderConfig } from '../src/adapters/github/index.js'
+import { issueId, type JsonObject } from '@symphony/core/domain/domain.js'
+import { makeGitHubIssueControl, makeGitHubTracker } from '@symphony/adapter-github/issues.js'
+import type { IssueControlPort } from '@symphony/core/ports/issue-control.js'
+import type { TrackerPort } from '@symphony/core/ports/tracker.js'
+import type { GitHubProviderConfig } from '@symphony/adapter-github'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',

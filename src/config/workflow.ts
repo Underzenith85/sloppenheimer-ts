@@ -3,106 +3,36 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Effect, Either, ParseResult, Schema } from 'effect'
-import { Liquid } from 'liquidjs'
 import { parse } from 'yaml'
 
-import type { Issue, JsonObject, JsonValue } from '../domain/domain.js'
-import { expandHomePath, resolvePathReference } from './env-reference.js'
-import { WorkflowError } from '../errors.js'
+import { expandHomePath, resolvePathReference } from '@symphony/core/config/env-reference.js'
+import {
+  codexApprovalPolicies,
+  codexSandboxModes,
+  workflowDefaults,
+  type EffectiveConfig,
+  type Workflow,
+} from '@symphony/core/config/workflow.js'
+import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
+import { WorkflowError } from '@symphony/core/domain/errors.js'
+import type {
+  TrackerProviderRegistry,
+  ValidatedTrackerProvider,
+} from '@symphony/core/domain/tracker-provider.js'
 import {
   emptyJsonObject,
   isJsonObject,
   JsonConversionError,
   toJsonObject,
   toJsonValue,
-} from '../support/json.js'
-import type {
-  TrackerProviderRegistry,
-  ValidatedTrackerProvider,
-} from '../domain/tracker-provider.js'
-
-export type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
-
-export type TrackerConfig = Readonly<{
-  kind: string
-  /** Adapter-owned configuration, preserved exactly as authored until an adapter validates it. */
-  provider: JsonObject
-  requiredLabels: readonly string[]
-  activeStates: readonly string[]
-  terminalStates: readonly string[]
-}>
-
-export type HooksConfig = Readonly<{
-  afterCreate: string | null
-  beforeRun: string | null
-  afterRun: string | null
-  beforeRemove: string | null
-  timeoutMs: number
-}>
-
-export type AgentConfig = Readonly<{
-  maxConcurrentAgents: number
-  maxTurns: number
-  maxRetryBackoffMs: number
-  maxConcurrentAgentsByState: ReadonlyMap<string, number>
-}>
-
-export type CodexConfig = Readonly<{
-  command: string
-  approvalPolicy: string
-  threadSandbox: string
-  /** Verbatim pass-through for the App Server turn sandbox policy. */
-  turnSandboxPolicy: JsonObject | null
-  turnTimeoutMs: number
-  readTimeoutMs: number
-  stallTimeoutMs: number
-}>
-
-export type EffectiveConfig = Readonly<{
-  tracker: TrackerConfig
-  pollingIntervalMs: number
-  workspaceRoot: string
-  hooks: HooksConfig
-  agent: AgentConfig
-  codex: CodexConfig
-  serverPort: number | null
-  /** Unknown front-matter keys, preserved verbatim and otherwise ignored. */
-  extensions: JsonObject
-}>
-
-export type Workflow = Readonly<{
-  path: string
-  fingerprint: string
-  config: EffectiveConfig
-  /** The adapter-validated tracker selection for `config.tracker.kind`. */
-  tracker: ValidatedTrackerProvider
-  promptTemplate: string
-}>
-
-export const workflowDefaults = Object.freeze({
-  pollingIntervalMs: 30_000,
-  workspaceRootBasename: 'symphony_workspaces',
-  hookTimeoutMs: 60_000,
-  maxConcurrentAgents: 10,
-  maxTurns: 20,
-  maxRetryBackoffMs: 300_000,
-  codexCommand: 'codex app-server',
-  approvalPolicy: 'never',
-  threadSandbox: 'workspace-write',
-  turnTimeoutMs: 3_600_000,
-  readTimeoutMs: 5_000,
-  stallTimeoutMs: 300_000,
-  activeStates: ['open'] as readonly string[],
-  terminalStates: ['closed'] as readonly string[],
-})
+} from '@symphony/core/support/json.js'
 
 /**
- * Codex-owned policy values, aligned with `codex app-server generate-json-schema`. The App Server's
- * `AskForApproval` also accepts a granular object form, which this host does not expose.
+ * Reading a workflow definition off disk is composition-root work: the shapes it produces
+ * ({@link Workflow}, {@link EffectiveConfig}) are core vocabulary, but the YAML dialect, the
+ * environment indirection, and the filesystem are the application's business. The composition root
+ * binds this module to `WorkflowLoader` so that no layer below it names a file format.
  */
-export const codexApprovalPolicies = ['untrusted', 'on-request', 'never'] as const
-export const codexSandboxModes = ['read-only', 'workspace-write', 'danger-full-access'] as const
-
 const knownSections = new Set([
   'tracker',
   'polling',
@@ -545,52 +475,4 @@ export const loadWorkflow = (
       tracker,
       promptTemplate: definition.prompt,
     }
-  })
-
-const liquid = new Liquid({ strictFilters: true, strictVariables: true })
-const parseAndRender: (template: string, context: JsonObject) => Promise<unknown> =
-  liquid.parseAndRender.bind(liquid)
-
-const issueForTemplate = (issue: Issue): JsonObject => ({
-  id: issue.id,
-  native_ref: issue.nativeRef,
-  identifier: issue.identifier,
-  title: issue.title,
-  description: issue.description,
-  priority: issue.priority,
-  state: issue.state,
-  branch_name: issue.branchName,
-  url: issue.url,
-  assignee_id: issue.assigneeId,
-  labels: issue.labels,
-  blocked_by: issue.blockedBy,
-  dispatchable: issue.dispatchable,
-  created_at: issue.createdAt?.toISOString() ?? null,
-  updated_at: issue.updatedAt?.toISOString() ?? null,
-})
-
-export const renderPrompt = (
-  workflow: Workflow,
-  issue: Issue,
-  attempt: number | null,
-): Effect.Effect<string, WorkflowError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const template =
-        workflow.promptTemplate || 'You are working on an issue from the configured tracker.'
-      const rendered = await parseAndRender(template, { issue: issueForTemplate(issue), attempt })
-      if (typeof rendered !== 'string') {
-        throw new WorkflowError({
-          category: 'template_render_error',
-          message: 'template result is not a string',
-        })
-      }
-      return rendered
-    },
-    catch: (cause: unknown) =>
-      new WorkflowError({
-        category: 'template_render_error',
-        message: 'failed to render workflow prompt',
-        cause,
-      }),
   })

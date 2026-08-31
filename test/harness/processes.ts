@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { Option } from 'effect'
 
-import { parseProcessStatus } from '../../src/support/subprocess.js'
+import { parseProcessStatus } from '@symphony/core/support/subprocess.js'
 
 /** Whether this host exposes the Linux `/proc` entries the zombie check reads. */
 const procIsReadable = ((): boolean => {

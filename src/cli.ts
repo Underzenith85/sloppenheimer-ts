@@ -4,9 +4,9 @@ import { NodeFileSystem } from '@effect/platform-node'
 import chokidar from 'chokidar'
 import { Cause, ConfigProvider, Effect, Exit, Layer, Queue, Stream } from 'effect'
 
-import { layerCodexAgentRunner } from './adapters/codex/agent-runner.js'
-import { githubHttpClientLayer } from './adapters/github/index.js'
-import { makeWorkspaceManager } from './adapters/node/workspace-manager.js'
+import { layerCodexAgentRunner } from '@symphony/adapter-codex'
+import { githubHttpClientLayer } from '@symphony/adapter-github'
+import { makeWorkspaceManager } from '@symphony/adapter-node'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { loadWorkflow, preflightWorkflow } from './config/workflow.js'
 import {
@@ -16,8 +16,11 @@ import {
   trackerFactory,
   trackerProviders,
 } from './tracker-adapters.js'
-import { startOrchestrator } from './core/orchestrator.js'
-import { SourceControlError, TrackerError, type WorkflowError } from './errors.js'
+import {
+  SourceControlError,
+  TrackerError,
+  type WorkflowError,
+} from '@symphony/core/domain/errors.js'
 import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
 import {
@@ -30,6 +33,7 @@ import {
   layerPorts,
   layerWorkflowWatcher,
   portsConfiguration,
+  startOrchestrator,
   TrackerFactory,
   SourceControlFactory,
   WorkflowLoader,
@@ -38,8 +42,8 @@ import {
   type CodeReviewServices,
   type PortServices,
   type SourceControlServices,
-} from './ports/index.js'
-import { logInfo } from './support/logging.js'
+} from '@symphony/core'
+import { logInfo } from '@symphony/core/support/logging.js'
 
 /**
  * The CLI's last-resort bound. Cleanup is not allowed to depend on it: the host closes its scope

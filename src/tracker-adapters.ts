@@ -7,21 +7,21 @@ import {
   makeGitHubIssueControl,
   makeGitHubSourceControl,
   makeGitHubTracker,
-} from './adapters/github/index.js'
+} from '@symphony/adapter-github'
 import {
   makeTrackerProviderRegistry,
   sameTrackerProvider,
   type RegisteredTrackerProvider,
   type TrackerProviderRegistry,
   type ValidatedTrackerProvider,
-} from './domain/tracker-provider.js'
-import { SourceControlError, TrackerError } from './errors.js'
+} from '@symphony/core/domain/tracker-provider.js'
+import { SourceControlError, TrackerError } from '@symphony/core/domain/errors.js'
 import type {
   CodeReviewFactoryPort,
   IssueControlFactoryPort,
   SourceControlFactoryPort,
   TrackerFactoryPort,
-} from './ports/index.js'
+} from '@symphony/core'
 
 export type RegisteredTrackerPorts = RegisteredTrackerProvider<
   TrackerFactoryPort['make'],

@@ -3,18 +3,18 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
-import { issueId, issueIdentifier } from '../../src/domain/domain.js'
-import type { ServerError } from '../../src/errors.js'
-import { TrackerError } from '../../src/errors.js'
+import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
+import type { ServerError } from '@symphony/core/domain/errors.js'
+import { TrackerError } from '@symphony/core/domain/errors.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { AgentDetailLookup, OrchestratorSnapshot } from '../../src/core/orchestrator.js'
+import type { AgentDetailLookup, OrchestratorSnapshot } from '@symphony/core'
 import { startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
   recordAgentEvent,
   type AgentDetailSnapshot,
-} from '../../src/telemetry.js'
+} from '@symphony/core/telemetry.js'
 
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T12:00:00.000Z',

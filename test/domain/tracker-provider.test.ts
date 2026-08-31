@@ -4,14 +4,14 @@ import { describe, expect } from 'vitest'
 
 import { withEnvironment } from '../harness/environment.js'
 
-import { githubTrackerProvider } from '../../src/adapters/github/index.js'
+import { githubTrackerProvider } from '@symphony/adapter-github'
 import {
   makeTrackerProviderRegistry,
   sameTrackerProvider,
   trackerProviderOf,
   type ValidatedTrackerProvider,
-} from '../../src/domain/tracker-provider.js'
-import { WorkflowError } from '../../src/errors.js'
+} from '@symphony/core/domain/tracker-provider.js'
+import { WorkflowError } from '@symphony/core/domain/errors.js'
 import {
   stubProvider,
   stubProviderToken,

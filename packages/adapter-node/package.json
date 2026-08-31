@@ -1,0 +1,28 @@
+{
+  "name": "@symphony/adapter-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host-platform adapters: filesystem, Git source control, and workspace management.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./*.js": {
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@effect/platform": "0.97.1",
+    "@symphony/core": "workspace:*",
+    "effect": "3.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3"
+  }
+}
