@@ -397,6 +397,19 @@ describe('GitHub pull request monitor', (): void => {
                       ],
                     },
                   },
+                  {
+                    id: 'thread-2',
+                    isResolved: false,
+                    comments: {
+                      nodes: [
+                        {
+                          body: 'Outdated comment',
+                          url: 'https://github.test/comment/2',
+                          commit: null,
+                        },
+                      ],
+                    },
+                  },
                 ],
               },
             },
@@ -415,6 +428,10 @@ describe('GitHub pull request monitor', (): void => {
       resolved: false,
       body: 'Fix this',
       commentHeadSha: 'reviewed-head',
+    })
+    expect(result.reviewThreads[1]).toMatchObject({
+      id: 'thread-2',
+      commentHeadSha: null,
     })
     expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
     expect(fetchMock).toHaveBeenCalledTimes(5)

@@ -122,16 +122,16 @@ const decodeThreads = (
             ? null
             : yield* decode(reviewComment, first, 'GitHub review comment is invalid')
         const commit =
-          comment === null || comment.commit === undefined
-            ? null
-            : yield* decode(jsonRecord, comment.commit, 'GitHub review commit is invalid')
+          comment === null ? null : Schema.decodeUnknownOption(jsonRecord)(comment.commit)
         return {
           id: thread.id,
           resolved: thread.isResolved,
           body: comment !== null && typeof comment.body === 'string' ? comment.body : '',
           url: comment !== null && typeof comment.url === 'string' ? comment.url : null,
           commentHeadSha:
-            commit !== null && typeof commit['oid'] === 'string' ? commit['oid'] : null,
+            commit !== null && commit._tag === 'Some' && typeof commit.value['oid'] === 'string'
+              ? commit.value['oid']
+              : null,
         }
       }),
     )

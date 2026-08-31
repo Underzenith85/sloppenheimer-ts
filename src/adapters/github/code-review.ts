@@ -18,7 +18,9 @@ import {
   toolFailure,
 } from './tools.js'
 
-const pullRequestResponse = Schema.Struct({ html_url: Schema.String })
+const pullRequestResponse = Schema.Struct({
+  html_url: Schema.String.pipe(Schema.filter((value) => value.length > 0)),
+})
 const pullRequestList = Schema.Array(Schema.Unknown)
 
 const decodePullRequest = (
