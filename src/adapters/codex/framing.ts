@@ -7,7 +7,7 @@
  * chunks belongs to the pipeline rather than to the connection that runs it.
  */
 
-import { Effect, Ref, Stream } from 'effect'
+import { Chunk, Effect, Ref, Stream } from 'effect'
 
 import { AgentError } from '../../errors.js'
 
@@ -16,14 +16,15 @@ const carriageReturn = 0x0d
 
 /**
  * A stateful stream operation. Each input advances the state and emits whatever it completed, and
- * the state left over when the source ends is flushed by `finish`. A failure abandons that state
- * instead of flushing it, so the fragment that overran the framing limit is never emitted.
+ * the state left over when the source ends is flushed by `finish`, which may reject it. A failure
+ * abandons that state instead of flushing it, so the fragment that overran the framing limit is
+ * never emitted — whether it overran mid-stream or was only revealed as over-long at the end.
  */
 const stateful =
   <S, A, B, E2 = never>(
     initial: S,
     step: (state: S, value: A) => Effect.Effect<Readonly<{ state: S; emit: readonly B[] }>, E2>,
-    finish: (state: S) => readonly B[],
+    finish: (state: S) => Effect.Effect<readonly B[], E2>,
   ) =>
   <E, R>(self: Stream.Stream<A, E, R>): Stream.Stream<B, E | E2, R> =>
     Stream.unwrap(
@@ -40,7 +41,8 @@ const stateful =
           ),
           Stream.unwrap(
             Ref.getAndSet(state, initial).pipe(
-              Effect.map((left) => Stream.fromIterable(finish(left))),
+              Effect.flatMap(finish),
+              Effect.map(Stream.fromIterable),
             ),
           ),
         ),
@@ -51,20 +53,20 @@ const stateful =
  * Bytes held back for a line that has no terminator yet, kept as the chunks they arrived in.
  * Concatenating on every chunk would make framing quadratic in line size: a permitted 10 MB frame
  * arriving in pipe-sized chunks would copy hundreds of megabytes before its terminator showed up.
+ * They accumulate in a `Chunk` rather than a copied array, so holding them stays linear in the
+ * number of chunks however finely the child writes.
  */
-type PendingLine = Readonly<{ chunks: readonly Uint8Array[]; bytes: number }>
+type PendingLine = Readonly<{ chunks: Chunk.Chunk<Uint8Array>; bytes: number }>
 
-const nothingPending: PendingLine = { chunks: [], bytes: 0 }
+const nothingPending: PendingLine = { chunks: Chunk.empty(), bytes: 0 }
 
 const bufferOf = (chunk: Uint8Array): Buffer =>
   Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
 
-const joined = (pending: PendingLine): Buffer => {
-  const [only] = pending.chunks
-  return pending.chunks.length === 1 && only !== undefined
-    ? bufferOf(only)
-    : Buffer.concat(pending.chunks, pending.bytes)
-}
+const joined = (pending: PendingLine): Buffer =>
+  Chunk.size(pending.chunks) === 1
+    ? bufferOf(Chunk.unsafeHead(pending.chunks))
+    : Buffer.concat(Chunk.toReadonlyArray(pending.chunks), pending.bytes)
 
 /** Drops the CR of a CRLF, now that the line it terminates is known to be whole. */
 const stripped = (raw: Buffer): Buffer =>
@@ -99,7 +101,7 @@ const frame = (
   const overflow = (): Effect.Effect<never, AgentError> => Effect.fail(lineOverflow(limitBytes))
   const arrived = bufferOf(chunk)
   const bytes = pending.bytes + chunk.byteLength
-  const held: PendingLine = { chunks: [...pending.chunks, arrived], bytes }
+  const held: PendingLine = { chunks: Chunk.append(pending.chunks, arrived), bytes }
   if (arrived.indexOf(lineFeed) < 0) {
     // No frame boundary here, so hold the chunk whole.
     return bytes > pendingLimitBytes ? overflow() : Effect.succeed({ state: held, emit: [] })
@@ -123,7 +125,9 @@ const frame = (
   }
   return Effect.succeed({
     state:
-      buffer.byteLength === 0 ? nothingPending : { chunks: [buffer], bytes: buffer.byteLength },
+      buffer.byteLength === 0
+        ? nothingPending
+        : { chunks: Chunk.of(buffer), bytes: buffer.byteLength },
     emit,
   })
 }
@@ -135,10 +139,18 @@ const framedLines = (
   stateful<PendingLine, Uint8Array, string, AgentError>(
     nothingPending,
     (pending, chunk) => frame(limitBytes, pending, chunk),
-    (pending) =>
-      options.flushIncompleteTail && pending.bytes > 0
-        ? [stripped(joined(pending)).toString('utf8')]
-        : [],
+    (pending) => {
+      if (!options.flushIncompleteTail || pending.bytes === 0) {
+        return Effect.succeed([])
+      }
+      // The pending allowance is one byte over the limit, for the CR of a CRLF whose LF has not
+      // arrived. A tail that never terminates has no such LF, so the completed record is measured
+      // again here: the allowance must not let an over-long record through the end of the stream.
+      const line = stripped(joined(pending))
+      return line.byteLength > limitBytes
+        ? Effect.fail(lineOverflow(limitBytes))
+        : Effect.succeed([line.toString('utf8')])
+    },
   )
 
 /**
@@ -205,6 +217,6 @@ export const diagnosticRecords = <E, R>(
     stateful<PemCapture | null, string, string>(
       null,
       (capture, line) => Effect.succeed(record(capture, line)),
-      (capture) => (capture === null ? [] : [redactedPem(capture.prefix)]),
+      (capture) => Effect.succeed(capture === null ? [] : [redactedPem(capture.prefix)]),
     ),
   )

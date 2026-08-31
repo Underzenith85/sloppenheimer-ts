@@ -89,6 +89,30 @@ describe('App Server line framing', (): void => {
 
     expect(error?.category).toBe('protocol_error')
   })
+
+  it('rejects a tail that only the pending allowance let through', async (): Promise<void> => {
+    // The pending buffer may hold one byte over the limit, for the CR of a CRLF whose LF has not
+    // arrived. A tail that never terminates has no such LF, so that allowance must not let an
+    // over-long record out at the end of the stream.
+    const error = await failure(bytes('123456789').pipe(diagnosticLines(8)))
+
+    expect(error?.category).toBe('protocol_error')
+  })
+
+  it('flushes a maximum-length tail whose last byte really is a CR', async (): Promise<void> => {
+    const lines = await collect(bytes('12345678\r').pipe(diagnosticLines(8)))
+
+    expect(lines).toEqual(['12345678'])
+  })
+
+  it('holds a finely chunked line without recopying the chunks it is holding', async (): Promise<void> => {
+    // Framing is linear in the number of chunks, not quadratic: a child that writes a long line
+    // a byte at a time must not cost the host the accumulated prefix on every write.
+    const written = Array.from({ length: 100_000 }, () => 'a')
+    const lines = await collect(bytes(...written, '\n').pipe(protocolLines(1024 * 1024)))
+
+    expect(lines).toEqual(['a'.repeat(100_000)])
+  }, 10_000)
 })
 
 describe('App Server diagnostic records', (): void => {
