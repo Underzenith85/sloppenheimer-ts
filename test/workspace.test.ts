@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { access, mkdir, readFile, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
-import { Clock, Effect, Fiber } from 'effect'
+import { Clock, Effect, Either, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '../src/domain/domain.js'
@@ -41,8 +41,8 @@ describe('workspace safety', (): void => {
   })
 
   it('rejects paths that escape or equal the root', (): void => {
-    expect(() => containedWorkspacePath('/tmp/symphony-root', '..')).toThrow()
-    expect(() => containedWorkspacePath('/tmp/symphony-root', '.')).toThrow()
+    expect(Either.isLeft(containedWorkspacePath('/tmp/symphony-root', '..'))).toBe(true)
+    expect(Either.isLeft(containedWorkspacePath('/tmp/symphony-root', '.'))).toBe(true)
   })
 
   it.live('runs after_create once and reuses the directory', () =>
