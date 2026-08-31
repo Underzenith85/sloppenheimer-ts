@@ -1,8 +1,7 @@
-import { Window, type HTMLButtonElement, type HTMLInputElement } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { HTMLInputElement } from 'happy-dom'
 
 import { issueId, issueIdentifier } from '../../src/domain/domain.js'
-import type { OrchestratorSnapshot } from '../../src/core/orchestrator.js'
 import {
   buildAgentDetail,
   timelineCategories,
@@ -13,101 +12,18 @@ import {
   type AgentDetailRecord,
   type AgentDetailSnapshot,
 } from '../../src/telemetry.js'
-import { appJavaScript, appTemplate } from '../../src/operator/ui-assets.js'
-
-const runningIdentifier = 'example/symphony#17'
-const retryingIdentifier = 'example/symphony#18'
-
-const snapshot: OrchestratorSnapshot = {
-  generatedAt: '2026-08-30T12:00:00.000Z',
-  workflowPath: '/tmp/WORKFLOW.md',
-  effectiveWorkflow: { fingerprint: 'ui', loadedAt: '2026-08-30T11:00:00.000Z' },
-  workflowReloadError: null,
-  pollingIntervalMs: 10_000,
-  maxConcurrentAgents: 2,
-  counts: { running: 1, retrying: 1, completed: 0 },
-  pausedIssueNumbers: [],
-  handoffs: [],
-  handoffRecovery: {
-    status: 'completed',
-    loaded: 0,
-    recovered: 0,
-    skipped: 0,
-    failed: 0,
-    storeError: null,
-  },
-  running: [
-    {
-      issueId: issueId('17'),
-      identifier: runningIdentifier,
-      title: 'Operator console',
-      url: 'https://example.test/issues/17',
-      attempt: null,
-      startedAt: '2026-08-30T11:59:00.000Z',
-      lastEventAt: '2026-08-30T11:59:30.000Z',
-      lastEvent: 'item/completed',
-      lastMessage: null,
-      processId: 42,
-      threadId: 'thread-1',
-      turnId: 'turn-1',
-      sessionId: 'thread-1',
-      turnCount: 1,
-      tokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-      lastReportedTokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-      workerHost: 'local',
-      detailUrl: '/api/v1/agents/example%2Fsymphony%2317',
-    },
-  ],
-  retrying: [
-    {
-      issueId: issueId('18'),
-      identifier: retryingIdentifier,
-      title: 'Flaky dependency',
-      url: 'https://example.test/issues/18',
-      attempt: 1,
-      dueAt: '2026-08-30T12:00:15.000Z',
-      error: 'turn failed',
-      workerHost: 'local',
-      detailUrl: '/api/v1/agents/example%2Fsymphony%2318',
-    },
-  ],
-  totals: { inputTokens: 10, outputTokens: 5, totalTokens: 15, secondsRunning: 60 },
-  rateLimits: null,
-}
-
-const backlog = {
-  controlLabel: 'symphony',
-  issues: [
-    {
-      number: 17,
-      identifier: runningIdentifier,
-      title: 'Operator console',
-      url: 'https://example.test/issues/17',
-      labels: ['symphony'],
-      priority: 1,
-      createdAt: null,
-      enabled: true,
-      state: 'open',
-      blockedBy: [],
-      readiness: 'ready',
-      reason: null,
-    },
-  ],
-  nodes: [
-    {
-      identifier: runningIdentifier,
-      number: 17,
-      title: 'Operator console',
-      url: 'https://example.test/issues/17',
-      state: 'open',
-      readiness: 'ready',
-      reason: null,
-      actionable: true,
-    },
-  ],
-  edges: [],
-  cycles: [],
-}
+import {
+  bootConsole,
+  jsonResponse,
+  type ConsolePage,
+  type DetailResponse,
+} from '../harness/operator-console.js'
+import {
+  consoleBacklog,
+  consoleState,
+  retryingIdentifier,
+  runningIdentifier,
+} from '../harness/console-fixtures.js'
 
 const populated = (withHandoff: boolean): AgentDetailRecord => {
   // Fixtures are anchored to the moment the test runs, so live countdowns are meaningful.
@@ -182,13 +98,18 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
   return record
 }
 
-const runningDetail = (withHandoff = true, stallTimeoutMs = 300_000): AgentDetailSnapshot =>
+const runningDetail = (
+  withHandoff = true,
+  stallTimeoutMs = 300_000,
+  handoffEnabled = true,
+): AgentDetailSnapshot =>
   buildAgentDetail(populated(withHandoff), {
     self: '/api/v1/agents/example%2Fsymphony%2317',
     now: new Date(),
     status: 'running',
     stallTimeoutMs,
     workerHost: 'local',
+    handoffEnabled,
     branch: 'symphony/issue-17',
     retry: null,
   })
@@ -214,276 +135,274 @@ const retryingDetail = (): AgentDetailSnapshot => {
     status: 'retrying',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
+    handoffEnabled: true,
     branch: 'symphony/issue-18',
     retry: { attempt: 1, dueAt, reason: 'turn failed' },
   })
 }
 
-type DetailResponse = Readonly<{ status: number; body: unknown }>
-type Interval = Readonly<{ handler: () => void; ms: number }>
+/** Mirrors the overlay's own focusable-control selector. */
+const focusableSelector =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
 
-type ConsoleScript = (
-  window: Window,
-  document: Window['document'],
-  navigator: unknown,
-  fetch: (path: string, options?: unknown) => Promise<Response>,
-  setInterval: (handler: () => void, ms: number) => number,
-) => void
-
-let page: Window
-let intervals: Interval[]
-let requestLog: string[]
-let detailResponses: Map<string, DetailResponse>
+let page: ConsolePage
+let details: Map<string, DetailResponse>
 let detailPending: boolean
+let serveOverride: ((path: string) => Promise<Response> | null) | null
 
-const jsonResponse = (status: number, body: unknown): Response =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
-
-let serveOverride: ((path: string) => Promise<Response> | null) | null = null
-
-const serve = async (path: string): Promise<Response> => {
-  requestLog.push(path)
-  const overridden = serveOverride?.(path) ?? null
-  if (overridden !== null) {
-    return overridden
-  }
-  if (path === '/api/v1/state') {
-    return jsonResponse(200, snapshot)
-  }
-  if (path === '/api/v1/backlog') {
-    return jsonResponse(200, backlog)
-  }
-  if (path.startsWith('/api/v1/agents/')) {
-    if (detailPending) {
-      return new Promise<Response>(() => undefined)
-    }
-    const identifier = decodeURIComponent(path.slice('/api/v1/agents/'.length))
-    const configured = detailResponses.get(identifier)
-    return configured === undefined
-      ? jsonResponse(404, {
-          version: 'v1',
-          error: { code: 'agent_not_found', message: 'No agent has that identifier' },
-        })
-      : jsonResponse(configured.status, configured.body)
-  }
-  return jsonResponse(404, { version: 'v1', error: { code: 'not_found', message: 'missing' } })
+const boot = async (
+  options: Readonly<{ hash?: string; width?: number }> = {},
+): Promise<ConsolePage> => {
+  page = await bootConsole({
+    ...options,
+    state: consoleState(),
+    backlog: consoleBacklog(),
+    details,
+    detailPending: () => detailPending,
+    serve: (path) => serveOverride?.(path) ?? null,
+  })
+  return page
 }
 
-const flush = async (): Promise<void> => {
-  for (let index = 0; index < 20; index += 1) {
-    await Promise.resolve()
+const openAgent = async (identifier: string): Promise<{ click: () => void }> => {
+  const trigger = page.card(identifier).querySelector('.inspect') as unknown as {
+    click: () => void
   }
-}
-
-/** Fires every interval the console registered at the given period. */
-const tick = async (ms: number): Promise<void> => {
-  for (const interval of intervals) {
-    if (interval.ms === ms) {
-      interval.handler()
-    }
-  }
-  await flush()
-}
-
-const boot = async (hash = ''): Promise<void> => {
-  page = new Window({ url: `http://127.0.0.1:7777/${hash}` })
-  const body = /<body>([\s\S]*)<\/body>/u.exec(appTemplate)?.[1] ?? ''
-  page.document.head.innerHTML = '<meta name="csrf-token" content="ui-test-token">'
-  page.document.body.innerHTML = body
-  // The console ships as one classic script, so evaluating that exact source is the only way to
-  // exercise what an operator gets. Its globals are supplied explicitly, which keeps the timers
-  // deterministic and the transport under the test's control.
-  // Running the console's exact published source is the point of this suite.
-  // oxlint-disable-next-line typescript/no-implied-eval
-  const script = new Function(
-    'window',
-    'document',
-    'navigator',
-    'fetch',
-    'setInterval',
-    appJavaScript,
-  ) as ConsoleScript
-  script(
-    page,
-    page.document,
-    { clipboard: { writeText: (): Promise<void> => Promise.resolve() } },
-    serve,
-    (handler, ms) => {
-      intervals.push({ handler, ms })
-      return intervals.length
-    },
-  )
-  await flush()
-}
-
-const query = (selector: string): HTMLButtonElement => {
-  const found = page.document.querySelector(selector)
-  if (found === null) {
-    throw new Error(`missing element: ${selector}`)
-  }
-  return found as unknown as HTMLButtonElement
-}
-
-const cardFor = (identifier: string): HTMLButtonElement => {
-  const cards = [...page.document.querySelectorAll('.work-card')]
-  const found = cards.find((card) => card.getAttribute('data-identifier') === identifier)
-  if (found === undefined) {
-    throw new Error(`no work card for ${identifier}`)
-  }
-  return found as unknown as HTMLButtonElement
-}
-
-const textOf = (selector: string): string =>
-  page.document.querySelector(selector)?.textContent?.trim() ?? ''
-
-const openRunning = async (): Promise<HTMLButtonElement> => {
-  const card = cardFor(runningIdentifier)
-  card.click()
-  await flush()
-  return card
+  trigger.click()
+  await page.flush()
+  return trigger
 }
 
 beforeEach((): void => {
-  intervals = []
-  requestLog = []
   detailPending = false
   serveOverride = null
-  detailResponses = new Map([
+  details = new Map([
     [runningIdentifier, { status: 200, body: { version: 'v1', detail: runningDetail() } }],
     [retryingIdentifier, { status: 200, body: { version: 'v1', detail: retryingDetail() } }],
   ])
 })
 
 afterEach(async (): Promise<void> => {
-  await page.happyDOM.close()
+  await page.close()
 })
 
 describe('operator console agent detail', (): void => {
-  it('offers a filter for every normalized event category', async (): Promise<void> => {
+  it('leads with the current operation and health before any identifier', async (): Promise<void> => {
     await boot()
+    await openAgent(runningIdentifier)
 
-    const offered = [...page.document.querySelectorAll('#detail-filters input')].map((input) =>
-      input.getAttribute('value'),
-    )
+    expect(page.query('#agent-detail').hidden).toBe(false)
+    expect(page.text('#detail-title')).toBe('Operator console')
+    const summary = page.text('#detail-summary')
+    expect(summary).toContain('Current operation')
+    expect(summary).toContain('Elapsed')
+    expect(summary).toContain('Last activity')
+    expect(summary).toContain('Workspace changes')
+    expect(summary).toContain('Handoff progress')
+    expect(page.query('#detail-summary .chip')?.textContent).toBe('Healthy')
+    // Identity facts are still available, but they are not what the panel opens with.
+    expect(summary).not.toContain('thread-1')
+    expect(page.text('#detail-outcome')).toContain('pull request')
+  })
+
+  it('does not promise a pull request on a host that composes no code review', async (): Promise<void> => {
+    details.set(runningIdentifier, {
+      status: 200,
+      body: { version: 'v1', detail: runningDetail(false, 300_000, false) },
+    })
+    await boot()
+    await openAgent(runningIdentifier)
+
+    const outcome = page.text('#detail-outcome')
+    expect(outcome).toContain('Handoff is disabled on this host')
+    expect(outcome).not.toContain('pull request for review')
+  })
+
+  it('keeps process and protocol identity in a Diagnostics disclosure', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    const diagnostics = page.text('#detail-diagnostics')
+    expect(diagnostics).toContain('thread-1')
+    expect(diagnostics).toContain('42')
+    expect(diagnostics).toContain('Rate limits')
+    expect(diagnostics).toContain('example_symphony_17')
+    expect(page.query('.diagnostics summary').textContent).toBe('Diagnostics')
+    // The disclosure is closed until the operator asks for it.
+    expect(page.query('.diagnostics').getAttribute('open')).toBeNull()
+  })
+
+  it('offers three timeline presets and keeps the full category filters available', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    expect(page.all('#detail-presets button').map((button) => button.textContent)).toEqual([
+      'Summary',
+      'Errors and retries',
+      'Everything',
+    ])
+    const offered = page.all('#detail-filters input').map((input) => input.getAttribute('value'))
     expect(offered).toEqual([...timelineCategories])
+    expect(page.query('.advanced-filters summary').textContent).toBe('Advanced filters')
   })
 
-  it('opens an inspection panel from a running agent and deep links it', async (): Promise<void> => {
+  it('excludes protocol noise from Summary while keeping commands and handoffs', async (): Promise<void> => {
     await boot()
-    const card = cardFor(runningIdentifier)
-    expect(card.getAttribute('aria-expanded')).toBe('false')
-    expect(card.getAttribute('aria-controls')).toBe('agent-detail')
+    await openAgent(runningIdentifier)
 
-    card.click()
-    await flush()
+    expect(
+      page.query('#detail-presets button[data-preset="summary"]').getAttribute('aria-pressed'),
+    ).toBe('true')
+    const summary = page.text('#detail-timeline')
+    expect(summary).toContain('Command pnpm')
+    expect(summary).toContain('Handoff pull request')
+    expect(summary).not.toContain('Working on the console')
 
-    expect(query('#agent-detail').hidden).toBe(false)
-    expect(card.getAttribute('aria-expanded')).toBe('true')
-    expect(page.location.hash).toBe('#/agents/example%2Fsymphony%2317')
-    expect(page.document.activeElement?.id).toBe('detail-title')
-    expect(textOf('#detail-title')).toBe('Operator console')
-    expect(textOf('#detail-phase')).toContain('running')
-    expect(textOf('#detail-facts')).toContain('thread-1')
-    expect(textOf('#detail-facts')).toContain('example_symphony_17')
-    expect(textOf('#detail-timeline')).toContain('Working on the console')
-    expect(textOf('#detail-timeline')).toContain('Command pnpm')
+    page.query('#detail-presets button[data-preset="everything"]').click()
+    await page.flush()
+    expect(page.text('#detail-timeline')).toContain('Working on the console')
   })
 
-  it('shows the handoff pull request link and the expected branch', async (): Promise<void> => {
+  it('narrows to failures and retries on request', async (): Promise<void> => {
     await boot()
-    await openRunning()
+    await openAgent(retryingIdentifier)
 
-    const link = page.document.querySelector('#detail-facts a[href*="pull"]')
-    expect(link?.getAttribute('href')).toBe('https://example.test/pull/61')
-    expect(textOf('#detail-facts')).toContain('symphony/issue-17')
-    expect(textOf('#detail-timeline')).toContain('Handoff pull request')
+    page.query('#detail-presets button[data-preset="failures"]').click()
+    await page.flush()
+
+    expect(page.text('#detail-timeline')).toContain('Retry attempt 1')
+    expect(page.text('#detail-timeline')).not.toContain('Command pnpm')
   })
 
-  it('shows a closed-without-merge handoff as a clear terminal status', async (): Promise<void> => {
-    serveOverride = (path): Promise<Response> | null =>
-      path === '/api/v1/state'
-        ? Promise.resolve(
-            jsonResponse(200, {
-              ...snapshot,
-              handoffs: [
-                {
-                  issueId: '75',
-                  identifier: 'example/symphony#75',
-                  pullRequestUrl: 'https://example.test/pull/50',
-                  branchName: 'symphony/issue-75',
-                  state: 'closed_without_merge',
-                  headSha: 'closed-head',
-                  reason: 'The pull request was closed without being merged',
-                  repairAttempts: 0,
-                  observedAt: '2026-08-30T12:00:00.000Z',
-                },
-              ],
-            }),
-          )
-        : null
-
+  it('lets an advanced filter override the active preset', async (): Promise<void> => {
     await boot()
+    await openAgent(runningIdentifier)
 
-    expect(textOf('#handoff-list')).toContain('Closed without merge')
-    expect(textOf('#handoff-list')).toContain('The pull request was closed without being merged')
-  })
+    const command = page.query<HTMLInputElement>('#detail-filters input[value="command"]')
+    expect(command.checked).toBe(true)
+    command.checked = false
+    command.dispatchEvent(new page.window.Event('change'))
+    await page.flush()
 
-  it('restores an inspection from a deep link on load', async (): Promise<void> => {
-    await boot(`#/agents/${encodeURIComponent(runningIdentifier)}`)
+    expect(page.text('#detail-timeline')).not.toContain('Command pnpm')
+    expect(
+      page.query('#detail-presets button[data-preset="summary"]').getAttribute('aria-pressed'),
+    ).toBe('false')
 
-    expect(query('#agent-detail').hidden).toBe(false)
-    expect(requestLog).toContain('/api/v1/agents/example%2Fsymphony%2317')
-    expect(textOf('#detail-title')).toBe('Operator console')
-  })
-
-  it('filters the timeline by event category', async (): Promise<void> => {
-    await boot()
-    await openRunning()
-    expect(textOf('#detail-timeline')).toContain('Command pnpm')
-
-    const commandFilter = page.document.querySelector(
-      '#detail-filters input[value="command"]',
-    ) as unknown as HTMLInputElement
-    expect(commandFilter.checked).toBe(true)
-    commandFilter.checked = false
-    commandFilter.dispatchEvent(new page.Event('change'))
-
-    expect(textOf('#detail-timeline')).not.toContain('Command pnpm')
-    expect(textOf('#detail-timeline')).toContain('Working on the console')
-
-    for (const input of page.document.querySelectorAll('#detail-filters input')) {
+    for (const input of page.all('#detail-filters input')) {
       const control = input as unknown as HTMLInputElement
       control.checked = false
-      control.dispatchEvent(new page.Event('change'))
+      control.dispatchEvent(new page.window.Event('change'))
     }
-    expect(textOf('#detail-timeline')).toContain('No events match the selected filters')
+    expect(page.text('#detail-timeline')).toContain('No events match the selected filters')
+  })
+
+  it('presents as a modal dialog and closes on the scrim as well as Escape', async (): Promise<void> => {
+    await boot()
+    const trigger = await openAgent(runningIdentifier)
+
+    const dialog = page.query('#agent-detail')
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.getAttribute('aria-labelledby')).toBe('detail-title')
+    expect(page.window.document.body.classList.contains('detail-open')).toBe(true)
+
+    page.query('#detail-scrim').click()
+    await page.flush()
+
+    expect(dialog.hidden).toBe(true)
+    expect(page.window.document.body.classList.contains('detail-open')).toBe(false)
+    expect(page.window.document.activeElement).toBe(trigger)
+  })
+
+  it('keeps Tab inside the modal instead of letting it reach the page behind', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    // The same reachability rule the overlay applies: a control is in the cycle unless a `hidden`
+    // ancestor or a closed disclosure it is not the summary of puts it out of reach.
+    const reachable = [...page.query('#agent-detail').querySelectorAll(focusableSelector)].filter(
+      (node) =>
+        node.tagName === 'SUMMARY' ||
+        node.closest('details') === null ||
+        node.closest('details')?.hasAttribute('open') === true,
+    )
+    expect(reachable.length).toBeGreaterThan(2)
+    const first = reachable[0] as unknown as { focus: () => void }
+    const last = reachable[reachable.length - 1] as unknown as { focus: () => void }
+
+    last.focus()
+    page.window.document.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+    )
+    expect(page.window.document.activeElement).toBe(reachable[0])
+
+    first.focus()
+    page.window.document.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }),
+    )
+    expect(page.window.document.activeElement).toBe(reachable[reachable.length - 1])
+  })
+
+  it('pulls focus back into the modal when it has escaped', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    page.query('#refresh').focus()
+    page.window.document.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+    )
+
+    expect(page.query('#agent-detail').contains(page.window.document.activeElement)).toBe(true)
+  })
+
+  it('uses the same overlay on a phone, leaving the queue where it was', async (): Promise<void> => {
+    await boot({ width: 390 })
+    const before = page.identifiers('#progress-list .work-card')
+    await openAgent(runningIdentifier)
+
+    expect(page.query('#agent-detail').hidden).toBe(false)
+    expect(page.query('#agent-detail').getAttribute('aria-modal')).toBe('true')
+    expect(page.identifiers('#progress-list .work-card')).toEqual(before)
+  })
+
+  it('deep links the open agent and restores it on load', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+    expect(page.window.location.hash).toBe('#/agents/example%2Fsymphony%2317')
+
+    await page.close()
+    await boot({ hash: '#/agents/example%2Fsymphony%2317' })
+
+    expect(page.query('#agent-detail').hidden).toBe(false)
+    expect(page.requestLog).toContain('/api/v1/agents/example%2Fsymphony%2317')
+    expect(page.text('#detail-title')).toBe('Operator console')
   })
 
   it('explains why an agent is retrying and when the next attempt is due', async (): Promise<void> => {
     await boot()
-    cardFor(retryingIdentifier).click()
-    await flush()
+    await openAgent(retryingIdentifier)
 
-    const status = textOf('#detail-status')
+    const status = page.text('#detail-status')
     expect(status).toContain('Retrying because turn failed')
     expect(status).toContain('Attempt 1 starts in 15s')
-    expect(query('#agent-detail').getAttribute('data-state')).toBe('retrying')
-    expect(textOf('#detail-timeline')).toContain('Retry attempt 1')
+    expect(page.query('#agent-detail').getAttribute('data-state')).toBe('retrying')
+    expect(page.text('#detail-outcome')).toContain('next attempt')
   })
 
   it('warns about a stall the published snapshot has not yet observed', async (): Promise<void> => {
-    detailResponses.set(runningIdentifier, {
+    details.set(runningIdentifier, {
       status: 200,
       body: { version: 'v1', detail: runningDetail(false) },
     })
     await boot()
-    await openRunning()
-    expect(textOf('#detail-status')).toContain('Considered stalled in')
+    await openAgent(runningIdentifier)
+    expect(page.text('#detail-status')).toContain('Considered stalled in')
 
     // The deadline has passed since the snapshot was published: the console must decide from the
     // absolute deadline it already holds instead of waiting for a later fetch to say so.
     const published = runningDetail(false)
-    detailResponses.set(runningIdentifier, {
+    details.set(runningIdentifier, {
       status: 200,
       body: {
         version: 'v1',
@@ -498,18 +417,19 @@ describe('operator console agent detail', (): void => {
         },
       },
     })
-    await tick(2_000)
-    const requests = requestLog.filter((path) => path.startsWith('/api/v1/agents/')).length
-    await tick(1_000)
+    await page.tick(2_000)
+    const requests = page.requestLog.filter((path) => path.startsWith('/api/v1/agents/')).length
+    await page.tick(1_000)
 
-    expect(textOf('#detail-status')).toContain('Stalled')
-    expect(query('#agent-detail').getAttribute('data-state')).toBe('stalled')
+    expect(page.text('#detail-status')).toContain('Stalled')
+    expect(page.query('#agent-detail').getAttribute('data-state')).toBe('stalled')
     // The one-second refresh recomputes the warning without asking the orchestrator again.
-    expect(requestLog.filter((path) => path.startsWith('/api/v1/agents/')).length).toBe(requests)
+    expect(page.requestLog.filter((path) => path.startsWith('/api/v1/agents/')).length).toBe(
+      requests,
+    )
   })
 
   it('ignores a stale detail response that finishes after a newer one', async (): Promise<void> => {
-    // The first request is left hanging and released only after a later one has already answered.
     let releaseFirst = (_response: Response): void => undefined
     let served = 0
     const stale = {
@@ -528,7 +448,6 @@ describe('operator console agent detail', (): void => {
         since: new Date().toISOString(),
       },
     }
-    const originalServe = serveOverride
     serveOverride = (path: string): Promise<Response> | null => {
       if (!path.startsWith('/api/v1/agents/')) {
         return null
@@ -541,23 +460,19 @@ describe('operator console agent detail', (): void => {
       }
       return Promise.resolve(jsonResponse(200, { version: 'v1', detail: fresh }))
     }
-    try {
-      await boot()
-      await openRunning()
-      await tick(2_000)
-      expect(textOf('#detail-operation')).toBe('Fresh operation')
+    await boot()
+    await openAgent(runningIdentifier)
+    await page.tick(2_000)
+    expect(page.text('#detail-operation')).toBe('Fresh operation')
 
-      releaseFirst(jsonResponse(200, { version: 'v1', detail: stale }))
-      await flush()
+    releaseFirst(jsonResponse(200, { version: 'v1', detail: stale }))
+    await page.flush()
 
-      expect(textOf('#detail-operation')).toBe('Fresh operation')
-    } finally {
-      serveOverride = originalServe
-    }
+    expect(page.text('#detail-operation')).toBe('Fresh operation')
   })
 
   it('recovers after a failed detail request', async (): Promise<void> => {
-    detailResponses.set(runningIdentifier, {
+    details.set(runningIdentifier, {
       status: 503,
       body: {
         version: 'v1',
@@ -568,76 +483,57 @@ describe('operator console agent detail', (): void => {
       },
     })
     await boot()
-    await openRunning()
+    await openAgent(runningIdentifier)
 
-    expect(textOf('#detail-status')).toContain('The agent session is still starting')
-    expect(query('#agent-detail').getAttribute('data-state')).toBe('error')
+    expect(page.text('#detail-status')).toContain('The agent session is still starting')
+    expect(page.query('#agent-detail').getAttribute('data-state')).toBe('error')
 
-    detailResponses.set(runningIdentifier, {
+    details.set(runningIdentifier, {
       status: 200,
       body: { version: 'v1', detail: runningDetail() },
     })
-    await tick(2_000)
+    await page.tick(2_000)
 
-    expect(textOf('#detail-status')).not.toContain('still starting')
-    expect(textOf('#detail-timeline')).toContain('Command pnpm')
+    expect(page.text('#detail-status')).not.toContain('still starting')
+    expect(page.text('#detail-timeline')).toContain('Command pnpm')
+  })
+
+  it('keeps the timeline retention notice', async (): Promise<void> => {
+    const published = runningDetail()
+    details.set(runningIdentifier, {
+      status: 200,
+      body: {
+        version: 'v1',
+        detail: { ...published, timeline: { ...published.timeline, dropped: 12 } },
+      },
+    })
+    await boot()
+    await openAgent(runningIdentifier)
+
+    expect(page.text('#detail-timeline')).toContain('12 earlier events were dropped')
+  })
+
+  it('copies the deep link on request', async (): Promise<void> => {
+    await boot()
+    await openAgent(runningIdentifier)
+
+    page.query('#detail-copy').click()
+    await page.flush()
+
+    expect(page.text('#notice')).toBe('Deep link copied.')
   })
 
   it('keeps polling the dashboard while a detail request is outstanding', async (): Promise<void> => {
     await boot()
     detailPending = true
-    await openRunning()
-    const before = requestLog.filter((path) => path === '/api/v1/state').length
+    await openAgent(runningIdentifier)
+    const before = page.requestLog.filter((path) => path === '/api/v1/state').length
 
-    await tick(2_000)
-    await tick(3_000)
+    await page.tick(2_000)
+    await page.tick(3_000)
 
-    expect(requestLog.filter((path) => path === '/api/v1/state').length).toBeGreaterThan(before)
-  })
-
-  it('closes on Escape and returns focus to the card that opened it', async (): Promise<void> => {
-    await boot()
-    const card = await openRunning()
-
-    page.document.dispatchEvent(new page.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-
-    expect(query('#agent-detail').hidden).toBe(true)
-    expect(page.location.hash).not.toContain('/agents/')
-    expect(card.getAttribute('aria-expanded')).toBe('false')
-    expect(page.document.activeElement?.getAttribute('data-identifier')).toBe(runningIdentifier)
-  })
-})
-
-describe('operator console dependency status', (): void => {
-  it('shows completed dependencies as satisfied without calling a ready issue blocked', async (): Promise<void> => {
-    const completedIdentifier = 'example/symphony#16'
-    serveOverride = (path): Promise<Response> | null =>
-      path === '/api/v1/backlog'
-        ? Promise.resolve(
-            jsonResponse(200, {
-              ...backlog,
-              nodes: [
-                ...backlog.nodes,
-                {
-                  identifier: completedIdentifier,
-                  number: 16,
-                  title: 'Completed foundation',
-                  url: 'https://example.test/issues/16',
-                  state: 'closed',
-                  readiness: 'completed',
-                  reason: null,
-                  actionable: false,
-                },
-              ],
-              edges: [{ blocker: completedIdentifier, dependent: runningIdentifier }],
-            }),
-          )
-        : null
-
-    await boot()
-
-    expect(textOf('#backlog')).not.toContain('Blocked by')
-    expect(page.document.querySelectorAll('.graph-edges path.satisfied')).toHaveLength(1)
-    expect(page.document.querySelectorAll('.graph-edges path.active')).toHaveLength(0)
+    expect(page.requestLog.filter((path) => path === '/api/v1/state').length).toBeGreaterThan(
+      before,
+    )
   })
 })

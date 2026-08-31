@@ -597,6 +597,12 @@ export type AgentDetailSnapshot = Readonly<{
   title: string
   url: string | null
   status: AgentDetailStatus
+  /**
+   * Whether this host composes code-review services. With them, completed work is handed off as a
+   * pull request; without them the core continuation lifecycle runs instead, and a console that
+   * assumed the first would promise an operator an outcome that cannot happen.
+   */
+  handoffEnabled: boolean
   identity: Readonly<{
     threadId: string | null
     turnId: string | null
@@ -1285,6 +1291,8 @@ export type AgentDetailContext = Readonly<{
   status: AgentDetailStatus
   stallTimeoutMs: number
   workerHost: string
+  /** Whether the execution behind this agent has a code-review port to hand its work off to. */
+  handoffEnabled: boolean
   branch: string | null
   retry: Readonly<{ attempt: number; dueAt: Date; reason: string | null }> | null
 }>
@@ -1324,6 +1332,7 @@ export const buildAgentDetail = (
     title: record.title,
     url: record.url,
     status: context.status,
+    handoffEnabled: context.handoffEnabled,
     identity: Object.freeze({
       threadId: record.threadId,
       turnId: record.turnId,

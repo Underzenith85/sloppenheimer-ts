@@ -32,12 +32,23 @@ const stripTypes = (source: string): string => {
 }
 
 /**
- * From `dist/` the compiled browser bundle sits next to this module. In source mode there
+ * The browser sources, in dependency order. They are plain scripts rather than modules — none of
+ * them imports or exports — so the compiler typechecks them as one program and they can be served
+ * as one classic script without a bundler. The order is the only thing this list encodes.
+ */
+const browserSources: readonly string[] = ['model', 'dom', 'detail', 'app']
+
+/**
+ * From `dist/` the compiled browser sources sit next to this module. In source mode there
  * is no build output to read — a fresh checkout has no `dist/` at all — so the same
  * TypeScript the build compiles is type-stripped in memory instead.
  */
 const browserScript = (): string =>
-  import.meta.url.endsWith('.ts') ? stripTypes(read('app.ts')) : read('app.js')
+  browserSources
+    .map((name) =>
+      import.meta.url.endsWith('.ts') ? stripTypes(read(`${name}.ts`)) : read(`${name}.js`),
+    )
+    .join('\n')
 
 export const appTemplate = read('index.html')
 export const appStyles = read('styles.css')

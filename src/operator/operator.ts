@@ -26,9 +26,20 @@ export type BacklogIssue = Readonly<{
   createdAt: string | null
   enabled: boolean
   state: string
+  /**
+   * The issue's state under the runtime's own normalization, so the console can match it against
+   * the saturated states the snapshot publishes without restating that rule in the browser.
+   */
+  normalizedState: string
   blockedBy: Issue['blockedBy']
   readiness: 'ready' | 'blocked' | 'cyclic'
   reason: string | null
+  /**
+   * How many other open issues stop being blocked, directly or transitively, once this one is
+   * finished. It is the console's ranking signal, and it is computed here because the dependency
+   * graph the count comes from is already assembled here.
+   */
+  unlocks: number
 }>
 
 export type DependencyNode = Readonly<{
@@ -93,6 +104,60 @@ const issueNumber = (identifier: string): number | null => {
   return match?.[1] === undefined ? null : Number(match[1])
 }
 
+/**
+ * How many open issues each issue unblocks, counted transitively.
+ *
+ * An issue is unlocked only once *every* one of its unresolved blockers is accounted for, so an
+ * issue held by two blockers is credited to neither of them alone. The walk is a cascade rather
+ * than plain reachability: completing the issue frees whatever it was the last blocker of, and
+ * those in turn free whatever they were the last blocker of. A member of a dependency cycle can
+ * never have all its blockers satisfied, so the cascade stops there rather than diverging.
+ *
+ * Blockers already in a terminal state are excluded, because they are not holding anything back.
+ */
+const downstreamCounts = (
+  openIssues: readonly Issue[],
+  terminalStates: readonly string[],
+): ReadonlyMap<string, number> => {
+  const blockers = new Map<string, ReadonlySet<string>>()
+  const dependents = new Map<string, string[]>()
+  for (const issue of openIssues) {
+    const unresolved = unresolvedBlockers(issue, terminalStates)
+    blockers.set(issue.identifier, new Set(unresolved.map((blocker) => blocker.identifier)))
+    for (const blocker of unresolved) {
+      const existing = dependents.get(blocker.identifier)
+      if (existing === undefined) {
+        dependents.set(blocker.identifier, [issue.identifier])
+      } else {
+        existing.push(issue.identifier)
+      }
+    }
+  }
+  const counts = new Map<string, number>()
+  for (const issue of openIssues) {
+    const cleared = new Set<string>([issue.identifier])
+    const frontier: string[] = [issue.identifier]
+    while (frontier.length > 0) {
+      const finished = frontier.pop()
+      if (finished === undefined) {
+        continue
+      }
+      for (const dependent of dependents.get(finished) ?? []) {
+        if (cleared.has(dependent)) {
+          continue
+        }
+        const remaining = blockers.get(dependent) ?? new Set<string>()
+        if ([...remaining].every((blocker) => cleared.has(blocker))) {
+          cleared.add(dependent)
+          frontier.push(dependent)
+        }
+      }
+    }
+    counts.set(issue.identifier, cleared.size - 1)
+  }
+  return counts
+}
+
 export const buildBacklogSnapshot = (
   openIssues: readonly Issue[],
   label: string,
@@ -101,6 +166,7 @@ export const buildBacklogSnapshot = (
 ): BacklogSnapshot => {
   const cycles = findDependencyCycles(openIssues)
   const cyclic = new Set(cycles.flatMap((cycle) => cycle.members))
+  const unlocks = downstreamCounts(openIssues, terminalStates)
   const issues = openIssues.map((issue): BacklogIssue => {
     const blockers = unresolvedBlockers(issue, terminalStates)
     const isCyclic = cyclic.has(issue.identifier)
@@ -115,6 +181,7 @@ export const buildBacklogSnapshot = (
       enabled:
         !pausedIssueNumbers.has(Number(issue.id)) && issue.labels.includes(label.toLowerCase()),
       state: issue.state,
+      normalizedState: normalizeState(issue.state),
       // The table presents active scheduling constraints. Keep the complete dependency history in
       // `nodes` and `edges`, but do not label an issue as "Blocked by" a terminal dependency.
       blockedBy: blockers,
@@ -125,6 +192,7 @@ export const buildBacklogSnapshot = (
         : blockers.length > 0
           ? `Waiting for ${blockers.map((blocker) => blocker.identifier).join(', ')}`
           : null,
+      unlocks: unlocks.get(issue.identifier) ?? 0,
     }
   })
   const nodes = new Map<string, DependencyNode>()
