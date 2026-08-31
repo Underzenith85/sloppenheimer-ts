@@ -1,3 +1,5 @@
+import { Option } from 'effect'
+
 import type { Issue } from '../domain/domain.js'
 import { classifyPullRequest, type PullRequestObservation } from '../domain/handoff.js'
 import type { HandoffEntry } from './state.js'
@@ -114,7 +116,7 @@ const attributeRepair = (
 const gateReview = (
   handoff: HandoffEntry,
   observation: OpenPullRequest,
-): HandoffDecision | null => {
+): Option.Option<HandoffDecision> => {
   const observedHeadSha = observation.headSha
   const codexReview = observation.codexReview
   if (handoff.reviewRequestedHeadSha !== observedHeadSha) {
@@ -125,52 +127,61 @@ const gateReview = (
       observedHeadSha.startsWith(codexReview.headShaPrefix)
     ) {
       // A review for this head already exists: adopt it rather than asking for a second one.
-      return decided(
-        codexReview.status === 'completed'
-          ? {
-              ...reset,
-              reviewRequestedHeadSha: observedHeadSha,
-              reviewCompletedHeadSha: observedHeadSha,
-              state: 'awaiting_checks',
-              reason:
-                'Codex review completed for the current head; waiting for review state to settle',
-            }
-          : {
-              ...reset,
-              reviewRequestedHeadSha: observedHeadSha,
-              state: 'awaiting_checks',
-              reason: 'Waiting for Codex review of the current head to complete',
-            },
+      return Option.some(
+        decided(
+          codexReview.status === 'completed'
+            ? {
+                ...reset,
+                reviewRequestedHeadSha: observedHeadSha,
+                reviewCompletedHeadSha: observedHeadSha,
+                state: 'awaiting_checks',
+                reason:
+                  'Codex review completed for the current head; waiting for review state to settle',
+              }
+            : {
+                ...reset,
+                reviewRequestedHeadSha: observedHeadSha,
+                state: 'awaiting_checks',
+                reason: 'Waiting for Codex review of the current head to complete',
+              },
+        ),
       )
     }
-    return decided(
-      { ...reset, state: 'awaiting_checks' },
-      {
-        _tag: 'RequestReview',
-        headSha: observedHeadSha,
-      },
+    return Option.some(
+      decided(
+        { ...reset, state: 'awaiting_checks' },
+        {
+          _tag: 'RequestReview',
+          headSha: observedHeadSha,
+        },
+      ),
     )
   }
   if (
     codexReview?.status !== 'completed' ||
     !observedHeadSha.startsWith(codexReview.headShaPrefix)
   ) {
-    return decided({
-      ...handoff,
-      reviewCompletedHeadSha: null,
-      state: 'awaiting_checks',
-      reason: 'Waiting for Codex review of the current head to complete',
-    })
+    return Option.some(
+      decided({
+        ...handoff,
+        reviewCompletedHeadSha: null,
+        state: 'awaiting_checks',
+        reason: 'Waiting for Codex review of the current head to complete',
+      }),
+    )
   }
   if (handoff.reviewCompletedHeadSha !== observedHeadSha) {
-    return decided({
-      ...handoff,
-      reviewCompletedHeadSha: observedHeadSha,
-      state: 'awaiting_checks',
-      reason: 'Codex review completed for the current head; waiting for review state to settle',
-    })
+    return Option.some(
+      decided({
+        ...handoff,
+        reviewCompletedHeadSha: observedHeadSha,
+        state: 'awaiting_checks',
+        reason: 'Codex review completed for the current head; waiting for review state to settle',
+      }),
+    )
   }
-  return null
+  // Nothing to say about the review: the disposition decides what happens to this head.
+  return Option.none()
 }
 
 /**
@@ -204,8 +215,8 @@ export const observeHandoff = (
   }
   if (observation.state === 'open') {
     const gated = gateReview(next, observation)
-    if (gated !== null) {
-      return gated
+    if (Option.isSome(gated)) {
+      return gated.value
     }
   }
   const unresolvedThreadIds = observation.reviewThreads

@@ -1,3 +1,5 @@
+import { Option } from 'effect'
+
 import { unresolvedBlockers } from '../domain/dependencies.js'
 import { normalizeState, type Issue, type IssueId } from '../domain/domain.js'
 import type { Workflow } from '../config/workflow.js'
@@ -77,9 +79,10 @@ export type DispatchAdmission =
       reason: 'recovering' | 'claimed' | 'paused' | 'cyclic' | 'inactive' | 'unroutable' | 'no_slot'
     }>
 
-export const identifierIssueNumber = (identifier: string): number | null => {
+/** The issue number an identifier ends in, when it carries one at all. */
+export const identifierIssueNumber = (identifier: string): Option.Option<number> => {
   const match = /#(\d+)$/u.exec(identifier)
-  return match?.[1] === undefined ? null : Number(match[1])
+  return match?.[1] === undefined ? Option.none() : Option.some(Number(match[1]))
 }
 
 /**
@@ -99,8 +102,11 @@ export const dispatchAdmission = (
   if (state.claimed.has(issue.id)) {
     return { _tag: 'Refuse', reason: 'claimed' }
   }
-  const issueNumber = identifierIssueNumber(issue.identifier)
-  if (issueNumber !== null && state.pausedIssueNumbers.has(issueNumber)) {
+  if (
+    Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
+      state.pausedIssueNumbers.has(issueNumber),
+    )
+  ) {
     return { _tag: 'Refuse', reason: 'paused' }
   }
   if (cyclicIdentifiers.has(issue.identifier)) {
@@ -122,7 +128,8 @@ export const dispatchAdmission = (
 export const entryMatchesIssueNumber = (
   entry: Readonly<{ issue: Issue }>,
   issueNumber: number,
-): boolean => identifierIssueNumber(entry.issue.identifier) === issueNumber
+): boolean =>
+  Option.exists(identifierIssueNumber(entry.issue.identifier), (each) => each === issueNumber)
 
 export const captureExecutionSnapshot = (
   effective: EffectiveWorkflow,

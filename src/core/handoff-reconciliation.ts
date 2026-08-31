@@ -1,4 +1,4 @@
-import { Effect, Ref, type Scope } from 'effect'
+import { Effect, Option, Ref, type Scope } from 'effect'
 
 import type { IssueId } from '../domain/domain.js'
 import { logInfo } from '../support/logging.js'
@@ -27,8 +27,9 @@ const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boole
   if (handoff.state === 'closed_without_merge') {
     return true
   }
-  const issueNumber = identifierIssueNumber(handoff.issue.identifier)
-  return issueNumber !== null && state.pausedIssueNumbers.has(issueNumber)
+  return Option.exists(identifierIssueNumber(handoff.issue.identifier), (issueNumber) =>
+    state.pausedIssueNumbers.has(issueNumber),
+  )
 }
 
 const writeHandoff = (
