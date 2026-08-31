@@ -701,8 +701,9 @@ describe('GitHub tracker error mapping', (): void => {
       )
 
       expect(error.category).toBe('tracker_rate_limited')
-      expect(error.retryAfterMs).toBeGreaterThan(58_000)
-      expect(error.retryAfterMs).toBeLessThanOrEqual(60_000)
+      // Exact rather than a window: the header and the adapter now read the same clock, so
+      // nothing drifts between them.
+      expect(error.retryAfterMs).toBe(60_000)
     }),
   )
 
