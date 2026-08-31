@@ -2426,6 +2426,65 @@ describe('restored pull request handoffs', (): void => {
     await rm(reloadedRoot, { force: true, recursive: true })
   })
 
+  it('attributes a repair head when the tracker omits the issue mid-run', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-missing-run-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const repairedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    let candidates: readonly Issue[] = [issue]
+    let currentHead = originalHead
+    await saveRepairHandoff(handoffStorePath, issue, originalHead)
+    const harness = makeHarness(isolated, () => candidates)
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+      }),
+      // The repair pushes and then stays open, so only the cancellation ends it.
+      runAgent: () =>
+        Effect.sync(() => {
+          currentHead = repairedHead
+        }).pipe(Effect.zipRight(Effect.never)),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.running.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The tracker stops reporting the issue while its repair is running. The handoff stays
+          // active, so the head that worker pushed is still the repair's.
+          candidates = []
+          while (current.handoffs[0]?.repairAttempts !== 1) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      ),
+    )
+
+    expect(snapshot.running).toEqual([])
+    expect(snapshot.handoffs[0]).toMatchObject({
+      repairAttempts: 1,
+      repairHeadShas: [repairedHead],
+      repairObservedHeadShas: [originalHead, repairedHead],
+      repairStartedHeadSha: null,
+    })
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('attributes a repair head when the tracker omits the issue from a retry refresh', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-missing-issue-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
@@ -3679,6 +3738,42 @@ describe('rebuilt port lifecycle', (): void => {
           expect(
             harness.releasedTrackers().map((each) => Redacted.value(githubProviderOf(each).token)),
           ).toEqual(['secret', 'secret'])
+        }),
+      ),
+    )
+  })
+
+  it('retires what a refused reload replaced before it refused', async (): Promise<void> => {
+    // The tracker cell installs a replacement, and only then does the code-review rebuild refuse.
+    // Every retry of the same invalid workflow displaces another instance, so the predecessors have
+    // to reach the drain even though the reload as a whole produced nothing.
+    let handoffAvailable = true
+    const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }))
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) =>
+        handoffAvailable ? requireCodeReview(harness.ports, provider) : null,
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          const beforeReload = harness.releasedTrackers().length
+
+          handoffAvailable = false
+          harness.setWorkflow(changedWorkflow({ fingerprint: 'no-code-review' }))
+          // Two refused reloads and a further pass to drain: the first displaces the instance the
+          // orchestrator is still using, and the second displaces the first's orphan.
+          yield* control.refresh
+          yield* control.refresh
+          yield* control.refresh
+
+          const snapshot = yield* control.snapshot
+          expect(snapshot.workflowReloadError?.message).toContain('does not supply CodeReviewPort')
+          expect(snapshot.effectiveWorkflow.fingerprint).toBe('initial')
+          expect(harness.releasedTrackers().length).toBeGreaterThan(beforeReload)
         }),
       ),
     )

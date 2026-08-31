@@ -1,33 +1,26 @@
 import { resolve } from 'node:path'
-import { Deferred, Effect, Fiber, Option, Queue, Runtime, Stream, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, Option, Queue, Ref, Runtime, Stream, type Scope } from 'effect'
 
-import { unresolvedBlockers } from '../domain/dependencies.js'
 import {
   issueId,
-  normalizeState,
   type Issue,
   type IssueId,
-  type IssueIdentifier,
   type JsonObject,
   type TokenTotals,
 } from '../domain/domain.js'
 import { WorkflowError } from '../errors.js'
 import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../domain/handoff.js'
 import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
-import { mergeSparseObject } from '../support/json.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
 import {
-  agentDetailPath,
   createAgentDetailRecord,
   recordAttemptStarted,
   recordCancellation,
   recordHandoff,
   recordIssueRefreshed,
   recordRetryScheduled,
-  type AgentDetailContext,
   type AgentDetailRecord,
   type AgentDetailSnapshot,
-  type AgentDetailStatus,
   type AgentEvent,
 } from '../telemetry.js'
 import type { Workflow } from '../config/workflow.js'
@@ -39,92 +32,54 @@ import {
   CurrentWorkspaceManager,
   WorkflowLoader,
   WorkflowWatcher,
-  type AgentRunnerConfig,
-  type AgentRunnerPort,
-  type CodeReviewCell,
-  type CodeReviewPort,
-  type TrackerCell,
-  type TrackerPort,
-  type WorkflowLoaderPort,
-  type WorkspaceManagerCell,
-  type WorkspaceManagerPort,
 } from '../ports/index.js'
 import { eventLoop } from './polling.js'
+import {
+  captureExecutionSnapshot,
+  issueIsActiveInSnapshot,
+  logContext,
+  retryDelayMs,
+  sessionLogContext,
+  stateIsIn,
+} from './policy.js'
+import { releaseRepair, settleRepair } from './handoff-decision.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
+import {
+  initialState,
+  type EffectiveWorkflow,
+  type HandoffEntry,
+  type RepairDisposition,
+  type RunningEntry,
+  type RuntimePorts,
+  type RuntimeState,
+} from './state.js'
+import * as Transitions from './transitions.js'
 import { rebuildEffectiveWorkflow } from './workflow-reload.js'
 
-export type RunningEntry = {
-  runId: number
-  issue: Issue
-  fiber: Fiber.RuntimeFiber<void>
-  execution: ExecutionSnapshot
-  attempt: number | null
-  startedAt: Date
-  lastEventAt: Date | null
-  lastEvent: string | null
-  lastMessage: string | null
-  processId: number | null
-  threadId: string | null
-  turnId: string | null
-  sessionId: string | null
-  turnCount: number
-  turnActive: boolean
-  tokens: Omit<TokenTotals, 'secondsRunning'>
-  lastReportedTokens: Omit<TokenTotals, 'secondsRunning'>
-}
-
-export type RetryEntry = {
-  issue: Issue
-  attempt: number
-  dueAt: number
-  error: string | null
-  fiber: Fiber.RuntimeFiber<void>
-}
-
 /**
- * What a cancelled run does with the repair identity it was carrying.
- *
- * - `release`: the repair is over, so the identity goes with it.
- * - `retain`: a retry continues this repair from the same baseline.
- * - `settle`: nothing continues it, but the worker may have pushed before it was cancelled, so the
- *   baseline outlives it for exactly one handoff inspection to attribute that head.
+ * How much finished work the snapshot publishes. The console scopes its Finished view to a time
+ * window, so the wire payload is bounded by recency rather than by however many issues a long
+ * session has merged.
  */
-export type RepairDisposition = 'release' | 'retain' | 'settle'
+export const publishedCompletedWork = 50
 
-export type RepairEntry = {
-  /** The repair-shaped issue, retained so a refused dispatch can render the same repair on retry. */
-  issue: Issue
-  /** Pull-request head from which this repair was started. */
-  startedHeadSha: string
-  /** False once nothing continues this repair: a restored baseline, or a settled cancellation. */
-  inFlight: boolean
-  /** Whether a worker actually started, as opposed to a dispatch refused before launch. */
-  workerStarted: boolean
-}
-
-export type HandoffEntry = {
-  issue: Issue
-  execution: ExecutionSnapshot
-  pullRequestNumber: number
-  pullRequestUrl: string
-  branchName: string
-  state: HandoffSnapshot['state']
-  headSha: string | null
-  reason: string | null
-  /** Distinct heads observed after a repair agent finished; its length is the verified repair count. */
-  repairHeadShas: string[]
-  /**
-   * Every head this handoff has been observed at, baselines included. Cycle detection reads this
-   * rather than repairHeadShas, which counts only post-repair heads and so never holds the head a
-   * repair started from.
-   */
-  repairObservedHeadShas: string[]
-  /** The repair currently running or waiting to retry; None for ordinary worker continuations. */
-  repair: Option.Option<RepairEntry>
-  reviewRequestedHeadSha: string | null
-  reviewCompletedHeadSha: string | null
-  observedAt: Date
-}
+export {
+  retainedCompletedDetails,
+  type CompletedEntry,
+  type EffectiveWorkflow,
+  type ExecutionSnapshot,
+  type HandoffEntry,
+  type HandoffRecoveryCounts,
+  type HandoffStoreError,
+  type PendingRetirement,
+  type PublishedDetail,
+  type RetryEntry,
+  type RunningEntry,
+  type RuntimePorts,
+  type RuntimeState,
+  type WorkflowReloadError,
+} from './state.js'
+export { issueIsRoutable, retryDelayMs, sortIssues } from './policy.js'
 
 export type RunningSnapshot = Readonly<{
   issueId: IssueId
@@ -152,21 +107,6 @@ export type RunningSnapshot = Readonly<{
   stallDeadline: string | null
   /** Stable link to the versioned detail resource for this agent. */
   detailUrl: string
-}>
-
-/**
- * One piece of finished work, as the console shows it. The runtime already had to know which
- * issues had completed; it now keeps enough of each to answer "what did Symphony finish, and
- * when" without the console inventing a session history of its own.
- */
-export type CompletedEntry = Readonly<{
-  issueId: IssueId
-  identifier: string
-  title: string
-  url: string | null
-  outcome: 'merged'
-  finishedAt: Date
-  pullRequestUrl: string | null
 }>
 
 export type CompletedSnapshot = Readonly<{
@@ -286,96 +226,6 @@ export type OrchestratorEvent =
     }>
 
 /**
- * One issue's published detail. The record is an immutable value the actor has finished with — a
- * later observation produces a new record rather than editing this one — and the reader supplies
- * only the current instant, so elapsed time and the stall countdown stay live without any consumer
- * touching scheduler state.
- */
-export type PublishedDetail =
-  | Readonly<{
-      _tag: 'Found'
-      record: AgentDetailRecord
-      context: Omit<AgentDetailContext, 'now'>
-    }>
-  | Readonly<{ _tag: 'Completed' }>
-  | Readonly<{ _tag: 'NoSession' }>
-  | Readonly<{ _tag: 'Unavailable'; reason: string }>
-
-/** How many finished agents keep their timeline for post-mortem inspection. */
-export const retainedCompletedDetails = 16
-
-/**
- * How much finished work the snapshot publishes. The console scopes its Finished view to a time
- * window, so the wire payload is bounded by recency rather than by however many issues a long
- * session has merged.
- */
-export const publishedCompletedWork = 50
-
-export type RuntimeState = {
-  running: Map<IssueId, RunningEntry>
-  claimed: Set<IssueId>
-  retries: Map<IssueId, RetryEntry>
-  completed: Map<IssueId, CompletedEntry>
-  pausedIssueNumbers: Set<number>
-  handoffs: Map<IssueId, HandoffEntry>
-  totals: TokenTotals
-  rateLimits: JsonObject | null
-  /** Actor-owned agent telemetry, keyed by issue and preserved across that issue's retries. */
-  details: Map<IssueId, AgentDetailRecord>
-  /** Issues whose detail record outlived its session, oldest first. */
-  finishedDetails: IssueId[]
-  /**
-   * Issues whose retained detail has since been evicted. A session that ended and then aged out
-   * keeps answering as completed rather than degrading into "no session", which would tell an
-   * operator the agent never ran.
-   */
-  agedOutDetails: Set<IssueId>
-  identifiers: Map<IssueId, IssueIdentifier>
-}
-
-export type EffectiveWorkflow = Readonly<{
-  workflow: Workflow
-  tracker: TrackerPort
-  codeReview: CodeReviewPort | null
-  workspaces: WorkspaceManagerPort
-  loadedAt: Date
-}>
-
-export type ExecutionSnapshot = Readonly<{
-  workflow: Workflow
-  tracker: TrackerPort
-  codeReview: CodeReviewPort | null
-  requiredLabels: readonly string[]
-  activeStates: readonly string[]
-  terminalStates: readonly string[]
-  secretEnvironmentNames: readonly string[]
-  workspaces: WorkspaceManagerPort
-  workspaceRoot: string
-  prompt: string
-  agentRunner: AgentRunnerConfig
-  maxTurns: number
-  stallTimeoutMs: number
-}>
-
-export type WorkflowReloadError = Readonly<{
-  message: string
-  observedAt: Date
-}>
-
-export type HandoffStoreError = Readonly<{
-  operation: 'read' | 'write'
-  message: string
-  observedAt: Date
-}>
-
-export type HandoffRecoveryCounts = {
-  loaded: number
-  recovered: number
-  skipped: number
-  failed: number
-}
-
-/**
  * What the composition root must provide for the orchestrator to run. The code-review capability is
  * not among them: it is optional, and its absence is how the application says handoff is disabled.
  */
@@ -387,245 +237,132 @@ export type OrchestratorServices =
   | WorkflowWatcher
 
 /**
- * The ports the orchestrator resolved from {@link OrchestratorServices} at startup, and the cells
- * through which a reload or a credential rotation installs their replacements.
+ * What the extracted runtime operations are handed instead of closing over the orchestrator's own
+ * scope: the state cell, the ports, and the operations whose implementation needs something only
+ * that scope has — a scope to fork a timer into, or the mailbox to enqueue against.
  *
- * This is not an injection seam: it is built inside the orchestrator from the tags the composition
- * root provided, and no caller can pass one in. A test binds a layer instead.
+ * The state is one `Ref` rather than a record of mutable containers, so every operation states its
+ * change as a transition applied to it. A reader sees one coherent value; a writer replaces it.
  */
-export type RuntimePorts = Readonly<{
-  agentRunner: AgentRunnerPort
-  workflowLoader: WorkflowLoaderPort
-  trackerCell: TrackerCell
-  workspaceCell: WorkspaceManagerCell
-  /**
-   * `None` when pull-request handoff is disabled, so no code-review capability was composed and the
-   * application follows the core continuation lifecycle.
-   */
-  codeReviewCell: Option.Option<CodeReviewCell>
-}>
-
-/**
- * An instance a rebuild replaced, held until the last live holder lets go of it. Adoption moves
- * running workers and in-flight handoffs onto the replacement, but a worker still holds whatever
- * its execution snapshot captured, and a handoff holds the workspace manager its run created.
- */
-export type PendingRetirement = Readonly<{
-  kind: 'tracker' | 'codeReview' | 'workspaces'
-  instance: unknown
-  retire: Effect.Effect<void>
-}>
-
-/**
- * The explicit mutable boundary shared by the extracted runtime operations.  The operation fields
- * are installed once the orchestrator has resolved its ports; extracted modules receive this record
- * instead of closing over startOrchestrator's local scope.
- */
-export type OrchestratorContext = {
-  readonly state: RuntimeState
-  readonly ports: RuntimePorts
-  /** Replaced port instances whose release is still waiting on a live holder. */
-  readonly pendingRetirements: PendingRetirement[]
-  /**
-   * Ports an adoption took away from a live run, keyed by that run. A call that read an instance a
-   * moment before adoption replaced it is still using it, so the instance is held until the run
-   * ends rather than until the reference is swapped. Keyed by run rather than by issue: the same
-   * issue goes on to a handoff, and a retry after it starts a run that never touched these.
-   */
-  readonly supersededPorts: Map<number, unknown[]>
-  readonly selectedWorkflowPath: string
-  readonly mailbox: Queue.Queue<OrchestratorEvent>
-  readonly currentRefreshWaiters: Deferred.Deferred<void>[]
-  readonly nextRefreshWaiters: Deferred.Deferred<void>[]
-  readonly pendingUsage: Map<IssueId, NonNullable<AgentEvent['usage']>>
-  readonly pendingLifecycle: Map<IssueId, AgentEvent[]>
-  lastKnownGood: EffectiveWorkflow
-  workflowReloadError: WorkflowReloadError | null
-  pendingRateLimits: JsonObject | null
-  nextRunId: number
-  startupRecoveryFinished: boolean
-  storeReadFailed: boolean
-  handoffStoreError: HandoffStoreError | null
-  readonly recoveryCounts: HandoffRecoveryCounts
-  publishedDetails: ReadonlyMap<string, PublishedDetail>
-  tickQueued: boolean
-  pollRunning: boolean
-  followUpRequested: boolean
-  pollTimer: Fiber.RuntimeFiber<void> | null
-  detailRecordValue: (
+export type OrchestratorContext = Readonly<{
+  state: Ref.Ref<RuntimeState>
+  ports: RuntimePorts
+  selectedWorkflowPath: string
+  mailbox: Queue.Queue<OrchestratorEvent>
+  /** Opens or reuses the detail record for an issue that is about to be dispatched. */
+  detailRecord: (
     issue: Issue,
     attempt: number | null,
     dispatchLabels: readonly string[],
-  ) => AgentDetailRecord
-  scheduleRetryEffect: (
+  ) => Effect.Effect<AgentDetailRecord>
+  scheduleRetry: (
     issue: Issue,
     attempt: number,
     error: string | null,
     continuation: boolean,
   ) => Effect.Effect<void, never, Scope.Scope>
-  captureExecutionSnapshotValue: (effective: EffectiveWorkflow, prompt: string) => ExecutionSnapshot
-  issueIsActiveInSnapshotValue: (issue: Issue, snapshot: ExecutionSnapshot) => boolean
-  issueIsRoutableInSnapshotValue: (issue: Issue, snapshot: ExecutionSnapshot) => boolean
-  logContextValue: (issue: Issue) => Readonly<Record<string, string>>
-  identifierIssueNumberValue: (identifier: string) => number | null
-  noteHandoffOutcomeValue: (
-    id: IssueId,
-    handoff: HandoffEntry,
-    outcome: 'pull_request_open' | 'merged' | 'intervention_required',
-  ) => void
-  stateHasSlotValue: (issue: Issue, state: RuntimeState, workflow: Workflow) => boolean
-  persistHandoffsEffect: () => Effect.Effect<void>
-  handoffSnapshotsValue: () => readonly HandoffSnapshot[]
-  recoverMissingHandoffsEffect: () => Effect.Effect<void>
-  reconcileEffect: () => Effect.Effect<void, never, Scope.Scope>
-  makeEffectiveWorkflowEffect: (
-    workflow: Workflow,
-  ) => Effect.Effect<EffectiveWorkflow, WorkflowError>
-  sortIssuesValue: typeof sortIssues
-  issueIsActiveValue: (issue: Issue, workflow: Workflow) => boolean
-  issueIsRoutableValue: typeof issueIsRoutable
-  stateIsInValue: (state: string, configured: readonly string[]) => boolean
-  offerFromCallbackValue: (event: OrchestratorEvent) => void
-  applyLifecycleUpdateEffect: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<void>
-  endRunningValue: (id: IssueId, expectedRunId: number | null) => RunningEntry | null
-  applyPendingTelemetryValue: (id: IssueId, entry: RunningEntry) => void
-  accountEndedRuntimeValue: (entry: RunningEntry, now: number) => void
-  sessionLogContextValue: (entry: RunningEntry) => Readonly<Record<string, string | number | null>>
-  cancelRunningEffect: (
+  /** Applies one protocol event to a run and says in the log what the event amounted to. */
+  applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
+  cancelRunning: (
     id: IssueId,
     cleanupWorkspace: boolean,
     reason?: string,
-    repairDisposition?: RepairDisposition,
-  ) => Effect.Effect<RunningEntry | null, never>
-  scheduleNextTickEffect: () => Effect.Effect<void, never, Scope.Scope>
-  hydrateRestoredHandoffsEffect: () => Effect.Effect<void>
-  publishDetailsValue: () => void
-}
+  ) => Effect.Effect<Option.Option<RunningEntry>>
+  /** Mirrors an observed pull-request disposition onto the issue's retained handoff detail. */
+  noteHandoffOutcome: (
+    id: IssueId,
+    handoff: HandoffEntry,
+    outcome: 'pull_request_open' | 'merged' | 'intervention_required',
+  ) => Effect.Effect<void>
+  persistHandoffs: Effect.Effect<void>
+  recoverMissingHandoffs: Effect.Effect<void>
+  reconcile: Effect.Effect<void, never, Scope.Scope>
+  hydrateRestoredHandoffs: Effect.Effect<void>
+  makeEffectiveWorkflow: (workflow: Workflow) => Effect.Effect<EffectiveWorkflow, WorkflowError>
+  scheduleNextTick: Effect.Effect<void, never, Scope.Scope>
+  requestTick: (source: Transitions.TickSource) => Effect.Effect<void>
+  /**
+   * Runs a settling effect from a plain callback, on the orchestrator's own runtime and inside its
+   * scope. The effect must complete without suspending; see the bridge's definition.
+   */
+  runFromCallback: (effect: Effect.Effect<void>) => void
+  /** Rebuilds the published detail index. Runs after every transition the event loop makes. */
+  publish: Effect.Effect<void>
+}>
 
-const initialState = (): RuntimeState => ({
-  running: new Map(),
-  claimed: new Set(),
-  retries: new Map(),
-  completed: new Map(),
-  pausedIssueNumbers: new Set(),
-  handoffs: new Map(),
-  totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
-  rateLimits: null,
-  details: new Map(),
-  finishedDetails: [],
-  agedOutDetails: new Set(),
-  identifiers: new Map(),
-})
-
-export const retryDelayMs = (attempt: number, maximumMs: number): number =>
-  Math.min(10_000 * 2 ** Math.max(attempt - 1, 0), maximumMs)
-
-export const sortIssues = (issues: readonly Issue[]): readonly Issue[] =>
-  [...issues].sort((left, right) => {
-    const leftPriority =
-      left.priority !== null && left.priority >= 1 && left.priority <= 4 ? left.priority : 5
-    const rightPriority =
-      right.priority !== null && right.priority >= 1 && right.priority <= 4 ? right.priority : 5
-    if (leftPriority !== rightPriority) {
-      return leftPriority - rightPriority
+/**
+ * Removes the workspace of every issue that reached a terminal state while the orchestrator was
+ * down. It runs before any state exists, and answers only to the tracker and the filesystem.
+ */
+const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const terminalGroups = yield* Effect.forEach(
+      effective.workflow.config.tracker.terminalStates,
+      (state) =>
+        effective.tracker.fetchIssuesByStates([state], null, { hydrateDependencies: false }).pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              logWarning('startup terminal issue fetch failed; continuing', {
+                state,
+                error: error.message,
+              }).pipe(Effect.as<readonly Issue[]>([])),
+            onSuccess: (issues) => Effect.succeed(issues),
+          }),
+        ),
+      { concurrency: 1 },
+    )
+    const terminalIssues = [
+      ...new Map(terminalGroups.flat().map((issue) => [issue.id, issue])).values(),
+    ]
+    for (const issue of terminalIssues) {
+      const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
+        Effect.matchEffect({
+          onFailure: (error) =>
+            logWarning('startup workspace inspection failed; continuing', {
+              ...logContext(issue),
+              action: 'workspace_inspection',
+              outcome: 'failed',
+              error: error.message,
+            }).pipe(Effect.as<boolean | null>(null)),
+          onSuccess: (exists) => Effect.succeed<boolean | null>(exists),
+        }),
+      )
+      if (workspaceExists !== true) {
+        continue
+      }
+      const refreshed = yield* effective.tracker
+        .fetchIssuesByIds([issue.id], { hydrateDependencies: false })
+        .pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              logWarning('startup terminal issue recheck failed; continuing', {
+                ...logContext(issue),
+                action: 'terminal_recheck',
+                outcome: 'failed',
+                error: error.message,
+              }).pipe(Effect.as<readonly Issue[] | null>(null)),
+            onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
+          }),
+        )
+      const current = refreshed?.find((candidate) => candidate.id === issue.id)
+      if (
+        current === undefined ||
+        !stateIsIn(current.state, effective.workflow.config.tracker.terminalStates)
+      ) {
+        continue
+      }
+      yield* effective.workspaces.remove(current.identifier).pipe(
+        Effect.catchAll((error) =>
+          logWarning('startup terminal workspace cleanup failed; continuing', {
+            ...logContext(current),
+            action: 'workspace_cleanup',
+            outcome: 'failed',
+            error: error.message,
+          }),
+        ),
+      )
     }
-    const leftCreated = left.createdAt?.getTime() ?? Number.POSITIVE_INFINITY
-    const rightCreated = right.createdAt?.getTime() ?? Number.POSITIVE_INFINITY
-    if (leftCreated !== rightCreated) {
-      return leftCreated - rightCreated
-    }
-    return left.identifier.localeCompare(right.identifier)
   })
-
-const stateIsIn = (state: string, configured: readonly string[]): boolean => {
-  const normalized = normalizeState(state)
-  return configured.some((candidate) => normalizeState(candidate) === normalized)
-}
-
-export const issueIsRoutable = (issue: Issue, workflow: Workflow): boolean => {
-  if (!issue.dispatchable) {
-    return false
-  }
-  if (unresolvedBlockers(issue, workflow.config.tracker.terminalStates).length > 0) {
-    return false
-  }
-  const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-  return workflow.config.tracker.requiredLabels.every(
-    (label) => label.length > 0 && labels.has(label),
-  )
-}
-
-const issueIsActiveInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean =>
-  stateIsIn(issue.state, snapshot.activeStates) && !stateIsIn(issue.state, snapshot.terminalStates)
-
-const issueIsRoutableInSnapshot = (issue: Issue, snapshot: ExecutionSnapshot): boolean => {
-  if (!issue.dispatchable) {
-    return false
-  }
-  if (unresolvedBlockers(issue, snapshot.terminalStates).length > 0) {
-    return false
-  }
-  const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-  return snapshot.requiredLabels.every((label) => label.length > 0 && labels.has(label))
-}
-
-const captureExecutionSnapshot = (
-  effective: EffectiveWorkflow,
-  prompt: string,
-): ExecutionSnapshot =>
-  Object.freeze({
-    workflow: effective.workflow,
-    tracker: effective.tracker,
-    codeReview: effective.codeReview,
-    requiredLabels: Object.freeze([...effective.workflow.config.tracker.requiredLabels]),
-    activeStates: Object.freeze([...effective.workflow.config.tracker.activeStates]),
-    terminalStates: Object.freeze([...effective.workflow.config.tracker.terminalStates]),
-    secretEnvironmentNames: Object.freeze([...effective.tracker.secretEnvironmentNames]),
-    workspaces: effective.workspaces,
-    workspaceRoot: effective.workflow.config.workspaceRoot,
-    prompt,
-    agentRunner: Object.freeze({ ...effective.workflow.config.codex }),
-    maxTurns: effective.workflow.config.agent.maxTurns,
-    stallTimeoutMs: effective.workflow.config.codex.stallTimeoutMs,
-  })
-
-const issueIsActive = (issue: Issue, workflow: Workflow): boolean =>
-  stateIsIn(issue.state, workflow.config.tracker.activeStates) &&
-  !stateIsIn(issue.state, workflow.config.tracker.terminalStates)
-
-const stateHasSlot = (issue: Issue, state: RuntimeState, workflow: Workflow): boolean => {
-  if (state.running.size >= workflow.config.agent.maxConcurrentAgents) {
-    return false
-  }
-  const normalized = normalizeState(issue.state)
-  const limit =
-    workflow.config.agent.maxConcurrentAgentsByState.get(normalized) ??
-    workflow.config.agent.maxConcurrentAgents
-  const used = [...state.running.values()].filter(
-    (entry) => normalizeState(entry.issue.state) === normalized,
-  ).length
-  return used < limit
-}
-
-const logContext = (issue: Issue): Readonly<Record<string, string>> => ({
-  issue_id: issue.id,
-  issue_identifier: issue.identifier,
-})
-
-const sessionLogContext = (
-  entry: RunningEntry,
-): Readonly<Record<string, string | number | null>> => ({
-  ...logContext(entry.issue),
-  session_id: entry.sessionId,
-  thread_id: entry.threadId,
-  turn_id: entry.turnId,
-  turn_count: entry.turnCount,
-})
-
-const identifierIssueNumber = (identifier: string): number | null => {
-  const match = /#(\d+)$/u.exec(identifier)
-  return match?.[1] === undefined ? null : Number(match[1])
-}
 
 export const startOrchestratorRuntime = (
   selectedWorkflowPath: string,
@@ -638,8 +375,6 @@ export const startOrchestratorRuntime = (
       workspaceCell: yield* CurrentWorkspaceManager,
       codeReviewCell: yield* Effect.serviceOption(CurrentCodeReview),
     }
-    const pendingRetirements: PendingRetirement[] = []
-    const supersededPorts = new Map<number, unknown[]>()
     /**
      * Built from the workflow the orchestrator loaded rather than adopted from the composition
      * root's own read of it. The two are separate reads of one file, and an edit between them would
@@ -647,340 +382,180 @@ export const startOrchestratorRuntime = (
      * check measures the file against the workflow adopted here, never against the cells' input.
      * The instances the layer built are replaced immediately and retired on the first poll.
      */
-    let lastKnownGood = yield* rebuildEffectiveWorkflow(
+    const bootstrap = yield* rebuildEffectiveWorkflow(
       ports,
-      pendingRetirements,
       yield* ports.workflowLoader.load(selectedWorkflowPath),
     )
+    // A bootstrap that refuses takes the whole host down with it, so whatever it replaced is
+    // released by the composition root's own scope rather than by a drain that never runs.
+    const bootstrapWorkflow = yield* bootstrap.value
+    yield* cleanupTerminalWorkspaces(bootstrapWorkflow)
+
+    const handoffStorePath = resolve(
+      bootstrapWorkflow.workflow.config.workspaceRoot,
+      '.symphony',
+      'handoffs.json',
+    )
+    // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
+    // never be written back over it. A later handoff-enabled run still has to restore those
+    // pull requests.
+    const handoffStoreDisabled = bootstrapWorkflow.codeReview === null
+    const restored = yield* handoffStoreDisabled
+      ? Effect.succeed({
+          handoffs: [] as readonly HandoffSnapshot[],
+          storeReadFailed: false,
+          storeError: null,
+        })
+      : loadHandoffs(handoffStorePath).pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              logError('handoff store read failed; preserving store during recovery', {
+                action: 'handoff_store_read',
+                outcome: 'failed',
+                path: handoffStorePath,
+                error: error.message,
+              }).pipe(
+                Effect.as({
+                  handoffs: [] as readonly HandoffSnapshot[],
+                  storeReadFailed: true,
+                  storeError: {
+                    operation: error.operation,
+                    message: error.message,
+                    observedAt: new Date(),
+                  },
+                }),
+              ),
+            onSuccess: (handoffs) =>
+              Effect.succeed({ handoffs, storeReadFailed: false, storeError: null }),
+          }),
+        )
+
+    const state = yield* Ref.make(
+      Transitions.holdRetirements(initialState(bootstrapWorkflow, restored), bootstrap.retirements),
+    )
+    const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
+
+    const publish = Ref.update(state, Transitions.publishDetails)
+
     const makeEffectiveWorkflow = (
       workflow: Workflow,
     ): Effect.Effect<EffectiveWorkflow, WorkflowError> =>
-      rebuildEffectiveWorkflow(ports, pendingRetirements, workflow)
-    const cleanupTerminalWorkspaces = (effective: EffectiveWorkflow): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        const terminalGroups = yield* Effect.forEach(
-          effective.workflow.config.tracker.terminalStates,
-          (state) =>
-            effective.tracker
-              .fetchIssuesByStates([state], null, { hydrateDependencies: false })
-              .pipe(
-                Effect.matchEffect({
-                  onFailure: (error) =>
-                    logWarning('startup terminal issue fetch failed; continuing', {
-                      state,
-                      error: error.message,
-                    }).pipe(Effect.as<readonly Issue[]>([])),
-                  onSuccess: (issues) => Effect.succeed(issues),
-                }),
-              ),
-          { concurrency: 1 },
-        )
-        const terminalIssues = [
-          ...new Map(terminalGroups.flat().map((issue) => [issue.id, issue])).values(),
-        ]
-        for (const issue of terminalIssues) {
-          const workspaceExists = yield* effective.workspaces.exists(issue.identifier).pipe(
-            Effect.matchEffect({
-              onFailure: (error) =>
-                logWarning('startup workspace inspection failed; continuing', {
-                  ...logContext(issue),
-                  action: 'workspace_inspection',
-                  outcome: 'failed',
-                  error: error.message,
-                }).pipe(Effect.as<boolean | null>(null)),
-              onSuccess: (exists) => Effect.succeed<boolean | null>(exists),
-            }),
-          )
-          if (workspaceExists !== true) {
-            continue
-          }
-          const refreshed = yield* effective.tracker
-            .fetchIssuesByIds([issue.id], { hydrateDependencies: false })
-            .pipe(
-              Effect.matchEffect({
-                onFailure: (error) =>
-                  logWarning('startup terminal issue recheck failed; continuing', {
-                    ...logContext(issue),
-                    action: 'terminal_recheck',
-                    outcome: 'failed',
-                    error: error.message,
-                  }).pipe(Effect.as<readonly Issue[] | null>(null)),
-                onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
-              }),
-            )
-          const current = refreshed?.find((candidate) => candidate.id === issue.id)
-          if (
-            current === undefined ||
-            !stateIsIn(current.state, effective.workflow.config.tracker.terminalStates)
-          ) {
-            continue
-          }
-          yield* effective.workspaces.remove(current.identifier).pipe(
-            Effect.catchAll((error) =>
-              logWarning('startup terminal workspace cleanup failed; continuing', {
-                ...logContext(current),
-                action: 'workspace_cleanup',
-                outcome: 'failed',
-                error: error.message,
-              }),
-            ),
-          )
-        }
-      })
-    yield* cleanupTerminalWorkspaces(lastKnownGood)
-    let workflowReloadError: WorkflowReloadError | null = null
-    const state = initialState()
-    const pendingUsage = new Map<IssueId, NonNullable<AgentEvent['usage']>>()
-    const pendingLifecycle = new Map<IssueId, AgentEvent[]>()
-    let pendingRateLimits: JsonObject | null = null
-    /**
-     * The immutable detail index published by the actor. Every consumer reads this; nothing outside
-     * the event loop ever reaches `state.details`.
-     */
-    let publishedDetails: ReadonlyMap<string, PublishedDetail> = new Map()
-
-    /** How many issue identifiers are remembered for answering detail requests. */
-    const rememberedIdentifiers = 500
-
-    const noteIssue = (issue: Issue): void => {
-      state.identifiers.set(issue.id, issue.identifier)
-      if (state.identifiers.size > rememberedIdentifiers) {
-        const oldest = state.identifiers.keys().next()
-        if (!oldest.done) {
-          state.identifiers.delete(oldest.value)
-        }
-      }
-    }
+      rebuildEffectiveWorkflow(ports, workflow).pipe(
+        // Recorded before the outcome is raised: a rebuild that refused partway through has still
+        // displaced whatever the cells it did reach were holding.
+        Effect.tap((rebuilt) =>
+          Ref.update(state, (current) => Transitions.holdRetirements(current, rebuilt.retirements)),
+        ),
+        Effect.flatMap((rebuilt) => rebuilt.value),
+      )
 
     const detailRecord = (
       issue: Issue,
       attempt: number | null,
       dispatchLabels: readonly string[],
-    ): AgentDetailRecord => {
-      noteIssue(issue)
-      // A new session supersedes whatever aged out for this issue.
-      state.agedOutDetails.delete(issue.id)
-      const now = new Date()
-      const existing = state.details.get(issue.id)
-      if (existing !== undefined) {
-        // The same record carries every attempt for the issue, so ordering and session identity
-        // survive the boundary that separates them.
-        const started = recordAttemptStarted(
-          recordIssueRefreshed(existing, issue),
-          now,
-          attempt ?? 0,
-        )
-        state.details.set(issue.id, started)
-        return started
-      }
-      const record = createAgentDetailRecord({
-        issueId: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-        url: issue.url,
-        attempt,
-        startedAt: now,
-        workspacePathKey: workspaceKey(issue.identifier),
-        expectedBranch: issue.branchName ?? issueBranchName(issue),
-        dispatchLabels,
-      })
-      state.details.set(issue.id, record)
-      return record
-    }
-
-    const publishDetailsValue = (): void => {
-      const next = new Map<string, PublishedDetail>()
-      for (const [id, record] of state.details) {
-        const running = state.running.get(id)
-        const retry = state.retries.get(id)
-        const status: AgentDetailStatus =
-          running !== undefined ? 'running' : retry !== undefined ? 'retrying' : 'completed'
-        if (status === 'completed') {
-          if (!state.finishedDetails.includes(id)) {
-            state.finishedDetails.push(id)
+    ): Effect.Effect<AgentDetailRecord> =>
+      Effect.suspend(() => {
+        // Read before the transition, not inside it: a transition is a function of its inputs.
+        const now = new Date()
+        return Ref.modify(state, (current) => {
+          // A new session supersedes whatever aged out for this issue.
+          const noted = Transitions.revivedDetail(Transitions.noteIssue(current, issue), issue.id)
+          const existing = noted.details.get(issue.id)
+          if (existing !== undefined) {
+            // The same record carries every attempt for the issue, so ordering and session identity
+            // survive the boundary that separates them.
+            const started = recordAttemptStarted(
+              recordIssueRefreshed(existing, issue),
+              now,
+              attempt ?? 0,
+            )
+            return [started, Transitions.putDetail(noted, issue.id, started)]
           }
-        } else {
-          state.finishedDetails = state.finishedDetails.filter((finished) => finished !== id)
-        }
-        next.set(record.identifier, {
-          _tag: 'Found',
-          record,
-          context: {
-            self: agentDetailPath(record.identifier),
-            status,
-            stallTimeoutMs: running?.execution.stallTimeoutMs ?? 0,
-            workerHost: 'local',
-            // Read from the execution the agent is running under, falling back to the workflow in
-            // force: composing no code-review services at all is what "handoff disabled" means.
-            handoffEnabled: (running?.execution.codeReview ?? lastKnownGood.codeReview) !== null,
-            branch: record.handoff.expectedBranch,
-            retry:
-              retry === undefined
-                ? null
-                : { attempt: retry.attempt, dueAt: new Date(retry.dueAt), reason: retry.error },
-          },
+          const record = createAgentDetailRecord({
+            issueId: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+            url: issue.url,
+            attempt,
+            startedAt: now,
+            workspacePathKey: workspaceKey(issue.identifier),
+            expectedBranch: issue.branchName ?? issueBranchName(issue),
+            dispatchLabels,
+          })
+          return [record, Transitions.putDetail(noted, issue.id, record)]
         })
+      })
+
+    const persistHandoffs: Effect.Effect<void> = Effect.gen(function* () {
+      const current = yield* Ref.get(state)
+      if (handoffStoreDisabled || !current.startupRecoveryFinished || current.storeReadFailed) {
+        return
       }
-      while (state.finishedDetails.length > retainedCompletedDetails) {
-        const evicted = state.finishedDetails.shift()
-        const record = evicted === undefined ? undefined : state.details.get(evicted)
-        if (evicted !== undefined && record !== undefined) {
-          state.details.delete(evicted)
-          state.agedOutDetails.add(evicted)
-          if (state.agedOutDetails.size > rememberedIdentifiers) {
-            const oldest = state.agedOutDetails.values().next()
-            if (!oldest.done) {
-              state.agedOutDetails.delete(oldest.value)
-            }
-          }
-          next.set(record.identifier, { _tag: 'Completed' })
-        }
-      }
-      for (const [id, identifier] of state.identifiers) {
-        if (next.has(identifier)) {
-          continue
-        }
-        if (state.completed.has(id) || state.agedOutDetails.has(id)) {
-          next.set(identifier, { _tag: 'Completed' })
-          continue
-        }
-        next.set(
-          identifier,
-          state.claimed.has(id) && !state.running.has(id) && !state.handoffs.has(id)
-            ? { _tag: 'Unavailable', reason: 'The agent session is still starting' }
-            : { _tag: 'NoSession' },
-        )
-      }
-      publishedDetails = next
-    }
-    const handoffStorePath = resolve(
-      lastKnownGood.workflow.config.workspaceRoot,
-      '.symphony',
-      'handoffs.json',
-    )
-    let handoffStoreError: HandoffStoreError | null = null
-    let storeReadFailed = false
-    // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
-    // never be written back over it. A later handoff-enabled run still has to restore those
-    // pull requests.
-    const handoffStoreDisabled = lastKnownGood.codeReview === null
-    const loadedHandoffs = yield* handoffStoreDisabled
-      ? Effect.succeed<readonly HandoffSnapshot[]>([])
-      : loadHandoffs(handoffStorePath).pipe(
-          Effect.matchEffect({
-            onFailure: (error) => {
-              storeReadFailed = true
-              handoffStoreError = {
-                operation: error.operation,
-                message: error.message,
-                observedAt: new Date(),
-              }
-              return logError('handoff store read failed; preserving store during recovery', {
-                action: 'handoff_store_read',
+      yield* saveHandoffs(handoffStorePath, Transitions.handoffSnapshots(current)).pipe(
+        Effect.catchAll((error) => {
+          const observedAt = new Date()
+          return Ref.update(state, (failing) =>
+            Transitions.setHandoffStoreError(Transitions.noteRecovery(failing, { failed: 1 }), {
+              operation: error.operation,
+              message: error.message,
+              observedAt,
+            }),
+          ).pipe(
+            Effect.zipRight(
+              logError('handoff store write failed', {
+                action: 'handoff_store_write',
                 outcome: 'failed',
                 path: handoffStorePath,
                 error: error.message,
-              }).pipe(Effect.as<readonly HandoffSnapshot[]>([]))
-            },
-            onSuccess: (handoffs) => Effect.succeed(handoffs),
-          }),
-        )
-    let pendingRestoredHandoffs = loadedHandoffs
-    const recoveryCounts = {
-      loaded: loadedHandoffs.length,
-      recovered: 0,
-      skipped: 0,
-      failed: storeReadFailed ? 1 : 0,
-    }
-    let startupRecoveryFinished = false
-    const recoveryResolved = new Set<IssueId>()
-    for (const pending of pendingRestoredHandoffs) {
-      state.claimed.add(issueId(pending.issueId))
-    }
-    const handoffSnapshots = (): readonly HandoffSnapshot[] => [
-      ...pendingRestoredHandoffs,
-      ...[...state.handoffs.values()].map((handoff) => ({
-        issueId: handoff.issue.id,
-        identifier: handoff.issue.identifier,
-        pullRequestUrl: handoff.pullRequestUrl,
-        branchName: handoff.branchName,
-        state: handoff.state,
-        headSha: handoff.headSha,
-        reason: handoff.reason,
-        repairAttempts: handoff.repairHeadShas.length,
-        repairHeadShas: [...handoff.repairHeadShas],
-        repairObservedHeadShas: [...handoff.repairObservedHeadShas],
-        repairStartedHeadSha: Option.match(handoff.repair, {
-          onNone: () => null,
-          onSome: (repair) => repair.startedHeadSha,
-        }),
-        // Persisted beside the baseline: a refused dispatch owns a baseline without ever having
-        // run, so recovery must not read the next head change as that repair's output.
-        repairWorkerStarted: Option.match(handoff.repair, {
-          onNone: () => false,
-          onSome: (repair) => repair.workerStarted,
-        }),
-        reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
-        reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
-        observedAt: handoff.observedAt.toISOString(),
-      })),
-    ]
-    const persistHandoffs = (): Effect.Effect<void> => {
-      if (handoffStoreDisabled || !startupRecoveryFinished || storeReadFailed) {
-        return Effect.void
-      }
-      return saveHandoffs(handoffStorePath, handoffSnapshots()).pipe(
-        Effect.catchAll((error) => {
-          recoveryCounts.failed += 1
-          handoffStoreError = {
-            operation: error.operation,
-            message: error.message,
-            observedAt: new Date(),
-          }
-          return logError('handoff store write failed', {
-            action: 'handoff_store_write',
-            outcome: 'failed',
-            path: handoffStorePath,
-            error: error.message,
-          })
+              }),
+            ),
+          )
         }),
       )
-    }
-    const hydrateRestoredHandoffsEffect = (): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        if (pendingRestoredHandoffs.length === 0) {
-          return
-        }
-        const fetched = yield* lastKnownGood.tracker
-          .fetchIssuesByIds(pendingRestoredHandoffs.map((handoff) => issueId(handoff.issueId)))
-          .pipe(
-            Effect.matchEffect({
-              onFailure: (error) => {
-                recoveryCounts.failed += 1
-                return logWarning('persisted handoff hydration failed; retrying later', {
-                  action: 'handoff_hydration',
-                  outcome: 'failed',
-                  pending: pendingRestoredHandoffs.length,
-                  error: error.message,
-                }).pipe(Effect.as<readonly Issue[] | null>(null))
-              },
-              onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
-            }),
-          )
-        if (fetched === null) {
-          return
-        }
+    })
+
+    const hydrateRestoredHandoffs: Effect.Effect<void> = Effect.gen(function* () {
+      const pending = yield* Ref.get(state)
+      if (pending.pendingRestoredHandoffs.length === 0) {
+        return
+      }
+      const fetched = yield* pending.lastKnownGood.tracker
+        .fetchIssuesByIds(
+          pending.pendingRestoredHandoffs.map((handoff) => issueId(handoff.issueId)),
+        )
+        .pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              Ref.update(state, (failing) => Transitions.noteRecovery(failing, { failed: 1 })).pipe(
+                Effect.zipRight(
+                  logWarning('persisted handoff hydration failed; retrying later', {
+                    action: 'handoff_hydration',
+                    outcome: 'failed',
+                    pending: pending.pendingRestoredHandoffs.length,
+                    error: error.message,
+                  }),
+                ),
+                Effect.as<readonly Issue[] | null>(null),
+              ),
+            onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
+          }),
+        )
+      if (fetched === null) {
+        return
+      }
+      yield* Ref.update(state, (current) => {
         const hydrated = new Set<string>()
-        for (const restored of pendingRestoredHandoffs) {
+        let next = current
+        for (const restored of current.pendingRestoredHandoffs) {
           const issue = fetched.find((candidate) => candidate.id === restored.issueId)
           const numberMatch = /\/pulls?\/(\d+)(?:\/)?$/u.exec(restored.pullRequestUrl)
           const pullRequestNumber = Number(numberMatch?.[1])
           if (issue === undefined || !Number.isSafeInteger(pullRequestNumber)) {
             continue
           }
-          state.handoffs.set(issue.id, {
+          next = Transitions.putHandoff(next, issue.id, {
             issue,
-            execution: captureExecutionSnapshot(lastKnownGood, ''),
+            execution: captureExecutionSnapshot(next.lastKnownGood, ''),
             pullRequestNumber,
             pullRequestUrl: restored.pullRequestUrl,
             branchName: restored.branchName,
@@ -1023,77 +598,332 @@ export const startOrchestratorRuntime = (
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
             observedAt: new Date(restored.observedAt),
           })
-          state.claimed.add(issue.id)
-          noteIssue(issue)
+          next = Transitions.claimIssue(next, issue)
           hydrated.add(restored.issueId)
         }
-        pendingRestoredHandoffs = pendingRestoredHandoffs.filter(
-          (handoff) => !hydrated.has(handoff.issueId),
+        return Transitions.dropRestoredHandoffs(next, hydrated)
+      })
+    })
+
+    const recoverMissingHandoffs: Effect.Effect<void> = Effect.gen(function* () {
+      const opening = yield* Ref.get(state)
+      if (opening.startupRecoveryFinished) {
+        return
+      }
+      const effective = opening.lastKnownGood
+      const codeReview = effective.codeReview
+      if (codeReview === null) {
+        yield* Ref.update(state, Transitions.finishStartupRecovery)
+        return
+      }
+      const requiredLabels = effective.workflow.config.tracker.requiredLabels
+      const fetched = yield* effective.tracker
+        .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
+          hydrateDependencies: false,
+        })
+        .pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
+          }),
         )
-      })
-    yield* hydrateRestoredHandoffsEffect()
-    publishDetailsValue()
-    const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
-    let nextRunId = 1
-    const currentRefreshWaiters: Deferred.Deferred<void>[] = []
-    const nextRefreshWaiters: Deferred.Deferred<void>[] = []
-
-    /**
-     * The one bridge left from a plain callback into the runtime: an agent runner reports progress
-     * synchronously, and the update has to reach the mailbox from there. The runtime is captured
-     * once here rather than re-derived per call, and the fork is attached to the orchestrator's
-     * scope, so an offer in flight is interrupted with the orchestrator instead of outliving it.
-     * Running the offer synchronously from the callback instead would discard this fiber's
-     * context, and would throw outright if offering ever became asynchronous.
-     */
-    const runtime = yield* Effect.runtime<never>()
-    const orchestratorScope = yield* Effect.scope
-    const offerFromCallback = (event: OrchestratorEvent): void => {
-      Runtime.runFork(runtime)(Queue.offer(mailbox, event), { scope: orchestratorScope })
-    }
-
-    const requestTick = (source: 'startup' | 'timer' | 'change'): Effect.Effect<void> =>
-      Effect.suspend(() => {
-        if (context.tickQueued) {
-          if (context.pollRunning && source === 'change') {
-            context.followUpRequested = true
-          }
-          return Effect.void
+      if (fetched._tag === 'Failed') {
+        const counts = yield* Ref.modify(state, (failing) => {
+          const next = Transitions.noteRecovery(failing, { failed: 1 })
+          return [next.recoveryCounts, next] as const
+        })
+        yield* logError('startup handoff recovery issue fetch failed; retrying later', {
+          action: 'handoff_recovery',
+          outcome: 'failed',
+          loaded: counts.loaded,
+          recovered: counts.recovered,
+          skipped: counts.skipped,
+          failed: counts.failed,
+          error: fetched.error.message,
+        })
+        return
+      }
+      let attemptFailed = false
+      for (const issue of fetched.issues) {
+        if (!issue.dispatchable) {
+          yield* Ref.update(state, (pass) =>
+            Transitions.noteRecovery(Transitions.resolveRecovery(pass, issue.id), { skipped: 1 }),
+          )
+          continue
         }
-        context.tickQueued = true
-        return Queue.offer(mailbox, { _tag: 'Tick' }).pipe(Effect.asVoid)
-      })
-
-    const requestRefresh = Effect.suspend(() =>
-      Effect.gen(function* () {
-        const reply = yield* Deferred.make<void>()
-        if (context.pollRunning) {
-          nextRefreshWaiters.push(reply)
-        } else {
-          currentRefreshWaiters.push(reply)
-        }
-        yield* requestTick('change')
-        yield* Deferred.await(reply)
-      }),
-    )
-
-    // The watcher is installed before startup continues; only its consumption is forked, into the
-    // orchestrator's scope, so the tick a change requests is interrupted on shutdown rather than
-    // left running against a stopped orchestrator.
-    const workflowWatcher = yield* WorkflowWatcher
-    const workflowChanges = yield* workflowWatcher.changes(selectedWorkflowPath)
-    yield* Effect.forkScoped(Stream.runForEach(workflowChanges, () => requestTick('change')))
-
-    const scheduleNextTick = (): Effect.Effect<void, never, Scope.Scope> =>
-      Effect.gen(function* () {
-        if (context.pollTimer !== null) {
-          yield* Fiber.interrupt(context.pollTimer)
-        }
-        const intervalMs = lastKnownGood.workflow.config.pollingIntervalMs
-        context.pollTimer = yield* Effect.forkScoped(
-          Effect.sleep(intervalMs).pipe(Effect.zipRight(requestTick('timer')), Effect.asVoid),
+        const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
+        const isLabeled = requiredLabels.every(
+          (label) => label.length > 0 && labels.has(label.trim().toLowerCase()),
         )
+        const pass = yield* Ref.get(state)
+        if (
+          !isLabeled ||
+          pass.handoffs.has(issue.id) ||
+          pass.pendingRestoredHandoffs.some((handoff) => handoff.issueId === issue.id) ||
+          pass.recoveryResolved.has(issue.id)
+        ) {
+          continue
+        }
+        const found = yield* codeReview.findExistingHandoff(issue).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
+          }),
+        )
+        if (found._tag === 'Failed') {
+          attemptFailed = true
+          yield* Ref.update(state, (failing) => Transitions.noteRecovery(failing, { failed: 1 }))
+          yield* logWarning('startup handoff recovery lookup failed; retrying later', {
+            ...logContext(issue),
+            action: 'handoff_recovery',
+            outcome: 'failed',
+            error: found.error.message,
+          })
+          continue
+        }
+        const foundResult = found.result
+        if (foundResult._tag === 'NoBranch') {
+          yield* Ref.update(state, (skipping) =>
+            Transitions.noteRecovery(Transitions.resolveRecovery(skipping, issue.id), {
+              skipped: 1,
+            }),
+          )
+          continue
+        }
+        const observedAt = new Date()
+        const inspected = yield* codeReview.inspectPullRequest(foundResult.pullRequestNumber).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
+          }),
+        )
+        const disposition =
+          inspected._tag === 'Succeeded'
+            ? classifyPullRequest(inspected.observation)
+            : { state: 'awaiting_checks' as const, reason: inspected.error.message }
+        const opened = yield* detailRecord(issue, null, requiredLabels)
+        const branchObserved = recordHandoff(opened, observedAt, {
+          step: 'remote_branch',
+          status: 'observed',
+          message: `Remote branch ${foundResult.branchName} is present`,
+          remoteBranch: foundResult.branchName,
+        })
+        yield* Ref.update(state, (recovering) => {
+          const withDetail = Transitions.putDetail(
+            recovering,
+            issue.id,
+            recordHandoff(branchObserved, observedAt, {
+              step: 'pull_request',
+              status: 'observed',
+              message: 'Recovered an existing pull request during startup',
+              pullRequest: {
+                status: 'reused',
+                number: foundResult.pullRequestNumber,
+                url: foundResult.pullRequestUrl,
+                state: disposition.state,
+              },
+            }),
+          )
+          const withHandoff = Transitions.putHandoff(withDetail, issue.id, {
+            issue,
+            execution: captureExecutionSnapshot(effective, ''),
+            pullRequestNumber: foundResult.pullRequestNumber,
+            pullRequestUrl: foundResult.pullRequestUrl,
+            branchName: foundResult.branchName,
+            state: disposition.state,
+            headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
+            reason: 'reason' in disposition ? disposition.reason : null,
+            repairHeadShas: [],
+            repairObservedHeadShas: [],
+            repair: Option.none(),
+            reviewRequestedHeadSha: null,
+            reviewCompletedHeadSha: null,
+            observedAt,
+          })
+          return Transitions.noteRecovery(
+            Transitions.resolveRecovery(Transitions.claimIssue(withHandoff, issue), issue.id),
+            { recovered: 1 },
+          )
+        })
+        yield* logInfo('open pull request handoff recovered', {
+          ...logContext(issue),
+          action: 'handoff_recovery',
+          outcome: 'recovered',
+          branch: foundResult.branchName,
+          pull_request_url: foundResult.pullRequestUrl,
+        })
+      }
+      if (attemptFailed) {
+        return
+      }
+      const finished = yield* Ref.modify(state, (pass) => {
+        const next = Transitions.finishStartupRecovery(pass)
+        return [next, next] as const
       })
+      yield* logInfo('startup handoff recovery completed', {
+        action: 'handoff_recovery',
+        outcome: finished.storeReadFailed ? 'degraded' : 'completed',
+        loaded: finished.recoveryCounts.loaded,
+        recovered: finished.recoveryCounts.recovered,
+        skipped: finished.recoveryCounts.skipped,
+        failed: finished.recoveryCounts.failed,
+      })
+      yield* persistHandoffs
+    })
+
+    const applyLifecycleUpdate = (
+      entry: RunningEntry,
+      update: AgentEvent,
+    ): Effect.Effect<RunningEntry> =>
+      Effect.gen(function* () {
+        const applied = Transitions.applyRunEvent(entry, update)
+        if (applied.sessionId !== null && update.event === 'session_started') {
+          yield* logInfo('action=session outcome=started', {
+            ...sessionLogContext(applied),
+            action: 'session',
+            outcome: 'started',
+            error: null,
+          })
+        }
+        if (applied.sessionId !== null && update.event === 'turn_started') {
+          yield* logInfo('action=turn outcome=started', {
+            ...sessionLogContext(applied),
+            action: 'turn',
+            outcome: 'started',
+            error: null,
+          })
+          return { ...applied, turnActive: true }
+        }
+        if (
+          applied.sessionId !== null &&
+          (update.event === 'turn/completed' ||
+            update.event === 'turn/failed' ||
+            update.event === 'turn/terminated') &&
+          update.turnStatus !== null
+        ) {
+          const outcome = ports.agentRunner.semantics.turnOutcome(update.turnStatus)
+          const completed = outcome === 'completed'
+          const cancelled = outcome === 'cancelled'
+          yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
+            ...sessionLogContext(applied),
+            action: 'turn',
+            outcome,
+            error: completed || cancelled ? null : `turn finished with status ${update.turnStatus}`,
+          })
+          return { ...applied, turnActive: false }
+        }
+        return applied
+      })
+
+    const cancelRunning = (
+      id: IssueId,
+      cleanupWorkspace: boolean,
+      reason = 'the orchestrator cancelled the run',
+      repairDisposition: RepairDisposition = 'release',
+    ): Effect.Effect<Option.Option<RunningEntry>> =>
+      Effect.gen(function* () {
+        const before = yield* Ref.get(state)
+        const running = before.running.get(id)
+        if (running === undefined) {
+          return Option.none()
+        }
+        const queuedBeforeInterruption = before.pendingLifecycle.get(id)?.length ?? 0
+        yield* Fiber.interrupt(running.fiber)
+        const queuedLifecycle = yield* Ref.modify(state, (current) =>
+          Transitions.takePendingLifecycle(current, id),
+        )
+        let entry = running
+        for (const update of queuedLifecycle.slice(0, queuedBeforeInterruption)) {
+          entry = yield* applyLifecycleUpdate(entry, update)
+        }
+        if (entry.sessionId !== null && entry.turnId !== null && entry.turnActive) {
+          yield* logInfo('action=turn outcome=cancelled', {
+            ...sessionLogContext(entry),
+            action: 'turn',
+            outcome: 'cancelled',
+            error: null,
+          })
+          entry = { ...entry, turnActive: false }
+        }
+        const settled = yield* Ref.modify(state, (current) =>
+          Transitions.applyPendingTelemetry(current, id, entry),
+        )
+        const endedAt = new Date()
+        yield* Ref.update(state, (current) => {
+          const [, ended] = Transitions.endRun(current, id, null)
+          const accounted = Transitions.accountEndedRun(ended, settled, endedAt.getTime())
+          const handoff = accounted.handoffs.get(id)
+          // `retain` leaves the identity for the retry that continues this repair; `settle` keeps
+          // the baseline with nothing behind it, so one inspection can still attribute a head the
+          // worker pushed before it stopped; `release` ends the repair outright.
+          const disposed =
+            handoff === undefined || repairDisposition === 'retain'
+              ? accounted
+              : Transitions.putHandoff(
+                  accounted,
+                  id,
+                  repairDisposition === 'release' ? releaseRepair(handoff) : settleRepair(handoff),
+                )
+          return Transitions.releaseClaim(
+            Transitions.updateDetail(disposed, id, (record) =>
+              recordCancellation(record, endedAt, reason),
+            ),
+            id,
+          )
+        })
+        if (repairDisposition !== 'retain') {
+          yield* persistHandoffs
+        }
+        if (settled.sessionId !== null) {
+          yield* logInfo('action=session outcome=cancelled', {
+            ...sessionLogContext(settled),
+            action: 'session',
+            outcome: 'cancelled',
+            error: null,
+          })
+        }
+        if (cleanupWorkspace) {
+          yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
+            Effect.catchAll((error) =>
+              logWarning('terminal workspace cleanup failed', {
+                ...logContext(settled.issue),
+                action: 'workspace_cleanup',
+                outcome: 'failed',
+                error: error.message,
+              }),
+            ),
+          )
+        }
+        return Option.some(settled)
+      })
+
+    const requestTick = (source: Transitions.TickSource): Effect.Effect<void> =>
+      Ref.modify(state, (current) => Transitions.requestTick(current, source)).pipe(
+        Effect.flatMap((decision) =>
+          decision.enqueue
+            ? Queue.offer(mailbox, { _tag: 'Tick' as const }).pipe(Effect.asVoid)
+            : Effect.void,
+        ),
+      )
+
+    const requestRefresh = Effect.gen(function* () {
+      const reply = yield* Deferred.make<void>()
+      yield* Ref.update(state, (current) => Transitions.awaitRefresh(current, reply))
+      yield* requestTick('change')
+      yield* Deferred.await(reply)
+    })
+
+    const scheduleNextTick: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
+      const current = yield* Ref.get(state)
+      if (current.pollTimer !== null) {
+        yield* Fiber.interrupt(current.pollTimer)
+      }
+      const intervalMs = current.lastKnownGood.workflow.config.pollingIntervalMs
+      const timer = yield* Effect.forkScoped(
+        Effect.sleep(intervalMs).pipe(Effect.zipRight(requestTick('timer')), Effect.asVoid),
+      )
+      yield* Ref.update(state, (next) => Transitions.setPollTimer(next, timer))
+    })
 
     const scheduleRetry = (
       issue: Issue,
@@ -1102,13 +932,10 @@ export const startOrchestratorRuntime = (
       continuation: boolean,
     ): Effect.Effect<void, never, Scope.Scope> =>
       Effect.gen(function* () {
-        const existing = state.retries.get(issue.id)
-        if (existing !== undefined) {
-          yield* Fiber.interrupt(existing.fiber)
-        }
+        const current = yield* Ref.get(state)
         const delay = continuation
           ? 1_000
-          : retryDelayMs(attempt, lastKnownGood.workflow.config.agent.maxRetryBackoffMs)
+          : retryDelayMs(attempt, current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs)
         const dueAt = Date.now() + delay
         const fiber = yield* Effect.forkScoped(
           Effect.sleep(delay).pipe(
@@ -1116,16 +943,18 @@ export const startOrchestratorRuntime = (
             Effect.asVoid,
           ),
         )
-        state.retries.set(issue.id, { issue, attempt, dueAt, error, fiber })
-        state.claimed.add(issue.id)
-        noteIssue(issue)
-        const record = state.details.get(issue.id)
-        if (record !== undefined) {
-          state.details.set(
-            issue.id,
-            recordRetryScheduled(record, new Date(), attempt, new Date(dueAt), error),
-          )
+        const displaced = yield* Ref.modify(state, (pending) =>
+          Transitions.scheduleRetry(pending, { issue, attempt, dueAt, error, fiber }),
+        )
+        if (Option.isSome(displaced)) {
+          yield* Fiber.interrupt(displaced.value.fiber)
         }
+        const scheduledAt = new Date()
+        yield* Ref.update(state, (pending) =>
+          Transitions.updateDetail(pending, issue.id, (record) =>
+            recordRetryScheduled(record, scheduledAt, attempt, new Date(dueAt), error),
+          ),
+        )
         yield* logInfo('action=retry outcome=scheduled', {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
@@ -1137,525 +966,162 @@ export const startOrchestratorRuntime = (
         })
       })
 
-    /** Mirrors an observed pull-request disposition onto the issue's retained handoff detail. */
     const noteHandoffOutcome = (
       id: IssueId,
       handoff: HandoffEntry,
       outcome: 'pull_request_open' | 'merged' | 'intervention_required',
-    ): void => {
-      const record = state.details.get(id)
-      if (record === undefined) {
+    ): Effect.Effect<void> =>
+      Ref.update(state, (current) =>
+        Transitions.updateDetail(current, id, (record) =>
+          recordHandoff(record, handoff.observedAt, {
+            step: 'outcome',
+            status: outcome === 'intervention_required' ? 'failed' : 'observed',
+            message: handoff.reason,
+            pullRequest: {
+              status:
+                record.handoff.pullRequest.status === 'pending'
+                  ? 'reused'
+                  : record.handoff.pullRequest.status,
+              number: handoff.pullRequestNumber,
+              url: handoff.pullRequestUrl,
+              state: handoff.state,
+            },
+            outcome,
+          }),
+        ),
+      )
+
+    const reconcile: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
+      const stalling = yield* Ref.get(state)
+      if (stalling.running.size === 0) {
         return
       }
-      const observed = recordHandoff(record, handoff.observedAt, {
-        step: 'outcome',
-        status: outcome === 'intervention_required' ? 'failed' : 'observed',
-        message: handoff.reason,
-        pullRequest: {
-          status:
-            record.handoff.pullRequest.status === 'pending'
-              ? 'reused'
-              : record.handoff.pullRequest.status,
-          number: handoff.pullRequestNumber,
-          url: handoff.pullRequestUrl,
-          state: handoff.state,
-        },
-        outcome,
-      })
-      state.details.set(id, observed)
-    }
-
-    const recoverMissingHandoffs = (): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        if (startupRecoveryFinished) {
-          return
-        }
-        const effective = lastKnownGood
-        if (effective.codeReview === null) {
-          startupRecoveryFinished = true
-          return
-        }
-        const requiredLabels = effective.workflow.config.tracker.requiredLabels
-        const fetched = yield* effective.tracker
-          .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
-            hydrateDependencies: false,
-          })
-          .pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-            }),
+      const now = Date.now()
+      for (const [id, entry] of stalling.running) {
+        const stallTimeout = entry.execution.stallTimeoutMs
+        const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
+        if (stallTimeout > 0 && now - activeAt > stallTimeout) {
+          const ended = yield* cancelRunning(
+            id,
+            false,
+            `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
+            // The retry scheduled just below continues this repair from the same baseline.
+            'retain',
           )
-        if (fetched._tag === 'Failed') {
-          recoveryCounts.failed += 1
-          yield* logError('startup handoff recovery issue fetch failed; retrying later', {
-            action: 'handoff_recovery',
-            outcome: 'failed',
-            loaded: recoveryCounts.loaded,
-            recovered: recoveryCounts.recovered,
-            skipped: recoveryCounts.skipped,
-            failed: recoveryCounts.failed,
-            error: fetched.error.message,
-          })
-          return
-        }
-        let attemptFailed = false
-        for (const issue of fetched.issues) {
-          if (!issue.dispatchable) {
-            recoveryResolved.add(issue.id)
-            recoveryCounts.skipped += 1
-            continue
-          }
-          const labels = new Set(issue.labels.map((label) => label.trim().toLowerCase()))
-          const isLabeled = requiredLabels.every(
-            (label) => label.length > 0 && labels.has(label.trim().toLowerCase()),
-          )
-          if (
-            !isLabeled ||
-            state.handoffs.has(issue.id) ||
-            pendingRestoredHandoffs.some((handoff) => handoff.issueId === issue.id) ||
-            recoveryResolved.has(issue.id)
-          ) {
-            continue
-          }
-          const found = yield* effective.codeReview.findExistingHandoff(issue).pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (result) => ({ _tag: 'Succeeded' as const, result }),
-            }),
-          )
-          if (found._tag === 'Failed') {
-            attemptFailed = true
-            recoveryCounts.failed += 1
-            yield* logWarning('startup handoff recovery lookup failed; retrying later', {
-              ...logContext(issue),
-              action: 'handoff_recovery',
-              outcome: 'failed',
-              error: found.error.message,
-            })
-            continue
-          }
-          if (found.result._tag === 'NoBranch') {
-            recoveryResolved.add(issue.id)
-            recoveryCounts.skipped += 1
-            continue
-          }
-          const observedAt = new Date()
-          const inspected = yield* effective.codeReview
-            .inspectPullRequest(found.result.pullRequestNumber)
-            .pipe(
-              Effect.match({
-                onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-                onSuccess: (observation) => ({ _tag: 'Succeeded' as const, observation }),
-              }),
-            )
-          const disposition =
-            inspected._tag === 'Succeeded'
-              ? classifyPullRequest(inspected.observation)
-              : {
-                  state: 'awaiting_checks' as const,
-                  reason: inspected.error.message,
-                }
-          const branchObserved = recordHandoff(
-            detailRecord(issue, null, requiredLabels),
-            observedAt,
-            {
-              step: 'remote_branch',
-              status: 'observed',
-              message: `Remote branch ${found.result.branchName} is present`,
-              remoteBranch: found.result.branchName,
-            },
-          )
-          state.details.set(
-            issue.id,
-            recordHandoff(branchObserved, observedAt, {
-              step: 'pull_request',
-              status: 'observed',
-              message: 'Recovered an existing pull request during startup',
-              pullRequest: {
-                status: 'reused',
-                number: found.result.pullRequestNumber,
-                url: found.result.pullRequestUrl,
-                state: disposition.state,
-              },
-            }),
-          )
-          state.handoffs.set(issue.id, {
-            issue,
-            execution: captureExecutionSnapshot(effective, ''),
-            pullRequestNumber: found.result.pullRequestNumber,
-            pullRequestUrl: found.result.pullRequestUrl,
-            branchName: found.result.branchName,
-            state: disposition.state,
-            headSha: inspected._tag === 'Succeeded' ? inspected.observation.headSha : null,
-            reason: 'reason' in disposition ? disposition.reason : null,
-            repairHeadShas: [],
-            repairObservedHeadShas: [],
-            repair: Option.none(),
-            reviewRequestedHeadSha: null,
-            reviewCompletedHeadSha: null,
-            observedAt,
-          })
-          state.claimed.add(issue.id)
-          noteIssue(issue)
-          recoveryResolved.add(issue.id)
-          recoveryCounts.recovered += 1
-          yield* logInfo('open pull request handoff recovered', {
-            ...logContext(issue),
-            action: 'handoff_recovery',
-            outcome: 'recovered',
-            branch: found.result.branchName,
-            pull_request_url: found.result.pullRequestUrl,
-          })
-        }
-        if (attemptFailed) {
-          return
-        }
-        startupRecoveryFinished = true
-        yield* logInfo('startup handoff recovery completed', {
-          action: 'handoff_recovery',
-          outcome: storeReadFailed ? 'degraded' : 'completed',
-          loaded: recoveryCounts.loaded,
-          recovered: recoveryCounts.recovered,
-          skipped: recoveryCounts.skipped,
-          failed: recoveryCounts.failed,
-        })
-        yield* persistHandoffs()
-      })
-
-    const endRunning = (id: IssueId, expectedRunId: number | null): RunningEntry | null => {
-      const entry = state.running.get(id)
-      if (entry === undefined || (expectedRunId !== null && entry.runId !== expectedRunId)) {
-        return null
-      }
-      state.running.delete(id)
-      return entry
-    }
-
-    const accountEndedRuntime = (entry: RunningEntry, now: number): void => {
-      const seconds = Math.max(now - entry.startedAt.getTime(), 0) / 1_000
-      state.totals = {
-        inputTokens: state.totals.inputTokens + entry.tokens.inputTokens,
-        outputTokens: state.totals.outputTokens + entry.tokens.outputTokens,
-        totalTokens: state.totals.totalTokens + entry.tokens.totalTokens,
-        secondsRunning: state.totals.secondsRunning + seconds,
-      }
-    }
-
-    const applyPendingTelemetry = (id: IssueId, entry: RunningEntry): void => {
-      const usage = pendingUsage.get(id)
-      if (usage !== undefined) {
-        entry.lastReportedTokens = usage
-        entry.tokens = {
-          inputTokens: Math.max(entry.tokens.inputTokens, usage.inputTokens),
-          outputTokens: Math.max(entry.tokens.outputTokens, usage.outputTokens),
-          totalTokens: Math.max(entry.tokens.totalTokens, usage.totalTokens),
-        }
-      }
-      if (pendingRateLimits !== null) {
-        state.rateLimits = mergeSparseObject(state.rateLimits, pendingRateLimits)
-        pendingRateLimits = null
-      }
-      pendingUsage.delete(id)
-    }
-
-    const applyLifecycleUpdate = (entry: RunningEntry, update: AgentEvent): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        entry.lastEvent = update.event
-        entry.lastEventAt = update.timestamp
-        if (update.message !== null) {
-          entry.lastMessage = update.message
-        }
-        entry.processId = update.processId
-        entry.threadId = update.threadId ?? entry.threadId
-        if (update.turnId !== null && update.turnCount >= entry.turnCount) {
-          entry.turnId = update.turnId
-        }
-        entry.sessionId = update.sessionId ?? entry.sessionId
-        entry.turnCount = Math.max(entry.turnCount, update.turnCount)
-        if (entry.sessionId !== null && update.event === 'session_started') {
-          yield* logInfo('action=session outcome=started', {
-            ...sessionLogContext(entry),
-            action: 'session',
-            outcome: 'started',
-            error: null,
-          })
-        }
-        if (entry.sessionId !== null && update.event === 'turn_started') {
-          entry.turnActive = true
-          yield* logInfo('action=turn outcome=started', {
-            ...sessionLogContext(entry),
-            action: 'turn',
-            outcome: 'started',
-            error: null,
-          })
-        }
-        if (
-          entry.sessionId !== null &&
-          (update.event === 'turn/completed' ||
-            update.event === 'turn/failed' ||
-            update.event === 'turn/terminated') &&
-          update.turnStatus !== null
-        ) {
-          const outcome = ports.agentRunner.semantics.turnOutcome(update.turnStatus)
-          const completed = outcome === 'completed'
-          const cancelled = outcome === 'cancelled'
-          entry.turnActive = false
-          yield* (completed || cancelled ? logInfo : logError)(`action=turn outcome=${outcome}`, {
-            ...sessionLogContext(entry),
-            action: 'turn',
-            outcome,
-            error: completed || cancelled ? null : `turn finished with status ${update.turnStatus}`,
-          })
-        }
-      })
-
-    const takePendingLifecycle = (id: IssueId): readonly AgentEvent[] => {
-      const updates = pendingLifecycle.get(id) ?? []
-      pendingLifecycle.delete(id)
-      return updates
-    }
-
-    const cancelRunning = (
-      id: IssueId,
-      cleanupWorkspace: boolean,
-      reason = 'the orchestrator cancelled the run',
-      repairDisposition: RepairDisposition = 'release',
-    ): Effect.Effect<RunningEntry | null, never> =>
-      Effect.gen(function* () {
-        const entry = state.running.get(id)
-        if (entry === undefined) {
-          return null
-        }
-        const queuedBeforeInterruption = pendingLifecycle.get(id)?.length ?? 0
-        yield* Fiber.interrupt(entry.fiber)
-        const queuedLifecycle = takePendingLifecycle(id)
-        yield* Effect.forEach(
-          queuedLifecycle.slice(0, queuedBeforeInterruption),
-          (update) => applyLifecycleUpdate(entry, update),
-          {
-            discard: true,
-          },
-        )
-        if (entry.sessionId !== null && entry.turnId !== null && entry.turnActive) {
-          yield* logInfo('action=turn outcome=cancelled', {
-            ...sessionLogContext(entry),
-            action: 'turn',
-            outcome: 'cancelled',
-            error: null,
-          })
-          entry.turnActive = false
-        }
-        applyPendingTelemetry(id, entry)
-        endRunning(id, null)
-        accountEndedRuntime(entry, Date.now())
-        const handoff = state.handoffs.get(id)
-        if (
-          handoff !== undefined &&
-          Option.isSome(handoff.repair) &&
-          repairDisposition !== 'retain'
-        ) {
-          handoff.repair =
-            repairDisposition === 'release'
-              ? Option.none()
-              : Option.some({ ...handoff.repair.value, inFlight: false })
-          yield* persistHandoffs()
-        }
-        const record = state.details.get(id)
-        if (record !== undefined) {
-          state.details.set(id, recordCancellation(record, new Date(), reason))
-        }
-        state.claimed.delete(id)
-        if (entry.sessionId !== null) {
-          yield* logInfo('action=session outcome=cancelled', {
-            ...sessionLogContext(entry),
-            action: 'session',
-            outcome: 'cancelled',
-            error: null,
-          })
-        }
-        if (cleanupWorkspace) {
-          yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
-            Effect.catchAll((error) =>
-              logWarning('terminal workspace cleanup failed', {
-                ...logContext(entry.issue),
-                action: 'workspace_cleanup',
-                outcome: 'failed',
-                error: error.message,
-              }),
-            ),
-          )
-        }
-        return entry
-      })
-
-    const reconcile = (): Effect.Effect<void, never, Scope.Scope> =>
-      Effect.gen(function* () {
-        if (state.running.size === 0) {
-          return
-        }
-        const now = Date.now()
-        for (const [id, entry] of state.running) {
-          const execution = entry.execution
-          const stallTimeout = execution.stallTimeoutMs
-          const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
-          if (stallTimeout > 0 && now - activeAt > stallTimeout) {
-            const ended = yield* cancelRunning(
-              id,
+          if (Option.isSome(ended)) {
+            yield* scheduleRetry(
+              ended.value.issue,
+              (ended.value.attempt ?? 0) + 1,
+              'agent stalled',
               false,
-              `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
-              'retain',
             )
-            if (ended !== null) {
-              yield* scheduleRetry(ended.issue, (ended.attempt ?? 0) + 1, 'agent stalled', false)
-            }
           }
         }
-        if (state.running.size === 0) {
-          return
+      }
+      const refreshing = yield* Ref.get(state)
+      if (refreshing.running.size === 0) {
+        return
+      }
+      for (const [id, entry] of refreshing.running) {
+        const execution = entry.execution
+        const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
+          Effect.match({
+            onFailure: (error) => ({ _tag: 'Failed' as const, error }),
+            onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
+          }),
+        )
+        if (refreshResult._tag === 'Failed') {
+          yield* logWarning('reconciliation failed; keeping worker running', {
+            ...logContext(entry.issue),
+            action: 'reconciliation',
+            outcome: 'failed',
+            error: refreshResult.error.message,
+          })
+          continue
         }
-        for (const [id, entry] of state.running) {
-          const execution = entry.execution
-          const refreshResult = yield* execution.tracker.fetchIssuesByIds([id]).pipe(
-            Effect.match({
-              onFailure: (error) => ({ _tag: 'Failed' as const, error }),
-              onSuccess: (issues) => ({ _tag: 'Succeeded' as const, issues }),
-            }),
+        const issue = refreshResult.issues.find((candidate) => candidate.id === id)
+        if (issue === undefined) {
+          // The handoff outlives the issue the tracker stopped reporting, so a head this worker
+          // pushed is still the repair's to account for on the next inspection.
+          yield* cancelRunning(id, false, 'the tracker no longer reports the issue', 'settle')
+          continue
+        }
+        const terminal = stateIsIn(issue.state, execution.terminalStates)
+        if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
+          yield* cancelRunning(
+            id,
+            terminal,
+            terminal
+              ? `the issue reached the terminal state ${issue.state}`
+              : `the issue left its active states as ${issue.state}`,
+            // A worker may have pushed immediately before its issue left the active states, and
+            // nothing continues it: keep the baseline for one inspection so that head is
+            // attributed. A terminal issue abandons the pull request outright.
+            terminal ? 'release' : 'settle',
           )
-          if (refreshResult._tag === 'Failed') {
-            yield* logWarning('reconciliation failed; keeping worker running', {
-              ...logContext(entry.issue),
-              action: 'reconciliation',
-              outcome: 'failed',
-              error: refreshResult.error.message,
-            })
-            continue
-          }
-          const issue = refreshResult.issues.find((candidate) => candidate.id === id)
-          if (issue === undefined) {
-            // The handoff outlives the issue the tracker stopped reporting, so a head this worker
-            // pushed is still the repair's to account for on the next inspection.
-            yield* cancelRunning(id, false, 'the tracker no longer reports the issue', 'settle')
-            continue
-          }
-          const terminal = stateIsIn(issue.state, execution.terminalStates)
-          if (terminal || !issueIsActiveInSnapshot(issue, execution)) {
-            yield* cancelRunning(
-              id,
-              terminal,
-              terminal
-                ? `the issue reached the terminal state ${issue.state}`
-                : `the issue left its active states as ${issue.state}`,
-              // A repair worker may have pushed immediately before its issue left the active
-              // states, and nothing continues it: keep the baseline for one inspection so that
-              // head is attributed. A terminal issue abandons the pull request outright.
-              terminal ? 'release' : 'settle',
-            )
-          } else {
-            entry.issue = issue
-          }
+        } else {
+          yield* Ref.update(state, (current) =>
+            Transitions.updateRun(current, id, (live) => ({ ...live, issue })),
+          )
         }
-      })
+      }
+    })
+
+    /**
+     * The one bridge left from a plain callback into the runtime: an agent runner reports progress
+     * synchronously, and what the report owes the run — the telemetry it buffers and the mailbox
+     * event it raises — has to be applied from there. The runtime is captured once here rather than
+     * re-derived per call, and the fork is attached to the orchestrator's scope, so work in flight
+     * is interrupted with the orchestrator instead of outliving it.
+     *
+     * The effect a caller hands this must be one that completes without suspending — a state update
+     * and an offer to an unbounded queue — because the fork starts immediately and the callback's
+     * caller is entitled to assume the report has landed by the time it returns.
+     */
+    const runtime = yield* Effect.runtime<never>()
+    const orchestratorScope = yield* Effect.scope
+    const runFromCallback = (effect: Effect.Effect<void>): void => {
+      Runtime.runFork(runtime)(effect, { scope: orchestratorScope })
+    }
 
     const context: OrchestratorContext = {
       state,
       ports,
-      pendingRetirements,
-      supersededPorts,
       selectedWorkflowPath,
       mailbox,
-      currentRefreshWaiters,
-      nextRefreshWaiters,
-      pendingUsage,
-      pendingLifecycle,
-      get lastKnownGood() {
-        return lastKnownGood
-      },
-      set lastKnownGood(value) {
-        lastKnownGood = value
-      },
-      get workflowReloadError() {
-        return workflowReloadError
-      },
-      set workflowReloadError(value) {
-        workflowReloadError = value
-      },
-      get pendingRateLimits() {
-        return pendingRateLimits
-      },
-      set pendingRateLimits(value) {
-        pendingRateLimits = value
-      },
-      get nextRunId() {
-        return nextRunId
-      },
-      set nextRunId(value) {
-        nextRunId = value
-      },
-      get startupRecoveryFinished() {
-        return startupRecoveryFinished
-      },
-      set startupRecoveryFinished(value) {
-        startupRecoveryFinished = value
-      },
-      get storeReadFailed() {
-        return storeReadFailed
-      },
-      set storeReadFailed(value) {
-        storeReadFailed = value
-      },
-      get handoffStoreError() {
-        return handoffStoreError
-      },
-      set handoffStoreError(value) {
-        handoffStoreError = value
-      },
-      recoveryCounts,
-      get publishedDetails() {
-        return publishedDetails
-      },
-      set publishedDetails(value) {
-        publishedDetails = value
-      },
-      tickQueued: false,
-      pollRunning: false,
-      followUpRequested: false,
-      pollTimer: null,
-      detailRecordValue: detailRecord,
-      scheduleRetryEffect: scheduleRetry,
-      captureExecutionSnapshotValue: captureExecutionSnapshot,
-      issueIsActiveInSnapshotValue: issueIsActiveInSnapshot,
-      issueIsRoutableInSnapshotValue: issueIsRoutableInSnapshot,
-      logContextValue: logContext,
-      identifierIssueNumberValue: identifierIssueNumber,
-      noteHandoffOutcomeValue: noteHandoffOutcome,
-      stateHasSlotValue: stateHasSlot,
-      persistHandoffsEffect: persistHandoffs,
-      handoffSnapshotsValue: handoffSnapshots,
-      recoverMissingHandoffsEffect: recoverMissingHandoffs,
-      reconcileEffect: reconcile,
-      makeEffectiveWorkflowEffect: makeEffectiveWorkflow,
-      sortIssuesValue: sortIssues,
-      issueIsActiveValue: issueIsActive,
-      issueIsRoutableValue: issueIsRoutable,
-      stateIsInValue: stateIsIn,
-      offerFromCallbackValue: offerFromCallback,
-      applyLifecycleUpdateEffect: applyLifecycleUpdate,
-      endRunningValue: endRunning,
-      applyPendingTelemetryValue: applyPendingTelemetry,
-      accountEndedRuntimeValue: accountEndedRuntime,
-      sessionLogContextValue: sessionLogContext,
-      cancelRunningEffect: cancelRunning,
-      scheduleNextTickEffect: scheduleNextTick,
-      hydrateRestoredHandoffsEffect,
-      publishDetailsValue,
+      detailRecord,
+      scheduleRetry,
+      applyLifecycleUpdate,
+      cancelRunning,
+      noteHandoffOutcome,
+      persistHandoffs,
+      recoverMissingHandoffs,
+      reconcile,
+      hydrateRestoredHandoffs,
+      makeEffectiveWorkflow,
+      scheduleNextTick,
+      requestTick,
+      runFromCallback,
+      publish,
     }
+
+    yield* hydrateRestoredHandoffs
+    yield* publish
+
+    // The watcher is installed before startup continues; only its consumption is forked, into the
+    // orchestrator's scope, so the tick a change requests is interrupted on shutdown rather than
+    // left running against a stopped orchestrator.
+    const workflowWatcher = yield* WorkflowWatcher
+    const workflowChanges = yield* workflowWatcher.changes(selectedWorkflowPath)
+    yield* Effect.forkScoped(Stream.runForEach(workflowChanges, () => requestTick('change')))
 
     const eventLoopFiber = yield* Effect.forkScoped(eventLoop(context))
     yield* requestTick('startup')
 
     return {
-      snapshot: Effect.sync(() => createSnapshot(context)),
+      snapshot: Ref.get(state).pipe(
+        Effect.map((current) => createSnapshot(current, selectedWorkflowPath)),
+      ),
       refresh: requestRefresh,
       agentDetail: (identifier) => agentDetail(context, identifier),
       setIssuePaused: (issueNumber, paused) =>
