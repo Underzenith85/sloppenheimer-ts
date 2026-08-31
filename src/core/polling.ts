@@ -10,6 +10,7 @@ import { dispatch } from './dispatch.js'
 import {
   afterRepairDispatched,
   attributeRepairHead,
+  gateReview,
   releaseRepair,
   repairIssue,
   repairLimit,
@@ -157,6 +158,13 @@ const prepareRepairRetry = (
     const attributed: HandoffEntry = Option.isSome(attribution)
       ? attribution.value.handoff
       : handoff
+    // The same gate reconciliation applies before it repairs anything: a head this attempt just
+    // pushed has no completed review yet, and repairing it would spend one of the budget with no
+    // review feedback to work from. Standing down leaves the next pass to request that review.
+    if (Option.isSome(gateReview(attributed, inspected.observation))) {
+      yield* writeHandoff(context, id, releaseRepair(attributed))
+      return Option.none()
+    }
     const disposition = classifyPullRequest(inspected.observation)
     if (disposition.state !== 'repair_needed') {
       yield* writeHandoff(context, id, releaseRepair(attributed))
@@ -610,9 +618,14 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           if (Option.isNone(repaired)) {
             break
           }
+          // Admission is judged against the workflow the run will actually be dispatched under,
+          // the way reconciliation admits the first repair, and against state re-read after the
+          // refresh above, which awaited a pull-request inspection another dispatch could span.
+          const admitting = yield* Ref.get(context.state)
+          const admissionWorkflow = repaired.value.effective?.workflow ?? effective.workflow
           // Deferred with the refreshed repair identity, not the one this retry arrived with:
           // waiting for a slot is not a reason to re-run the attribution on the next attempt.
-          if (!hasSlot(current, repaired.value.issue, effective.workflow)) {
+          if (!hasSlot(admitting, repaired.value.issue, admissionWorkflow)) {
             yield* context.scheduleRetry(
               repaired.value.issue,
               event.attempt + 1,

@@ -150,8 +150,12 @@ const attributeRepair = (
 /**
  * The review gate for an open pull request: every head is reviewed once, and nothing is merged
  * until the review for the head in hand has completed and settled.
+ *
+ * Exported because a repair is gated on it too. A head that has not been reviewed yet has no
+ * review feedback to repair against, so repairing it would spend one of the budget on a guess.
+ * `None` means the head is settled and the disposition decides what happens to it.
  */
-const gateReview = (
+export const gateReview = (
   handoff: HandoffEntry,
   observation: OpenPullRequest,
 ): Option.Option<HandoffDecision> => {

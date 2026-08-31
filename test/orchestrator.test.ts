@@ -2123,7 +2123,23 @@ describe('restored pull request handoffs', (): void => {
           // The failed attempt still owns the baseline it started from.
           expect(current.handoffs[0]?.repairStartedHeadSha).toBe(originalHead)
           yield* TestClock.adjust('30 seconds')
+          while (current.handoffs[0]?.repairAttempts !== 1) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The head it pushed has no review of its own yet, so the retry stands down rather than
+          // repairing it blind -- but the head is already counted before it does.
+          expect(launchedDescriptions).toHaveLength(1)
+          expect(current.handoffs[0]).toMatchObject({
+            repairAttempts: 1,
+            repairHeadShas: [intermediateHead],
+            repairObservedHeadShas: [originalHead, intermediateHead],
+            repairStartedHeadSha: null,
+          })
+          // Reconciliation picks the head up, settles its review, and repairs it from there, so
+          // standing down defers the work rather than stranding it.
           while (launchedDescriptions.length < 2) {
+            yield* control.refresh
             yield* Effect.yieldNow()
           }
           current = yield* control.snapshot
@@ -2138,13 +2154,86 @@ describe('restored pull request handoffs', (): void => {
     expect(snapshot.handoffs[0]).toMatchObject({
       repairAttempts: 1,
       repairHeadShas: [intermediateHead],
-      repairObservedHeadShas: [originalHead, intermediateHead],
       repairStartedHeadSha: intermediateHead,
     })
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
-  it('attributes a pushed head even when its retry defers for capacity', async (): Promise<void> => {
+  it('admits a repair retry against the workflow it will be dispatched under', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-admission-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = {
+      ...workflow,
+      fingerprint: 'original',
+      config: { ...workflow.config, workspaceRoot },
+    }
+    // The reload admits nothing. The handoff captured the workflow above, which admits one, and
+    // that is the one the retry is dispatched under.
+    const reloaded: Workflow = {
+      ...isolated,
+      fingerprint: 'reloaded',
+      config: {
+        ...isolated.config,
+        agent: { ...isolated.config.agent, maxConcurrentAgents: 0 },
+      },
+    }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let launches = 0
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [issue])
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+      }),
+      // The first repair fails without pushing, queueing a retry; the second is held open.
+      runAgent: () =>
+        Effect.suspend(() => {
+          launches += 1
+          return launches > 1
+            ? Effect.never
+            : Effect.fail(
+                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+              )
+        }),
+    }
+
+    await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // The concurrency limit drops to nothing while the repair retry is queued.
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('30 seconds')
+          while (launches < 2) {
+            yield* Effect.yieldNow()
+          }
+          yield* control.setIssuePaused(20, true)
+        }),
+      ),
+    )
+
+    expect(launches).toBe(2)
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
+  it('keeps the refreshed repair identity when a retry defers for capacity', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-retry-no-slot-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
     const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
@@ -2156,29 +2245,27 @@ describe('restored pull request handoffs', (): void => {
       ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
       id: issueId('21'),
     }
-    const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    const intermediateHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    let currentHead = originalHead
+    // Unchanged throughout, and already review-settled, so the review gate passes and the capacity
+    // gate is what the retry actually meets.
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     let candidates: readonly Issue[] = [repaired]
-    await saveRepairHandoff(handoffStorePath, repaired, originalHead)
+    await saveRepairHandoff(handoffStorePath, repaired, head)
     const harness = makeHarness(isolated, () => candidates)
     const ports: TestPorts = {
       ...harness.ports,
       makeCodeReview: (provider) => ({
         ...requireCodeReview(harness.ports, provider),
-        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, currentHead)),
+        inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
       }),
-      // The repair pushes a head and then fails; the issue that takes the freed slot holds it.
+      // The repair fails without pushing; the issue that takes the freed slot holds it.
       runAgent: ({ issue: launchedIssue }) =>
-        Effect.suspend(() => {
-          if (launchedIssue.id !== repaired.id) {
-            return Effect.never
-          }
-          currentHead = intermediateHead
-          return Effect.fail(
-            new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
-          )
-        }),
+        Effect.suspend(() =>
+          launchedIssue.id === repaired.id
+            ? Effect.fail(
+                new AgentError({ category: 'process_exited', message: 'repair worker failed' }),
+              )
+            : Effect.never,
+        ),
     }
 
     const snapshot = await runWithTestClock(
@@ -2198,7 +2285,9 @@ describe('restored pull request handoffs', (): void => {
             current = yield* control.snapshot
           }
           yield* TestClock.adjust('30 seconds')
-          while (current.handoffs[0]?.repairAttempts !== 1) {
+          while (
+            !current.retrying.some((entry) => entry.error === 'no available orchestrator slots')
+          ) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -2208,16 +2297,12 @@ describe('restored pull request handoffs', (): void => {
       ),
     )
 
-    // Capacity deferred the next attempt, but the head the failed one pushed is already counted.
+    // Waiting for a slot is not a reason to forget which repair this is: the deferred attempt still
+    // holds the baseline, so the next one continues the repair rather than dispatching a bare issue.
     expect(snapshot.retrying.map((entry) => entry.issueId)).toContain(repaired.id)
-    expect(snapshot.retrying.map((entry) => entry.error)).toContain(
-      'no available orchestrator slots',
-    )
     expect(snapshot.handoffs[0]).toMatchObject({
-      repairAttempts: 1,
-      repairHeadShas: [intermediateHead],
-      repairObservedHeadShas: [originalHead, intermediateHead],
-      repairStartedHeadSha: intermediateHead,
+      repairAttempts: 0,
+      repairStartedHeadSha: head,
     })
     await rm(workspaceRoot, { force: true, recursive: true })
   })
