@@ -1,16 +1,21 @@
-import { Effect, Fiber, Queue, type Scope } from 'effect'
+import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue } from '../domain/domain.js'
 import { AgentError } from '../errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../host-tools.js'
-import { mergeSparseObject, toJsonObject } from '../support/json.js'
+import { toJsonObject } from '../support/json.js'
 import { logError, logInfo } from '../support/logging.js'
-import type { EffectiveWorkflow, ExecutionSnapshot, OrchestratorContext } from './runtime.js'
-import { adoptPorts, revalidateCredentials } from './workflow-reload.js'
-
-/** The ports a session reaches its provider through, as they stand at the moment of the call. */
-export type SessionPorts = Pick<ExecutionSnapshot, 'tracker' | 'codeReview'>
+import {
+  captureExecutionSnapshot,
+  issueIsActiveInSnapshot,
+  issueIsRoutableInSnapshot,
+  logContext,
+} from './policy.js'
+import type { OrchestratorContext } from './runtime.js'
+import type { EffectiveWorkflow, SessionPorts } from './state.js'
+import * as Transitions from './transitions.js'
+import { installEffectiveWorkflow, revalidateCredentials } from './workflow-reload.js'
 
 /**
  * The tool surface advertised to one session.
@@ -48,6 +53,13 @@ export const makeHostToolSession = (
     },
   })
 
+const isLifecycleEvent = (event: string): boolean =>
+  event === 'session_started' ||
+  event === 'turn_started' ||
+  event === 'turn/completed' ||
+  event === 'turn/failed' ||
+  event === 'turn/terminated'
+
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 export const dispatch = (
   context: OrchestratorContext,
@@ -56,21 +68,24 @@ export const dispatch = (
   effectiveOverride?: EffectiveWorkflow,
 ): Effect.Effect<boolean, never, Scope.Scope> =>
   Effect.gen(function* () {
-    if (context.state.running.has(issue.id)) {
+    const before = yield* Ref.get(context.state)
+    if (before.running.has(issue.id)) {
       return false
     }
-    context.state.claimed.add(issue.id)
-    const retry = context.state.retries.get(issue.id)
-    if (retry !== undefined) {
-      yield* Fiber.interrupt(retry.fiber)
-      context.state.retries.delete(issue.id)
+    // Claiming and taking the queued retry are one transition: the issue must never be seen as
+    // claimed-but-still-retrying, and the timer that would fire is interrupted here.
+    const displacedRetry = yield* Ref.modify(context.state, (current) =>
+      Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
+    )
+    if (Option.isSome(displacedRetry)) {
+      yield* Fiber.interrupt(displacedRetry.value.fiber)
     }
 
-    const base = effectiveOverride ?? context.lastKnownGood
+    const base = effectiveOverride ?? before.lastKnownGood
     // Opened before preflight, not after the worker starts: a dispatch that fails validation or
     // prompt rendering schedules a retry, and that retry's published link has to resolve to the
     // reason it failed rather than to "no active session".
-    context.detailRecordValue(issue, attempt, base.workflow.config.tracker.requiredLabels)
+    yield* context.detailRecord(issue, attempt, base.workflow.config.tracker.requiredLabels)
     const preflight = yield* revalidateCredentials(context, base).pipe(
       Effect.match({
         onFailure: (error) => ({ _tag: 'Failed' as const, error }),
@@ -79,19 +94,17 @@ export const dispatch = (
     )
     if (preflight._tag === 'Failed') {
       yield* logError('action=dispatch outcome=failed', {
-        ...context.logContextValue(issue),
+        ...logContext(issue),
         action: 'dispatch',
         outcome: 'failed',
         error: preflight.error.message,
       })
-      yield* context.scheduleRetryEffect(issue, (attempt ?? 0) + 1, preflight.error.message, false)
+      yield* context.scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
       return false
     }
     const effective = preflight.value
-    if (effectiveOverride === undefined && effective !== context.lastKnownGood) {
-      const previous = context.lastKnownGood
-      context.lastKnownGood = effective
-      yield* adoptPorts(context, previous, effective)
+    if (effectiveOverride === undefined && effective !== base) {
+      yield* installEffectiveWorkflow(context, base, effective)
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(
       Effect.match({
@@ -100,41 +113,36 @@ export const dispatch = (
       }),
     )
     if (renderedPrompt._tag === 'Failed') {
-      yield* context.scheduleRetryEffect(
-        issue,
-        (attempt ?? 0) + 1,
-        renderedPrompt.error.message,
-        false,
-      )
+      yield* context.scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
       return false
     }
-    const execution = context.captureExecutionSnapshotValue(effective, renderedPrompt.prompt)
-    const runId = context.nextRunId
-    context.nextRunId += 1
+    const execution = captureExecutionSnapshot(effective, renderedPrompt.prompt)
+    const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
     /**
-     * The ports this run reaches its provider through. Adoption replaces the running entry's
-     * execution when a reload or a rotation installs a replacement, so reading it back here is what
-     * keeps a live session — and the instances it holds — current with the orchestrator.
+     * The ports this run reaches its provider through, in a cell the non-Effect world can read. A
+     * host tool leaves Effect for a promise and so cannot take a turn on the state cell; adoption
+     * writes the replacement here at the moment it rewrites the run's execution snapshot, which is
+     * what keeps a live session current with the orchestrator.
      */
-    const sessionPorts = (): SessionPorts => {
-      const running = context.state.running.get(issue.id)
-      return running?.runId === runId ? running.execution : execution
-    }
-    const hostTools = makeHostToolSession(execution, issue, sessionPorts)
-    const refreshIssue = (): Effect.Effect<Issue | null, AgentError> => {
-      const tracker = sessionPorts().tracker
-      return tracker.fetchIssuesByIds([issue.id]).pipe(
-        Effect.map((issues) => issues[0] ?? null),
-        Effect.mapError(
-          (error) =>
-            new AgentError({
-              category: 'protocol_error',
-              message: `issue refresh failed: ${error.message}`,
-              cause: error,
-            }),
-        ),
-      )
-    }
+    const sessionPorts = MutableRef.make<SessionPorts>({
+      tracker: execution.tracker,
+      codeReview: execution.codeReview,
+    })
+    const hostTools = makeHostToolSession(execution, issue, () => MutableRef.get(sessionPorts))
+    const refreshIssue = (): Effect.Effect<Issue | null, AgentError> =>
+      MutableRef.get(sessionPorts)
+        .tracker.fetchIssuesByIds([issue.id])
+        .pipe(
+          Effect.map((issues) => issues[0] ?? null),
+          Effect.mapError(
+            (error) =>
+              new AgentError({
+                category: 'protocol_error',
+                message: `issue refresh failed: ${error.message}`,
+                cause: error,
+              }),
+          ),
+        )
 
     const worker = execution.workspaces.create(issue.identifier).pipe(
       Effect.flatMap((workspace) =>
@@ -151,35 +159,36 @@ export const dispatch = (
               hostTools,
               refreshIssue,
               isRoutable: (refreshed) =>
-                context.issueIsActiveInSnapshotValue(refreshed, execution) &&
-                context.issueIsRoutableInSnapshotValue(refreshed, execution),
+                issueIsActiveInSnapshot(refreshed, execution) &&
+                issueIsRoutableInSnapshot(refreshed, execution),
+              // The runner reports progress from a plain callback. Recording what the update owes
+              // the run and enqueueing it are one step, so an exit cannot overtake a report the
+              // callback has already made.
               onEvent: (update) => {
-                if (update.usage !== null) {
-                  const previous = context.pendingUsage.get(issue.id)
-                  context.pendingUsage.set(issue.id, {
-                    inputTokens: Math.max(previous?.inputTokens ?? 0, update.usage.inputTokens),
-                    outputTokens: Math.max(previous?.outputTokens ?? 0, update.usage.outputTokens),
-                    totalTokens: Math.max(previous?.totalTokens ?? 0, update.usage.totalTokens),
-                  })
-                }
-                if (update.rateLimits !== null) {
-                  context.pendingRateLimits = mergeSparseObject(
-                    context.pendingRateLimits,
-                    update.rateLimits,
-                  )
-                }
-                if (
-                  update.event === 'session_started' ||
-                  update.event === 'turn_started' ||
-                  update.event === 'turn/completed' ||
-                  update.event === 'turn/failed' ||
-                  update.event === 'turn/terminated'
-                ) {
-                  const queued = context.pendingLifecycle.get(issue.id) ?? []
-                  queued.push(update)
-                  context.pendingLifecycle.set(issue.id, queued)
-                }
-                context.offerFromCallbackValue({ _tag: 'AgentUpdate', issueId: issue.id, update })
+                context.runFromCallback(
+                  Ref.update(context.state, (current) => {
+                    let next = current
+                    if (update.usage !== null) {
+                      next = Transitions.recordPendingUsage(next, issue.id, update.usage)
+                    }
+                    if (update.rateLimits !== null) {
+                      next = Transitions.recordPendingRateLimits(next, update.rateLimits)
+                    }
+                    if (isLifecycleEvent(update.event)) {
+                      next = Transitions.queuePendingLifecycle(next, issue.id, update)
+                    }
+                    return next
+                  }).pipe(
+                    Effect.zipRight(
+                      Queue.offer(context.mailbox, {
+                        _tag: 'AgentUpdate',
+                        issueId: issue.id,
+                        update,
+                      }),
+                    ),
+                    Effect.asVoid,
+                  ),
+                )
               },
             }),
           ),
@@ -208,27 +217,30 @@ export const dispatch = (
       }),
     )
     const fiber = yield* Effect.forkScoped(worker)
-    context.state.running.set(issue.id, {
-      runId,
-      issue,
-      fiber,
-      execution,
-      attempt,
-      startedAt: new Date(),
-      lastEventAt: null,
-      lastEvent: null,
-      lastMessage: null,
-      processId: null,
-      threadId: null,
-      turnId: null,
-      sessionId: null,
-      turnCount: 0,
-      turnActive: false,
-      tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-      lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-    })
+    yield* Ref.update(context.state, (current) =>
+      Transitions.beginRun(current, {
+        runId,
+        issue,
+        fiber,
+        execution,
+        sessionPorts,
+        attempt,
+        startedAt: new Date(),
+        lastEventAt: null,
+        lastEvent: null,
+        lastMessage: null,
+        processId: null,
+        threadId: null,
+        turnId: null,
+        sessionId: null,
+        turnCount: 0,
+        turnActive: false,
+        tokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      }),
+    )
     yield* logInfo('action=dispatch outcome=started', {
-      ...context.logContextValue(issue),
+      ...logContext(issue),
       action: 'dispatch',
       outcome: 'started',
     })
