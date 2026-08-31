@@ -467,12 +467,16 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               }),
             )
             if (inspected._tag === 'Failed') {
-              yield* context.scheduleRetry(
+              const scheduled = yield* context.scheduleRetry(
                 repair.value.issue,
                 event.attempt + 1,
                 `repair baseline refresh failed: ${inspected.error.message}`,
                 false,
+                inspected.error,
               )
+              if (!scheduled) {
+                yield* writeHandoff(context, event.issueId, settleRepair(entry))
+              }
               break
             }
             const settled = settleRepair(entry)

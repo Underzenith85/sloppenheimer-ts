@@ -3233,6 +3233,69 @@ describe('restored pull request handoffs', (): void => {
     await rm(workspaceRoot, { force: true, recursive: true })
   })
 
+  it('settles a refused repair when tracker policy rejects its baseline inspection', async (): Promise<void> => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-refused-inspection-'))
+    const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+    const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+      id: issueId('20'),
+    }
+    const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let rejectInspection = false
+    await saveRepairHandoff(handoffStorePath, issue, head)
+    const harness = makeHarness(isolated, () => [issue], undefined, {})
+    const ports: TestPorts = {
+      ...harness.ports,
+      makeCodeReview: (provider) => ({
+        ...requireCodeReview(harness.ports, provider),
+        inspectPullRequest: (number) =>
+          rejectInspection
+            ? Effect.fail(
+                new TrackerError({
+                  category: 'tracker_response',
+                  message: 'baseline inspection was rejected',
+                  retryable: false,
+                }),
+              )
+            : Effect.succeed(repairObservation(number, head)),
+      }),
+    }
+
+    const snapshot = await runWithTestClock(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          rejectInspection = true
+          yield* TestClock.adjust('20 seconds')
+          while (current.retrying.length !== 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      ),
+    )
+
+    expect(snapshot.handoffs[0]).toMatchObject({
+      state: 'repair_needed',
+      repairAttempts: 0,
+      repairStartedHeadSha: null,
+      repairWorkerStarted: false,
+    })
+    expect(snapshot.retrying).toEqual([])
+    await expect(Effect.runPromise(loadHandoffs(handoffStorePath))).resolves.toEqual([
+      expect.objectContaining({ repairStartedHeadSha: null, repairWorkerStarted: false }),
+    ])
+    await rm(workspaceRoot, { force: true, recursive: true })
+  })
+
   it('does not attribute a manual head to a restored repair that never ran', async (): Promise<void> => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-repair-restored-refused-'))
     const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
