@@ -1,5 +1,5 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Clock, Effect, HashMap, Option, Redacted, Ref, type Layer } from 'effect'
+import { Clock, Effect, HashMap, Option, Ref, type Layer } from 'effect'
 
 import type { BlockerRef, Issue, IssueId, JsonValue } from '@symphony/core/domain/domain.js'
 import { cyclicIssueIdentifiers, unresolvedBlockers } from '@symphony/core/domain/dependencies.js'
@@ -7,7 +7,7 @@ import { TrackerError } from '@symphony/core/domain/errors.js'
 import { isJsonArray } from '@symphony/core/support/json.js'
 import { logWarning } from '@symphony/core/support/logging.js'
 import { sameTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
-import type { HostToolResult, HostToolSpec } from '@symphony/core/domain/host-tools.js'
+import type { HostToolSpec } from '@symphony/core/domain/host-tools.js'
 import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
 import {
   IssueControlFactory,
@@ -16,7 +16,13 @@ import {
   type IssueControlPort,
 } from '@symphony/core/ports/issue-control.js'
 import type { TrackerPort } from '@symphony/core/ports/tracker.js'
-import { githubJson, githubPageSize, trackerResponseError, withBoundHttpClient } from './client.js'
+import {
+  githubJson,
+  githubPageSize,
+  trackerCause,
+  trackerResponseError,
+  withBoundHttpClient,
+} from './client.js'
 import {
   githubProviderOf,
   githubSecretEnvironmentNames,
@@ -33,11 +39,9 @@ import {
 import { paginate } from './pagination.js'
 import {
   exactObject,
-  githubIssueNumber,
-  githubToolValue,
+  githubHostToolExecutor,
   invalidToolArguments,
   requiredResponseUrl,
-  toolFailure,
 } from './tools.js'
 
 const dependencyConcurrency = 4
@@ -146,37 +150,29 @@ const labelList = (value: JsonValue | undefined): readonly string[] | null => {
   return new Set(labels).size === labels.length ? labels : null
 }
 
-const makeGitHubTrackerToolExecutor =
-  (
-    provider: GitHubProviderConfig,
-    prefix: string,
-    httpClient: HttpClient.HttpClient | undefined,
-  ): TrackerPort['executeTool'] =>
-  async (name, argumentsValue, context): Promise<HostToolResult> => {
-    if (!githubTrackerToolSpecs.some((spec) => spec.name === name)) {
-      return unsupportedHostTool(name)
-    }
-    if (Redacted.value(provider.token).length === 0) {
-      return toolFailure('missing_auth', 'GitHub credential is not configured')
-    }
-    const issueNumber = githubIssueNumber(provider, context)
-    if (issueNumber === null) {
-      return invalidToolArguments('Session issue context is invalid for this GitHub adapter')
-    }
-    const issuePath = `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}`
-    if (name === 'github_add_comment') {
-      const argumentsObject = exactObject(argumentsValue, new Set(['body']))
-      const body = argumentsObject?.['body']
-      if (
-        argumentsObject === null ||
-        typeof body !== 'string' ||
-        body.trim().length === 0 ||
-        body.length > 65_536
-      ) {
-        return invalidToolArguments('github_add_comment requires only a non-empty body string')
-      }
-      return githubToolValue(
-        githubJson(provider, `${issuePath}/comments`, {
+const makeGitHubTrackerToolExecutor = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  httpClient: HttpClient.HttpClient | undefined,
+): TrackerPort['executeTool'] =>
+  githubHostToolExecutor(
+    githubTrackerToolSpecs,
+    provider,
+    httpClient,
+    (name, argumentsValue, issueNumber) => {
+      const issuePath = `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}`
+      if (name === 'github_add_comment') {
+        const argumentsObject = exactObject(argumentsValue, new Set(['body']))
+        const body = argumentsObject?.['body']
+        if (
+          argumentsObject === null ||
+          typeof body !== 'string' ||
+          body.trim().length === 0 ||
+          body.length > 65_536
+        ) {
+          return invalidToolArguments('github_add_comment requires only a non-empty body string')
+        }
+        return githubJson(provider, `${issuePath}/comments`, {
           method: 'POST',
           body: JSON.stringify({ body }),
         }).pipe(
@@ -186,76 +182,69 @@ const makeGitHubTrackerToolExecutor =
                 issue_number: issueNumber,
                 comment_url: requiredResponseUrl(responseBody, 'html_url'),
               }),
-              catch: (cause: unknown) =>
-                cause instanceof TrackerError
-                  ? cause
-                  : trackerResponseError('GitHub comment response is invalid', cause),
+              catch: trackerCause('GitHub comment response is invalid'),
             }),
           ),
-        ),
-        httpClient,
-      )
-    }
-    if (name === 'github_handoff_issue') {
-      const argumentsObject = exactObject(
-        argumentsValue,
-        new Set(['state', 'add_labels', 'remove_labels']),
-      )
-      if (argumentsObject === null || Object.keys(argumentsObject).length === 0) {
-        return invalidToolArguments('github_handoff_issue requires at least one supported field')
-      }
-      const state = argumentsObject['state']
-      const addLabels = labelList(argumentsObject['add_labels'])
-      const removeLabels = labelList(argumentsObject['remove_labels'])
-      if (
-        (state !== undefined && state !== 'open' && state !== 'closed') ||
-        addLabels === null ||
-        removeLabels === null ||
-        addLabels.some((label) => removeLabels.includes(label))
-      ) {
-        return invalidToolArguments('github_handoff_issue arguments do not match its schema')
-      }
-      const mutations: Effect.Effect<unknown, TrackerError>[] = []
-      if (state !== undefined) {
-        mutations.push(
-          githubJson(provider, issuePath, {
-            method: 'PATCH',
-            body: JSON.stringify({ state }),
-          }),
         )
       }
-      if (addLabels.length > 0) {
-        mutations.push(
-          githubJson(provider, `${issuePath}/labels`, {
-            method: 'POST',
-            body: JSON.stringify({ labels: addLabels }),
-          }),
+      if (name === 'github_handoff_issue') {
+        const argumentsObject = exactObject(
+          argumentsValue,
+          new Set(['state', 'add_labels', 'remove_labels']),
         )
-      }
-      for (const label of removeLabels) {
-        mutations.push(
-          githubJson(
-            provider,
-            `${issuePath}/labels/${encodeURIComponent(label)}`,
-            { method: 'DELETE' },
-            [404],
-          ),
-        )
-      }
-      return githubToolValue(
-        Effect.forEach(mutations, (mutation) => mutation, { concurrency: 1 }).pipe(
+        if (argumentsObject === null || Object.keys(argumentsObject).length === 0) {
+          return invalidToolArguments('github_handoff_issue requires at least one supported field')
+        }
+        const state = argumentsObject['state']
+        const addLabels = labelList(argumentsObject['add_labels'])
+        const removeLabels = labelList(argumentsObject['remove_labels'])
+        if (
+          (state !== undefined && state !== 'open' && state !== 'closed') ||
+          addLabels === null ||
+          removeLabels === null ||
+          addLabels.some((label) => removeLabels.includes(label))
+        ) {
+          return invalidToolArguments('github_handoff_issue arguments do not match its schema')
+        }
+        const mutations: Effect.Effect<unknown, TrackerError>[] = []
+        if (state !== undefined) {
+          mutations.push(
+            githubJson(provider, issuePath, {
+              method: 'PATCH',
+              body: JSON.stringify({ state }),
+            }),
+          )
+        }
+        if (addLabels.length > 0) {
+          mutations.push(
+            githubJson(provider, `${issuePath}/labels`, {
+              method: 'POST',
+              body: JSON.stringify({ labels: addLabels }),
+            }),
+          )
+        }
+        for (const label of removeLabels) {
+          mutations.push(
+            githubJson(
+              provider,
+              `${issuePath}/labels/${encodeURIComponent(label)}`,
+              { method: 'DELETE' },
+              [404],
+            ),
+          )
+        }
+        return Effect.forEach(mutations, (mutation) => mutation, { concurrency: 1 }).pipe(
           Effect.as({
             issue_number: issueNumber,
             state: state ?? null,
             added_labels: addLabels,
             removed_labels: removeLabels,
           }),
-        ),
-        httpClient,
-      )
-    }
-    return unsupportedHostTool(name)
-  }
+        )
+      }
+      return unsupportedHostTool(name)
+    },
+  )
 
 const fetchBlockedBy = (
   provider: GitHubProviderConfig,
@@ -397,10 +386,7 @@ export const makeGitHubTracker = (
                 Effect.flatMap(({ body }) =>
                   Effect.try({
                     try: () => normalizeIssue(decodeGitHubIssue(body ?? null), provider),
-                    catch: (cause: unknown) =>
-                      cause instanceof TrackerError
-                        ? cause
-                        : trackerResponseError(`GitHub issue ${id} could not be decoded`, cause),
+                    catch: trackerCause(`GitHub issue ${id} could not be decoded`),
                   }),
                 ),
               ),

@@ -5,7 +5,7 @@ import * as HttpClient from '@effect/platform/HttpClient'
 import type * as HttpClientError from '@effect/platform/HttpClientError'
 import * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import type * as HttpMethod from '@effect/platform/HttpMethod'
-import { Clock, Effect, Layer, Option, Redacted } from 'effect'
+import { Clock, Effect, Either, Layer, Option, Redacted, Schema } from 'effect'
 
 import type { JsonValue } from '@symphony/core/domain/domain.js'
 import { TrackerError } from '@symphony/core/domain/errors.js'
@@ -38,6 +38,59 @@ export const trackerPaginationError = (message: string, cause?: unknown): Tracke
     message,
     retryable: false,
     ...(cause === undefined ? {} : { cause }),
+  })
+
+/**
+ * Maps whatever went wrong onto a `TrackerError`, leaving one that already is alone.
+ *
+ * A GitHub read is a stack of steps that each report failure their own way: a schema rejects a
+ * payload with a `ParseError`, `new URL` throws a `TypeError`, and a decoder called from inside
+ * `Effect.try` throws a `TrackerError` that has already said something more precise than its
+ * caller could. Re-wrapping that last one would bury the message the reader wants, so it passes
+ * through and only an unrecognized cause is described by the caller's `message`.
+ *
+ * `wrap` names which failure this is: a payload Symphony could not read, or a page sequence it
+ * could not follow.
+ */
+export const trackerCause =
+  (
+    message: string,
+    wrap: (message: string, cause?: unknown) => TrackerError = trackerResponseError,
+  ): ((cause: unknown) => TrackerError) =>
+  (cause: unknown): TrackerError =>
+    cause instanceof TrackerError ? cause : wrap(message, cause)
+
+/**
+ * Decodes with a schema, reporting a rejected payload through `onFailure`.
+ *
+ * Every GitHub payload this adapter reads arrives as `unknown` and leaves as a checked value or a
+ * `TrackerError`; only the message differs. `onFailure` is a parameter rather than a message so
+ * that a field which reports the key it was read under can share this with a whole-record decode
+ * that reports only what it expected.
+ */
+export const decodeTracker = <Value, Encoded>(
+  schema: Schema.Schema<Value, Encoded>,
+  value: unknown,
+  onFailure: (cause: unknown) => TrackerError,
+): Effect.Effect<Value, TrackerError> =>
+  Schema.decodeUnknown(schema)(value).pipe(Effect.mapError(onFailure))
+
+/**
+ * {@link decodeTracker} for a caller already inside `Effect.try`, which reports by throwing.
+ *
+ * The throw is caught by the surrounding `Effect.try` and mapped back onto the failure channel, so
+ * a `TrackerError` never escapes as a defect.
+ */
+export const decodeTrackerOrThrow = <Value, Encoded>(
+  schema: Schema.Schema<Value, Encoded>,
+  value: unknown,
+  onFailure: (cause: unknown) => TrackerError,
+): Value =>
+  Either.match(Schema.decodeUnknownEither(schema)(value), {
+    onLeft: (cause) => {
+      throw onFailure(cause)
+    },
+    onRight: (decoded) => decoded,
   })
 
 /** Transport failures — connection, DNS, TLS, an aborted read, or the request deadline. */
@@ -267,10 +320,7 @@ export const parseNextUrl = (
       }
       return nextUrl.href
     } catch (cause: unknown) {
-      if (cause instanceof TrackerError) {
-        throw cause
-      }
-      throw trackerPaginationError('GitHub returned an invalid next page URL', cause)
+      throw trackerCause('GitHub returned an invalid next page URL', trackerPaginationError)(cause)
     }
   }
   return null

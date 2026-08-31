@@ -1,35 +1,27 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
-import { Effect, Option, Redacted, Schema } from 'effect'
+import { Effect, Option, Schema } from 'effect'
 
 import type { Issue } from '@symphony/core/domain/domain.js'
 import { issueBranchName } from '@symphony/core/domain/handoff.js'
 import { TrackerError } from '@symphony/core/domain/errors.js'
 import type { GitHubProviderConfig } from './provider.js'
-import type { HostToolResult, HostToolSpec } from '@symphony/core/domain/host-tools.js'
-import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
+import type { HostToolSpec } from '@symphony/core/domain/host-tools.js'
 import type { CodeReviewPort, HandoffResult } from '@symphony/core/ports/code-review.js'
-import { githubJson, githubPageSize, trackerResponseError, withBoundHttpClient } from './client.js'
-import { makeGitHubPullRequestMonitor } from './pull-requests.js'
 import {
-  exactObject,
-  githubIssueNumber,
-  githubToolValue,
-  invalidToolArguments,
-  toolFailure,
-} from './tools.js'
+  decodeTracker,
+  githubJson,
+  githubPageSize,
+  trackerCause,
+  trackerResponseError,
+  withBoundHttpClient,
+} from './client.js'
+import { makeGitHubPullRequestMonitor } from './pull-requests.js'
+import { exactObject, githubHostToolExecutor, invalidToolArguments } from './tools.js'
 
 const pullRequestResponse = Schema.Struct({
   html_url: Schema.String.pipe(Schema.filter((value) => value.length > 0)),
 })
 const pullRequestList = Schema.Array(Schema.Unknown)
-
-const decodePullRequest = (
-  value: unknown,
-  message: string,
-): Effect.Effect<{ readonly html_url: string }, TrackerError> =>
-  Schema.decodeUnknown(pullRequestResponse)(value).pipe(
-    Effect.mapError((cause) => trackerResponseError(message, cause)),
-  )
 
 const githubCodeReviewToolSpecs: readonly HostToolSpec[] = Object.freeze([
   Object.freeze({
@@ -47,44 +39,38 @@ const githubCodeReviewToolSpecs: readonly HostToolSpec[] = Object.freeze([
   }),
 ])
 
-const makeGitHubCodeReviewToolExecutor =
-  (
-    provider: GitHubProviderConfig,
-    prefix: string,
-    httpClient: HttpClient.HttpClient | undefined,
-  ): CodeReviewPort['executeTool'] =>
-  async (name, argumentsValue, context): Promise<HostToolResult> => {
-    if (!githubCodeReviewToolSpecs.some((spec) => spec.name === name)) {
-      return unsupportedHostTool(name)
-    }
-    if (Redacted.value(provider.token).length === 0) {
-      return toolFailure('missing_auth', 'GitHub credential is not configured')
-    }
-    const issueNumber = githubIssueNumber(provider, context)
-    if (issueNumber === null) {
-      return invalidToolArguments('Session issue context is invalid for this GitHub adapter')
-    }
-    const argumentsObject = exactObject(argumentsValue, new Set(['pull_request_number']))
-    const pullRequestNumber = argumentsObject?.['pull_request_number']
-    if (
-      argumentsObject === null ||
-      typeof pullRequestNumber !== 'number' ||
-      !Number.isSafeInteger(pullRequestNumber) ||
-      pullRequestNumber <= 0
-    ) {
-      return invalidToolArguments(
-        'github_link_pull_request requires only a positive pull_request_number integer',
-      )
-    }
-    return githubToolValue(
-      githubJson(
+const makeGitHubCodeReviewToolExecutor = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  httpClient: HttpClient.HttpClient | undefined,
+): CodeReviewPort['executeTool'] =>
+  githubHostToolExecutor(
+    githubCodeReviewToolSpecs,
+    provider,
+    httpClient,
+    (_name, argumentsValue, issueNumber) => {
+      const argumentsObject = exactObject(argumentsValue, new Set(['pull_request_number']))
+      const pullRequestNumber = argumentsObject?.['pull_request_number']
+      if (
+        argumentsObject === null ||
+        typeof pullRequestNumber !== 'number' ||
+        !Number.isSafeInteger(pullRequestNumber) ||
+        pullRequestNumber <= 0
+      ) {
+        return invalidToolArguments(
+          'github_link_pull_request requires only a positive pull_request_number integer',
+        )
+      }
+      return githubJson(
         provider,
         `${provider.apiBaseUrl}${prefix}/pulls/${String(pullRequestNumber)}`,
       ).pipe(
         Effect.flatMap(({ body }) =>
-          decodePullRequest(body, 'GitHub pull request response is invalid').pipe(
-            Effect.map((pullRequest) => pullRequest.html_url),
-          ),
+          decodeTracker(
+            pullRequestResponse,
+            body,
+            trackerCause('GitHub pull request response is invalid'),
+          ).pipe(Effect.map((pullRequest) => pullRequest.html_url)),
         ),
         Effect.flatMap((pullRequestUrl) =>
           githubJson(
@@ -104,10 +90,9 @@ const makeGitHubCodeReviewToolExecutor =
             }),
           ),
         ),
-      ),
-      httpClient,
-    )
-  }
+      )
+    },
+  )
 
 const pullRequestNumberFromUrl = (url: string): number => {
   const match = /\/pulls?\/(\d+)(?:\/)?$/u.exec(url)
@@ -144,19 +129,17 @@ const findPullRequest = (
     `${provider.apiBaseUrl}${prefix}/pulls?state=open&head=${encodeURIComponent(`${provider.owner}:${branchName}`)}&base=${encodeURIComponent(provider.baseBranch)}&per_page=${String(githubPageSize)}`,
   ).pipe(
     Effect.flatMap(({ body }) =>
-      Schema.decodeUnknown(pullRequestList)(body).pipe(
-        Effect.mapError((cause) =>
-          trackerResponseError('GitHub pull request list is invalid', cause),
-        ),
-      ),
+      decodeTracker(pullRequestList, body, trackerCause('GitHub pull request list is invalid')),
     ),
     Effect.flatMap((pullRequests) => {
       const first = pullRequests[0]
       return first === undefined
         ? Effect.succeed(Option.none<string>())
-        : decodePullRequest(first, 'GitHub pull request is invalid').pipe(
-            Effect.map((pullRequest) => Option.some(pullRequest.html_url)),
-          )
+        : decodeTracker(
+            pullRequestResponse,
+            first,
+            trackerCause('GitHub pull request is invalid'),
+          ).pipe(Effect.map((pullRequest) => Option.some(pullRequest.html_url)))
     }),
   )
 
@@ -176,7 +159,7 @@ const createPullRequest = (
     }),
   }).pipe(
     Effect.flatMap(({ body }) =>
-      decodePullRequest(body, 'GitHub pull request is invalid').pipe(
+      decodeTracker(pullRequestResponse, body, trackerCause('GitHub pull request is invalid')).pipe(
         Effect.map((pullRequest) => pullRequest.html_url),
       ),
     ),
@@ -225,10 +208,7 @@ export const makeGitHubCodeReview = (
                     pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
                     created,
                   }),
-                  catch: (cause: unknown) =>
-                    cause instanceof TrackerError
-                      ? cause
-                      : trackerResponseError('GitHub pull request URL is invalid', cause),
+                  catch: trackerCause('GitHub pull request URL is invalid'),
                 }),
               ),
             )
@@ -252,10 +232,7 @@ export const makeGitHubCodeReview = (
                     pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
                     created: false,
                   }),
-                  catch: (cause: unknown) =>
-                    cause instanceof TrackerError
-                      ? cause
-                      : trackerResponseError('GitHub pull request URL is invalid', cause),
+                  catch: trackerCause('GitHub pull request URL is invalid'),
                 }),
             }),
           ),

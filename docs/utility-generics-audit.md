@@ -7,10 +7,9 @@ verbatim, or written once per concrete type where one type parameter would do.
 Findings are ordered by how much they remove and how safe the removal is. Each names the call sites
 so the work can be scoped without re-deriving the search.
 
-**Status.** Findings 1, 2, 3, 6, and 8 are implemented; each is marked below, and the line numbers in
-those sections refer to the code as it stood before the change. Findings 4, 5, 7, 9, 10, and 11
-remain open and are tracked in
-[#215](https://github.com/Underzenith85/symphony-ts/issues/215).
+**Status.** Findings 1–8 are implemented; each is marked below, and the line numbers in those
+sections refer to the code as it stood before the change. Findings 9, 10, and 11 remain open and are
+tracked in [#215](https://github.com/Underzenith85/symphony-ts/issues/215).
 
 Every proposed home respects the layering in `AGENTS.md`: `support/` is the bottom layer, `core/`
 and the adapter packages may both reach it, and all three adapter packages already import from
@@ -153,6 +152,8 @@ intervals, and a shared statement of the escalation _schedule_ would keep them f
 
 ## 4. `Schema` → domain error: three bespoke wrappers and seven rethrow ternaries
 
+_Implemented: `decodeTracker`, `decodeTrackerOrThrow`, and `trackerCause` in `client.ts`._
+
 **Three wrappers, one shape.** All of these decode with a schema and map the parse failure onto
 `trackerResponseError`:
 
@@ -186,6 +187,8 @@ wrapper is a parameter, `field` and `decode` are one function.
 ---
 
 ## 5. Three parallel vocabularies for the same schema primitives
+
+_Implemented for the adapter's copies: `safeInteger`, `positiveInteger`, and `unknownRecord` join `nonEmptyString` in `support/schema.ts`. The named-message family in the workflow loader is left as it stands._
 
 The repository has invented "non-empty string" and "safe integer" three times, in three modules, in
 three styles:
@@ -240,6 +243,8 @@ as a private `isRecord`. Three copies, one export, one importer that already has
 ---
 
 ## 7. Host-tool executors: the same three-guard preamble twice
+
+_Implemented: `githubHostToolExecutor` in `tools.ts`._
 
 `packages/adapter-github/src/issues.ts:149` and `packages/adapter-github/src/code-review.ts:50` open
 with the identical sixteen lines — same factory signature, then spec lookup, credential check, and
