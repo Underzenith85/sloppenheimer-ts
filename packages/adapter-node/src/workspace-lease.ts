@@ -50,12 +50,20 @@ export const ownerIsRunning = (owner: WorkspaceOwner): boolean => {
 export const leaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
   leaseIsClaimed(lease, hostOwner.hostId, ownerIsRunning(lease.owner))
 
+/**
+ * Written to a sibling temporary file and renamed over the record, the way the handoff store is.
+ * A host terminated mid-write would otherwise leave an empty or half-written lease, and a lease
+ * that cannot be read is deliberately not treated as a workspace nobody owns: cleanup would then
+ * refuse that issue's workspaces for good rather than recovering them.
+ */
 export const writeLease = (
   fileSystem: FileSystem.FileSystem,
   path: string,
   lease: WorkspaceLeaseRecord,
 ): Effect.Effect<void, PlatformError> =>
-  fileSystem.writeFileString(path, encodeLease(lease), { mode: 0o600 })
+  fileSystem
+    .writeFileString(`${path}.tmp`, encodeLease(lease), { mode: 0o600 })
+    .pipe(Effect.zipRight(fileSystem.rename(`${path}.tmp`, path)))
 
 /**
  * Reads the lease beside a run workspace. A lease that is not there is `none` — a run directory

@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Effect, Option } from 'effect'
+import { Cause, Effect, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -24,7 +24,7 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { LeasedWorkspace, WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
-import { isSymbolicLink } from './filesystem.js'
+import { isSymbolicLink, removeDirectoryIfEmpty } from './filesystem.js'
 import { hostOwner, leaseIsLive, readLease, writeLease } from './workspace-lease.js'
 import { runHook } from './workspace-hooks.js'
 
@@ -182,6 +182,28 @@ const warnRelease = (path: string, error: WorkspaceError): Effect.Effect<void> =
     error: error.message,
   })
 
+/** Rewrites a held lease as the retained recovery artifact the reason names. */
+const retainLease = (
+  fileSystem: FileSystem.FileSystem,
+  owner: WorkspaceOwner,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  reason: string,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    const releasedAt = yield* currentInstant
+    const existing = yield* readLease(fileSystem, paths.leasePath)
+    const held = Option.getOrElse(existing, () => heldLease(run, paths.runKey, owner, releasedAt))
+    yield* writeLease(fileSystem, paths.leasePath, retainedLease(held, reason, releasedAt))
+  })
+
+/** Why an acquisition that took the lease and then failed is keeping the workspace. */
+const provisioningReason = (cause: Cause.Cause<WorkspaceError>): string =>
+  Option.match(Cause.failureOption(cause), {
+    onNone: () => 'workspace provisioning was interrupted',
+    onSome: (error) => `workspace provisioning failed: ${error.message}`,
+  })
+
 /**
  * Allocates and leases one run's workspace. `after_create` is fatal: a workspace whose provisioning
  * hook failed is not usable. It runs for every run, because every run is given a directory that did
@@ -205,7 +227,14 @@ const acquireRunWorkspace = (
     )
     const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
     if (hooks.afterCreate !== null) {
-      yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
+      yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs).pipe(
+        // The lease was taken before the hook ran, and an acquisition that fails hands the caller
+        // nothing to release with: the workspace is retained here instead, so cleanup can take it
+        // rather than being held off by a lease this host will never let go of.
+        Effect.onError((cause) =>
+          Effect.ignore(retainLease(fileSystem, owner, paths, run, provisioningReason(cause))),
+        ),
+      )
     }
     const leased: LeasedWorkspace = { run, workspace }
     return leased
@@ -228,10 +257,7 @@ const disposeOfWorkspace = (
       // inside it; cleanup takes it when the issue is finished with.
       return
     }
-    const releasedAt = yield* currentInstant
-    const existing = yield* readLease(fileSystem, paths.leasePath)
-    const held = Option.getOrElse(existing, () => heldLease(run, paths.runKey, owner, releasedAt))
-    yield* writeLease(fileSystem, paths.leasePath, retainedLease(held, reason, releasedAt))
+    yield* retainLease(fileSystem, owner, paths, run, reason)
   })
 
 /** Releasing reports to nobody: the run it followed has already ended, so a failure is logged. */
@@ -279,7 +305,10 @@ const removeIssueWorkspaces = (
       })
       return
     }
-    yield* fileSystem.remove(issuePath, { force: true, recursive: true })
+    // Not a recursive removal: a run acquired while the scan was running would be swept up with
+    // the container it had just been created in. `rmdir` refuses a directory that is no longer
+    // empty, so a workspace that appeared during cleanup survives it.
+    yield* removeDirectoryIfEmpty(issuePath)
   }).pipe(reportedAs('remove_failed', 'failed to remove workspace'))
 
 /**

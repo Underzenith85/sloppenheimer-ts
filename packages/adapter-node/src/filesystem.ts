@@ -1,5 +1,6 @@
 import type { FileSystem } from '@effect/platform'
-import type { PlatformError } from '@effect/platform/Error'
+import { SystemError, type PlatformError } from '@effect/platform/Error'
+import { rmdir } from 'node:fs/promises'
 import { Effect } from 'effect'
 
 /**
@@ -27,4 +28,36 @@ export const isSymbolicLink = (
         ? Effect.fail(error)
         : Effect.succeed(false),
     ),
+  )
+
+/**
+ * Removes a directory only while it is empty, and reports whether it went.
+ *
+ * `FileSystem.remove` cannot ask this question: without `recursive` it refuses a directory outright,
+ * and with it, a directory that stopped being empty between the check and the call is deleted along
+ * with whatever appeared inside it. `rmdir` makes emptiness and removal one decision the kernel
+ * takes, so a workspace created while cleanup was scanning survives instead of being swept up with
+ * the container it was created in. A directory already gone is reported the same way, because the
+ * caller wanted it gone either way.
+ */
+export const removeDirectoryIfEmpty = (path: string): Effect.Effect<boolean, PlatformError> =>
+  Effect.tryPromise({
+    try: () => rmdir(path).then(() => true),
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll((cause) => {
+      const code = (cause as NodeJS.ErrnoException).code
+      return code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'ENOENT'
+        ? Effect.succeed(false)
+        : Effect.fail(
+            new SystemError({
+              reason: 'Unknown',
+              module: 'FileSystem',
+              method: 'remove',
+              pathOrDescriptor: path,
+              description: `could not remove the empty directory: ${path}`,
+              cause,
+            }),
+          )
+    }),
   )

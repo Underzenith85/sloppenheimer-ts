@@ -10,6 +10,7 @@ import { afterEach, describe, expect } from 'vitest'
 import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
+import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
   containedWorkspacePath,
@@ -575,6 +576,61 @@ describe('run workspace allocation and leases', (): void => {
 
       // With its owner gone, the artifact is cleanup's to take once the issue is finished with.
       expect(existsSync(abandoned)).toBe(false)
+    }),
+  )
+
+  it.live('keeps the workspace of an acquisition whose provisioning hook failed', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
+      const identifier = issueIdentifier('GH-174')
+
+      const failed = yield* Effect.flip(manager.acquire({ identifier, runId: 1 }))
+
+      // The lease was taken before the hook ran, and a failed acquisition returns nothing for the
+      // run to release with: the workspace has to be retained here, or cleanup could never take it.
+      expect(failed.category).toBe('hook_failed')
+      expect(yield* manager.exists(identifier)).toBe(true)
+      yield* manager.remove(identifier)
+      expect(yield* manager.exists(identifier)).toBe(false)
+    }),
+  )
+
+  it.live('writes a lease record whole, leaving no partial file beside it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = issueIdentifier('GH-175')
+      const leased = yield* manager.acquire({ identifier, runId: 1 })
+
+      yield* manager.release(leased, { _tag: 'Retained', reason: 'worker failed' })
+
+      // The record is renamed into place rather than written over, so the only entries an issue
+      // directory holds are its run workspaces and their finished leases.
+      expect((yield* host(() => readdir(join(root, workspaceKey(identifier))))).toSorted()).toEqual(
+        [leased.workspace.key, `${leased.workspace.key}.lease`].toSorted(),
+      )
+      expect(yield* host(() => leaseOf(leased.workspace.path))).toMatchObject({
+        status: 'retained',
+        reason: 'worker failed',
+      })
+    }),
+  )
+
+  it.live('will not take an issue directory a workspace appeared in', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const directory = join(root, 'container')
+      yield* host(() => mkdir(directory, { recursive: true }))
+
+      expect(yield* removeDirectoryIfEmpty(directory)).toBe(true)
+
+      yield* host(() => mkdir(join(directory, 'run-1-host'), { recursive: true }))
+
+      // What cleanup removes at the end of its scan is the container, and only while it is still
+      // empty: a run acquired while the scan was running must not go with it.
+      expect(yield* removeDirectoryIfEmpty(directory)).toBe(false)
+      expect(existsSync(join(directory, 'run-1-host'))).toBe(true)
     }),
   )
 
