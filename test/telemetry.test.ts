@@ -17,6 +17,7 @@ import {
   recordCancellation,
   recordHandoff,
   recordRetryScheduled,
+  changedPathLimit,
   retainedAttemptLimit,
   timelineEventLimit,
   type AgentDetailRecord,
@@ -210,10 +211,8 @@ describe('protocol normalization', (): void => {
       }),
     ).toEqual({
       kind: 'file',
-      path: 'work/src/telemetry.ts',
-      change: 'update',
-      addedLines: 12,
-      deletedLines: 3,
+      state: 'completed',
+      files: [{ path: 'work/src/telemetry.ts', change: 'update', addedLines: 12, deletedLines: 3 }],
     })
     // Token totals and rate limits are extracted once, by the client, and arrive on the event
     // itself; the payload for such a method carries nothing that would compete with them.
@@ -261,10 +260,202 @@ describe('protocol normalization', (): void => {
       }),
     ).toEqual({
       kind: 'file',
-      path: 'work/src/telemetry.ts',
-      change: 'add',
-      addedLines: 4,
-      deletedLines: null,
+      state: 'completed',
+      files: [{ path: 'work/src/telemetry.ts', change: 'add', addedLines: 4, deletedLines: null }],
+    })
+  })
+
+  it('reads every file a patch item changed and counts its lines from the diff', (): void => {
+    // The App Server's `fileChange` item is `{id, changes, status}`, where `changes` lists every
+    // file the patch touched as `{path, kind, diff}`: `kind` is the tagged `PatchChangeKind`
+    // record rather than a word, and no entry carries a line count at all. Reading only the first
+    // entry lost the rest of a multi-file patch, reading `kind` as a word published every change
+    // as `unknown`, and waiting for a count the protocol never sends left the workspace summary
+    // reporting no lines however much the agent wrote.
+    const payload = normalizePayload('item/completed', {
+      item: {
+        id: 'item_3',
+        type: 'fileChange',
+        status: 'completed',
+        changes: [
+          {
+            path: '/home/agent/work/src/telemetry.ts',
+            kind: { type: 'update', movePath: null },
+            diff: [
+              '--- a/src/telemetry.ts',
+              '+++ b/src/telemetry.ts',
+              '@@ -1,4 +1,5 @@',
+              ' const kept = 1',
+              '-const removed = 2',
+              '+const added = 2',
+              '+const alsoAdded = 3',
+            ].join('\n'),
+          },
+          {
+            path: '/home/agent/work/src/server.ts',
+            kind: { type: 'add' },
+            diff: [
+              '--- /dev/null',
+              '+++ b/src/server.ts',
+              '@@ -0,0 +1 @@',
+              '+export const serve = (): null => null',
+            ].join('\n'),
+          },
+          { path: '/home/agent/work/docs/README.md', kind: { type: 'delete' } },
+        ],
+      },
+    })
+
+    expect(payload).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [
+        { path: 'work/src/telemetry.ts', change: 'update', addedLines: 2, deletedLines: 1 },
+        { path: 'work/src/server.ts', change: 'add', addedLines: 1, deletedLines: 0 },
+        // A change carrying no diff reports no counts, which is a different reading from a change
+        // that touched no lines.
+        { path: 'work/docs/README.md', change: 'delete', addedLines: null, deletedLines: null },
+      ],
+    })
+    // A diff is file content: it is counted and dropped, never retained.
+    expect(JSON.stringify(payload)).not.toContain('alsoAdded')
+  })
+
+  it('counts a content line that begins with the characters a file header does', (): void => {
+    // `+++counter` is an added line whose own text begins with `++`, not a header. Skipping every
+    // line with those three characters undercounts the patch by exactly the lines most likely to
+    // be diff-like themselves.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/src/counter.ts',
+              kind: 'update',
+              diff: [
+                'diff --git a/src/counter.ts b/src/counter.ts',
+                '--- a/src/counter.ts',
+                '+++ b/src/counter.ts',
+                '@@ -1,2 +1,2 @@',
+                '---counter',
+                '+++counter',
+                ' const kept = 1',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/src/counter.ts', change: 'update', addedLines: 1, deletedLines: 1 }],
+    })
+  })
+
+  it('counts a headerless fragment as the content it is', (): void => {
+    // A fragment carrying no hunk marker is all content, and content wears both the characters and
+    // the separator a header does: `++ heading` arrives as `+++ heading`. Only a `---` line with a
+    // `+++` line right after it is a header, which a fragment like this one never has.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/docs/notes.md',
+              kind: 'update',
+              diff: ['+++ heading', '+++more', '-- removed', '---gone'].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/docs/notes.md', change: 'update', addedLines: 2, deletedLines: 2 }],
+    })
+  })
+
+  it('counts a header-shaped pair that follows content as the content it is', (): void => {
+    // A header sits in the header section, before any content. Once a line has been added or
+    // removed, a `---`/`+++` pair below it is a removed `-- heading` and an added `++ heading`,
+    // whatever it resembles.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/docs/notes.md',
+              kind: { type: 'update' },
+              diff: ['+ordinary', '--- heading', '+++ heading'].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/docs/notes.md', change: 'update', addedLines: 2, deletedLines: 1 }],
+    })
+  })
+
+  it('reopens the header section for each file of a whole-patch diff', (): void => {
+    // A change carries one file's diff, but a backend reporting the whole patch under `patch` sends
+    // several. Each `diff --git` opens that file's header section again, so the second file's
+    // header is read as one rather than counted as the two lines it resembles.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'patchApply',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/src/a.ts',
+              kind: { type: 'update' },
+              patch: [
+                'diff --git a/src/a.ts b/src/a.ts',
+                '--- a/src/a.ts',
+                '+++ b/src/a.ts',
+                '@@ -1 +1 @@',
+                '-old',
+                '+new',
+                'diff --git a/src/b.ts b/src/b.ts',
+                '--- /dev/null',
+                '+++ b/src/b.ts',
+                '@@ -0,0 +1 @@',
+                '+added',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/src/a.ts', change: 'update', addedLines: 2, deletedLines: 1 }],
+    })
+  })
+
+  it('reads a change list reported as a map keyed by the path it changed', (): void => {
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'patchApply',
+          status: 'completed',
+          changes: {
+            '/home/agent/work/src/server.ts': { kind: 'update', added_lines: 6, deleted_lines: 2 },
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/src/server.ts', change: 'update', addedLines: 6, deletedLines: 2 }],
     })
   })
 
@@ -384,16 +575,18 @@ describe('agent detail records', (): void => {
       record,
       event({
         kind: 'file',
-        path: 'src/telemetry.ts',
-        change: 'update',
-        addedLines: 10,
-        deletedLines: 2,
+        state: 'completed',
+        files: [{ path: 'src/telemetry.ts', change: 'update', addedLines: 10, deletedLines: 2 }],
       }),
     )
     record = recordAgentEvent(
       record,
       event(
-        { kind: 'file', path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 },
+        {
+          kind: 'file',
+          state: 'completed',
+          files: [{ path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 }],
+        },
         { timestamp: new Date('2026-08-30T10:00:07.000Z') },
       ),
     )
@@ -422,6 +615,120 @@ describe('agent detail records', (): void => {
       qualityCommandState: 'completed',
       pathsTruncated: false,
     })
+  })
+
+  it('counts a patch when it is applied, not when it is proposed or refused', (): void => {
+    // One file item is reported twice: once as the patch it proposes and once as the patch it
+    // applied. Counting both would double every line the agent wrote, and counting a declined or
+    // failed patch would credit the worktree with an edit it never received.
+    const changes = [
+      {
+        path: '/home/agent/work/src/telemetry.ts',
+        kind: 'update',
+        diff: '+one\n+two\n-three\n',
+      },
+    ]
+    const item = (status: string, listed: typeof changes): AgentEventPayload =>
+      normalizePayload(status === 'inProgress' ? 'item/started' : 'item/completed', {
+        item: { id: 'item_7', type: 'fileChange', status, changes: listed },
+      })
+    let record = makeRecord()
+    record = recordAgentEvent(record, event(item('inProgress', changes), { event: 'item/started' }))
+    const proposed = snapshotOf(record)
+    record = recordAgentEvent(record, event(item('completed', changes)))
+    const applied = snapshotOf(record)
+    record = recordAgentEvent(
+      record,
+      event(
+        item('declined', [
+          { path: '/home/agent/work/src/server.ts', kind: 'add', diff: '+refused\n' },
+        ]),
+      ),
+    )
+    const refused = snapshotOf(record)
+
+    expect(proposed.workspace).toMatchObject({
+      dirtyFileCount: 0,
+      addedLines: 0,
+      deletedLines: 0,
+    })
+    expect(applied.workspace).toMatchObject({
+      dirtyFileCount: 1,
+      addedLines: 2,
+      deletedLines: 1,
+    })
+    expect(refused.workspace).toMatchObject({
+      dirtyFileCount: 1,
+      addedLines: 2,
+      deletedLines: 1,
+    })
+    // Every report still reaches the timeline; what the ledger counts is what reached the
+    // worktree, and the state on each entry is what says which is which.
+    expect(refused.timeline.events.map((entry) => [entry.category, entry.event])).toEqual([
+      ['file', 'item/started'],
+      ['file', 'item/completed'],
+      ['file', 'item/completed'],
+    ])
+  })
+
+  it('records one patch as one timeline event covering every file it touched', (): void => {
+    let record = makeRecord()
+    record = recordAgentEvent(
+      record,
+      event({
+        kind: 'file',
+        state: 'completed',
+        files: [
+          { path: 'src/telemetry.ts', change: 'update', addedLines: 10, deletedLines: 2 },
+          { path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 },
+          { path: 'docs/README.md', change: 'delete', addedLines: null, deletedLines: null },
+        ],
+      }),
+    )
+    const snapshot = snapshotOf(record)
+    const [entry] = snapshot.timeline.events
+
+    expect(snapshot.timeline.events).toHaveLength(1)
+    expect(entry?.category === 'file' ? entry.files.map((file) => file.path) : []).toEqual([
+      'src/telemetry.ts',
+      'src/server.ts',
+      'docs/README.md',
+    ])
+    expect(snapshot.workspace).toMatchObject({
+      dirtyFileCount: 3,
+      addedLines: 15,
+      deletedLines: 2,
+    })
+    expect(snapshot.phase.operation).toBe('Editing src/telemetry.ts and 2 more')
+  })
+
+  it('counts every file of a patch larger than the retained path list', (): void => {
+    // The retained path list is bounded, and the totals are not: a patch touching more files than
+    // the record keeps paths for still contributes all of its lines, and says the list was cut.
+    const files = Array.from({ length: changedPathLimit + 5 }, (_unused, index) => ({
+      path: `src/module-${String(index)}.ts`,
+      change: 'update' as const,
+      addedLines: 2,
+      deletedLines: 1,
+    }))
+    const record = recordAgentEvent(
+      makeRecord(),
+      event({ kind: 'file', state: 'completed', files }),
+    )
+    const snapshot = snapshotOf(record)
+    const [entry] = snapshot.timeline.events
+
+    expect(snapshot.workspace).toMatchObject({
+      dirtyFileCount: changedPathLimit,
+      addedLines: (changedPathLimit + 5) * 2,
+      deletedLines: changedPathLimit + 5,
+      pathsTruncated: true,
+    })
+    // The entry names no more paths than the record retains, and reports the patch's true size
+    // rather than the size of the sample it kept.
+    expect(entry?.category === 'file' ? entry.files.length : 0).toBe(changedPathLimit)
+    expect(entry?.category === 'file' ? entry.fileCount : 0).toBe(changedPathLimit + 5)
+    expect(entry?.category === 'file' ? entry.addedLines : 0).toBe((changedPathLimit + 5) * 2)
   })
 
   it('leaves the running phase when a tool or command finishes', (): void => {
@@ -721,7 +1028,17 @@ describe('agent detail records', (): void => {
   it('publishes frozen snapshots that cannot be edited by a consumer', (): void => {
     let record = makeRecord()
     record = recordAgentEvent(record, event({ kind: 'reasoning' }))
+    // A runner's adapter is not required to freeze what it builds, and this one deliberately does
+    // not: what the record adopts has to be safe whichever adapter produced it.
+    const mutable = {
+      path: 'src/telemetry.ts',
+      change: 'update' as const,
+      addedLines: 3,
+      deletedLines: 1,
+    }
+    record = recordAgentEvent(record, event({ kind: 'file', state: 'completed', files: [mutable] }))
     const snapshot = snapshotOf(record)
+    const file = snapshot.timeline.events.find((entry) => entry.category === 'file')
 
     expect(Object.isFrozen(snapshot)).toBe(true)
     expect(Object.isFrozen(snapshot.timeline.events)).toBe(true)
@@ -730,6 +1047,18 @@ describe('agent detail records', (): void => {
     expect(snapshot.timeline.events.every((entry) => Object.isFrozen(entry))).toBe(true)
     expect(snapshot.attempt.attempts.every((attempt) => Object.isFrozen(attempt))).toBe(true)
     expect(snapshot.errors.every((error) => Object.isFrozen(error))).toBe(true)
+    // Including the files of a patch, which arrived on the payload rather than being built here.
+    expect(
+      file?.category === 'file' ? file.files.every((entry) => Object.isFrozen(entry)) : false,
+    ).toBe(true)
+    mutable.path = 'tampered'
+    mutable.addedLines = 9_000
+    expect(file?.category === 'file' ? file.files[0] : null).toEqual({
+      path: 'src/telemetry.ts',
+      change: 'update',
+      addedLines: 3,
+      deletedLines: 1,
+    })
     const events = snapshot.timeline.events as unknown as { push: (value: unknown) => number }
     expect(() => events.push('tampered')).toThrow()
   })
@@ -742,10 +1071,8 @@ describe('agent detail records', (): void => {
       event(
         {
           kind: 'file',
-          path: 'src/telemetry.ts',
-          change: 'update',
-          addedLines: 3,
-          deletedLines: 1,
+          state: 'completed',
+          files: [{ path: 'src/telemetry.ts', change: 'update', addedLines: 3, deletedLines: 1 }],
         },
         { timestamp: new Date('2026-08-30T10:00:06.000Z') },
       ),

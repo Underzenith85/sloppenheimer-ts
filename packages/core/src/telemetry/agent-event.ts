@@ -11,7 +11,7 @@
 
 import { bound } from '../support/redaction.js'
 import { decodeRateLimits, foldTurnIdentity } from './events.js'
-import type { AgentEvent, AgentEventPayload } from './events.js'
+import type { AgentEvent, AgentEventPayload, FileChange } from './events.js'
 import {
   alignSession,
   closeSession,
@@ -22,6 +22,7 @@ import {
   setPhase,
 } from './folding.js'
 import type { AgentDetailRecord } from './record.js'
+import { changedPathLimit } from './snapshot.js'
 import type { AgentTimelineBase } from './snapshot.js'
 
 /**
@@ -168,28 +169,72 @@ const appendCommand = (
   })
 }
 
+/** What the inspector reports the agent is doing, for a patch that may touch more than one file. */
+const editingOperation = (files: readonly FileChange[]): string => {
+  const first = files[0]
+  if (first === undefined) {
+    return 'Editing the workspace'
+  }
+  return files.length === 1
+    ? `Editing ${first.path}`
+    : `Editing ${first.path} and ${String(files.length - 1)} more`
+}
+
+/**
+ * What a patch did in total. A sum of nothing reported is `null` rather than zero: a patch whose
+ * every change carried no diff to count has an unknown size, not a size of none.
+ */
+const patchLines = (
+  files: readonly FileChange[],
+  read: (file: FileChange) => number | null,
+): number | null =>
+  files.reduce<number | null>((carried, file) => {
+    const lines = read(file)
+    return lines === null ? carried : (carried ?? 0) + lines
+  }, null)
+
+/**
+ * The files an entry retains: as many as the record holds paths for, each copied and frozen as the
+ * record adopts it.
+ *
+ * The payload came from a runner's adapter, and this fold serves every runner, so it cannot assume
+ * the one that built these froze them. Freezing the array alone would leave each entry a shared
+ * mutable object, and an edit to one after the event was recorded would reach the actor's timeline
+ * and every snapshot already published from it.
+ */
+const retainedFiles = (files: readonly FileChange[]): readonly FileChange[] =>
+  Object.freeze(files.slice(0, changedPathLimit).map((file) => Object.freeze({ ...file })))
+
 const appendFile = (
   record: AgentDetailRecord,
   base: EventBase,
   payload: PayloadOf<'file'>,
   at: Date,
 ): AgentDetailRecord => {
-  const changed = noteChangedPath(
-    record,
-    payload.path,
-    payload.addedLines,
-    payload.deletedLines,
-    at,
-  )
-  const next = setPhase(changed, 'editing', `Editing ${payload.path}`, at)
+  // A runner reports one file item twice — the patch it proposes, then the patch it applied — so
+  // only the terminal report reaches the ledger: counting the proposal as well would double every
+  // line count, and counting a failed or declined patch would report an edit the worktree never
+  // received. The event itself is retained either way, so the timeline still shows the attempt.
+  const changed =
+    payload.state === 'completed'
+      ? payload.files.reduce(
+          (carried, file) =>
+            noteChangedPath(carried, file.path, file.addedLines, file.deletedLines, at),
+          record,
+        )
+      : record
+  const next = setPhase(changed, 'editing', editingOperation(payload.files), at)
+  // Every file counts toward the totals above; the entry names as many as the record retains paths
+  // for, and carries the count of the rest so nothing reads as though the patch were that small.
   return push(next, {
     ...base,
     operation: next.operation,
     category: 'file',
-    path: payload.path,
-    change: payload.change,
-    addedLines: payload.addedLines,
-    deletedLines: payload.deletedLines,
+    state: payload.state,
+    files: retainedFiles(payload.files),
+    fileCount: payload.files.length,
+    addedLines: patchLines(payload.files, (file) => file.addedLines),
+    deletedLines: patchLines(payload.files, (file) => file.deletedLines),
   })
 }
 
