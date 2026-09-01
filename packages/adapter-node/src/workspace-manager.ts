@@ -25,7 +25,7 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
-import { isSymbolicLink, removeDirectoryIfEmpty } from './filesystem.js'
+import { realDirectoryExists, removeDirectoryIfEmpty } from './filesystem.js'
 import {
   discardStagedLease,
   hostOwner,
@@ -50,41 +50,6 @@ import { runHook } from './workspace-hooks.js'
  * behind as a lease record naming the issue, the run and the host that produced it.
  */
 
-const notADirectory = (path: string): WorkspaceError =>
-  new WorkspaceError({
-    category: 'invalid_path',
-    message: `workspace exists and is not a directory: ${path}`,
-  })
-
-/**
- * Reports whether a usable workspace directory is present. A path that exists but is not a real
- * directory — a file, or a symbolic link pointing elsewhere — is rejected rather than treated as a
- * workspace, so cleanup can never follow a substituted path.
- *
- * The absent case is named by the platform error's `reason` rather than by matching an `ENOENT`
- * code on an unknown cause; every other platform failure is left for the calling operation to
- * report under its own category.
- */
-const workspaceDirectoryExists = (
-  fileSystem: FileSystem.FileSystem,
-  path: string,
-): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    if (yield* isSymbolicLink(fileSystem, path)) {
-      return yield* Effect.fail(notADirectory(path))
-    }
-    const info = yield* fileSystem.stat(path)
-    if (info.type !== 'Directory') {
-      return yield* Effect.fail(notADirectory(path))
-    }
-    return true
-  }).pipe(
-    Effect.catchIf(
-      (error) => error._tag === 'SystemError' && error.reason === 'NotFound',
-      () => Effect.succeed(false),
-    ),
-  )
-
 /**
  * Everything a claim needs in place before it can be published: the issue directory that will hold
  * the run, and the record itself, written where nothing yet refers to it.
@@ -102,7 +67,7 @@ const prepareRunClaim = (
   Effect.gen(function* () {
     // The issue directory is only ever a container for run directories, so an existing one is
     // reused — once it has been confirmed to be a real directory rather than a substituted path.
-    if (!(yield* workspaceDirectoryExists(fileSystem, paths.issuePath))) {
+    if (!(yield* realDirectoryExists(fileSystem, paths.issuePath))) {
       yield* fileSystem.makeDirectory(paths.issuePath, { recursive: true })
     }
     const acquiredAt = yield* currentInstant
@@ -163,7 +128,7 @@ const removeRunWorkspace = (
   runPath: string,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
-    if (hooks.beforeRemove !== null && (yield* workspaceDirectoryExists(fileSystem, runPath))) {
+    if (hooks.beforeRemove !== null && (yield* realDirectoryExists(fileSystem, runPath))) {
       yield* runHook('before_remove', hooks.beforeRemove, runPath, hooks.timeoutMs).pipe(
         Effect.catchAll(() => Effect.void),
       )
@@ -305,7 +270,7 @@ const removeIssueWorkspaces = (
 ): Effect.Effect<void, WorkspaceError> =>
   Effect.gen(function* () {
     const issuePath = yield* containedWorkspacePath(root, workspaceKey(identifier))
-    if (!(yield* workspaceDirectoryExists(fileSystem, issuePath))) {
+    if (!(yield* realDirectoryExists(fileSystem, issuePath))) {
       return
     }
     const held = yield* removeFreeRunWorkspaces(fileSystem, hooks, issuePath)
@@ -335,7 +300,7 @@ const issueHoldsWorkspace = (
 ): Effect.Effect<boolean, WorkspaceError> =>
   Effect.gen(function* () {
     const path = yield* containedWorkspacePath(root, workspaceKey(identifier))
-    if (!(yield* workspaceDirectoryExists(fileSystem, path))) {
+    if (!(yield* realDirectoryExists(fileSystem, path))) {
       return false
     }
     return (yield* fileSystem.readDirectory(path)).length > 0

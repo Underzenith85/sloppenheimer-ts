@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { Effect, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import { realDirectoryExists } from './filesystem.js'
 import type { RunWorkspacePaths } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
   decodeLease,
@@ -131,10 +132,16 @@ export const writeStagedLease = (
   fileSystem: FileSystem.FileSystem,
   staged: string,
   lease: WorkspaceLeaseRecord,
-): Effect.Effect<void, PlatformError> =>
-  fileSystem
-    .makeDirectory(dirname(staged), { recursive: true })
-    .pipe(Effect.zipRight(fileSystem.writeFileString(staged, encodeLease(lease), { mode: 0o600 })))
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    const stagingPath = dirname(staged)
+    // A staging directory that is a symbolic link would put every record it holds outside the
+    // configured root — where the sweep below would then be deleting somebody else's files.
+    if (!(yield* realDirectoryExists(fileSystem, stagingPath))) {
+      yield* fileSystem.makeDirectory(stagingPath, { recursive: true })
+    }
+    yield* fileSystem.writeFileString(staged, encodeLease(lease), { mode: 0o600 })
+  })
 
 /** Takes a staged record away, whether it was published or abandoned. */
 export const discardStagedLease = (
@@ -172,6 +179,9 @@ export const pruneStagedLeases = (
   lifetimeMs: number,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
+    if (!(yield* realDirectoryExists(fileSystem, stagingPath))) {
+      return
+    }
     const entries = yield* fileSystem.readDirectory(stagingPath)
     for (const entry of entries) {
       const staged = join(stagingPath, entry)
@@ -195,7 +205,7 @@ export const writeLease = (
   fileSystem: FileSystem.FileSystem,
   paths: Pick<RunWorkspacePaths, 'leasePath' | 'stagingPath'>,
   lease: WorkspaceLeaseRecord,
-): Effect.Effect<void, PlatformError> =>
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.suspend(() => {
     const staged = stagedLeasePath(paths.stagingPath)
     return writeStagedLease(fileSystem, staged, lease).pipe(

@@ -572,6 +572,29 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('refuses a staging directory that is a substituted path', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const outside = join('/tmp', `sloppenheimer-outside-${crypto.randomUUID()}`)
+      roots.push(outside)
+      yield* host(() => mkdir(root, { recursive: true }))
+      yield* host(() => mkdir(outside))
+      const bystander = join(outside, 'someone-elses.txt')
+      yield* host(() => writeFile(bystander, 'not ours to sweep'))
+      const longAgo = new Date(Date.now() - 4 * 60 * 60 * 1_000)
+      yield* host(() => utimes(bystander, longAgo, longAgo))
+      yield* host(() => symlink(outside, join(root, '#lease-writes'), 'dir'))
+
+      const manager = yield* workspaceManager(root, hooks())
+      const refused = yield* Effect.flip(retained(manager, 'GH-182'))
+
+      // The sweep deletes what it finds, and staging writes what a claim is made of: neither may
+      // follow a link out of the configured root.
+      expect(refused.category).toBe('invalid_path')
+      expect(existsSync(bystander)).toBe(true)
+    }),
+  )
+
   it.live('stages lease records outside the issue directory cleanup reads', () =>
     Effect.gen(function* () {
       const root = makeRoot()

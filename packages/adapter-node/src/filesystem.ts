@@ -1,7 +1,9 @@
-import type { FileSystem } from '@effect/platform'
+import { type FileSystem } from '@effect/platform'
 import { SystemError, type PlatformError } from '@effect/platform/Error'
 import { rmdir } from 'node:fs/promises'
 import { Effect } from 'effect'
+
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 
 /**
  * The filesystem questions the workspace adapters ask that `FileSystem` does not answer directly.
@@ -60,4 +62,43 @@ export const removeDirectoryIfEmpty = (path: string): Effect.Effect<boolean, Pla
             }),
           )
     }),
+  )
+
+/**
+ * Whether a path holds a real directory: absent is `false`, and anything that is not a directory —
+ * a file, or a symbolic link pointing somewhere else — is a rejection rather than an answer, so
+ * nothing the workspace adapters enumerate, write into or remove can be a substituted path.
+ *
+ * The absent case is named by the platform error's `reason` rather than by matching an `ENOENT`
+ * code on an unknown cause; every other platform failure is left for the calling operation to
+ * report under its own category.
+ */
+export const realDirectoryExists = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (yield* isSymbolicLink(fileSystem, path)) {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          category: 'invalid_path',
+          message: `path exists and is not a directory: ${path}`,
+        }),
+      )
+    }
+    const info = yield* fileSystem.stat(path)
+    if (info.type !== 'Directory') {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          category: 'invalid_path',
+          message: `path exists and is not a directory: ${path}`,
+        }),
+      )
+    }
+    return true
+  }).pipe(
+    Effect.catchIf(
+      (error) => error._tag === 'SystemError' && error.reason === 'NotFound',
+      () => Effect.succeed(false),
+    ),
   )
