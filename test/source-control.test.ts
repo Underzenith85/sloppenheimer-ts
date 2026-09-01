@@ -170,6 +170,45 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live('keeps an earlier publication when a normal continuation publishes again', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      const first = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+      const published = yield* sourceControl.publish(issue, first)
+
+      // The next turn of the same session, against a branch that now exists. Starting it from the
+      // protected base would drop the commit above, and publishing from there force-pushes that
+      // loss to the remote under a lease that matches the head it is about to delete.
+      const second = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() => writeFile(join(fixture.workspace, 'follow-up.ts'), 'more\n'))
+      yield* sourceControl.publish(issue, second)
+
+      const firstHead = published._tag === 'Published' ? published.headSha : ''
+      expect(second.baselineSha).toBe(firstHead)
+      // The earlier publication is still on the branch, with the new one built on top of it rather
+      // than in place of it.
+      const branchHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      expect(branchHead).not.toBe(firstHead)
+      expect(
+        yield* host(() =>
+          git(fixture.workspace, ['merge-base', '--is-ancestor', firstHead, 'HEAD']),
+        ),
+      ).toBe('')
+      expect(yield* host(() => git(fixture.workspace, ['log', '--pretty=%s']))).toContain(
+        'Host-owned publication',
+      )
+    }),
+  )
+
   it.live('refuses a branch that has diverged from the retained work, keeping both sides', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
@@ -235,16 +274,25 @@ describe('host Git source control', (): void => {
       yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
       yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
 
-      // What the next agent receives. Preserving the stale head would start it from a commit the
-      // branch has moved past — and republish that commit as though it were new work.
+      // What the next agent receives: the branch as it now stands, not the commit the workspace
+      // was left on. Preserving the stale head would republish it as though it were new work;
+      // resetting to the protected base instead would drop the branch's own commits, and the next
+      // publication would force-push that back over them under a lease that matches.
       const second = yield* sourceControl.prepare(issue, workspace, target)
 
-      expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(
-        second.baselineSha,
+      const remoteHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
       )
-      yield* Effect.promise(() =>
-        expect(readFile(join(fixture.workspace, 'implementation.ts'), 'utf8')).rejects.toThrow(),
+      expect(second.baselineSha).toBe(remoteHead)
+      expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(remoteHead)
+      // Both commits the branch carries are there — this run's own earlier publication, and the one
+      // that landed on top of it while the host was away.
+      expect(yield* host(() => readFile(join(fixture.workspace, 'later.ts'), 'utf8'))).toBe(
+        'later\n',
       )
+      expect(
+        yield* host(() => readFile(join(fixture.workspace, 'implementation.ts'), 'utf8')),
+      ).toBe('export const done = true\n')
       expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
     }),
   )

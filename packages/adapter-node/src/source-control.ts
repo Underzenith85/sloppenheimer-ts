@@ -265,7 +265,13 @@ const prepareRepository = (
     const branch = yield* currentBranch(settings, 'prepare', workspace)
     const head = yield* currentHead(settings, 'prepare', workspace)
     const dirty = (yield* status(settings, 'prepare', workspace)).length > 0
-    const baselineSha = Option.getOrElse(repairHead, () => baseSha)
+    // A repair starts from the head it holds a lease on. A normal target starts from whatever its
+    // branch already carries, and only from the protected base when the branch does not exist yet:
+    // the commits on it are this issue's own published work, and rebuilding the workspace from the
+    // base would have the next publication force-push over them under a lease that matches.
+    const baselineSha = Option.getOrElse(repairHead, () =>
+      Option.getOrElse(observedRemoteHead, () => baseSha),
+    )
     // Measured against what the remote already has, exactly as the inspection measures it. A
     // workspace the branch has moved past holds a commit the remote has since built on: preserving
     // it would hand the next agent a stale head, and publishing from there force-pushes over the

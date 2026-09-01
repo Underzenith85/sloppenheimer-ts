@@ -608,7 +608,11 @@ repair agent that had achieved nothing.
   pushed, a publication cut off midway — and the fiber that would have settled the postflight is
   gone. That is what makes the preservation policy below true within one process rather than only
   across a restart: the next pass looks, and publishes what it finds, instead of handing the
-  workspace to an agent as though it were empty.
+  workspace to an agent as though it were empty. A queued retry takes the workspace back, because
+  it resolves the same unknown just as well and differently: the same session is going back into
+  the same workspace, so what is in there is its own work in progress rather than something a later
+  run would adopt. The examination is for the case where nothing is coming back — an operator pause,
+  which drops the queued retry, or a cancellation with no continuation behind it.
 - An examination is an answer about a directory, so none of them survive a reload that moves the
   workspace root. A root switched back to one an earlier process used holds that process's retained
   work, and an issue still recorded examined would have the dispatch pass walk straight past it.
@@ -617,6 +621,12 @@ repair agent that had achieved nothing.
   carries no attempt behind it, and that is exactly what the queued retry consults to decide whether
   to dispatch a repair or a bare continuation — one that would edit the branch with no expected-head
   lease and without the pull request's prompt, leaving the stale repair identity on the handoff.
+- A normal target starts from whatever its branch already carries, and from the protected base only
+  when that branch does not exist yet. The commits on it are this issue's own published work:
+  rebuilding the workspace from the base would drop them, and the next publication would force-push
+  that loss to the remote under a lease matching the very head it deletes. Publication still rebases
+  onto protected main — that is what keeps the branch on top of the base, and it is a different
+  thing from choosing what the branch starts from.
 - A branch that has diverged from the retained work is refused rather than published over. The
   publication's lease is read at preparation time, so a divergence that predates the preparation
   satisfies it trivially: rebasing onto the protected base and force-pushing would delete the

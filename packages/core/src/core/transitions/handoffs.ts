@@ -147,6 +147,18 @@ export const forgetWorkspaceExaminations = (state: RuntimeState): RuntimeState =
   examinedWorkspaces: new Set(),
 })
 
+/**
+ * A continuation is queued for this issue, so its workspace has an owner again.
+ *
+ * The cancellation that preceded this recorded the workspace as unread, because an interrupted run
+ * leaves an unknown. A retry resolves that differently from an examination and just as well: the
+ * same session is going back into the same workspace, so what is in there is its own work in
+ * progress rather than something a later run would adopt as its own. The examination exists for
+ * the case where nothing is coming back.
+ */
+export const noteWorkspaceContinued = (state: RuntimeState, id: IssueId): RuntimeState =>
+  state.unexaminedWorkspaces.has(id) ? noteWorkspaceExamined(state, id, true) : state
+
 export const setHandoffStoreError = (
   state: RuntimeState,
   error: RuntimeState['handoffStoreError'],

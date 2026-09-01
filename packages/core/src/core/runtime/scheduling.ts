@@ -99,8 +99,14 @@ export const scheduleRetry = (
     }
     const scheduledAt = yield* currentInstant
     yield* Ref.update(cells.state, (pending) =>
-      Transitions.updateDetail(pending, issue.id, (record) =>
-        recordRetryScheduled(record, scheduledAt, attempt, new Date(dueAt), error),
+      // The cancellation that led here may have recorded the workspace unread. This retry is the
+      // same session going back into it, so it takes that workspace back rather than leaving it to
+      // an examination that would publish a turn's work in progress as though it were finished.
+      Transitions.noteWorkspaceContinued(
+        Transitions.updateDetail(pending, issue.id, (record) =>
+          recordRetryScheduled(record, scheduledAt, attempt, new Date(dueAt), error),
+        ),
+        issue.id,
       ),
     )
     yield* logInfo('action=retry outcome=scheduled', {
