@@ -209,6 +209,35 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live('settles a retry whose push the remote already accepted', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      const prepared = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+      const published = yield* sourceControl.publish(issue, prepared)
+
+      // The same preparation published again, which is what a delivery retry does after a push the
+      // remote accepted and the client did not see succeed: the lease still names the tip from
+      // before, and the branch now carries this very commit.
+      const retried = yield* sourceControl.publish(issue, prepared)
+
+      expect(retried).toMatchObject({
+        _tag: 'Published',
+        branchName: 'sloppenheimer/issue-165',
+        headSha: published._tag === 'Published' ? published.headSha : '',
+      })
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(published._tag === 'Published' ? published.headSha : '')
+    }),
+  )
+
   it.live('refuses a branch that has diverged from the retained work, keeping both sides', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)

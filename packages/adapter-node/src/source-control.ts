@@ -455,6 +455,20 @@ const publishRepository = (
       prepared.workspace,
       prepared.target.branchName,
     )
+    // The branch already carries exactly what this would push, so the publication happened — the
+    // most likely way to arrive here is a push the remote accepted and the client did not see
+    // succeed. Answering `Published` makes the retry idempotent; leaving it to the lease check
+    // would reject every attempt against a tip that is this very commit, spend the delivery budget
+    // and hand the agent back work that is already on the remote.
+    if (Option.contains(actualRemoteHead, headSha)) {
+      const already: PublicationOutcome = {
+        _tag: 'Published',
+        branchName: prepared.target.branchName,
+        headSha,
+        commitCreated: dirty,
+      }
+      return already
+    }
     if (!sameHead(prepared.expectedRemoteHead, actualRemoteHead)) {
       return yield* Effect.fail(leaseFailure(prepared, actualRemoteHead))
     }

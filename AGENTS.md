@@ -659,6 +659,11 @@ repair agent that had achieved nothing.
   that loss to the remote under a lease matching the very head it deletes. Publication still rebases
   onto protected main — that is what keeps the branch on top of the base, and it is a different
   thing from choosing what the branch starts from.
+- A publication whose branch already carries exactly what it would push answers `Published` rather
+  than consulting the lease. The likeliest way to arrive there is a push the remote accepted and
+  the client did not see succeed, and a delivery retry has to be idempotent: rejecting it against a
+  tip that is this very commit would spend the delivery budget and hand the agent back work already
+  on the remote.
 - A branch that has diverged from the retained work is refused rather than published over. The
   publication's lease is read at preparation time, so a divergence that predates the preparation
   satisfies it trivially: rebasing onto the protected base and force-pushing would delete the
