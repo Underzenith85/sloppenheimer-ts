@@ -318,6 +318,13 @@ export type OrchestratorContext = Readonly<{
   scheduleDelivery: (request: DeliveryRequest) => Effect.Effect<boolean, never, Scope.Scope>
   /** Discards retained unpublished work, per the cancellation policy in `AGENTS.md`. */
   abandonDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
+  /**
+   * Holds retained work without discarding it: the attempt waiting to publish is called off and
+   * the change stays in its workspace. What an operator pause does to a delivery.
+   */
+  suspendDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
+  /** Arms a suspended delivery again, from the attempt it was suspended on. */
+  resumeDelivery: (entry: DeliveryEntry) => Effect.Effect<void, never, Scope.Scope>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
   cancelRunning: (

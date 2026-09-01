@@ -6,6 +6,7 @@ import { logInfo, logWarning } from '../../support/logging.js'
 import { recordPublication } from '../../telemetry.js'
 import { logContext } from '../policy.js'
 import { agentRetryDelay, deliveryAttemptLimit } from '../retry.js'
+import type { DeliveryEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
 import type { DeliveryRequest, RuntimeCells } from './types.js'
 
@@ -71,7 +72,7 @@ export const scheduleDelivery = (
     const displaced = yield* Ref.modify(cells.state, (pending) =>
       Transitions.scheduleDelivery(pending, { ...request, dueAt, observedAt, fiber }),
     )
-    if (Option.isSome(displaced)) {
+    if (Option.isSome(displaced) && displaced.value.fiber !== null) {
       yield* Fiber.interrupt(displaced.value.fiber)
     }
     yield* Ref.update(cells.state, (pending) =>
@@ -99,6 +100,74 @@ export const scheduleDelivery = (
   })
 
 /**
+ * Suspends a retained delivery: the attempt waiting to publish is called off, and the work stays
+ * exactly where it is.
+ *
+ * This is what an operator pause does to a delivery. It is deliberately not what it does to a
+ * queued retry — that is dropped, because an agent that has not run has produced nothing to keep —
+ * and deliberately not a discard, because the change exists and the pause is reversible.
+ */
+export const suspendDelivery = (
+  cells: RuntimeCells,
+  id: IssueId,
+  reason: string,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const suspended = yield* Ref.modify(cells.state, (current) =>
+      Transitions.suspendDelivery(current, id),
+    )
+    if (Option.isNone(suspended)) {
+      return
+    }
+    const armed = suspended.value.fiber
+    if (armed !== null) {
+      yield* Fiber.interrupt(armed)
+    }
+    const observedAt = yield* currentInstant
+    yield* Ref.update(cells.state, (current) =>
+      Transitions.updateDetail(current, id, (record) =>
+        recordPublication(record, observedAt, {
+          status: 'failed',
+          branch: suspended.value.prepared.target.branchName,
+          baselineSha: suspended.value.prepared.baselineSha,
+          category: suspended.value.failure.category,
+          attempts: suspended.value.attempt,
+          message: `${suspended.value.failure.message}. Delivery is held: ${reason}`,
+        }),
+      ),
+    )
+    yield* logInfo('action=delivery outcome=suspended', {
+      ...logContext(suspended.value.issue),
+      action: 'delivery',
+      outcome: 'suspended',
+      attempt: suspended.value.attempt,
+      branch: suspended.value.prepared.target.branchName,
+      error: reason,
+    })
+  })
+
+/**
+ * Arms a suspended delivery again, from the attempt it was suspended on. No attempt is spent by
+ * being paused.
+ */
+export const resumeDelivery = (
+  cells: RuntimeCells,
+  entry: DeliveryEntry,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.asVoid(
+    scheduleDelivery(cells, {
+      issue: entry.issue,
+      execution: entry.execution,
+      prepared: entry.prepared,
+      attempt: entry.attempt,
+      workerAttempt: entry.workerAttempt,
+      failure: entry.failure,
+      changedFileCount: entry.changedFileCount,
+      repairRun: entry.repairRun,
+    }),
+  )
+
+/**
  * Drops a retained delivery, interrupting the attempt it was waiting on.
  *
  * Called only where the documented policy says unpublished work is discarded rather than
@@ -117,7 +186,9 @@ export const abandonDelivery = (
     if (Option.isNone(dropped)) {
       return
     }
-    yield* Fiber.interrupt(dropped.value.fiber)
+    if (dropped.value.fiber !== null) {
+      yield* Fiber.interrupt(dropped.value.fiber)
+    }
     const observedAt = yield* currentInstant
     yield* Ref.update(cells.state, (current) =>
       Transitions.updateDetail(current, id, (record) =>

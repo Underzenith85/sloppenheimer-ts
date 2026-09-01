@@ -1,4 +1,4 @@
-import { Deferred, Effect, Fiber, Option, Ref } from 'effect'
+import { Deferred, Effect, Fiber, Option, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
 import { recordCancellation } from '../../telemetry.js'
@@ -9,12 +9,17 @@ import { releaseHandoffRepair } from './repair-identity.js'
 
 /**
  * The operator pausing or resuming an issue number. A pause ends whatever that number has running
- * or queued; a resume only lifts the bar, because what to dispatch next is the poll's decision.
+ * or queued; a resume lifts the bar and arms whatever the pause was holding rather than discarding,
+ * because what to dispatch next is the poll's decision.
+ *
+ * Work that already exists is the exception on both sides. A queued retry is dropped, because an
+ * agent that has not run has produced nothing to keep; a delivery is only suspended, because the
+ * change is in its workspace and a pause is a decision to stop, not to throw it away.
  */
 export const onIssuePauseChanged = (
   context: OrchestratorContext,
   event: Extract<OrchestratorEvent, { _tag: 'SetIssuePaused' }>,
-): Effect.Effect<void> =>
+): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     if (event.paused) {
       yield* Ref.update(context.state, (current) =>
@@ -23,6 +28,10 @@ export const onIssuePauseChanged = (
       const paused = yield* Ref.get(context.state)
       for (const id of issuesForNumber(paused.running, event.issueNumber)) {
         yield* context.cancelRunning(id, false, 'the operator paused the issue')
+      }
+      const delivering = yield* Ref.get(context.state)
+      for (const id of issuesForNumber(delivering.deliveries, event.issueNumber)) {
+        yield* context.suspendDelivery(id, 'the operator paused the issue')
       }
       const retrying = yield* Ref.get(context.state)
       for (const id of issuesForNumber(retrying.retries, event.issueNumber)) {
@@ -50,6 +59,13 @@ export const onIssuePauseChanged = (
       yield* Ref.update(context.state, (current) =>
         Transitions.resumeIssueNumber(current, event.issueNumber),
       )
+      const resumed = yield* Ref.get(context.state)
+      for (const id of issuesForNumber(resumed.deliveries, event.issueNumber)) {
+        const entry = resumed.deliveries.get(id)
+        if (entry !== undefined && entry.fiber === null) {
+          yield* context.resumeDelivery(entry)
+        }
+      }
     }
     yield* Deferred.succeed(event.reply, undefined)
   })

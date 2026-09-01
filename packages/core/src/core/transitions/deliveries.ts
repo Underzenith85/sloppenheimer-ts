@@ -47,6 +47,38 @@ export const takeDueDelivery = (
 }
 
 /**
+ * Puts a delivery back with no timer behind it. The work is retained and nothing is waiting to
+ * publish it, which is where a delivery that came due for a paused issue belongs until the
+ * operator lifts the pause.
+ */
+export const holdDelivery = (state: RuntimeState, entry: DeliveryEntry): RuntimeState => {
+  const claimed = claimIssue(state, entry.issue)
+  return {
+    ...claimed,
+    deliveries: withEntry(claimed.deliveries, entry.issue.id, { ...entry, fiber: null }),
+  }
+}
+
+/**
+ * Retains a delivery with no timer behind it, returning the entry whose timer the caller must
+ * interrupt. This is what an operator pause does to work that is already in a workspace: the
+ * change is kept, and only the attempt waiting to publish it is called off.
+ */
+export const suspendDelivery = (
+  state: RuntimeState,
+  id: IssueId,
+): readonly [Option.Option<DeliveryEntry>, RuntimeState] => {
+  const entry = state.deliveries.get(id)
+  if (entry === undefined || entry.fiber === null) {
+    return [Option.none(), state]
+  }
+  return [
+    Option.some(entry),
+    { ...state, deliveries: withEntry(state.deliveries, id, { ...entry, fiber: null }) },
+  ]
+}
+
+/**
  * Drops a retained delivery whatever attempt it is on, returning it so the caller can interrupt
  * its timer. This is how work is abandoned rather than published: only a cancellation that
  * discards the workspace, per the documented policy, takes a delivery this way.

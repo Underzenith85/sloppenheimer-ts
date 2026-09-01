@@ -46,10 +46,13 @@ repair agent that had achieved nothing.
   inspected worktree was clean. The repair identity carries the postflight verdict for exactly this
   reason: an unchanged head alone cannot tell a no-op turn from a push that failed.
 - Restart recovery reads the workspace, not a persisted queue. The host's preparation preserves a
-  worktree that is on the expected branch and carries uncommitted edits or a commit past the
-  baseline, so a prepared workspace that inspects as changed is work a previous process never
+  worktree that is on the expected branch and carries uncommitted edits or a commit the remote does
+  not have, so a prepared workspace that inspects as changed is work a previous process never
   published. `core/delivery-recovery.ts` publishes it once, before anything can put an agent on the
-  issue, and it is never counted as a repair attempt.
+  issue, and it is never counted as a repair attempt. It is not filtered by dispatch eligibility: a
+  routing label removed between the failed publication and the restart says nothing about the diff
+  on disk. A workspace it could not read leaves the scan unfinished rather than concluding there
+  was nothing there.
 
 ### Cancellation and shutdown policy for unpublished work
 
@@ -59,8 +62,12 @@ happens to the work.
 
 - Shutdown preserves it. Nothing is deleted, and the next process rediscovers it through delivery
   recovery.
-- A cancellation that keeps the workspace preserves it: a stall, a workflow reload, a paused issue,
-  a tracker that stopped reporting the issue.
+- A cancellation that keeps the workspace preserves it: a stall, a workflow reload, a tracker that
+  stopped reporting the issue.
+- An operator pause **suspends** a delivery rather than dropping it. A queued retry is dropped on a
+  pause, because an agent that has not run has produced nothing to keep; a delivery holds a change
+  that exists, and a pause is a decision to stop rather than to discard. The timer is called off,
+  the entry stays, and a resume arms it again from the attempt it was suspended on.
 - A cancellation that removes the workspace discards it, and drops the retained delivery in the
   same step, so a delivery can never come due against a directory that no longer exists. That is
   the terminal-issue path, and only it.

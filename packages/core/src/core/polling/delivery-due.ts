@@ -5,24 +5,41 @@ import { logInfo, logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
 import { recordPublication } from '../../telemetry.js'
 import { settlePostflight } from '../delivery.js'
-import { logContext, issueIsActive, stateIsIn } from '../policy.js'
+import { identifierIssueNumber, issueIsActive, logContext, stateIsIn } from '../policy.js'
 import { runPostflight } from '../postflight.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
-import type { DeliveryEntry } from '../state.js'
+import type { DeliveryEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
 
 type DeliveryDue = Extract<OrchestratorEvent, { _tag: 'DeliveryDue' }>
 
 /**
- * Whether the issue still wants this work delivered.
+ * What is owed to a delivery that has come due.
  *
- * A delivery holds a claim with no worker behind it, so nothing else re-reads the issue while it
- * waits. It asks here, once, immediately before publishing: pushing work for an issue that has
- * since been closed would put a branch and a pull request on the remote that no operator asked
- * for, and is the one case where retained work is discarded rather than preserved.
+ * A delivery holds a claim with no worker behind it, so nothing else re-reads its issue while it
+ * waits. It asks here, once, immediately before publishing.
  */
-const issueStillWantsDelivery = (entry: DeliveryEntry): Effect.Effect<boolean> =>
+type DeliveryDisposition = 'publish' | 'discard' | 'hold'
+
+/**
+ * Whether the issue still wants this work delivered, and what to do if it does not.
+ *
+ * An operator pause holds the work: a pause is reversible, so nothing is published and nothing is
+ * thrown away. An issue that has gone terminal or left its active states discards it: pushing a
+ * branch and opening a pull request for work nobody asked for any more is worse than losing a diff,
+ * and it is the one case the policy in `AGENTS.md` calls a discard.
+ */
+const dispositionOf = (
+  state: RuntimeState,
+  entry: DeliveryEntry,
+): Effect.Effect<DeliveryDisposition> =>
   Effect.gen(function* () {
+    const paused = Option.exists(identifierIssueNumber(entry.issue.identifier), (issueNumber) =>
+      state.pausedIssueNumbers.has(issueNumber),
+    )
+    if (paused) {
+      return 'hold'
+    }
     const refreshed = yield* entry.execution.tracker
       .fetchIssuesByIds([entry.issue.id])
       .pipe(asSettled)
@@ -35,14 +52,72 @@ const issueStillWantsDelivery = (entry: DeliveryEntry): Effect.Effect<boolean> =
         outcome: 'refresh_failed',
         error: refreshed.error.message,
       })
-      return true
+      return 'publish'
     }
     const issue = refreshed.value.find((candidate) => candidate.id === entry.issue.id)
     if (issue === undefined) {
-      return true
+      return 'publish'
     }
     const execution = entry.execution
     return !stateIsIn(issue.state, execution.terminalStates) && issueIsActive(issue, execution)
+      ? 'publish'
+      : 'discard'
+  })
+
+/** Holds the work where it is, with nothing waiting to publish it until the pause is lifted. */
+const holdDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const heldAt = yield* currentInstant
+    yield* Ref.update(context.state, (current) =>
+      Transitions.updateDetail(Transitions.holdDelivery(current, entry), entry.issue.id, (record) =>
+        recordPublication(record, heldAt, {
+          status: 'failed',
+          branch: entry.prepared.target.branchName,
+          baselineSha: entry.prepared.baselineSha,
+          category: entry.failure.category,
+          attempts: entry.attempt,
+          message: `${entry.failure.message}. Delivery is held: the operator paused the issue`,
+        }),
+      ),
+    )
+    yield* logInfo('action=delivery outcome=suspended', {
+      ...logContext(entry.issue),
+      action: 'delivery',
+      outcome: 'suspended',
+      attempt: entry.attempt,
+      branch: entry.prepared.target.branchName,
+      error: 'the operator paused the issue',
+    })
+  })
+
+/** Discards the work with the workspace holding it, because the issue is finished with. */
+const discardDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const discardedAt = yield* currentInstant
+    yield* Ref.update(context.state, (current) =>
+      Transitions.releaseClaim(
+        Transitions.updateDetail(current, entry.issue.id, (record) =>
+          recordPublication(record, discardedAt, {
+            status: 'not_performed',
+            branch: entry.prepared.target.branchName,
+            baselineSha: entry.prepared.baselineSha,
+            attempts: entry.attempt,
+            message: 'Unpublished work discarded: the issue no longer wants it',
+          }),
+        ),
+        entry.issue.id,
+      ),
+    )
+    yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
+      Effect.catchAll((error) =>
+        logWarning('delivery workspace cleanup failed', {
+          ...logContext(entry.issue),
+          action: 'workspace_cleanup',
+          outcome: 'failed',
+          error: error.message,
+        }),
+      ),
+    )
   })
 
 /**
@@ -64,32 +139,13 @@ export const onDeliveryDue = (
       return
     }
     const entry = due.value
-    if (!(yield* issueStillWantsDelivery(entry))) {
-      const discardedAt = yield* currentInstant
-      yield* Ref.update(context.state, (current) =>
-        Transitions.releaseClaim(
-          Transitions.updateDetail(current, event.issueId, (record) =>
-            recordPublication(record, discardedAt, {
-              status: 'not_performed',
-              branch: entry.prepared.target.branchName,
-              baselineSha: entry.prepared.baselineSha,
-              attempts: entry.attempt,
-              message: 'Unpublished work discarded: the issue no longer wants it',
-            }),
-          ),
-          event.issueId,
-        ),
-      )
-      yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
-        Effect.catchAll((error) =>
-          logWarning('delivery workspace cleanup failed', {
-            ...logContext(entry.issue),
-            action: 'workspace_cleanup',
-            outcome: 'failed',
-            error: error.message,
-          }),
-        ),
-      )
+    const disposition = yield* dispositionOf(yield* Ref.get(context.state), entry)
+    if (disposition === 'hold') {
+      yield* holdDelivery(context, entry)
+      return
+    }
+    if (disposition === 'discard') {
+      yield* discardDelivery(context, entry)
       return
     }
     // Whichever instance the orchestrator holds now: a credential rotation between the failure and

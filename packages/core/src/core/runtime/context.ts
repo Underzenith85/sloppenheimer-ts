@@ -5,7 +5,7 @@ import type { Workflow } from '../../config/workflow.js'
 import type { EffectiveWorkflow, RuntimePorts } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { rebuildEffectiveWorkflow } from '../workflow-reload.js'
-import { abandonDelivery, scheduleDelivery } from './deliveries.js'
+import { abandonDelivery, resumeDelivery, scheduleDelivery, suspendDelivery } from './deliveries.js'
 import { hydrateRestoredHandoffs, recoverMissingHandoffs } from './handoff-recovery.js'
 import { reconcile } from './reconcile.js'
 import {
@@ -60,6 +60,8 @@ export const orchestratorContext = (
     scheduleRetry(cells, issue, attempt, error, continuation, repairRun, trackerError),
   scheduleDelivery: (request) => scheduleDelivery(cells, request),
   abandonDelivery: (id, reason) => abandonDelivery(cells, id, reason),
+  suspendDelivery: (id, reason) => suspendDelivery(cells, id, reason),
+  resumeDelivery: (entry) => resumeDelivery(cells, entry),
   applyLifecycleUpdate,
   cancelRunning: (id, cleanupWorkspace, reason) =>
     cancelRunning(cells, id, cleanupWorkspace, reason),

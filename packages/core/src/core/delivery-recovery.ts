@@ -24,16 +24,11 @@ import { issueBranchName } from '../domain/handoff.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
 import { settlePostflight } from './delivery.js'
-import {
-  captureExecutionSnapshot,
-  identifierIssueNumber,
-  issueIsRoutable,
-  logContext,
-} from './policy.js'
+import { captureExecutionSnapshot, identifierIssueNumber, logContext } from './policy.js'
 import { runPostflight } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { HandoffEntry } from './state.js'
-import type { SourceControlTarget } from '../ports/index.js'
+import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
+import type { PreparedRepository, SourceControlPort, SourceControlTarget } from '../ports/index.js'
 import * as Transitions from './transitions.js'
 
 /**
@@ -53,69 +48,34 @@ const targetFor = (issue: Issue, handoff: HandoffEntry | undefined): SourceContr
     : { _tag: 'Repair', branchName: handoff.branchName, expectedHeadSha: handoff.headSha }
 }
 
-/** One issue's workspace, examined and published if it holds anything. */
-const recoverIssue = (
+/**
+ * Whether something is already acting on this issue, and so this scan has nothing to examine.
+ *
+ * Deliberately not the claim: an issue with an open handoff is claimed for as long as its pull
+ * request lives, and that pull request is exactly what unpublished work is owed.
+ */
+const alreadyHandled = (state: RuntimeState, issue: Issue): boolean =>
+  state.running.has(issue.id) ||
+  state.retries.has(issue.id) ||
+  state.deliveries.has(issue.id) ||
+  Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
+    state.pausedIssueNumbers.has(issueNumber),
+  )
+
+/**
+ * Publishes what the inspection found, and hands the outcome to the same settlement a turn's own
+ * postflight goes through.
+ */
+const publishRetained = (
   context: OrchestratorContext,
   issue: Issue,
+  effective: EffectiveWorkflow,
+  sourceControl: SourceControlPort,
+  handoff: HandoffEntry | undefined,
+  prepared: PreparedRepository,
 ): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const current = yield* Ref.get(context.state)
-    const effective = current.lastKnownGood
-    const sourceControl = effective.sourceControl
-    // Deliberately not the claim: an issue with an open handoff is claimed for as long as its pull
-    // request lives, and that pull request is exactly what unpublished work is owed. What rules the
-    // issue out is something already acting on it.
-    const busy =
-      current.running.has(issue.id) ||
-      current.retries.has(issue.id) ||
-      current.deliveries.has(issue.id) ||
-      Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
-        current.pausedIssueNumbers.has(issueNumber),
-      )
-    if (sourceControl === null || busy) {
-      return
-    }
-    const exists = yield* effective.workspaces.exists(issue.identifier).pipe(asSettled)
-    if (exists._tag === 'Failed' || !exists.value) {
-      return
-    }
-    const workspace = yield* effective.workspaces.create(issue.identifier).pipe(asSettled)
-    if (workspace._tag === 'Failed') {
-      yield* logWarning('delivery recovery could not open the workspace; continuing', {
-        ...logContext(issue),
-        action: 'delivery_recovery',
-        outcome: 'failed',
-        error: workspace.error.message,
-      })
-      return
-    }
-    const handoff = current.handoffs.get(issue.id)
-    const prepared = yield* sourceControl
-      .prepare(issue, workspace.value, targetFor(issue, handoff))
-      .pipe(asSettled)
-    if (prepared._tag === 'Failed') {
-      yield* logWarning('delivery recovery could not prepare the repository; continuing', {
-        ...logContext(issue),
-        action: 'delivery_recovery',
-        outcome: 'failed',
-        error: prepared.error.message,
-      })
-      return
-    }
-    const inspected = yield* sourceControl.inspect(prepared.value).pipe(asSettled)
-    if (inspected._tag === 'Failed' || inspected.value._tag === 'Clean') {
-      // Nothing was retained. The issue is left exactly as it was found, so the ordinary dispatch
-      // path decides what happens to it.
-      return
-    }
-    yield* logInfo('rediscovered unpublished agent work', {
-      ...logContext(issue),
-      action: 'delivery_recovery',
-      outcome: 'recovered',
-      branch: prepared.value.target.branchName,
-      changed_files: inspected.value.dirtyFileCount,
-    })
-    const outcome = yield* runPostflight(sourceControl, issue, prepared.value)
+    const outcome = yield* runPostflight(sourceControl, issue, prepared)
     yield* settlePostflight(
       context,
       {
@@ -131,6 +91,91 @@ const recoverIssue = (
       outcome,
       1,
     )
+  })
+
+/**
+ * One issue's workspace, examined and published if it holds anything.
+ *
+ * Answers whether the workspace was examined conclusively. `false` is a host that could not look —
+ * an unreadable workspace, a preparation or inspection that failed — and it keeps the whole scan
+ * unfinished, because the alternative is deciding there is no retained work on the strength of not
+ * having looked.
+ */
+const recoverIssue = (
+  context: OrchestratorContext,
+  issue: Issue,
+): Effect.Effect<boolean, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const current = yield* Ref.get(context.state)
+    const effective = current.lastKnownGood
+    const sourceControl = effective.sourceControl
+    if (sourceControl === null || alreadyHandled(current, issue)) {
+      // Something is already acting on this issue, or nothing here can publish: either way this
+      // pass has nothing to examine, and neither is a failure to look.
+      return true
+    }
+    const exists = yield* effective.workspaces.exists(issue.identifier).pipe(asSettled)
+    if (exists._tag === 'Failed') {
+      yield* logWarning('delivery recovery could not inspect the workspace; retrying later', {
+        ...logContext(issue),
+        action: 'delivery_recovery',
+        outcome: 'failed',
+        error: exists.error.message,
+      })
+      return false
+    }
+    if (!exists.value) {
+      return true
+    }
+    const workspace = yield* effective.workspaces.create(issue.identifier).pipe(asSettled)
+    if (workspace._tag === 'Failed') {
+      yield* logWarning('delivery recovery could not open the workspace; retrying later', {
+        ...logContext(issue),
+        action: 'delivery_recovery',
+        outcome: 'failed',
+        error: workspace.error.message,
+      })
+      return false
+    }
+    const handoff = current.handoffs.get(issue.id)
+    const prepared = yield* sourceControl
+      .prepare(issue, workspace.value, targetFor(issue, handoff))
+      .pipe(asSettled)
+    if (prepared._tag === 'Failed') {
+      yield* logWarning('delivery recovery could not prepare the repository; retrying later', {
+        ...logContext(issue),
+        action: 'delivery_recovery',
+        outcome: 'failed',
+        error: prepared.error.message,
+      })
+      return false
+    }
+    const inspected = yield* sourceControl.inspect(prepared.value).pipe(asSettled)
+    if (inspected._tag === 'Failed') {
+      // Not the same as a clean workspace, and treating it as one would let this pass dispatch an
+      // agent onto changes it never looked at.
+      yield* logWarning('delivery recovery could not read the worktree; retrying later', {
+        ...logContext(issue),
+        action: 'delivery_recovery',
+        outcome: 'failed',
+        error: inspected.error.message,
+      })
+      return false
+    }
+    if (inspected.value._tag === 'Clean') {
+      // Nothing was retained. The issue is left exactly as it was found, so the ordinary dispatch
+      // path decides what happens to it.
+      return true
+    }
+    yield* logInfo('rediscovered unpublished agent work', {
+      ...logContext(issue),
+      action: 'delivery_recovery',
+      outcome: 'recovered',
+      branch: prepared.value.target.branchName,
+      changed_files: inspected.value.dirtyFileCount,
+    })
+    yield* publishRetained(context, issue, effective, sourceControl, handoff, prepared.value)
+    return true
   })
 
 /**
@@ -161,7 +206,6 @@ export const recoverRetainedDeliveries = (
       yield* Ref.update(context.state, Transitions.finishDeliveryRecovery)
       return true
     }
-    const requiredLabels = effective.workflow.config.tracker.requiredLabels
     const candidates = yield* effective.tracker
       .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
         hydrateDependencies: false,
@@ -177,10 +221,17 @@ export const recoverRetainedDeliveries = (
       })
       return false
     }
+    // Deliberately not filtered by dispatch eligibility. A change that already exists is owed a
+    // publication whether or not the issue would be dispatched again: a routing label removed
+    // between the failed publication and this restart says nothing about the diff on disk.
+    let examinedEverything = true
     for (const issue of candidates.value) {
-      if (issueIsRoutable(issue, { requiredLabels })) {
-        yield* recoverIssue(context, issue)
-      }
+      examinedEverything = (yield* recoverIssue(context, issue)) && examinedEverything
+    }
+    if (!examinedEverything) {
+      // The scan is not finished until every workspace has been looked at, so the next pass tries
+      // the ones this pass could not read.
+      return false
     }
     yield* Ref.update(context.state, Transitions.finishDeliveryRecovery)
     return true

@@ -246,7 +246,12 @@ export type DeliveryEntry = Readonly<{
   /** Whether the run that produced this work was repairing a pull request. */
   repairRun: boolean
   observedAt: Date
-  fiber: Fiber.Fiber<void>
+  /**
+   * The timer the next attempt is waiting on, or `null` while an operator pause has suspended it.
+   * A pause stops agents; it does not throw away a change that already exists, so the entry
+   * outlives the timer and a resume arms a new one.
+   */
+  fiber: Fiber.Fiber<void> | null
 }>
 
 /**
