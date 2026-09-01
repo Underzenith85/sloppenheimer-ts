@@ -156,12 +156,15 @@ const provisionRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   workspace: Workspace,
+  stillTheIssueDirectory: Effect.Effect<void, WorkspaceError | PlatformError>,
 ): Effect.Effect<void, WorkspaceError> =>
   Effect.gen(function* () {
     yield* fileSystem.makeDirectory(workspace.path)
     // `after_create` is fatal: a workspace whose provisioning hook failed is not usable. It runs
-    // for every run, because every run is given a directory that did not exist before it.
+    // for every run, because every run is given a directory that did not exist before it — and its
+    // working directory is resolved afresh, so the ground is confirmed again before it starts.
     if (hooks.afterCreate !== null) {
+      yield* stillTheIssueDirectory
       yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
     }
   }).pipe(reportedAs('create_failed', 'failed to create workspace'))
@@ -174,10 +177,11 @@ const disposeOfWorkspace = (
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
   reason: string | null,
+  stillTheIssueDirectory: Effect.Effect<void, WorkspaceError | PlatformError>,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     if (reason === null) {
-      yield* removeRunWorkspace(fileSystem, hooks, paths.runPath)
+      yield* removeRunWorkspace(fileSystem, hooks, paths.runPath, stillTheIssueDirectory)
       // The issue directory itself stays. It is an empty container once its last run has gone, and
       // removing it here would race an acquisition that has just created its own run directory
       // inside it; cleanup takes it when the issue is finished with.
@@ -197,13 +201,23 @@ const releaseRunWorkspace = (
 ): Effect.Effect<void> =>
   containedRunWorkspacePath(root, leased.run.identifier, leased.workspace.key).pipe(
     Effect.flatMap((paths) =>
-      disposeOfWorkspace(
-        fileSystem,
-        hooks,
-        owner,
-        paths,
-        leased.run,
-        release._tag === 'Completed' ? null : release.reason,
+      // The acquisition's hold ended with provisioning, and this runs after the run: the hook it
+      // may run and the removal that follows resolve through the issue directory again, so it is
+      // held still again for them.
+      Effect.scoped(
+        Effect.flatMap(
+          pinDirectory(fileSystem, paths.issuePath, 'workspace directory'),
+          (stillTheIssueDirectory) =>
+            disposeOfWorkspace(
+              fileSystem,
+              hooks,
+              owner,
+              paths,
+              leased.run,
+              release._tag === 'Completed' ? null : release.reason,
+              stillTheIssueDirectory,
+            ),
+        ),
       ).pipe(
         reportedAs('remove_failed', 'failed to release workspace'),
         // Let go whatever the disposal managed to write. A release that failed leaves a record this
@@ -274,7 +288,9 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
           // Provisioning that does not finish keeps the workspace under the reason it failed for,
           // rather than leaving a lease nobody holds.
           yield* stillTheIssueDirectory
-          yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
+          yield* restore(
+            provisionRunWorkspace(fileSystem, hooks, workspace, stillTheIssueDirectory),
+          ).pipe(
             Effect.onExit((exit) =>
               Exit.isSuccess(exit)
                 ? Effect.void

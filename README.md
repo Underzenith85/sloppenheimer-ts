@@ -652,6 +652,13 @@ Cleanup fences what it does take. Deciding a workspace is free and removing it a
 operator's `before_remove` hook between them, so the record is moved aside in one rename first and
 the decision made again on what was actually taken — and put back if it turns out to still be held.
 
+Directories are held still while they are acted through: opened, which pins the inode, and confirmed
+by device and inode again before each step that creates, renames, executes in or removes. That
+guards against the substitutions a host can stumble into — a path that resolves outside the root, a
+symlink in the tree, a directory recreated under an inspected name — and not against a process with
+write access to the root that is racing this one, which no check-then-act sequence could. The
+workspace root is the host's own directory.
+
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the
 protected base when it does not, so an attempt that ran out of turns is continued by the branch it

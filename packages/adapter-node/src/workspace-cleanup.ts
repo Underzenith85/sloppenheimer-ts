@@ -75,10 +75,14 @@ export const removeRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   runPath: string,
+  stillTheIssueDirectory: Effect.Effect<void, WorkspaceError | PlatformError>,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
+    yield* stillTheIssueDirectory
     yield* runBeforeRemove(fileSystem, hooks, runPath)
+    yield* stillTheIssueDirectory
     yield* removeRunDirectory(fileSystem, runPath)
+    yield* stillTheIssueDirectory
     yield* fileSystem.remove(leasePathFor(runPath), { force: true })
   })
 
@@ -101,6 +105,9 @@ const removeFreeRunWorkspace = (
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const leasePath = leasePathFor(runPath)
+    // Taking the record is a rename, which is as destructive as the rest: a name enumerated under
+    // one directory would otherwise be moved out of another.
+    yield* stillTheIssueDirectory
     const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
     // What was decided on and what was taken are two reads of one name, so the decision is made
     // again on the record actually in hand.

@@ -607,13 +607,23 @@ lifecycle. This section is the architecture record for it; do not create a separ
   clock it introduced was a way for one host to delete another's work.
   Every step that names a path resolves it through whatever its parents are at that instant, so a
   directory is held still while it is being acted through: opened, which pins its inode, and
-  confirmed by device and inode again immediately before each step. Acquisition holds the issue
-  directory that way across the link that publishes the claim, the run directory it creates, and the
-  `after_create` hook; cleanup holds it across the reads, the `before_remove` hook, the renames and
-  the removals; the staged-record sweep holds its own the same way. A directory moved aside and
-  replaced under its name stops the caller rather than being followed there. The limit is Node's:
-  there is no `openat` or `unlinkat`, so the last instant before each step cannot be closed by
-  identity alone — what bounds it is that no path outside the configured root is ever named.
+  confirmed by device and inode again immediately before each step that creates, renames, executes
+  in or removes. Acquisition holds the issue directory that way across the link that publishes the
+  claim, the run directory it creates and the `after_create` hook; the release holds it again across
+  its own hook and removals; cleanup holds it across the record it takes, the `before_remove` hook
+  and each removal; the staged-record sweep holds its own the same way. A directory moved aside and
+  replaced under its name stops the caller rather than being followed there.
+- **What that does and does not defend, so it is not extended without a reason.** It defends against
+  the substitutions this host can produce for itself and stumble into: a workspace path that
+  resolves outside the root, a symlink anywhere in the tree, a directory removed and recreated under
+  a name that was inspected earlier, and one host's cleanup crossing another's live run. It does not
+  defend against a process with write access to the workspace root that is actively racing this one.
+  It cannot: Node exposes no `openat`, `renameat` or `unlinkat`, so a confirmation and the step it
+  guards are always two syscalls, and every check narrows a window it can never close — while an
+  attacker with that access could write into the run directory the agent is already using and need
+  win no race at all. The workspace root is the host's own directory, and that is the boundary. Add
+  a confirmation where a step gained a genuinely wide gap — an operator's hook, a recursive
+  removal — and not to shorten a gap that is already two adjacent statements.
   Cleanup still fences what it does take. Deciding a workspace is free and removing it are two
   steps with an operator's `before_remove` hook between them, so the record is moved aside in one
   rename first and the decision made again on what was actually taken. Moving it aside frees the
