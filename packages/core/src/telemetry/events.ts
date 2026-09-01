@@ -35,6 +35,18 @@ export type FileChangeKind = 'add' | 'update' | 'delete' | 'unknown'
 export type MessageRole = 'assistant' | 'user'
 export type ErrorSeverity = 'warning' | 'error'
 
+/**
+ * One file a change item reported touching, reduced to the workspace-relative path, what the item
+ * did to it, and how many lines that did. Line counts are `null` when the item reported no diff to
+ * count them from, which is a different reading from a diff that changed nothing.
+ */
+export type FileChange = Readonly<{
+  path: string
+  change: FileChangeKind
+  addedLines: number | null
+  deletedLines: number | null
+}>
+
 /** The quality command an agent is running, recognized from an allowlist of subcommand words. */
 export type QualityPhase = 'format' | 'lint' | 'typecheck' | 'test' | 'build' | 'check'
 
@@ -75,10 +87,14 @@ export type AgentEventPayload =
     }>
   | Readonly<{
       kind: 'file'
-      path: string
-      change: FileChangeKind
-      addedLines: number | null
-      deletedLines: number | null
+      /**
+       * Whether the patch this item describes has reached the worktree. A runner reports the same
+       * file item twice — once as it proposes the edits and once as it finishes them — so the
+       * workspace ledger counts only the terminal report, and never a `failed` one.
+       */
+      state: ToolState
+      /** Every file the item reported touching, never only the first of them. */
+      files: readonly FileChange[]
     }>
   | Readonly<{
       kind: 'error'

@@ -82,6 +82,30 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
       durationMs: null,
     },
   })
+  record = recordAgentEvent(record, {
+    event: 'item/completed',
+    timestamp: new Date(base + 25_000),
+    processId: 42,
+    message: null,
+    usage: null,
+    rateLimits: null,
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    sessionId: 'thread-1:turn-1',
+    turnCount: 1,
+    turnStatus: null,
+    lifecycle: null,
+    // One patch, two files: what the App Server reports as a single item, and what the console
+    // has to render without pretending the second file was not touched.
+    payload: {
+      kind: 'file',
+      state: 'completed',
+      files: [
+        { path: 'src/telemetry.ts', change: 'update', addedLines: 12, deletedLines: 3 },
+        { path: 'src/server.ts', change: 'add', addedLines: 4, deletedLines: 0 },
+      ],
+    },
+  })
   if (!withHandoff) {
     return record
   }
@@ -258,6 +282,9 @@ describe('operator console agent detail', (): void => {
     const summary = page.text('#detail-timeline')
     expect(summary).toContain('Command pnpm')
     expect(summary).toContain('Handoff pull request')
+    // Every file of a patch is accounted for: the first is named and the rest are counted, with
+    // the line totals summed across all of them.
+    expect(summary).toContain('update src/telemetry.ts and 1 more (+16 / −3)')
     expect(summary).not.toContain('Working on the console')
 
     page.query('#detail-presets button[data-preset="everything"]').click()
