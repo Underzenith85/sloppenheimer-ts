@@ -245,23 +245,20 @@ const byPriority = (left: WorkItem, right: WorkItem): number =>
   compareOptionalNumber(left.priority, right.priority)
 
 const priorityLabel = (priority: number | null): string =>
-  priority === null ? 'no priority' : 'P' + String(priority)
+  priority === null ? 'no priority' : `P${priority}`
 
 const unlockLabel = (unlocks: number): string =>
-  unlocks === 1 ? 'unlocks 1 issue' : 'unlocks ' + String(unlocks) + ' issues'
+  unlocks === 1 ? 'unlocks 1 issue' : `unlocks ${unlocks} issues`
 
 /**
  * Why a ready issue holds its place in the queue. Every ready row carries one, so the ordering is
  * self-explanatory rather than something the operator has to reverse-engineer from the labels.
  */
 const readyRanking = (item: WorkItem, first: boolean): string =>
-  priorityLabel(item.priority) +
-  ' · ' +
-  unlockLabel(item.unlocks) +
-  (first ? ' · ranked first' : '')
+  `${priorityLabel(item.priority)} · ${unlockLabel(item.unlocks)}${first ? ' · ranked first' : ''}`
 
 const attentionRanking = (kind: AttentionKind, priority: number | null): string =>
-  attentionLabels[kind] + ' · ' + priorityLabel(priority)
+  `${attentionLabels[kind]} · ${priorityLabel(priority)}`
 
 const byAttention = inOrder<WorkItem>(
   (left, right) =>

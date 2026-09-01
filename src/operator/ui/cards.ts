@@ -16,13 +16,13 @@ const inFlight = new Set<string>()
 const identifierKey = (identifier: string): string => statusClass(identifier)
 
 const stateChip = (item: WorkItem): HTMLElement =>
-  chip('state-' + item.state, workStateLabels[item.state])
+  chip(`state-${item.state}`, workStateLabels[item.state])
 
 const phaseChip = (item: WorkItem): HTMLElement =>
-  chip('phase-' + item.phase, phaseLabels[item.phase])
+  chip(`phase-${item.phase}`, phaseLabels[item.phase])
 
 const eligibilityChip = (item: WorkItem): HTMLElement =>
-  chip('eligibility-' + item.eligibility, eligibilityLabels[item.eligibility])
+  chip(`eligibility-${item.eligibility}`, eligibilityLabels[item.eligibility])
 
 const actionLabels: Readonly<Record<ActionKind, string>> = {
   start: 'Start agent',
@@ -84,8 +84,8 @@ const blockerDisclosure = (item: WorkItem): HTMLElement => {
   const wrapper = document.createElement('details')
   wrapper.className = 'blockers'
   const summary = document.createElement('summary')
-  summary.textContent = 'View blockers (' + String(item.blockers.length) + ')'
-  summary.setAttribute('aria-label', 'View the blockers of ' + item.identifier + ': ' + item.title)
+  summary.textContent = `View blockers (${item.blockers.length})`
+  summary.setAttribute('aria-label', `View the blockers of ${item.identifier}: ${item.title}`)
   wrapper.append(summary)
   const list = document.createElement('ul')
   for (const blocker of item.blockers) {
@@ -119,9 +119,7 @@ const confirmPause = (item: WorkItem): boolean => {
     return true
   }
   return window.confirm(
-    'Pausing ' +
-      item.identifier +
-      ' cancels the agent that is running for it and drops any queued retry. Continue?',
+    `Pausing ${item.identifier} cancels the agent that is running for it and drops any queued retry. Continue?`,
   )
 }
 
@@ -137,7 +135,7 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
     retry: null,
   })
   try {
-    await post('/api/v1/issues/' + String(issueNumber) + '/' + (enable ? 'start' : 'pause'))
+    await post(`/api/v1/issues/${issueNumber}/${enable ? 'start' : 'pause'}`)
     await post('/api/v1/refresh')
     await Promise.all([loadState(), loadBacklog()])
     setFeedback(item.identifier, {
@@ -145,7 +143,7 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
       message: enable
         ? item.queueReason === null
           ? 'Eligible. Sloppenheimer is selecting work and will start it shortly.'
-          : 'Queued: ' + item.queueReason + '. It starts when a slot frees.'
+          : `Queued: ${item.queueReason}. It starts when a slot frees.`
         : 'Paused. Sloppenheimer will not select this issue.',
       retry: null,
     })
@@ -169,15 +167,15 @@ const actionControl = (item: WorkItem, scope: string): HTMLElement | null => {
   if (item.action === 'blockers') {
     return blockerDisclosure(item)
   }
-  const button = text('button', 'action action-' + item.action, actionLabels[item.action])
+  const button = text('button', `action action-${item.action}`, actionLabels[item.action])
   button.type = 'button'
   // The same item is rendered in more than one list — a state view and the complete work list —
   // so the description's id is scoped to the list it belongs to rather than to the issue alone.
-  const describedBy = scope + '-action-help-' + identifierKey(item.identifier)
+  const describedBy = `${scope}-action-help-${identifierKey(item.identifier)}`
   button.setAttribute('aria-describedby', describedBy)
   button.setAttribute(
     'aria-label',
-    actionLabels[item.action] + ' for ' + item.identifier + ': ' + item.title,
+    `${actionLabels[item.action]} for ${item.identifier}: ${item.title}`,
   )
   const busy = inFlight.has(item.identifier)
   button.disabled = busy
@@ -201,7 +199,7 @@ const feedbackNode = (item: WorkItem): HTMLElement | null => {
   if (feedback === undefined) {
     return null
   }
-  const node = text('p', 'row-feedback tone-' + feedback.tone, feedback.message)
+  const node = text('p', `row-feedback tone-${feedback.tone}`, feedback.message)
   node.setAttribute('role', 'status')
   if (feedback.retry !== null) {
     const retry = text('button', 'link-button', 'Try again')
@@ -232,11 +230,9 @@ const workCard = (item: WorkItem, scope: string): HTMLElement => {
   chips.className = 'work-chips'
   chips.append(stateChip(item), phaseChip(item), eligibilityChip(item))
   if (item.attention !== null) {
-    chips.append(chip('attention-' + item.attention, attentionLabels[item.attention]))
+    chips.append(chip(`attention-${item.attention}`, attentionLabels[item.attention]))
   }
-  chips.append(
-    chip('priority', item.priority === null ? 'No priority' : 'P' + String(item.priority)),
-  )
+  chips.append(chip('priority', item.priority === null ? 'No priority' : `P${item.priority}`))
   heading.append(chips)
   card.append(heading)
   card.append(text('p', 'work-identifier', item.identifier))
@@ -247,7 +243,7 @@ const workCard = (item: WorkItem, scope: string): HTMLElement => {
     card.append(text('p', 'work-ranking', item.ranking))
   }
   if (item.finishedAt !== null) {
-    card.append(text('p', 'work-finished', 'Finished ' + formatAgo(item.finishedAt, Date.now())))
+    card.append(text('p', 'work-finished', `Finished ${formatAgo(item.finishedAt, Date.now())}`))
   }
   if (item.labels.length > 0) {
     const labels = document.createElement('details')
@@ -266,7 +262,7 @@ const workCard = (item: WorkItem, scope: string): HTMLElement => {
     inspect.dataset['detailTrigger'] = 'true'
     inspect.setAttribute('aria-controls', 'agent-detail')
     inspect.setAttribute('aria-expanded', 'false')
-    inspect.setAttribute('aria-label', 'Inspect the agent for ' + item.identifier)
+    inspect.setAttribute('aria-label', `Inspect the agent for ${item.identifier}`)
     inspect.addEventListener('click', () => openDetail(item.identifier, inspect))
     controls.append(inspect)
   }
