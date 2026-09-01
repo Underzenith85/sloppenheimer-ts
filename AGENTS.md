@@ -92,6 +92,30 @@ The tests stay in the root `test/` tree and run once, against the whole workspac
 `pnpm check`. The three Vitest configurations select by test path, so a package split does not
 change which tests each profile runs.
 
+## Module and function size
+
+[#211](https://github.com/Underzenith85/sloppenheimer-ts/issues/211) set the bar: **500 lines a
+module, 100 lines a function**, counting blank lines and comments. `.oxlintrc.json` configures
+`max-lines` and `max-lines-per-function` at those thresholds for every source directory in the
+workspace, so `pnpm lint` — and therefore `pnpm check` — fails on a module or function that grows
+past one.
+
+- 100 rather than ESLint's default 50, because `Effect.gen` pipelines are vertically expensive: an
+  `Effect.matchEffect` branch costs six to eight lines of structure, so a 50-line bar flags
+  idiomatic Effect code that is not complex.
+- The rules are scoped to sources, never to `test/`, where `max-lines-per-function` would count a
+  `describe` callback and flag suite structure rather than complexity.
+- There is no exemption anywhere today. A module that genuinely has to exceed one of these takes an
+  `overrides` entry of its own naming the issue that removes it again — the same convention the
+  import allow-lists use. Never raise a threshold to accommodate a file.
+
+The orchestrator is the worked example. `packages/core/src/core/runtime.ts` is assembly and nothing
+else; every operation the running host performs lives in a module under `core/runtime/` and takes
+the cells it needs — the state `Ref`, the mailbox, the handoff store — as a parameter rather than
+closing over the factory's scope. `OrchestratorContext` is those module-level functions bound to
+one set of cells, built by `core/runtime/context.ts`. Add an operation as a module beside them, not
+as a closure inside the factory.
+
 ## Module import direction
 
 The directories under `packages/core/src/` are layers, and imports may only ever point downwards:
