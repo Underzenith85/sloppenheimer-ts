@@ -17,8 +17,8 @@ const blockerSummary = (blockers: readonly Blocker[]): string => {
   }
   const first = blockers[0]?.identifier ?? ''
   return blockers.length === 1
-    ? 'Blocked by ' + first
-    : 'Blocked by ' + first + ' and ' + String(blockers.length - 1) + ' more'
+    ? `Blocked by ${first}`
+    : `Blocked by ${first} and ${blockers.length - 1} more`
 }
 
 const stalledNowAt = (deadline: string | null, now: number): boolean =>
@@ -69,7 +69,7 @@ const systemAlerts = (state: PublishedState | null): readonly SystemAlert[] => {
     alerts.push({
       key: 'workflow-reload',
       title: 'Workflow reload failed',
-      detail: state.workflow_reload_error.message + ' — the last good workflow is still in force.',
+      detail: `${state.workflow_reload_error.message} — the last good workflow is still in force.`,
     })
   }
   const recovery = state.handoff_recovery
@@ -78,11 +78,8 @@ const systemAlerts = (state: PublishedState | null): readonly SystemAlert[] => {
       key: 'handoff-recovery',
       title: 'Handoff recovery is degraded',
       detail:
-        String(recovery.failed) +
-        ' of ' +
-        String(recovery.loaded) +
-        ' stored handoffs could not be recovered' +
-        (recovery.store_error === null ? '.' : ': ' + recovery.store_error.message),
+        `${recovery.failed} of ${recovery.loaded} stored handoffs could not be recovered` +
+        (recovery.store_error === null ? '.' : `: ${recovery.store_error.message}`),
     })
   }
   return alerts
@@ -137,7 +134,7 @@ const retryingItem = (
   eligibility: eligibilityOf(issue, paused),
   priority: issue?.priority ?? null,
   labels: issue?.labels ?? [],
-  reason: 'Attempt ' + String(entry.attempt) + ' · ' + (entry.error ?? 'continuing'),
+  reason: `Attempt ${entry.attempt} · ${entry.error ?? 'continuing'}`,
   ranking: null,
   blockers: [],
   unlocks: issue?.unlocks ?? 0,
@@ -170,7 +167,7 @@ const handoffItem = (
   const merged = phase === 'merged'
   const state: WorkState = attention !== null ? 'attention' : merged ? 'finished' : 'progress'
   const notDispatchable = ineligibilityReason(issue, paused)
-  const handoffReason = entry.reason ?? 'Head ' + (entry.head_sha ?? 'pending')
+  const handoffReason = entry.reason ?? `Head ${entry.head_sha ?? 'pending'}`
   return {
     identifier: entry.issue_identifier,
     issueNumber: issueNumberOf(entry.issue_identifier),
@@ -239,16 +236,10 @@ const bindingLimit = (
     return 'Sloppenheimer’s runtime state has not loaded, so a free dispatch slot cannot be confirmed'
   }
   if (capacity.full) {
-    return (
-      'Sloppenheimer is at capacity (' +
-      String(capacity.running) +
-      ' of ' +
-      String(capacity.limit) +
-      ' agents)'
-    )
+    return `Sloppenheimer is at capacity (${capacity.running} of ${capacity.limit} agents)`
   }
   if (saturated.has(issue.normalizedState)) {
-    return 'issues in state “' + issue.state + '” have reached their own concurrency limit'
+    return `issues in state “${issue.state}” have reached their own concurrency limit`
   }
   return null
 }

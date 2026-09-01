@@ -105,8 +105,8 @@ const renderGraph = (snapshot: BacklogSnapshot): void => {
   const layout = graphLayout(snapshot)
   const stage = document.createElement('div')
   stage.className = 'graph-stage'
-  stage.style.width = String(layout.width) + 'px'
-  stage.style.height = String(layout.height) + 'px'
+  stage.style.width = `${layout.width}px`
+  stage.style.height = `${layout.height}px`
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('class', 'graph-edges')
   svg.setAttribute('width', String(layout.width))
@@ -122,24 +122,11 @@ const renderGraph = (snapshot: BacklogSnapshot): void => {
       const startX = start.x + 224
       const endX = end.x
       const middle = (startX + endX) / 2
+      const startY = start.y + 48
+      const endY = end.y + 48
       path.setAttribute(
         'd',
-        'M ' +
-          String(startX) +
-          ' ' +
-          String(start.y + 48) +
-          ' C ' +
-          String(middle) +
-          ' ' +
-          String(start.y + 48) +
-          ', ' +
-          String(middle) +
-          ' ' +
-          String(end.y + 48) +
-          ', ' +
-          String(endX) +
-          ' ' +
-          String(end.y + 48),
+        `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY}, ${endX} ${endY}`,
       )
       svg.append(path)
     }
@@ -152,19 +139,12 @@ const renderGraph = (snapshot: BacklogSnapshot): void => {
     }
     const status = runtimeStatus(node)
     const card = document.createElement('a')
-    card.className = 'graph-node state-' + statusClass(status)
+    card.className = `graph-node state-${statusClass(status)}`
     card.href = node.url ?? '#'
-    card.style.left = String(position.x) + 'px'
-    card.style.top = String(position.y) + 'px'
-    card.setAttribute(
-      'aria-label',
-      node.identifier +
-        ': ' +
-        node.title +
-        '. ' +
-        status +
-        (node.reason === null ? '' : '. ' + node.reason),
-    )
+    card.style.left = `${position.x}px`
+    card.style.top = `${position.y}px`
+    const reason = node.reason === null ? '' : `. ${node.reason}`
+    card.setAttribute('aria-label', `${node.identifier}: ${node.title}. ${status}${reason}`)
     card.append(
       text('span', 'graph-state', status),
       text('strong', '', node.title),

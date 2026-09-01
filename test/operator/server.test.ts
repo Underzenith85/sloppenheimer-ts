@@ -253,7 +253,7 @@ describe('operator server', (): void => {
         retry: null,
       })
       const source = await script.text()
-      expect(source).toContain("'graph-node state-' + statusClass(status)")
+      expect(source).toContain('`graph-node state-${statusClass(status)}`')
       expect(source).toContain("awaiting_checks: 'Awaiting checks'")
       expect(source).toContain("closed_without_merge: 'Closed without merge'")
       expect(source).toContain('(state?.handoffs ?? []).find(')
