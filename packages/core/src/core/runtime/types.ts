@@ -14,6 +14,7 @@ import type {
   WorkflowWatcher,
 } from '../../ports/index.js'
 import type {
+  CompletedSnapshot,
   EffectiveWorkflow,
   HandoffEntry,
   RefreshOperation,
@@ -24,11 +25,11 @@ import type {
 import type { TickSource } from '../transitions.js'
 
 /**
- * How much finished work the snapshot publishes. The console scopes its Finished view to a time
- * window, so the wire payload is bounded by recency rather than by however many issues a long
- * session has merged.
+ * The bound on published finished work, and the record it publishes, both live in `state.ts`: the
+ * completion store persists the same record, and a scheduler value the store writes belongs with
+ * the state rather than with the wire types alone.
  */
-export const publishedCompletedWork = 50
+export { publishedCompletedWork, type CompletedSnapshot } from '../state.js'
 
 export type RunningSnapshot = Readonly<{
   issueId: IssueId
@@ -58,16 +59,6 @@ export type RunningSnapshot = Readonly<{
   stallDeadline: string | null
   /** Stable link to the versioned detail resource for this agent. */
   detailUrl: string
-}>
-
-export type CompletedSnapshot = Readonly<{
-  issueId: IssueId
-  identifier: string
-  title: string
-  url: string | null
-  outcome: 'merged'
-  finishedAt: string
-  pullRequestUrl: string | null
 }>
 
 export type RetrySnapshot = Readonly<{
@@ -208,17 +199,25 @@ export type OrchestratorServices =
   | WorkflowWatcher
 
 /**
- * Where the persisted handoffs live, and how an operation reaches the filesystem holding them.
+ * One of the documents the host keeps beside its workspace, and how an operation reaches the
+ * filesystem holding it.
+ *
+ * The store names its file rather than its path, because a reload may move `workspaceRoot`: a
+ * write resolves the root in force through `storePath`, so a store is never written beside a root
+ * the host has left and then looked for beside the one it moved to.
  *
  * The filesystem is bound once at startup rather than read from each fiber that persists: the
  * runtime hands its own operations out as `Effect<void>` for a callback to run, and those carry no
  * context of their own.
  */
-export type HandoffStore = Readonly<{
-  path: string
+export type RuntimeStore = Readonly<{
+  /** The document's name under `.sloppenheimer/`. */
+  file: string
   /**
-   * Handoff disabled: the store is deliberately left unread, so the empty in-memory list must never
-   * be written back over it. A later handoff-enabled run still has to restore those pull requests.
+   * Whether this store is left alone entirely. Handoff disabled: neither store is read, so the
+   * empty in-memory lists must never be written back over them — a later handoff-enabled run still
+   * has to restore those pull requests and republish that finished work. A completion store whose
+   * read failed is disabled for the same reason: what it holds has not been seen.
    */
   disabled: boolean
   onHostFileSystem: <Value, Error>(
@@ -226,9 +225,15 @@ export type HandoffStore = Readonly<{
   ) => Effect.Effect<Value, Error>
 }>
 
+/** The two documents that outlive the host: the pull requests it is following, and what it merged. */
+export type RuntimeStores = Readonly<{
+  handoffs: RuntimeStore
+  completions: RuntimeStore
+}>
+
 /**
  * What the extracted runtime operations take in place of closing over the factory's scope: the
- * state cell, the mailbox they enqueue against, and the handoff store they persist to.
+ * state cell, the mailbox they enqueue against, and the stores they persist to.
  *
  * The state is one `Ref` rather than a record of mutable containers, so every operation states its
  * change as a transition applied to it. A reader sees one coherent value; a writer replaces it.
@@ -236,7 +241,7 @@ export type HandoffStore = Readonly<{
 export type RuntimeCells = Readonly<{
   state: Ref.Ref<RuntimeState>
   mailbox: Queue.Queue<OrchestratorEvent>
-  handoffStore: HandoffStore
+  stores: RuntimeStores
 }>
 
 /**
@@ -276,6 +281,8 @@ export type OrchestratorContext = Readonly<{
     outcome: 'pull_request_open' | 'merged' | 'intervention_required',
   ) => Effect.Effect<void>
   persistHandoffs: Effect.Effect<void>
+  /** Records the finished work this host can still show, so a restart does not empty Finished. */
+  persistCompletions: Effect.Effect<void>
   recoverMissingHandoffs: Effect.Effect<void>
   reconcile: (retryDispatchAllowed: boolean) => Effect.Effect<void, never, Scope.Scope>
   hydrateRestoredHandoffs: Effect.Effect<void>

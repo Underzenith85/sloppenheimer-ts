@@ -51,6 +51,17 @@ export type RuntimeState = Readonly<{
   retries: ReadonlyMap<IssueId, RetryEntry>
   /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
+  /**
+   * Finished work an earlier host recorded, restored from the completion store and already
+   * filtered to the Finished window.
+   *
+   * Deliberately not folded into `completed`, and read by nothing but `createSnapshot`. A restored
+   * completion is history this host is republishing, not work it performed: it holds no claim, has
+   * no detail record and no session behind it, so admitting it to the map that `publishDetails`
+   * consults would change how the versioned agent-detail resource answers after a restart. The
+   * console's Finished view is what asked for this, and the console reads the snapshot.
+   */
+  restoredCompletions: readonly CompletedSnapshot[]
   pausedIssueNumbers: ReadonlySet<number>
   handoffs: ReadonlyMap<IssueId, HandoffEntry>
   totals: TokenTotals
@@ -168,6 +179,21 @@ export type CompletedEntry = Readonly<{
   url: string | null
   outcome: 'merged'
   finishedAt: Date
+  pullRequestUrl: string | null
+}>
+
+/**
+ * One piece of finished work as it is published and as it is persisted: the same record as
+ * {@link CompletedEntry} with its instant as a wire timestamp. The console reads it off the
+ * snapshot and the completion store writes it to disk, so the two never drift apart.
+ */
+export type CompletedSnapshot = Readonly<{
+  issueId: IssueId
+  identifier: string
+  title: string
+  url: string | null
+  outcome: 'merged'
+  finishedAt: string
   pullRequestUrl: string | null
 }>
 
@@ -328,6 +354,23 @@ export type RuntimePorts = Readonly<{
 /** How many finished agents keep their timeline for post-mortem inspection. */
 export const retainedCompletedDetails = 16
 
+/**
+ * How much finished work the snapshot publishes, and how much of it the completion store keeps.
+ * The console scopes its Finished view to a time window, so both are bounded by recency rather
+ * than by however many issues a long-lived host has merged.
+ */
+export const publishedCompletedWork = 50
+
+/**
+ * How far back restored finished work reaches: completions older than this are not read back at
+ * startup, because nothing would ever show them.
+ *
+ * This is the console's Finished window. The console states its own copy in
+ * `src/operator/ui/model.ts` — its sources are classic browser scripts and cannot import this
+ * module — and `test/operator/console-ux.test.ts` holds the two to the same span.
+ */
+export const completionWindowMs = 24 * 60 * 60 * 1000
+
 /** How many issue identifiers are remembered for answering detail requests. */
 export const rememberedIdentifiers = 500
 
@@ -335,6 +378,7 @@ export const initialState = (
   lastKnownGood: EffectiveWorkflow,
   restored: Readonly<{
     handoffs: readonly HandoffSnapshot[]
+    completions: readonly CompletedSnapshot[]
     storeReadFailed: boolean
     storeError: HandoffStoreError | null
   }>,
@@ -344,6 +388,7 @@ export const initialState = (
   claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
   completed: new Map(),
+  restoredCompletions: restored.completions,
   pausedIssueNumbers: new Set(),
   handoffs: new Map(),
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },

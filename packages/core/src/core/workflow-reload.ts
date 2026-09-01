@@ -358,6 +358,16 @@ export const installEffectiveWorkflow = (
 ): Effect.Effect<void> =>
   Ref.update(context.state, (current) => Transitions.adoptWorkflow(current, next)).pipe(
     Effect.zipRight(adoptPorts(context, previous, next)),
+    // Both stores live beside `workspaceRoot`, so a reload that moves it moves them. The handoff
+    // store is rewritten at the end of every reconciliation pass and follows the root by itself;
+    // the completion store is written only when work finishes, which may be never, so the move is
+    // what has to carry it across -- otherwise a restart after one would read the new root and
+    // find none of the history the old one held.
+    Effect.zipRight(
+      previous.workflow.config.workspaceRoot === next.workflow.config.workspaceRoot
+        ? Effect.void
+        : context.persistCompletions,
+    ),
   )
 
 /**

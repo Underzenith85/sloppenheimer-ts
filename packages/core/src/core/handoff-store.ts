@@ -1,10 +1,9 @@
-import { FileSystem } from '@effect/platform'
-import type { PlatformError } from '@effect/platform/Error'
-import { dirname } from 'node:path'
-import { Effect, Option, ParseResult, Schema } from 'effect'
+import type { FileSystem } from '@effect/platform'
+import { Effect, Schema } from 'effect'
 
 import { HandoffStoreError } from '../domain/errors.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
+import { loadStoreDocument, saveStoreDocument, type StoreFailure } from './json-store.js'
 
 const handoffState = Schema.Literal(
   'merged',
@@ -50,101 +49,24 @@ const handoffStoreV1 = Schema.Struct({
   handoffs: Schema.Array(handoffSnapshot),
 }).annotations({ message: () => 'handoff store envelope is not version 1 or contains bad data' })
 
-const storeError = (
-  operation: 'read' | 'write',
-  path: string,
-  detail: string,
-  cause: unknown,
-): HandoffStoreError =>
-  new HandoffStoreError({
-    operation,
-    message: `Could not ${operation} handoff store ${path}${detail}`,
-    cause,
-  })
+const label = 'handoff store'
 
-/**
- * A platform failure reported the way this store has always reported one. `description` carries the
- * underlying `fs` error's own message, so the operator-visible text is unchanged by reading the
- * filesystem through the platform layer rather than through `node:fs/promises` directly.
- */
-const platformStoreError =
-  (operation: 'read' | 'write', path: string) =>
-  (error: PlatformError): HandoffStoreError =>
-    storeError(
-      operation,
-      path,
-      error.description === undefined ? '' : `: ${error.description}`,
-      error,
-    )
+const fail: StoreFailure<HandoffStoreError> = (operation, message, cause) =>
+  new HandoffStoreError({ operation, message, cause })
 
-const decodeError = (path: string, detail: string, cause: unknown): HandoffStoreError =>
-  new HandoffStoreError({
-    operation: 'read',
-    message: `Could not decode handoff store ${path}: ${detail}`,
-    cause,
-  })
-
-const schemaDecodeError = (path: string, error: ParseResult.ParseError): HandoffStoreError =>
-  decodeError(
-    path,
-    ParseResult.ArrayFormatter.formatIssueSync(error.issue)[0]?.message ??
-      'handoff store schema rejected the document',
-    error,
-  )
-
-/**
- * Reads the store, treating a store that has never been written as no handoffs.
- *
- * Absence is decided by the platform error's `reason` rather than by inspecting an `ENOENT` code on
- * an unknown cause, so the one failure this store recovers from is named rather than string-matched.
- */
 export const loadHandoffs = (
   path: string,
 ): Effect.Effect<readonly HandoffSnapshot[], HandoffStoreError, FileSystem.FileSystem> =>
-  FileSystem.FileSystem.pipe(
-    Effect.flatMap((fileSystem) => fileSystem.readFileString(path, 'utf8')),
-    Effect.map(Option.some<string>),
-    Effect.catchAll((error) =>
-      error._tag === 'SystemError' && error.reason === 'NotFound'
-        ? Effect.succeed(Option.none<string>())
-        : Effect.fail(platformStoreError('read', path)(error)),
-    ),
-    Effect.flatMap(
-      Option.match({
-        onNone: () => Effect.succeed<readonly HandoffSnapshot[]>([]),
-        onSome: (contents) =>
-          Effect.try({
-            try: (): unknown => JSON.parse(contents),
-            catch: (cause: unknown) => decodeError(path, 'the file is not valid JSON', cause),
-          }).pipe(
-            Effect.flatMap((parsed) =>
-              Schema.decodeUnknown(handoffStoreV1)(parsed).pipe(
-                Effect.mapError((error) => schemaDecodeError(path, error)),
-              ),
-            ),
-            Effect.map(({ handoffs }) => handoffs),
-          ),
-      }),
-    ),
-  )
+  loadStoreDocument({
+    path,
+    label,
+    schema: handoffStoreV1,
+    absent: { version: 1, handoffs: [] } as const,
+    fail,
+  }).pipe(Effect.map(({ handoffs }) => handoffs))
 
-/** Written to a sibling temporary file and renamed over the store, so a reader never sees a partial document. */
 export const saveHandoffs = (
   path: string,
   handoffs: readonly HandoffSnapshot[],
 ): Effect.Effect<void, HandoffStoreError, FileSystem.FileSystem> =>
-  Effect.try({
-    try: () => `${JSON.stringify({ version: 1, handoffs }, null, 2)}\n`,
-    catch: (cause: unknown) =>
-      storeError('write', path, cause instanceof Error ? `: ${cause.message}` : '', cause),
-  }).pipe(
-    Effect.flatMap((document) =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem
-        const temporaryPath = `${path}.tmp`
-        yield* fileSystem.makeDirectory(dirname(path), { recursive: true })
-        yield* fileSystem.writeFileString(temporaryPath, document, { mode: 0o600 })
-        yield* fileSystem.rename(temporaryPath, path)
-      }).pipe(Effect.mapError(platformStoreError('write', path))),
-    ),
-  )
+  saveStoreDocument({ path, label, document: { version: 1, handoffs }, fail })

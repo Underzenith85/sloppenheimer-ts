@@ -3,14 +3,21 @@ import { Exit, Fiber, MutableRef, Option } from 'effect'
 import { describe, expect } from 'vitest'
 
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
-import { issueIdentifier, type Issue, type IssueId } from '@sloppenheimer/core/domain/domain.js'
+import {
+  issueId,
+  issueIdentifier,
+  type Issue,
+  type IssueId,
+} from '@sloppenheimer/core/domain/domain.js'
 import { dispatchAdmission, hasSlot } from '@sloppenheimer/core/core/policy.js'
 import {
   initialState,
+  publishedCompletedWork,
   retainedCompletedDetails,
   type EffectiveWorkflow,
   type ExecutionSnapshot,
   type CompletedEntry,
+  type CompletedSnapshot,
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
@@ -131,7 +138,12 @@ const makeIssue = (identifier: string, state = 'open', labels = ['sloppenheimer'
 
 const emptyState = (): RuntimeState =>
   Transitions.finishStartupRecovery(
-    initialState(effective, { handoffs: [], storeReadFailed: false, storeError: null }),
+    initialState(effective, {
+      handoffs: [],
+      completions: [],
+      storeReadFailed: false,
+      storeError: null,
+    }),
   )
 
 const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
@@ -177,6 +189,17 @@ const finishedWork = (issue: Issue): CompletedEntry => ({
   outcome: 'merged',
   finishedAt: new Date('2026-01-02T00:00:00.000Z'),
   pullRequestUrl: 'https://example.test/pulls/7',
+})
+
+/** Work an earlier host merged, as the completion store hands it back. */
+const restoredWork = (identifier: string, finishedAt: string): CompletedSnapshot => ({
+  issueId: issueId(identifier),
+  identifier,
+  title: identifier,
+  url: null,
+  outcome: 'merged',
+  finishedAt,
+  pullRequestUrl: null,
 })
 
 const detailFor = (issue: Issue): AgentDetailRecord =>
@@ -413,6 +436,58 @@ describe('claim lifecycle', (): void => {
     })
   })
 
+  it('publishes restored work beside its own, newest first', (): void => {
+    const issue = makeIssue('example/sloppenheimer#1')
+    const own = Transitions.completeIssue(emptyState(), issue.id, finishedWork(issue))
+
+    const published = Transitions.completionSnapshots({
+      ...own,
+      restoredCompletions: [
+        restoredWork('example/sloppenheimer#2', '2026-01-03T00:00:00.000Z'),
+        restoredWork('example/sloppenheimer#3', '2026-01-01T00:00:00.000Z'),
+      ],
+    })
+
+    // #1 was finished on 2026-01-02 by this host: recency orders them, not provenance.
+    expect(published.map((entry) => entry.identifier)).toEqual([
+      'example/sloppenheimer#2',
+      issue.identifier,
+      'example/sloppenheimer#3',
+    ])
+  })
+
+  it('drops a restored record for work this host has finished itself', (): void => {
+    const issue = makeIssue('example/sloppenheimer#1')
+    const own = Transitions.completeIssue(emptyState(), issue.id, finishedWork(issue))
+
+    const published = Transitions.completionSnapshots({
+      ...own,
+      restoredCompletions: [restoredWork(issue.identifier, '2026-01-03T00:00:00.000Z')],
+    })
+
+    expect(published).toHaveLength(1)
+    expect(published[0]).toMatchObject({
+      identifier: issue.identifier,
+      finishedAt: '2026-01-02T00:00:00.000Z',
+    })
+  })
+
+  it('bounds what it publishes and persists to the most recent finished work', (): void => {
+    const restoredCompletions = Array.from({ length: publishedCompletedWork + 5 }, (_, index) =>
+      restoredWork(
+        `example/sloppenheimer#${index}`,
+        new Date(Date.UTC(2026, 0, 1) + index * 60_000).toISOString(),
+      ),
+    )
+
+    const published = Transitions.publishedCompletions({ ...emptyState(), restoredCompletions })
+
+    expect(published).toHaveLength(publishedCompletedWork)
+    // The newest survive the bound, and the five oldest are the ones dropped.
+    expect(published[0]?.identifier).toBe(`example/sloppenheimer#${publishedCompletedWork + 4}`)
+    expect(published.map((entry) => entry.identifier)).not.toContain('example/sloppenheimer#4')
+  })
+
   it('leaves the state it was given untouched', (): void => {
     const issue = makeIssue('example/sloppenheimer#1')
     const before = emptyState()
@@ -434,6 +509,7 @@ describe('dispatch admission', (): void => {
   it('refuses everything until startup recovery has finished', (): void => {
     const recovering = initialState(effective, {
       handoffs: [],
+      completions: [],
       storeReadFailed: false,
       storeError: null,
     })
