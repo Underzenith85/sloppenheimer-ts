@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Effect, Option } from 'effect'
+import { Effect, Exit, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { IssueIdentifier } from '@sloppenheimer/core/domain/domain.js'
@@ -110,47 +110,76 @@ const removeFreeRunWorkspace = (
       // one directory would otherwise be moved out of another.
       yield* stillTheIssueDirectory
       const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
-      // What was decided on and what was taken are two reads of one name, so the decision is made
-      // again on the record actually in hand.
-      if (Option.exists(taken, (record) => leaseIsLive(record.lease, leasePath))) {
-        const restored = yield* Option.match(taken, {
-          onNone: () => Effect.succeed(true),
-          onSome: (record) => returnLease(fileSystem, record, leasePath),
-        })
-        if (!restored) {
-          // An acquisition found the name free while it was aside and claimed it. Its record stands,
-          // and this one is gone: the workspace belongs to the run that took the name.
-          yield* logWarning('workspace lease was claimed while cleanup held it aside', {
-            action: 'workspace_cleanup',
-            outcome: 'skipped',
-            path: runPath,
-          })
-        }
-        return false
-      }
-      // Only the directory: the record was taken aside above, so this name is no longer this
-      // removal's to touch, and anything at it now was published by somebody else. Both steps resolve
-      // `runPath` afresh, so the directory it is under is confirmed to be the one that was inspected
-      // before each of them.
-      // The record now sits in staging, and the hook below is unbounded: what it could move aside is
-      // that directory as well as this one, so it is held still for as long as the record is there.
-      const stillTheStagingDirectory = yield* Option.match(taken, {
-        onNone: () =>
-          Effect.succeed(Effect.void as Effect.Effect<void, WorkspaceError | PlatformError>),
-        onSome: () => pinDirectory(fileSystem, stagingPath, 'lease staging path'),
+      return yield* Option.match(taken, {
+        onNone: () => removeFreeRunDirectory(fileSystem, hooks, runPath, stillTheIssueDirectory),
+        onSome: (record) =>
+          // The record is out of its name from here, and the name is free for anyone to claim. So
+          // everything that follows is bracketed by putting it back: a cleanup interrupted during
+          // the hook, or one that fails anywhere, must not leave a run directory whose lease has
+          // been carried off to staging, which the next pass would read as belonging to nobody.
+          Effect.acquireUseRelease(
+            Effect.succeed(record),
+            () =>
+              // What was decided on and what was taken are two reads of one name, so the decision
+              // is made again on the record actually in hand.
+              leaseIsLive(record.lease, leasePath)
+                ? Effect.succeed(false)
+                : Effect.gen(function* () {
+                    // The record sits in staging now, and the hook below is unbounded: what it
+                    // could move aside is that directory as well as this one.
+                    const stillTheStagingDirectory = yield* pinDirectory(
+                      fileSystem,
+                      stagingPath,
+                      'lease staging path',
+                    )
+                    yield* removeFreeRunDirectory(
+                      fileSystem,
+                      hooks,
+                      runPath,
+                      stillTheIssueDirectory,
+                    )
+                    yield* stillTheStagingDirectory
+                    yield* discardStagedLease(fileSystem, record.path)
+                    return true
+                  }),
+            (held, exit) =>
+              // Committed, so there is nothing to put back: the workspace and its record are gone.
+              Exit.isSuccess(exit) && exit.value
+                ? Effect.void
+                : returnLease(fileSystem, held, leasePath).pipe(
+                    Effect.flatMap((restored) =>
+                      restored
+                        ? Effect.void
+                        : // An acquisition found the name free while it was aside and claimed it.
+                          // Its record stands, and this one is gone: the workspace belongs to the
+                          // run that took the name.
+                          logWarning('workspace lease was claimed while cleanup held it aside', {
+                            action: 'workspace_cleanup',
+                            outcome: 'skipped',
+                            path: runPath,
+                          }),
+                    ),
+                    Effect.ignore,
+                  ),
+          ),
       })
-      yield* stillTheIssueDirectory
-      yield* runBeforeRemove(fileSystem, hooks, runPath)
-      yield* stillTheIssueDirectory
-      yield* removeRunDirectory(fileSystem, runPath)
-      yield* stillTheStagingDirectory
-      yield* Option.match(taken, {
-        onNone: () => Effect.void,
-        onSome: (record) => discardStagedLease(fileSystem, record.path),
-      })
-      return true
     }),
   )
+
+/** The directory and the operator's last look at it, each against ground confirmed for it. */
+const removeFreeRunDirectory = (
+  fileSystem: FileSystem.FileSystem,
+  hooks: HooksConfig,
+  runPath: string,
+  stillTheIssueDirectory: Effect.Effect<void, WorkspaceError | PlatformError>,
+): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    yield* stillTheIssueDirectory
+    yield* runBeforeRemove(fileSystem, hooks, runPath)
+    yield* stillTheIssueDirectory
+    yield* removeRunDirectory(fileSystem, runPath)
+    return true
+  })
 
 /**
  * Every run workspace of one issue that no live owner holds, removed; the run keys that were left

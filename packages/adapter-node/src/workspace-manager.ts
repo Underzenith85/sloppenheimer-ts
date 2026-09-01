@@ -144,12 +144,16 @@ const retainLease = (
   })
 
 /** Why an acquisition that took the lease and then failed is keeping the workspace. */
-const provisioningReason = (cause: Cause.Cause<WorkspaceError>): string =>
+const provisioningReason = (cause: Cause.Cause<WorkspaceError | PlatformError>): string =>
   Option.match(Cause.failureOption(cause), {
     onNone: () => 'workspace provisioning was interrupted',
     // The category, never the message: a hook's failure carries an excerpt of what it wrote, and
-    // the lease record is a file on disk rather than a log the redaction rules pass over.
-    onSome: (error) => `workspace provisioning failed: ${error.category}`,
+    // the lease record is a file on disk rather than a log the redaction rules pass over. A host
+    // that refused outright has no category of its own, and says only that.
+    onSome: (error) =>
+      error instanceof WorkspaceError
+        ? `workspace provisioning failed: ${error.category}`
+        : 'workspace provisioning failed: the host refused',
   })
 
 /**
@@ -285,17 +289,21 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
           )
           yield* stillTheIssueDirectory
           yield* publishRunClaim(fileSystem, paths, staged)
-          yield* stillTheIssueDirectory
-          // From here this process has the lease, which is something it knows rather than something
-          // it reads back: a release whose write does not land must not leave a record every later
-          // reading in this process takes for a live run. Only the acquisition that published the
-          // claim holds it — a duplicate dispatch that lost the link never had it to let go.
+          // Taken here and nowhere later: from the instant the link lands, this process has the
+          // lease, and what it holds is something it knows rather than something it reads back — a
+          // release whose write does not land must not leave a record every later reading in this
+          // process takes for a live run. Only the acquisition that published the claim holds it, so
+          // a duplicate dispatch that lost the link never had one to let go of.
           holdLease(paths.leasePath)
-          // Provisioning that does not finish keeps the workspace under the reason it failed for,
-          // rather than leaving a lease nobody holds. It also lets the hold go, because the release
-          // that would otherwise do it is only installed once the workspace has been handed over.
+          // Everything from here is bracketed by that: provisioning that does not finish keeps the
+          // workspace under the reason it failed for, and so does a ground check that will not pass,
+          // rather than leaving a lease nobody holds. The release that would otherwise do this is
+          // installed only once the workspace has been handed over.
           yield* restore(
-            provisionRunWorkspace(fileSystem, hooks, workspace, stillTheIssueDirectory),
+            Effect.zipRight(
+              stillTheIssueDirectory,
+              provisionRunWorkspace(fileSystem, hooks, workspace, stillTheIssueDirectory),
+            ),
           ).pipe(
             Effect.onExit((exit) =>
               Exit.isSuccess(exit)
