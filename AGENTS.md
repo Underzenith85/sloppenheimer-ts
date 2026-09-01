@@ -561,7 +561,10 @@ repair agent that had achieved nothing.
   took it over, and the stall sweep leaves those alone — otherwise an inspection or a push that
   outlasts the timeout is retired as a stalled agent and the coding agent runs again on work it had
   already finished, which is the confusion this whole record exists to end. A publication that
-  cannot finish is the source control's to fail, and it fails as a delivery.
+  cannot finish is the source control's to fail, and it fails as a delivery. The surfaces say the same
+  thing: the run's snapshot publishes no stall deadline once the host has taken over, and its detail
+  moves to the `publishing` phase — a deadline nothing will act on is what has a console reporting a
+  stalled agent for a run whose stall detection is off.
 - The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
   published SHA and expected remote SHA are authoritative.
 - A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing

@@ -70,10 +70,12 @@ const runningSnapshot = (entry: RunningEntry): RunningSnapshot => ({
   tokens: entry.tokens,
   lastReportedTokens: entry.lastReportedTokens,
   workerHost: 'local',
-  stallDeadline: stallDeadlineOf(
-    entry.lastEventAt ?? entry.startedAt,
-    entry.execution.stallTimeoutMs,
-  ),
+  // No deadline once the host's postflight has taken over: the stall sweep exempts such a run, and
+  // publishing a deadline it will never act on is what has the console calling it a stalled agent.
+  stallDeadline:
+    entry.postflightStartedAt !== null
+      ? null
+      : stallDeadlineOf(entry.lastEventAt ?? entry.startedAt, entry.execution.stallTimeoutMs),
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 

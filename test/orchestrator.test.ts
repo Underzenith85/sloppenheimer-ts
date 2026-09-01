@@ -1808,6 +1808,17 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(snapshot.retrying).toEqual([])
           expect(snapshot.running).toHaveLength(1)
 
+          // And the surfaces say so. Stall detection is off for this run, so publishing a deadline
+          // it will never act on is what has the console reporting a stalled agent.
+          expect(snapshot.running[0]?.stallDeadline).toBeNull()
+          const lookup = yield* control.agentDetail(issue.identifier)
+          expect(lookup._tag).toBe('Found')
+          if (lookup._tag === 'Found') {
+            expect(lookup.detail.phase.phase).toBe('publishing')
+            expect(lookup.detail.activity.stalled).toBe(false)
+            expect(lookup.detail.activity.stallDeadline).toBeNull()
+          }
+
           release()
           while ((yield* control.snapshot).handoffs.length === 0) {
             yield* Effect.yieldNow()

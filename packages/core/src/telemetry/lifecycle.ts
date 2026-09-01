@@ -19,6 +19,20 @@ import type {
 } from './snapshot.js'
 
 /**
+ * The host's postflight has taken the run over from the agent.
+ *
+ * Phase rather than a publication: nothing is known yet about whether there is anything to publish
+ * — the inspection has not run. What is known is who is working, and that is what the surfaces need
+ * so a silent postflight does not read as a silent agent. `agentDetail` already exempts this phase
+ * from the stall countdown, so saying it here is what stops the console reporting a stall for a
+ * run whose stall detection is off.
+ */
+export const recordPostflightStarted = (record: AgentDetailRecord, at: Date): AgentDetailRecord =>
+  record.phase === 'publishing'
+    ? record
+    : setPhase(record, 'publishing', 'The host is inspecting the workspace and publishing', at)
+
+/**
  * Records a scheduled retry. The attempt boundary is explicit on the timeline, and the sequence
  * keeps rising, so ordering and session identity survive the boundary that separates the attempts.
  */

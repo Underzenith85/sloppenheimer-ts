@@ -1,6 +1,7 @@
 import { Effect, Queue, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
+import { recordPostflightStarted } from '../telemetry.js'
 import * as Transitions from './transitions.js'
 import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
@@ -44,7 +45,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
         case 'PostflightStarted': {
           const startedAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>
-            Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
+            Transitions.updateDetail(
+              Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
+              event.issueId,
+              (record) => recordPostflightStarted(record, startedAt),
+            ),
           )
           break
         }
