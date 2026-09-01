@@ -2,9 +2,9 @@ import { FileSystem } from '@effect/platform'
 import chokidar from 'chokidar'
 import { Effect, Layer, Queue, Stream } from 'effect'
 
-import { makeWorkspaceManager } from '@symphony/adapter-node'
+import { makeWorkspaceManager } from '@sloppenheimer/adapter-node'
 import { agentRunners, defaultAgentRunnerKind, layerAgentRunnerFor } from './agent-runners.js'
-import type { ValidatedAgentRunner } from '@symphony/core/domain/agent-runner-provider.js'
+import type { ValidatedAgentRunner } from '@sloppenheimer/core/domain/agent-runner-provider.js'
 import { loadWorkflow, preflightWorkflow, type WorkflowAdapters } from './config/workflow.js'
 import {
   codeReviewFactory,
@@ -17,7 +17,7 @@ import type {
   SourceControlError,
   TrackerError,
   WorkflowError,
-} from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/errors.js'
 import {
   CodeReviewFactory,
   CurrentIssueControl,
@@ -35,7 +35,7 @@ import {
   type AdapterServices,
   type PortServices,
   type SourceControlServices,
-} from '@symphony/core'
+} from '@sloppenheimer/core'
 
 /**
  * The tracker kinds and runner kinds this build supports, and the runner a workflow that names none

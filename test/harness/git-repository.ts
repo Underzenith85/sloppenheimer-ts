@@ -22,7 +22,7 @@ export type GitRepositoryFixture = Readonly<{
 }>
 
 export const makeGitRepository = async (): Promise<GitRepositoryFixture> => {
-  const root = await mkdtemp(join(tmpdir(), 'symphony-source-control-'))
+  const root = await mkdtemp(join(tmpdir(), 'sloppenheimer-source-control-'))
   const remote = join(root, 'remote.git')
   const seed = join(root, 'seed')
   const workspace = join(root, 'workspace')

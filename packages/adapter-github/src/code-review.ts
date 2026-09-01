@@ -1,12 +1,12 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Option, Schema } from 'effect'
 
-import type { Issue } from '@symphony/core/domain/domain.js'
-import { issueBranchName } from '@symphony/core/domain/handoff.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import type { Issue } from '@sloppenheimer/core/domain/domain.js'
+import { issueBranchName } from '@sloppenheimer/core/domain/handoff.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import type { GitHubProviderConfig } from './provider.js'
-import type { HostToolSpec } from '@symphony/core/domain/host-tools.js'
-import type { CodeReviewPort, HandoffResult } from '@symphony/core/ports/code-review.js'
+import type { HostToolSpec } from '@sloppenheimer/core/domain/host-tools.js'
+import type { CodeReviewPort, HandoffResult } from '@sloppenheimer/core/ports/code-review.js'
 import {
   decodeTracker,
   githubJson,

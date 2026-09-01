@@ -1,9 +1,9 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Schema } from 'effect'
 
-import type { JsonValue } from '@symphony/core/domain/domain.js'
-import { unknownRecord } from '@symphony/core/support/schema.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { unknownRecord } from '@sloppenheimer/core/support/schema.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import {
   githubJson,
   githubMaxPages,
@@ -18,7 +18,7 @@ import {
 import type {
   CodexReviewObservation,
   PullRequestObservation,
-} from '@symphony/core/domain/handoff.js'
+} from '@sloppenheimer/core/domain/handoff.js'
 import {
   closedObservation,
   decode,

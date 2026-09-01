@@ -1,6 +1,6 @@
 import { Deferred, Effect, Option, Queue, Ref } from 'effect'
 
-import { AgentError } from '@symphony/core/domain/errors.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
 import {
   beginTurnTimer,
   claimTurn,
@@ -157,7 +157,7 @@ export const ensureTurnStarted = (
 
 /**
  * Waits for a turn to finish. Everything that could have decided it already — a completion the
- * App Server emitted in the same batch as the `turn/start` response, a request Symphony could not
+ * App Server emitted in the same batch as the `turn/start` response, a request Sloppenheimer could not
  * serve, a process that died — is the same Deferred, so this never has to rank one against
  * another. A Deferred retains its result for late waiters.
  */

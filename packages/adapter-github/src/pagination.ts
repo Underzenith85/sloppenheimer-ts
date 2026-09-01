@@ -1,7 +1,7 @@
 import { Effect } from 'effect'
 
-import type { JsonValue } from '@symphony/core/domain/domain.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import type { GitHubProviderConfig } from './provider.js'
 import {
   githubJson,

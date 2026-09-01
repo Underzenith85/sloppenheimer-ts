@@ -60,7 +60,7 @@ export type TrackerFactoryPort = Readonly<{
   ) => Effect.Effect<TrackerPort, TrackerError, Scope.Scope>
 }>
 
-export class TrackerFactory extends Context.Tag('symphony/TrackerFactory')<
+export class TrackerFactory extends Context.Tag('sloppenheimer/TrackerFactory')<
   TrackerFactory,
   TrackerFactoryPort
 >() {}
@@ -68,7 +68,7 @@ export class TrackerFactory extends Context.Tag('symphony/TrackerFactory')<
 export type TrackerCell = AdapterCell<TrackerPort, ValidatedTrackerProvider, TrackerError>
 
 /** The tracker in force now, and the seam through which a reload installs its replacement. */
-export class CurrentTracker extends Context.Tag('symphony/CurrentTracker')<
+export class CurrentTracker extends Context.Tag('sloppenheimer/CurrentTracker')<
   CurrentTracker,
   TrackerCell
 >() {}

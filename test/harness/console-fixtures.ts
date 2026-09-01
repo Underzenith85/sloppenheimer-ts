@@ -1,6 +1,6 @@
-import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
 import type { BacklogSnapshot } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '@symphony/core'
+import type { OrchestratorSnapshot } from '@sloppenheimer/core'
 
 /**
  * One repository state exercising every classification the console can make: running, stalled,
@@ -9,21 +9,21 @@ import type { OrchestratorSnapshot } from '@symphony/core'
  * shape the runtime would never publish.
  */
 
-export const runningIdentifier = 'example/symphony#17'
-export const stalledIdentifier = 'example/symphony#21'
-export const retryingIdentifier = 'example/symphony#18'
-export const awaitingIdentifier = 'example/symphony#30'
-export const repairIdentifier = 'example/symphony#31'
-export const interventionIdentifier = 'example/symphony#32'
-export const mergedIdentifier = 'example/symphony#40'
-export const staleMergedIdentifier = 'example/symphony#41'
-export const readyTopIdentifier = 'example/symphony#50'
-export const readyMiddleIdentifier = 'example/symphony#52'
-export const readyLastIdentifier = 'example/symphony#51'
-export const blockedIdentifier = 'example/symphony#60'
-export const escalatedBlockedIdentifier = 'example/symphony#61'
-export const cyclicIdentifier = 'example/symphony#70'
-export const cyclicPartnerIdentifier = 'example/symphony#71'
+export const runningIdentifier = 'example/sloppenheimer#17'
+export const stalledIdentifier = 'example/sloppenheimer#21'
+export const retryingIdentifier = 'example/sloppenheimer#18'
+export const awaitingIdentifier = 'example/sloppenheimer#30'
+export const repairIdentifier = 'example/sloppenheimer#31'
+export const interventionIdentifier = 'example/sloppenheimer#32'
+export const mergedIdentifier = 'example/sloppenheimer#40'
+export const staleMergedIdentifier = 'example/sloppenheimer#41'
+export const readyTopIdentifier = 'example/sloppenheimer#50'
+export const readyMiddleIdentifier = 'example/sloppenheimer#52'
+export const readyLastIdentifier = 'example/sloppenheimer#51'
+export const blockedIdentifier = 'example/sloppenheimer#60'
+export const escalatedBlockedIdentifier = 'example/sloppenheimer#61'
+export const cyclicIdentifier = 'example/sloppenheimer#70'
+export const cyclicPartnerIdentifier = 'example/sloppenheimer#71'
 
 const tokens = { inputTokens: 10, outputTokens: 5, totalTokens: 15 } as const
 
@@ -65,7 +65,7 @@ const handoffEntry = (
   issueId: String(number),
   identifier,
   pullRequestUrl: `https://example.test/pull/${String(number)}`,
-  branchName: `symphony/issue-${String(number)}`,
+  branchName: `sloppenheimer/issue-${String(number)}`,
   state,
   headSha: `head-${String(number)}`,
   reason,
@@ -165,7 +165,7 @@ const issue = (
   identifier,
   title,
   url: `https://example.test/issues/${String(number)}`,
-  labels: ['symphony'],
+  labels: ['sloppenheimer'],
   priority: 2,
   createdAt: null,
   enabled: true,
@@ -220,33 +220,35 @@ export const consoleBacklog = (): BacklogSnapshot => {
       priority: 3,
       dispatchable: false,
       readiness: 'blocked',
-      reason: 'Waiting for example/symphony#50',
+      reason: 'Waiting for example/sloppenheimer#50',
       blockedBy: [blocker(50, readyTopIdentifier)],
     }),
     issue(61, escalatedBlockedIdentifier, 'Urgent but blocked', {
       priority: 1,
       dispatchable: false,
       readiness: 'blocked',
-      reason: 'Waiting for example/symphony#50',
+      reason: 'Waiting for example/sloppenheimer#50',
       blockedBy: [blocker(50, readyTopIdentifier)],
     }),
     issue(70, cyclicIdentifier, 'First half of a cycle', {
       priority: 2,
       dispatchable: false,
       readiness: 'cyclic',
-      reason: 'Dependency cycle: example/symphony#70 → example/symphony#71 → example/symphony#70',
+      reason:
+        'Dependency cycle: example/sloppenheimer#70 → example/sloppenheimer#71 → example/sloppenheimer#70',
       blockedBy: [blocker(71, cyclicPartnerIdentifier)],
     }),
     issue(71, cyclicPartnerIdentifier, 'Second half of a cycle', {
       priority: 2,
       dispatchable: false,
       readiness: 'cyclic',
-      reason: 'Dependency cycle: example/symphony#71 → example/symphony#70 → example/symphony#71',
+      reason:
+        'Dependency cycle: example/sloppenheimer#71 → example/sloppenheimer#70 → example/sloppenheimer#71',
       blockedBy: [blocker(70, cyclicIdentifier)],
     }),
   ]
   return {
-    controlLabel: 'symphony',
+    controlLabel: 'sloppenheimer',
     issues,
     nodes: issues.map((entry) => ({
       identifier: entry.identifier,
@@ -268,7 +270,7 @@ export const consoleBacklog = (): BacklogSnapshot => {
       {
         members: [cyclicIdentifier, cyclicPartnerIdentifier],
         message:
-          'Dependency cycle: example/symphony#70 → example/symphony#71 → example/symphony#70',
+          'Dependency cycle: example/sloppenheimer#70 → example/sloppenheimer#71 → example/sloppenheimer#70',
       },
     ],
   }

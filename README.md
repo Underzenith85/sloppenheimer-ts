@@ -74,8 +74,8 @@ tokens are rejected. The host retains the reference's environment-variable name 
 provenance, without making another plaintext token copy, and removes that name plus the GitHub
 fallback aliases `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environments. Codex's own
 `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` authentication sources are always preserved, and tracker
-configuration may not reuse those names. Each eligible issue must carry the `symphony` label.
-Workspaces live under `.symphony/workspaces` and are never treated as trusted paths until
+configuration may not reuse those names. Each eligible issue must carry the `sloppenheimer` label.
+Workspaces live under `.sloppenheimer/workspaces` and are never treated as trusted paths until
 containment checks pass. Containment is re-verified immediately before every agent launch, not only
 at creation: the path must be a strict descendant of the configured root both as written and after
 symlink resolution, and must be a real directory that still exists. The verified real path — not
@@ -99,34 +99,34 @@ The server deliberately binds only to loopback. From another machine, reach an L
 an SSH tunnel:
 
 ```sh
-ssh -L 3000:127.0.0.1:3000 symphony-host
+ssh -L 3000:127.0.0.1:3000 sloppenheimer-host
 ```
 
-Before a normal turn, Symphony prepares `symphony/issue-<number>` from the current protected base;
-before a repair, it prepares the exact recorded pull-request head. The agent edits only ordinary
-worktree files and receives no GitHub credential. After a successful turn, the host commits the
-diff, rebases it onto the current protected base, verifies the remote head still matches the
-captured lease, and pushes it with the host credential. An empty diff remains distinct from a
+Before a normal turn, Sloppenheimer prepares `sloppenheimer/issue-<number>` from the current
+protected base; before a repair, it prepares the exact recorded pull-request head. The agent edits
+only ordinary worktree files and receives no GitHub credential. After a successful turn, the host
+commits the diff, rebases it onto the current protected base, verifies the remote head still matches
+the captured lease, and pushes it with the host credential. An empty diff remains distinct from a
 publication failure, and lease or authentication failures preserve the local work for retry.
 
 Pull-request handoff is an extension the workflow turns on and off with `handoff.enabled`, which
 defaults to `true`; everything in the rest of this section describes the enabled host. With it
-disabled, Symphony composes no code-review services and follows the core continuation lifecycle
+disabled, Sloppenheimer composes no code-review services and follows the core continuation lifecycle
 alone.
 
-After publication, Symphony creates or reuses an open pull request and schedules the same short
+After publication, Sloppenheimer creates or reuses an open pull request and schedules the same short
 continuation retry used when no branch exists. The handoff is observation-only: only a live worker
 or queued retry owns the issue claim, and the refreshed tracker state plus routability decide
 whether another worker starts. Dispatch labels remain unchanged. Pull-request inspection and merge
 remain separate code-review operations and also use only the host-side credential.
 
-After handoff, Symphony persists the PR under the workspace root and monitors its exact head SHA,
-CI checks, mergeability, review decision, and unresolved review threads. Failed checks, requested
-changes, stale branches, and conflicts return to the coding agent with repair context. A clean PR is
-squash-merged only through the repository protection rules with an expected-head guard. The
-operator console shows each active handoff, its current blocker, and why its issue is not
+After handoff, Sloppenheimer persists the PR under the workspace root and monitors its exact head
+SHA, CI checks, mergeability, review decision, and unresolved review threads. Failed checks,
+requested changes, stale branches, and conflicts return to the coding agent with repair context. A
+clean PR is squash-merged only through the repository protection rules with an expected-head guard.
+The operator console shows each active handoff, its current blocker, and why its issue is not
 dispatchable when tracker eligibility prevents continuation. No handoff or pause transition removes
-the Symphony label.
+the Sloppenheimer label.
 
 ## Codex App Server client
 
@@ -140,8 +140,8 @@ and a record still open when stderr closes is flushed rather than lost.
 
 Ordering is not assumed. A pending request is registered before its line is written, so a response
 can never arrive unowned. How a turn ended is one record per turn: whatever observes the end — a
-lifecycle notification, a request Symphony cannot serve, the turn timeout, or the session dying —
-writes a settlement against that turn id, and the first write wins. A completion that arrives
+lifecycle notification, a request Sloppenheimer cannot serve, the turn timeout, or the session dying
+— writes a settlement against that turn id, and the first write wins. A completion that arrives
 before its waiter exists is therefore not lost, a turn the server already reported keeps its own
 result, and a later session-level error cannot relabel finished work. A process that exits or fails
 to start settles every outstanding request and turn once, including the turn in flight, so no call
@@ -161,7 +161,7 @@ half of the identity.
 SPEC §10.2 also asks for issue-identifying metadata "when the targeted protocol supports turn or
 session titles". The App Server does not: neither `thread/start` nor `turn/start` accepts a title,
 name, or label, and the `name` a thread reads back with is server-derived with no method to set it,
-so Symphony sends none. `test/installed-codex.integration.test.ts` asserts that against the
+so Sloppenheimer sends none. `test/installed-codex.integration.test.ts` asserts that against the
 installed `codex app-server generate-json-schema` and fails as soon as such a field appears.
 
 Three timeouts stay distinct. `runner.read_timeout_ms` bounds one request/response round trip.
@@ -188,8 +188,8 @@ Failures map onto stable categories: `spawn_failed`, `workspace_rejected`, `prot
 ### Trust and safety posture
 
 SPEC §10.5 leaves approval, sandbox, and operator-confirmation behaviour implementation-defined and
-requires each implementation to document what it chose. Symphony answers all four server-initiated
-requests, so nothing stalls waiting on an operator who is not there:
+requires each implementation to document what it chose. Sloppenheimer answers all four
+server-initiated requests, so nothing stalls waiting on an operator who is not there:
 
 | Request                                 | Response                     | Effect                    |
 | --------------------------------------- | ---------------------------- | ------------------------- |
@@ -203,7 +203,7 @@ Any other server-initiated request is declined with `-32601` and the session con
 The first two match the high-trust example the SPEC sketches. The third is a deliberate departure:
 a permissions request asks to widen the sandbox the thread was started with, and granting what it
 asks would let the agent negotiate the containment that verifying the workspace before launch
-exists to establish. Symphony answers in the shape the protocol requires — so the turn proceeds
+exists to establish. Sloppenheimer answers in the shape the protocol requires — so the turn proceeds
 rather than stalling — while granting nothing beyond the sandbox already configured, and records a
 `permissions_grant_withheld` event. Widening is an operator decision made in `WORKFLOW.md` through
 `runner.settings.turn_sandbox_policy`, where it is reviewable, not one made by the agent mid-turn.
@@ -217,12 +217,12 @@ machine-specific schema is committed.
 
 The console answers four questions, and its navigation is the four answers with their counts:
 
-| View                | What is in it                                                                                                                                                                                                                                                                                                                                                                   |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                                                                                                                                    |
-| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                                                                                                                                                  |
-| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                                                                                                                                         |
-| **Finished**        | Work this host merged and closed out in the last 24 hours. The scope is stated on the view — it is a window _and_ a lifetime, since completions live in the running host's state and a restart empties it. An item is dated by the provider's merge time rather than by when Symphony noticed it, so a pull request merged while the host was down does not reappear as recent. |
+| View                | What is in it                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                                                                                                                                         |
+| **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                                                                                                                                                       |
+| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                                                                                                                                              |
+| **Finished**        | Work this host merged and closed out in the last 24 hours. The scope is stated on the view — it is a window _and_ a lifetime, since completions live in the running host's state and a restart empties it. An item is dated by the provider's merge time rather than by when Sloppenheimer noticed it, so a pull request merged while the host was down does not reappear as recent. |
 
 Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
 agent** control appears only where the detail resource will answer: a handoff restored from the
@@ -243,7 +243,7 @@ held by two blockers counts for neither of them alone, and blockers already in a
 ignored.
 
 Actions are named after what the backend does. Making an issue eligible adds the configured
-orchestration label and asks Symphony to reselect, so the control reads **Start agent** when a
+orchestration label and asks Sloppenheimer to reselect, so the control reads **Start agent** when a
 dispatch slot is free and **Queue issue** when none is; the row then says which happened, and names
 the limit that bound — the global `agent.max_concurrent_agents`, or the narrower
 `agent.max_concurrent_agents_by_state` cap for that issue's state. The runtime publishes which states
@@ -251,7 +251,7 @@ are saturated, so the console never promises an immediate start for work the sch
 The backlog and the runtime snapshot are fetched separately, so until the runtime half arrives
 capacity is unknown rather than free, and the control reads **Queue issue** for the same reason. **Pause**
 removes the issue from orchestration eligibility, cancels the agent running for it, and drops any
-queued retry — it does not remove the Symphony label from the pull-request handoff lifecycle. Because
+queued retry — it does not remove the Sloppenheimer label from the pull-request handoff lifecycle. Because
 pausing can interrupt live work, it asks for confirmation exactly when the issue is starting, running
 or retrying. Every mutation reports pending, success and failure in the affected row, keeps a failure
 attached to that row with a retry, cannot be submitted twice from one row, and survives the next poll.
@@ -291,7 +291,7 @@ internal record: it is snake_case, and it names a running row's issue `issue_id`
 `OrchestratorSnapshot` keeps its own vocabulary, because the operator backend and the agent detail
 path read it too, and a published name has no business travelling back into the scheduler.
 
-| Baseline (13.7.2)                                                              | Symphony extension fields                                                                                                                                                                                                 |
+| Baseline (13.7.2)                                                              | Sloppenheimer extension fields                                                                                                                                                                                            |
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `generated_at`, `counts`, `codex_totals`                                       | `workflow_path`, `effective_workflow`, `polling_interval_ms`, `max_concurrent_agents`, `rate_limits`                                                                                                                      |
 | `running[]` with `issue_id`, `issue_identifier`, `issue_url`, `title`, `state` | `attempt`, `started_at`, `last_event_at`, `last_event`, `last_message`, `process_id`, `thread_id`, `turn_id`, `session_id`, `turn_count`, `tokens`, `last_reported_tokens`, `worker_host`, `stall_deadline`, `detail_url` |
@@ -325,8 +325,8 @@ itself rather than restated by the HTTP layer: a pass whose credential or workfl
 stops before `dispatch`, and its acknowledgement stops there too. `coalesced` is `true` when the
 request joined a pass somebody else had already arranged, rather than bringing one into being, so a
 burst of refreshes costs one poll rather than one each and the request that caused the poll is the
-one told so. Symphony holds the response until that pass has finished — stronger than the `202` the
-SPEC suggests — so a caller that reads `/api/v1/state` next sees the state the refresh produced.
+one told so. Sloppenheimer holds the response until that pass has finished — stronger than the `202`
+the SPEC suggests — so a caller that reads `/api/v1/state` next sees the state the refresh produced.
 
 `GET /api/v1/backlog` is the console's own endpoint rather than a SPEC route, and stays in the
 internal vocabulary its consumer is written against.
@@ -364,7 +364,7 @@ Three baseline fields are mapped rather than stored under those names. `workspac
 the deterministic workspace key, not the host absolute path: the path is a filesystem detail the
 console never needs, and the detail pipeline redacts it before retention, so there is no absolute
 path to publish. `logs` is timeline retention accounting — retained, dropped, the bound, and how
-many events this response carries — because Symphony retains a bounded, redacted event timeline
+many events this response carries — because Sloppenheimer retains a bounded, redacted event timeline
 rather than raw agent logs. `tracked` says the orchestrator holds this issue as live work (starting,
 running, retrying, or handed off) rather than as retained history.
 
@@ -372,25 +372,26 @@ running, retrying, or handed off) rather than as retained history.
 
 SPEC 13.7.2 places `GET /api/v1/state`, `POST /api/v1/refresh` and `GET /api/v1/{identifier}` at the
 same level of one namespace, so an issue whose identifier is spelled exactly like a fixed **GET**
-route is shadowed by that route. `GET /api/v1/backlog` is Symphony's own route and shadows a second
-name the same way:
+route is shadowed by that route. `GET /api/v1/backlog` is Sloppenheimer's own route and shadows a
+second name the same way:
 
 | Identifier | What `GET /api/v1/<identifier>` answers |
 | ---------- | --------------------------------------- |
 | `state`    | the runtime state document              |
 | `backlog`  | the backlog document                    |
 
-For such an issue the published `self` names a URL that answers for something else, and the per-issue
-resource is unreachable. **The collision is documented as a known limit of the SPEC's namespace and
-left unhandled** ([#220](https://github.com/Underzenith85/symphony-ts/issues/220)). It is inherent to
-the URL design rather than to this host, and the two ways out both cost more than the collision does.
-Moving the resource under a prefix such as `/api/v1/issues/{identifier}` changes the URL of a SPEC
-route — the one thing a SPEC route may not do — and escaping the two names changes it for every
-identifier. Both would be spent on identifiers no tracker profile can currently spell:
-`IssueIdentifier` is an unconstrained branded string, but the only profile is GitHub, whose
-identifiers are `owner/repo#number` and can never equal a bare word. Moving `/api/v1/backlog` alone,
-the one route here Symphony owns, would resolve one of the two and not the one the SPEC forces. A
-tracker profile whose identifiers could collide is what would reopen this.
+For such an issue the published `self` names a URL that answers for something else, and the
+per-issue resource is unreachable. **The collision is documented as a known limit of the SPEC's
+namespace and left unhandled**
+([#220](https://github.com/Underzenith85/sloppenheimer-ts/issues/220)). It is inherent to the URL
+design rather than to this host, and the two ways out both cost more than the collision does. Moving
+the resource under a prefix such as `/api/v1/issues/{identifier}` changes the URL of a SPEC route —
+the one thing a SPEC route may not do — and escaping the two names changes it for every identifier.
+Both would be spent on identifiers no tracker profile can currently spell: `IssueIdentifier` is an
+unconstrained branded string, but the only profile is GitHub, whose identifiers are
+`owner/repo#number` and can never equal a bare word. Moving `/api/v1/backlog` alone, the one route
+here Sloppenheimer owns, would resolve one of the two and not the one the SPEC forces. A tracker
+profile whose identifiers could collide is what would reopen this.
 
 `refresh` is not among them, though the same path is spelled by a fixed route. That route is
 registered for POST alone rather than for every method, so the method distinguishes it from the
@@ -410,7 +411,7 @@ decision being taken again.
 
 ### Why a refresh needs the console's token
 
-`POST /api/v1/refresh` requires the `X-Symphony-CSRF` header, so the plain empty-body POST SPEC
+`POST /api/v1/refresh` requires the `X-Sloppenheimer-CSRF` header, so the plain empty-body POST SPEC
 13.7.2 suggests receives `403 invalid_csrf_token`. **The requirement stands, as deliberate SPEC 15.5
 hardening.** The server listens on loopback with no authentication, which means every page in the
 operator's browser can reach it; a refresh is not a read — it spends tracker API quota and can
@@ -422,7 +423,7 @@ page and is valid for the life of the process.
 
 ```sh
 token=$(curl -s http://127.0.0.1:3000/ | sed -n 's/.*name="csrf-token" content="\([^"]*\)".*/\1/p')
-curl -s -X POST -H "X-Symphony-CSRF: $token" http://127.0.0.1:3000/api/v1/refresh
+curl -s -X POST -H "X-Sloppenheimer-CSRF: $token" http://127.0.0.1:3000/api/v1/refresh
 ```
 
 The token is a forgery defence, not authentication: it proves the caller could read the console
@@ -512,7 +513,7 @@ rather than as the first exception a decoder happened to throw.
 | `tracker.active_states`       | `[open]`                                 |
 | `tracker.terminal_states`     | `[closed]`                               |
 | `polling.interval_ms`         | `30000`                                  |
-| `workspace.root`              | `<tmpdir>/symphony_workspaces`           |
+| `workspace.root`              | `<tmpdir>/sloppenheimer_workspaces`      |
 | `hooks.timeout_ms`            | `60000`                                  |
 | `agent.max_concurrent_agents` | `10`                                     |
 | `agent.max_turns`             | `20`                                     |
@@ -745,9 +746,9 @@ refresh fails the call, because the caller asked for that specific record.
 also runs the shipped extension suites and never discovers real-integration tests.
 
 `pnpm test:real-integration` runs the opt-in GitHub/Codex smoke profile. It reports missing
-`SYMPHONY_INTEGRATION_REPOSITORY`, `GITHUB_TOKEN`, and
+`SLOPPENHEIMER_INTEGRATION_REPOSITORY`, `GITHUB_TOKEN`, and
 `OPENAI_API_KEY`/`CODEX_ACCESS_TOKEN` as skipped.
-When a CI job explicitly sets `SYMPHONY_REAL_INTEGRATION=1`, missing credentials or integration
+When a CI job explicitly sets `SLOPPENHEIMER_REAL_INTEGRATION=1`, missing credentials or integration
 failures fail the job. The profile creates a uniquely named temporary workspace and removes it in a
 `finally` block; its GitHub check is read-only and creates no tracker artifacts.
 

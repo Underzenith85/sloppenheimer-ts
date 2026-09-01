@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
-import { bound, commandSummary, makeRedactor, redact } from '@symphony/core/support/redaction.js'
-import { clientPayload, normalizePayload } from '@symphony/adapter-codex/payload.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
+import {
+  bound,
+  commandSummary,
+  makeRedactor,
+  redact,
+} from '@sloppenheimer/core/support/redaction.js'
+import { clientPayload, normalizePayload } from '@sloppenheimer/adapter-codex/payload.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
@@ -18,21 +23,21 @@ import {
   type AgentDetailSnapshot,
   type AgentEvent,
   type AgentEventPayload,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 
 const startedAt = new Date('2026-08-30T10:00:00.000Z')
 
 const makeRecord = (): AgentDetailRecord =>
   createAgentDetailRecord({
     issueId: issueId('34'),
-    identifier: issueIdentifier('example/symphony#34'),
+    identifier: issueIdentifier('example/sloppenheimer#34'),
     title: 'Live agent inspection',
     url: 'https://example.test/issues/34',
     attempt: null,
     startedAt,
-    workspacePathKey: 'example_symphony_34',
-    expectedBranch: 'symphony/issue-34',
-    dispatchLabels: ['symphony'],
+    workspacePathKey: 'example_sloppenheimer_34',
+    expectedBranch: 'sloppenheimer/issue-34',
+    dispatchLabels: ['sloppenheimer'],
   })
 
 const event = (payload: AgentEventPayload, overrides: Partial<AgentEvent> = {}): AgentEvent => ({
@@ -57,13 +62,13 @@ const snapshotOf = (
   now = new Date('2026-08-30T10:00:30.000Z'),
 ): AgentDetailSnapshot =>
   buildAgentDetail(record, {
-    self: '/api/v1/agents/example%2Fsymphony%2334',
+    self: '/api/v1/agents/example%2Fsloppenheimer%2334',
     now,
     status: 'running',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
     handoffEnabled: true,
-    branch: 'symphony/issue-34',
+    branch: 'sloppenheimer/issue-34',
     retry: null,
   })
 
@@ -73,7 +78,7 @@ describe('field-level redaction', (): void => {
       'cloning with github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz012345',
       'export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz012345',
       'Authorization: Bearer abcdefghijklmnopqrstuvwxyz.012345',
-      'git remote add origin https://octocat:hunter2secret@github.com/example/symphony.git',
+      'git remote add origin https://octocat:hunter2secret@github.com/example/sloppenheimer.git',
       'GET /repos?access_token=abcdefghijklmnop&per_page=100',
       'AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"',
       'aws key AKIAIOSFODNN7EXAMPLE rejected',
@@ -87,7 +92,7 @@ describe('field-level redaction', (): void => {
     expect(redact(samples[7] ?? '')).toBe('[REDACTED PEM PRIVATE KEY]')
     expect(redact(samples[1] ?? '')).toBe('export OPENAI_API_KEY=[REDACTED]')
     expect(redact(samples[3] ?? '')).toBe(
-      'git remote add origin https://[REDACTED]@github.com/example/symphony.git',
+      'git remote add origin https://[REDACTED]@github.com/example/sloppenheimer.git',
     )
     expect(redact('nothing secret about pnpm check')).toBe('nothing secret about pnpm check')
   })
@@ -407,8 +412,8 @@ describe('agent detail records', (): void => {
     const snapshot = snapshotOf(record)
 
     expect(snapshot.workspace).toMatchObject({
-      pathKey: 'example_symphony_34',
-      branch: 'symphony/issue-34',
+      pathKey: 'example_sloppenheimer_34',
+      branch: 'sloppenheimer/issue-34',
       dirtyFileCount: 2,
       addedLines: 15,
       deletedLines: 2,
@@ -532,8 +537,8 @@ describe('agent detail records', (): void => {
     record = recordHandoff(record, new Date('2026-08-30T10:00:10.000Z'), {
       step: 'remote_branch',
       status: 'absent',
-      message: 'No remote branch symphony/issue-34 exists yet; continuing the session',
-      remoteBranch: 'symphony/issue-34',
+      message: 'No remote branch sloppenheimer/issue-34 exists yet; continuing the session',
+      remoteBranch: 'sloppenheimer/issue-34',
       outcome: 'no_branch',
     })
     record = recordRetryScheduled(
@@ -576,8 +581,8 @@ describe('agent detail records', (): void => {
     record = recordHandoff(record, new Date('2026-08-30T10:01:00.000Z'), {
       step: 'remote_branch',
       status: 'observed',
-      message: 'Remote branch symphony/issue-34 is present',
-      remoteBranch: 'symphony/issue-34',
+      message: 'Remote branch sloppenheimer/issue-34 is present',
+      remoteBranch: 'sloppenheimer/issue-34',
     })
     record = recordHandoff(record, new Date('2026-08-30T10:01:01.000Z'), {
       step: 'pull_request',
@@ -599,10 +604,10 @@ describe('agent detail records', (): void => {
     const snapshot = snapshotOf(record, new Date('2026-08-30T10:01:03.000Z'))
 
     expect(snapshot.handoff).toMatchObject({
-      expectedBranch: 'symphony/issue-34',
-      remoteBranch: { status: 'observed', name: 'symphony/issue-34' },
+      expectedBranch: 'sloppenheimer/issue-34',
+      remoteBranch: { status: 'observed', name: 'sloppenheimer/issue-34' },
       pullRequest: { status: 'created', number: 61, url: 'https://example.test/pull/61' },
-      dispatchLabels: { labels: ['symphony'], status: 'not_performed' },
+      dispatchLabels: { labels: ['sloppenheimer'], status: 'not_performed' },
       outcome: 'pull_request_open',
     })
     expect(snapshot.timeline.events.map((entry) => entry.category)).toEqual([

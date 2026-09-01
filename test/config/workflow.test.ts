@@ -7,19 +7,23 @@ import { Effect, Redacted } from 'effect'
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { afterEach, describe, expect } from 'vitest'
 
-import { githubProviderOf } from '@symphony/adapter-github'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import { sameTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
-import type { WorkflowError } from '@symphony/core/domain/errors.js'
-import type { TrackerProviderRegistry } from '@symphony/core/domain/tracker-provider.js'
+import { githubProviderOf } from '@sloppenheimer/adapter-github'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import { sameTrackerProvider } from '@sloppenheimer/core/domain/tracker-provider.js'
+import type { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
+import type { TrackerProviderRegistry } from '@sloppenheimer/core/domain/tracker-provider.js'
 import { withEnvironment } from '../harness/environment.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { stubProviderToken, stubTrackerProviders } from '../harness/stub-tracker-provider.js'
-import { JsonConversionError, toJsonValue } from '@symphony/core/support/json.js'
-import { renderPrompt, workflowDefaults, type Workflow } from '@symphony/core/config/workflow.js'
+import { JsonConversionError, toJsonValue } from '@sloppenheimer/core/support/json.js'
+import {
+  renderPrompt,
+  workflowDefaults,
+  type Workflow,
+} from '@sloppenheimer/core/config/workflow.js'
 import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
-import { codexSettingsDefaults, codexSettingsOf } from '@symphony/adapter-codex'
+import { codexSettingsDefaults, codexSettingsOf } from '@sloppenheimer/adapter-codex'
 import { auroraTempo } from '../harness/alien-agent-runner.js'
 import { anIssue } from '../harness/fixtures.js'
 
@@ -37,7 +41,7 @@ const temporaryDirectories: string[] = []
 
 const makeTemporaryDirectory = (): Effect.Effect<string> =>
   Effect.promise(async () => {
-    const path = await mkdtemp(join(tmpdir(), 'symphony-workflow-test-'))
+    const path = await mkdtemp(join(tmpdir(), 'sloppenheimer-workflow-test-'))
     temporaryDirectories.push(path)
     return path
   })
@@ -70,9 +74,9 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
-  required_labels: [Symphony]
+  required_labels: [Sloppenheimer]
 workspace:
   root: .workspaces
 agent:
@@ -90,12 +94,12 @@ Work on {{ issue.identifier }}: {{ issue.title }} (attempt {{ attempt }})
 
       expect(workflow.config.tracker.provider).toEqual({
         owner: 'example',
-        repository: 'symphony',
+        repository: 'sloppenheimer',
         token: '$TEST_TRACKER_TOKEN',
       })
       expect(Redacted.value(githubProviderOf(workflow.tracker).token)).toBe('secret')
       expect(githubProviderOf(workflow.tracker).tokenEnvironmentName).toBe('TEST_TRACKER_TOKEN')
-      expect(workflow.config.tracker.requiredLabels).toEqual(['symphony'])
+      expect(workflow.config.tracker.requiredLabels).toEqual(['sloppenheimer'])
       expect(githubProviderOf(workflow.tracker).baseBranch).toBe('main')
       expect(workflow.config.workspaceRoot).toBe(join(directory, '.workspaces'))
       expect(workflow.config.agent.maxConcurrentAgents).toBe(2)
@@ -118,7 +122,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $EMPTY_TRACKER_TOKEN
 ---
 Do the work
@@ -166,7 +170,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $MISSING_TRACKER_TOKEN
 ---
 Do the work
@@ -192,7 +196,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
 server:
   port: 0
@@ -223,7 +227,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: ${literal}
 ---
 Do the work
@@ -255,7 +259,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $${environmentName}
 ---
 Do the work
@@ -279,7 +283,7 @@ const minimalTracker = `tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN`
 
 const writeWorkflow = (frontMatter: string): Effect.Effect<string> =>
@@ -354,7 +358,7 @@ experimental: true`)
       const path = yield* writeWorkflow(`tracker:
   kind: github
   provider:
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
 future_section:
   anything: 1`)
@@ -374,7 +378,7 @@ future_section:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
     adapter_specific:
       nested: [1, 2]`)
@@ -385,7 +389,7 @@ future_section:
 
       expect(workflow.config.tracker.provider).toEqual({
         owner: 'example',
-        repository: 'symphony',
+        repository: 'sloppenheimer',
         token: '$TEST_TRACKER_TOKEN',
         adapter_specific: { nested: [1, 2] },
       })
@@ -399,13 +403,13 @@ describe('declared secret and path indirection', (): void => {
     Effect.gen(function* () {
       const path = yield* writeWorkflow(`${minimalTracker}
 workspace:
-  root: ~/symphony-root`)
+  root: ~/sloppenheimer-root`)
 
       const workflow = yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {
         TEST_TRACKER_TOKEN: 'secret',
       })
 
-      expect(workflow.config.workspaceRoot).toBe(join(homedir(), 'symphony-root'))
+      expect(workflow.config.workspaceRoot).toBe(join(homedir(), 'sloppenheimer-root'))
     }),
   )
 
@@ -417,10 +421,10 @@ workspace:
 
       const workflow = yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {
         TEST_TRACKER_TOKEN: 'secret',
-        TEST_WORKSPACE_ROOT: '/srv/symphony',
+        TEST_WORKSPACE_ROOT: '/srv/sloppenheimer',
       })
 
-      expect(workflow.config.workspaceRoot).toBe('/srv/symphony')
+      expect(workflow.config.workspaceRoot).toBe('/srv/sloppenheimer')
     }),
   )
 
@@ -603,7 +607,7 @@ describe('front-matter decoding messages', (): void => {
   it.effect('keeps every value a valid document declared', () =>
     Effect.gen(function* () {
       const path = yield* writeWorkflow(`${minimalTracker}
-  required_labels: [Symphony, Ready]
+  required_labels: [Sloppenheimer, Ready]
   active_states: [open, in_progress]
   terminal_states: [closed, done]
 polling:
@@ -634,7 +638,7 @@ handoff:
         TEST_TRACKER_TOKEN: 'secret',
       })
 
-      expect(workflow.config.tracker.requiredLabels).toEqual(['symphony', 'ready'])
+      expect(workflow.config.tracker.requiredLabels).toEqual(['sloppenheimer', 'ready'])
       expect(workflow.config.tracker.activeStates).toEqual(['open', 'in_progress'])
       expect(workflow.config.tracker.terminalStates).toEqual(['closed', 'done'])
       expect(workflow.config.pollingIntervalMs).toBe(15_000)
@@ -757,7 +761,7 @@ describe('adapter-owned validation', (): void => {
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
     api_base_url: /repos`)
 
@@ -776,7 +780,7 @@ describe('adapter-owned validation', (): void => {
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
     api_base_url: https://github.example.test/api/v3/`)
 
@@ -943,7 +947,7 @@ describe('agent runner selection', (): void => {
       // runner's authentication in it; a variable that is both cannot be honoured either way. The
       // rule is stated against whichever runner the workflow chose, not against a fixed list.
       const path = yield* writeWorkflow(
-        `tracker:\n  kind: github\n  provider:\n    owner: example\n    repository: symphony\n    token: $AURORA_SIGNING_KEY\nrunner:\n  kind: aurora`,
+        `tracker:\n  kind: github\n  provider:\n    owner: example\n    repository: sloppenheimer\n    token: $AURORA_SIGNING_KEY\nrunner:\n  kind: aurora`,
       )
 
       const error = yield* Effect.flip(
@@ -964,7 +968,7 @@ describe('agent runner selection', (): void => {
       // OPENAI_API_KEY is Codex's, and Codex is registered — but it is not the selected runner, so
       // nothing about this workflow makes the name unusable.
       const path = yield* writeWorkflow(
-        `tracker:\n  kind: github\n  provider:\n    owner: example\n    repository: symphony\n    token: $OPENAI_API_KEY\nrunner:\n  kind: aurora`,
+        `tracker:\n  kind: github\n  provider:\n    owner: example\n    repository: sloppenheimer\n    token: $OPENAI_API_KEY\nrunner:\n  kind: aurora`,
       )
 
       const workflow = yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {

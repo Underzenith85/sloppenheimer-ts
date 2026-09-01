@@ -1,7 +1,7 @@
 import { Option } from 'effect'
 
-import { makeGitSourceControl } from '@symphony/adapter-node/source-control.js'
-import type { SourceControlPort } from '@symphony/core/ports/source-control.js'
+import { makeGitSourceControl } from '@sloppenheimer/adapter-node/source-control.js'
+import type { SourceControlPort } from '@sloppenheimer/core/ports/source-control.js'
 import type { GitHubProviderConfig } from './provider.js'
 
 /** GitHub supplies repository identity and a redacted credential; Git mechanics remain generic. */

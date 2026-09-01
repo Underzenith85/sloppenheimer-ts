@@ -5,8 +5,8 @@ import { it } from '@effect/vitest'
 import { Effect, Option, Redacted } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { SourceControlError } from '@symphony/core/domain/errors.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
 import { commitFile, git, makeGitRepository } from '../harness/git-repository.js'
 import { anIssue, sourceControlFor } from '../harness/fixtures.js'
 
@@ -24,7 +24,7 @@ afterEach(async (): Promise<void> => {
 
 const issue: Issue = anIssue({
   id: issueId('165'),
-  identifier: issueIdentifier('example/symphony#165'),
+  identifier: issueIdentifier('example/sloppenheimer#165'),
   title: 'Host publication conformance',
   priority: 1,
 })
@@ -41,11 +41,11 @@ describe('SourceControlPort conformance', (): void => {
       Effect.gen(function* () {
         const fixture = yield* host(makeGitRepository)
         roots.push(fixture.root)
-        yield* host(() => git(fixture.seed, ['checkout', '-b', 'symphony/issue-165']))
+        yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
         yield* host(() => commitFile(fixture.seed, 'feature.ts', 'initial\n', 'initial feature'))
-        yield* host(() => git(fixture.seed, ['push', 'origin', 'symphony/issue-165']))
+        yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
         const expectedHead = yield* host(() =>
-          git(fixture.remote, ['rev-parse', 'refs/heads/symphony/issue-165']),
+          git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
         )
         yield* host(() => git(fixture.seed, ['checkout', 'main']))
         const protectedHead = yield* host(() =>
@@ -56,7 +56,7 @@ describe('SourceControlPort conformance', (): void => {
         const prepared = yield* sourceControl.prepare(
           issue,
           { path: fixture.workspace, key: 'issue-165', createdNow: true },
-          { _tag: 'Repair', branchName: 'symphony/issue-165', expectedHeadSha: expectedHead },
+          { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: expectedHead },
         )
         expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(expectedHead)
         yield* host(() => writeFile(join(fixture.workspace, 'feature.ts'), 'repaired\n'))
@@ -65,7 +65,7 @@ describe('SourceControlPort conformance', (): void => {
 
         expect(published._tag).toBe('Published')
         const remoteHead = yield* host(() =>
-          git(fixture.remote, ['rev-parse', 'refs/heads/symphony/issue-165']),
+          git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
         )
         expect(
           yield* host(() => git(fixture.workspace, ['merge-base', protectedHead, remoteHead])),
@@ -77,20 +77,20 @@ describe('SourceControlPort conformance', (): void => {
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
-      yield* host(() => git(fixture.seed, ['checkout', '-b', 'symphony/issue-165']))
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
       yield* host(() => commitFile(fixture.seed, 'feature.ts', 'initial\n', 'initial feature'))
-      yield* host(() => git(fixture.seed, ['push', 'origin', 'symphony/issue-165']))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
       const expectedHead = yield* host(() =>
-        git(fixture.remote, ['rev-parse', 'refs/heads/symphony/issue-165']),
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
       )
       const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
         { path: fixture.workspace, key: 'issue-165', createdNow: true },
-        { _tag: 'Repair', branchName: 'symphony/issue-165', expectedHeadSha: expectedHead },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: expectedHead },
       )
       yield* host(() => commitFile(fixture.seed, 'collision.ts', 'collision\n', 'colliding push'))
-      yield* host(() => git(fixture.seed, ['push', 'origin', 'symphony/issue-165']))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
       yield* host(() => writeFile(join(fixture.workspace, 'feature.ts'), 'local repair\n'))
 
       const failure = yield* Effect.flip(sourceControl.publish(issue, prepared))
@@ -102,7 +102,7 @@ describe('SourceControlPort conformance', (): void => {
         worktreePreserved: true,
       })
       expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
-        'symphony: example/symphony#165 Host publication conformance',
+        'sloppenheimer: example/sloppenheimer#165 Host publication conformance',
       )
     }),
   )
@@ -117,7 +117,7 @@ describe('SourceControlPort conformance', (): void => {
       const prepared = yield* sourceControl.prepare(
         issue,
         { path: fixture.workspace, key: 'issue-165', createdNow: true },
-        { _tag: 'Normal', branchName: 'symphony/issue-165' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
       const server = createServer((_request, response) => {
         response.writeHead(401, { 'WWW-Authenticate': 'Basic realm="test"' })
@@ -148,7 +148,7 @@ describe('SourceControlPort conformance', (): void => {
         worktreePreserved: true,
       })
       expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
-        'symphony: example/symphony#165 Host publication conformance',
+        'sloppenheimer: example/sloppenheimer#165 Host publication conformance',
       )
     }),
   )

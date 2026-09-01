@@ -1,13 +1,13 @@
 import { FileSystem } from '@effect/platform'
 import { Effect, Option, Ref, Runtime, type Scope } from 'effect'
 
-import { AgentError, type WorkspaceError } from '@symphony/core/domain/errors.js'
-import type { AgentLaunch, AgentResult } from '@symphony/core/ports/agent-runner.js'
-import type { VerifiedWorkspace } from '@symphony/core/domain/workspace-containment.js'
+import { AgentError, type WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import type { AgentLaunch, AgentResult } from '@sloppenheimer/core/ports/agent-runner.js'
+import type { VerifiedWorkspace } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
-} from '@symphony/adapter-node/workspace-identity.js'
+} from '@sloppenheimer/adapter-node/workspace-identity.js'
 import { CodexConnection } from './connection.js'
 import { initialConnectionState } from './connection-state.js'
 import { sessionSecretValues } from './session.js'
@@ -30,8 +30,8 @@ export {
   makeCodexEnvironment,
   sessionSecretValues,
 } from './session.js'
-export type { AgentEvent } from '@symphony/core/telemetry.js'
-export type { AgentLaunch, AgentResult } from '@symphony/core/ports/agent-runner.js'
+export type { AgentEvent } from '@sloppenheimer/core/telemetry.js'
+export type { AgentLaunch, AgentResult } from '@sloppenheimer/core/ports/agent-runner.js'
 
 const rejectWorkspaceLaunch = (error: WorkspaceError): AgentError =>
   new AgentError({

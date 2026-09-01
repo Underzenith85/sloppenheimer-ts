@@ -1,9 +1,9 @@
 import { Deferred, Effect, Option, Queue, Ref } from 'effect'
 
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import type { AgentError } from '@symphony/core/domain/errors.js'
-import { mergeSparseObject } from '@symphony/core/support/json.js'
-import type { AgentEvent } from '@symphony/core/telemetry.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import type { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import { mergeSparseObject } from '@sloppenheimer/core/support/json.js'
+import type { AgentEvent } from '@sloppenheimer/core/telemetry.js'
 import type { ProtocolIdentity } from './protocol.js'
 
 /**

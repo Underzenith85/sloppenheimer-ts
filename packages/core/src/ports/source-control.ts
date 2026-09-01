@@ -50,7 +50,7 @@ export type SourceControlFactoryPort = Readonly<{
   ) => Effect.Effect<SourceControlPort | null, SourceControlError, Scope.Scope>
 }>
 
-export class SourceControlFactory extends Context.Tag('symphony/SourceControlFactory')<
+export class SourceControlFactory extends Context.Tag('sloppenheimer/SourceControlFactory')<
   SourceControlFactory,
   SourceControlFactoryPort
 >() {}
@@ -66,7 +66,7 @@ export type SourceControlCell = AdapterCell<
   SourceControlError
 >
 
-export class CurrentSourceControl extends Context.Tag('symphony/CurrentSourceControl')<
+export class CurrentSourceControl extends Context.Tag('sloppenheimer/CurrentSourceControl')<
   CurrentSourceControl,
   SourceControlCell
 >() {}

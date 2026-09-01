@@ -2,9 +2,9 @@ import { it } from '@effect/vitest'
 import { Exit, Fiber, MutableRef, Option } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { Workflow } from '@symphony/core/config/workflow.js'
-import { issueIdentifier, type Issue, type IssueId } from '@symphony/core/domain/domain.js'
-import { dispatchAdmission, hasSlot } from '@symphony/core/core/policy.js'
+import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import { issueIdentifier, type Issue, type IssueId } from '@sloppenheimer/core/domain/domain.js'
+import { dispatchAdmission, hasSlot } from '@sloppenheimer/core/core/policy.js'
 import {
   initialState,
   retainedCompletedDetails,
@@ -14,15 +14,15 @@ import {
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
-} from '@symphony/core/core/state.js'
-import * as Transitions from '@symphony/core/core/transitions.js'
+} from '@sloppenheimer/core/core/state.js'
+import * as Transitions from '@sloppenheimer/core/core/transitions.js'
 import {
   createAgentDetailRecord,
   recordAgentEvent,
   recordAttemptStarted,
   type AgentDetailRecord,
   type AgentEvent,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
 import { anIssue } from '../harness/fixtures.js'
@@ -46,12 +46,12 @@ const workflow: Workflow = {
     tracker: {
       kind: 'stub',
       provider: { token: 'token' },
-      requiredLabels: ['symphony'],
+      requiredLabels: ['sloppenheimer'],
       activeStates: ['open'],
       terminalStates: ['closed'],
     },
     pollingIntervalMs: 30_000,
-    workspaceRoot: '/tmp/symphony',
+    workspaceRoot: '/tmp/sloppenheimer',
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -126,7 +126,7 @@ const execution = {
   workspaces: unusedPorts.workspaces,
 } as unknown as ExecutionSnapshot
 
-const makeIssue = (identifier: string, state = 'open', labels = ['symphony']): Issue =>
+const makeIssue = (identifier: string, state = 'open', labels = ['sloppenheimer']): Issue =>
   anIssue({ identifier: issueIdentifier(identifier), state, labels })
 
 const emptyState = (): RuntimeState =>
@@ -186,7 +186,7 @@ const detailFor = (issue: Issue): AgentDetailRecord =>
     attempt: null,
     startedAt: new Date('2026-01-01T00:00:00.000Z'),
     workspacePathKey: 'key',
-    expectedBranch: 'symphony/branch',
+    expectedBranch: 'sloppenheimer/branch',
     dispatchLabels: [],
   })
 
@@ -228,7 +228,7 @@ const turnCompleted = (turnId: string, sessionId: string, turnCount: number): Ag
 
 describe('turn identity', (): void => {
   it('adopts the composed session id of the turn an event belongs to', (): void => {
-    const entry = runningEntry(makeIssue('example/symphony#1'))
+    const entry = runningEntry(makeIssue('example/sloppenheimer#1'))
 
     const applied = Transitions.applyRunEvent(entry, agentEvent('turn-1', 'thread-1-turn-1', 1))
 
@@ -238,7 +238,7 @@ describe('turn identity', (): void => {
   })
 
   it('takes the session id of a session-scoped event that carries no turn', (): void => {
-    const entry = runningEntry(makeIssue('example/symphony#1'))
+    const entry = runningEntry(makeIssue('example/sloppenheimer#1'))
 
     const applied = Transitions.applyRunEvent(entry, agentEvent(null, 'thread-1', 0))
 
@@ -247,7 +247,7 @@ describe('turn identity', (): void => {
   })
 
   it('holds both surfaces on the current turn when a superseded turn reports late', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const turnTwo = agentEvent('turn-2', 'thread-1-turn-2', 2)
     const lateTurnOne = agentEvent('turn-1', 'thread-1-turn-1', 1)
 
@@ -268,7 +268,7 @@ describe('turn identity', (): void => {
   })
 
   it('retains one session summary per composed session id', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     let detail = recordAgentEvent(detailFor(issue), agentEvent(null, 'thread-1', 0))
 
     // The thread is known before any turn runs, so the summary opened there is completed by the
@@ -301,7 +301,7 @@ describe('turn identity', (): void => {
   })
 
   it('does not reopen or close a session for a superseded turn reporting late', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const running = recordAgentEvent(
       recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
       agentEvent('turn-2', 'thread-1-turn-2', 2),
@@ -322,7 +322,7 @@ describe('turn identity', (): void => {
   })
 
   it('records a superseded turn on the timeline against the turn that produced it', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const running = recordAgentEvent(
       recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
       agentEvent('turn-2', 'thread-1-turn-2', 2),
@@ -344,7 +344,7 @@ describe('turn identity', (): void => {
   })
 
   it('keeps one summary for a turn that reports activity after it completed', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const completed = recordAgentEvent(
       recordAgentEvent(detailFor(issue), agentEvent('turn-1', 'thread-1-turn-1', 1)),
       turnCompleted('turn-1', 'thread-1-turn-1', 1),
@@ -359,7 +359,7 @@ describe('turn identity', (): void => {
   })
 
   it('lets a new attempt start again at turn one after the count was reset', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const restarted = recordAttemptStarted(
       recordAgentEvent(detailFor(issue), agentEvent('turn-2', 'thread-1-turn-2', 2)),
       new Date('2026-01-01T00:00:10.000Z'),
@@ -375,7 +375,7 @@ describe('turn identity', (): void => {
 
 describe('claim lifecycle', (): void => {
   it('claims an issue and remembers its identifier for later detail requests', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
 
     const claimed = Transitions.claimIssue(emptyState(), issue)
 
@@ -384,7 +384,7 @@ describe('claim lifecycle', (): void => {
   })
 
   it('releases a claim without forgetting the issue or counting it completed', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
 
     const released = Transitions.releaseClaim(Transitions.claimIssue(emptyState(), issue), issue.id)
 
@@ -394,7 +394,7 @@ describe('claim lifecycle', (): void => {
   })
 
   it('gives up the claim and records completion in one step', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
 
     const completed = Transitions.completeIssue(
       Transitions.claimIssue(emptyState(), issue),
@@ -412,7 +412,7 @@ describe('claim lifecycle', (): void => {
   })
 
   it('leaves the state it was given untouched', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const before = emptyState()
 
     Transitions.claimIssue(before, issue)
@@ -423,7 +423,7 @@ describe('claim lifecycle', (): void => {
 })
 
 describe('dispatch admission', (): void => {
-  const issue = makeIssue('example/symphony#1')
+  const issue = makeIssue('example/sloppenheimer#1')
 
   it('admits an active, routable, unclaimed issue with a free slot', (): void => {
     expect(dispatchAdmission(emptyState(), issue, workflow)).toEqual({ _tag: 'Admit' })
@@ -462,18 +462,21 @@ describe('dispatch admission', (): void => {
 
   it('refuses an issue outside the active states', (): void => {
     expect(
-      dispatchAdmission(emptyState(), makeIssue('example/symphony#2', 'closed'), workflow),
+      dispatchAdmission(emptyState(), makeIssue('example/sloppenheimer#2', 'closed'), workflow),
     ).toEqual({ _tag: 'Refuse', reason: 'inactive' })
   })
 
   it('refuses an issue missing a required label', (): void => {
     expect(
-      dispatchAdmission(emptyState(), makeIssue('example/symphony#2', 'open', []), workflow),
+      dispatchAdmission(emptyState(), makeIssue('example/sloppenheimer#2', 'open', []), workflow),
     ).toEqual({ _tag: 'Refuse', reason: 'unroutable' })
   })
 
   it('refuses an issue when every agent slot is taken', (): void => {
-    const busy = Transitions.beginRun(emptyState(), runningEntry(makeIssue('example/symphony#9')))
+    const busy = Transitions.beginRun(
+      emptyState(),
+      runningEntry(makeIssue('example/sloppenheimer#9')),
+    )
 
     expect(dispatchAdmission(busy, issue, withAgentLimits(1))).toEqual({
       _tag: 'Refuse',
@@ -484,17 +487,17 @@ describe('dispatch admission', (): void => {
   it('counts the per-state budget separately from the global one', (): void => {
     const busy = Transitions.beginRun(
       emptyState(),
-      runningEntry(makeIssue('example/symphony#9', 'open')),
+      runningEntry(makeIssue('example/sloppenheimer#9', 'open')),
     )
     const limits = withAgentLimits(4, new Map([['open', 1]]))
 
     expect(hasSlot(busy, issue, limits)).toBe(false)
-    expect(hasSlot(busy, makeIssue('example/symphony#3', 'triage'), limits)).toBe(true)
+    expect(hasSlot(busy, makeIssue('example/sloppenheimer#3', 'triage'), limits)).toBe(true)
   })
 })
 
 describe('retry scheduling', (): void => {
-  const issue = makeIssue('example/symphony#1')
+  const issue = makeIssue('example/sloppenheimer#1')
 
   it('claims the issue and queues the retry together', (): void => {
     const [displaced, scheduled] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
@@ -527,7 +530,7 @@ describe('retry scheduling', (): void => {
 })
 
 describe('run lifecycle', (): void => {
-  const issue = makeIssue('example/symphony#1')
+  const issue = makeIssue('example/sloppenheimer#1')
 
   it('ends only the run the caller means', (): void => {
     const started = Transitions.beginRun(emptyState(), runningEntry(issue, 7))
@@ -638,7 +641,7 @@ describe('tick debounce', (): void => {
 })
 
 describe('detail publication', (): void => {
-  const issue = makeIssue('example/symphony#1')
+  const issue = makeIssue('example/sloppenheimer#1')
 
   it('publishes a live run as running and a finished one as completed', (): void => {
     const withDetail = Transitions.putDetail(
@@ -672,7 +675,7 @@ describe('detail publication', (): void => {
   it('keeps an aged-out record answering as completed rather than as never run', (): void => {
     let state = emptyState()
     const issues = Array.from({ length: retainedCompletedDetails + 1 }, (_, index) =>
-      makeIssue(`example/symphony#${String(index + 1)}`),
+      makeIssue(`example/sloppenheimer#${String(index + 1)}`),
     )
     for (const candidate of issues) {
       state = Transitions.putDetail(
@@ -704,14 +707,14 @@ describe('detail publication', (): void => {
 
 describe('handoff bookkeeping', (): void => {
   it('drops the handoff, completes the issue, and releases the claim together', (): void => {
-    const issue = makeIssue('example/symphony#1')
+    const issue = makeIssue('example/sloppenheimer#1')
     const id: IssueId = issue.id
     const held = Transitions.putHandoff(emptyState(), id, {
       issue,
       execution,
       pullRequestNumber: 7,
       pullRequestUrl: 'https://example.test/pulls/7',
-      branchName: 'symphony/branch',
+      branchName: 'sloppenheimer/branch',
       state: 'awaiting_checks',
       headSha: 'abc',
       reason: null,

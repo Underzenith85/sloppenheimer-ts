@@ -445,7 +445,7 @@ export const startOrchestratorRuntime = (
 
     const handoffStorePath = resolve(
       bootstrapWorkflow.workflow.config.workspaceRoot,
-      '.symphony',
+      '.sloppenheimer',
       'handoffs.json',
     )
     // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must

@@ -9,11 +9,11 @@ so the work can be scoped without re-deriving the search.
 
 **Status.** All eleven findings are implemented; each is marked below, and the line numbers in those
 sections refer to the code as it stood before the change. Tracked in
-[#215](https://github.com/Underzenith85/symphony-ts/issues/215).
+[#215](https://github.com/Underzenith85/sloppenheimer-ts/issues/215).
 
 Every proposed home respects the layering in `AGENTS.md`: `support/` is the bottom layer, `core/`
 and the adapter packages may both reach it, and all three adapter packages already import from
-`@symphony/core/support/` today.
+`@sloppenheimer/core/support/` today.
 
 ---
 
@@ -219,7 +219,7 @@ which would let `integer`, `positiveInteger`, `nonNegativeInteger`, and `portNum
 chains.
 
 **Proposal.** Have `adapter-github` import the two primitives it duplicates from
-`@symphony/core/support/schema.js` (it already imports `support/json.js`, so the path is proven),
+`@sloppenheimer/core/support/schema.js` (it already imports `support/json.js`, so the path is proven),
 add `safeInteger`/`positiveSafeInteger` there beside the existing `nonNegativeInteger`, and export a
 single `jsonRecord`. Leave the named-message family in the loader, but factor its repeated
 `.pipe(filter).annotations(message)` shape.
@@ -236,7 +236,7 @@ _Implemented: both copies now call `isJsonObject`._
 typeof value === 'object' && value !== null && !Array.isArray(value)
 ```
 
-The same file imports `isJsonObject` from `@symphony/core/support/json.js` at line 24, and
+The same file imports `isJsonObject` from `@sloppenheimer/core/support/json.js` at line 24, and
 `isJsonObject` is exactly that expression. `packages/core/src/support/schema.ts:18` has a third copy
 as a private `isRecord`. Three copies, one export, one importer that already has it in scope.
 

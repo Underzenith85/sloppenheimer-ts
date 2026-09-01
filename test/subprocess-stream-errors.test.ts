@@ -4,9 +4,9 @@ import { rm, writeFile } from 'node:fs/promises'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { HooksConfig } from '@symphony/core/config/workflow.js'
-import { makeWorkspaceManager } from '@symphony/adapter-node/workspace-manager.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
+import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
 import { hostFileSystem } from './harness/filesystem.js'
 import { makeGitRepository } from './harness/git-repository.js'
 import { anIssue, sourceControlFor } from './harness/fixtures.js'
@@ -77,7 +77,7 @@ afterEach(async (): Promise<void> => {
 
 const issue: Issue = anIssue({
   id: issueId('200'),
-  identifier: issueIdentifier('example/symphony#200'),
+  identifier: issueIdentifier('example/sloppenheimer#200'),
   title: 'Survive a failing output pipe',
   priority: 1,
 })
@@ -122,7 +122,7 @@ describe('a child output pipe that fails', (): void => {
         sourceControl.prepare(
           issue,
           { path: fixture.workspace, key: 'issue-200', createdNow: true },
-          { _tag: 'Normal', branchName: 'symphony/issue-200' },
+          { _tag: 'Normal', branchName: 'sloppenheimer/issue-200' },
         ),
       ),
     )
@@ -154,7 +154,7 @@ describe('a child output pipe that fails', (): void => {
         sourceControl.prepare(
           issue,
           { path: fixture.workspace, key: 'issue-403', createdNow: true },
-          { _tag: 'Normal', branchName: 'symphony/issue-403' },
+          { _tag: 'Normal', branchName: 'sloppenheimer/issue-403' },
         ),
       ),
     )

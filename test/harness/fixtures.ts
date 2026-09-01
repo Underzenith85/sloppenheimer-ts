@@ -1,12 +1,12 @@
 import { Option } from 'effect'
 
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import type { PullRequestObservation } from '@symphony/core/domain/handoff.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import type { PullRequestObservation } from '@sloppenheimer/core/domain/handoff.js'
 import {
   makeGitSourceControl,
   type GitSourceControlSettings,
-} from '@symphony/adapter-node/source-control.js'
-import type { SourceControlPort } from '@symphony/core/ports/source-control.js'
+} from '@sloppenheimer/adapter-node/source-control.js'
+import type { SourceControlPort } from '@sloppenheimer/core/ports/source-control.js'
 import type { GitRepositoryFixture } from './git-repository.js'
 
 /**
@@ -32,17 +32,17 @@ export const fixture =
  * never independently interesting and letting them drift apart has no meaning.
  */
 const baseIssue: Issue = {
-  id: issueId('example/symphony#1'),
+  id: issueId('example/sloppenheimer#1'),
   nativeRef: null,
-  identifier: issueIdentifier('example/symphony#1'),
-  title: 'example/symphony#1',
+  identifier: issueIdentifier('example/sloppenheimer#1'),
+  title: 'example/sloppenheimer#1',
   description: null,
   priority: null,
   state: 'open',
   branchName: null,
   url: null,
   assigneeId: null,
-  labels: ['symphony'],
+  labels: ['sloppenheimer'],
   blockedBy: [],
   dispatchable: true,
   createdAt: null,
@@ -79,7 +79,7 @@ export type OpenPullRequestObservation = Extract<PullRequestObservation, { state
 export const anOpenPullRequest = fixture<OpenPullRequestObservation>({
   number: 41,
   state: 'open',
-  url: 'https://github.com/example/symphony/pull/41',
+  url: 'https://github.com/example/sloppenheimer/pull/41',
   headSha: 'abc123',
   merged: false,
   mergeCommitSha: null,

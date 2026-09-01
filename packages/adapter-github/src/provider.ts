@@ -6,10 +6,10 @@ import {
   type RegisteredTrackerProvider,
   type TrackerProviderAdapter,
   type ValidatedTrackerProvider,
-} from '@symphony/core/domain/tracker-provider.js'
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { resolveSecretReference } from '@symphony/core/config/env-reference.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/tracker-provider.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { resolveSecretReference } from '@sloppenheimer/core/config/env-reference.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 
 export type GitHubProviderConfig = Readonly<{
   owner: string

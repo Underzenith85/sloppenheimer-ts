@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { HTMLInputElement } from 'happy-dom'
 
-import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
 import {
   buildAgentDetail,
   timelineCategories,
@@ -11,7 +11,7 @@ import {
   recordRetryScheduled,
   type AgentDetailRecord,
   type AgentDetailSnapshot,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 import {
   bootConsole,
   jsonResponse,
@@ -35,9 +35,9 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     url: 'https://example.test/issues/17',
     attempt: null,
     startedAt: new Date(base),
-    workspacePathKey: 'example_symphony_17',
-    expectedBranch: 'symphony/issue-17',
-    dispatchLabels: ['symphony'],
+    workspacePathKey: 'example_sloppenheimer_17',
+    expectedBranch: 'sloppenheimer/issue-17',
+    dispatchLabels: ['sloppenheimer'],
   })
   record = recordAgentEvent(record, {
     event: 'item/completed',
@@ -106,13 +106,13 @@ const runningDetail = (
   handoffEnabled = true,
 ): AgentDetailSnapshot =>
   buildAgentDetail(populated(withHandoff), {
-    self: '/api/v1/agents/example%2Fsymphony%2317',
+    self: '/api/v1/agents/example%2Fsloppenheimer%2317',
     now: new Date(),
     status: 'running',
     stallTimeoutMs,
     workerHost: 'local',
     handoffEnabled,
-    branch: 'symphony/issue-17',
+    branch: 'sloppenheimer/issue-17',
     retry: null,
   })
 
@@ -125,20 +125,20 @@ const retryingDetail = (): AgentDetailSnapshot => {
     url: 'https://example.test/issues/18',
     attempt: 0,
     startedAt: new Date(at.getTime() - 30_000),
-    workspacePathKey: 'example_symphony_18',
-    expectedBranch: 'symphony/issue-18',
-    dispatchLabels: ['symphony'],
+    workspacePathKey: 'example_sloppenheimer_18',
+    expectedBranch: 'sloppenheimer/issue-18',
+    dispatchLabels: ['sloppenheimer'],
   })
   const dueAt = new Date(at.getTime() + 15_000)
   record = recordRetryScheduled(record, at, 1, dueAt, 'turn failed')
   return buildAgentDetail(record, {
-    self: '/api/v1/agents/example%2Fsymphony%2318',
+    self: '/api/v1/agents/example%2Fsloppenheimer%2318',
     now: at,
     status: 'retrying',
     stallTimeoutMs: 60_000,
     workerHost: 'local',
     handoffEnabled: true,
-    branch: 'symphony/issue-18',
+    branch: 'sloppenheimer/issue-18',
     retry: { attempt: 1, dueAt, reason: 'turn failed' },
   })
 }
@@ -228,7 +228,7 @@ describe('operator console agent detail', (): void => {
     expect(diagnostics).toContain('thread-1')
     expect(diagnostics).toContain('42')
     expect(diagnostics).toContain('Rate limits')
-    expect(diagnostics).toContain('example_symphony_17')
+    expect(diagnostics).toContain('example_sloppenheimer_17')
     expect(page.query('.diagnostics summary').textContent).toBe('Diagnostics')
     // The disclosure is closed until the operator asks for it.
     expect(page.query('.diagnostics').getAttribute('open')).toBeNull()
@@ -371,13 +371,13 @@ describe('operator console agent detail', (): void => {
   it('deep links the open agent and restores it on load', async (): Promise<void> => {
     await boot()
     await openAgent(runningIdentifier)
-    expect(page.window.location.hash).toBe('#/agents/example%2Fsymphony%2317')
+    expect(page.window.location.hash).toBe('#/agents/example%2Fsloppenheimer%2317')
 
     await page.close()
-    await boot({ hash: '#/agents/example%2Fsymphony%2317' })
+    await boot({ hash: '#/agents/example%2Fsloppenheimer%2317' })
 
     expect(page.query('#agent-detail').hidden).toBe(false)
-    expect(page.requestLog).toContain('/api/v1/agents/example%2Fsymphony%2317')
+    expect(page.requestLog).toContain('/api/v1/agents/example%2Fsloppenheimer%2317')
     expect(page.text('#detail-title')).toBe('Operator console')
   })
 

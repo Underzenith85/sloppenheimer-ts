@@ -1,12 +1,12 @@
 import { Option } from 'effect'
 
-import type { JsonObject } from '@symphony/core/domain/domain.js'
+import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
 import type {
   AgentEvent,
   AgentEventPayload,
   AgentLifecycle,
   TokenCounts,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 import type { ConnectionState } from './connection-state.js'
 import { composeSessionId } from './session.js'
 

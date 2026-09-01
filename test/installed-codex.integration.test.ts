@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { codexApprovalPolicies, codexSandboxModes } from '@symphony/adapter-codex/settings.js'
+import { codexApprovalPolicies, codexSandboxModes } from '@sloppenheimer/adapter-codex/settings.js'
 
 const execFileAsync = promisify(execFile)
 const schemaArguments = ['app-server', 'generate-json-schema'] as const
@@ -34,7 +34,7 @@ const codexSchemaDocuments = async (): Promise<readonly string[]> => {
     const { stdout } = await execFileAsync('codex', [...schemaArguments], bufferLimit)
     return [stdout]
   }
-  const directory = await mkdtemp(join(tmpdir(), 'symphony-codex-schema-'))
+  const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-codex-schema-'))
   roots.push(directory)
   await execFileAsync('codex', [...schemaArguments, '--out', directory], bufferLimit)
   const entries = await readdir(directory, { recursive: true, withFileTypes: true })

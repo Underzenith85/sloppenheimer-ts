@@ -1,8 +1,8 @@
 import { Config, Effect, Redacted } from 'effect'
 
-import type { AgentTurnOutcome } from '@symphony/core/ports/agent-runner.js'
-import type { JsonObject } from '@symphony/core/domain/domain.js'
-import { redact, redactionMarker } from '@symphony/core/support/redaction.js'
+import type { AgentTurnOutcome } from '@sloppenheimer/core/ports/agent-runner.js'
+import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import { redact, redactionMarker } from '@sloppenheimer/core/support/redaction.js'
 import { messageTextFrom } from './protocol.js'
 import { codexAuthenticationEnvironmentNames } from './settings.js'
 

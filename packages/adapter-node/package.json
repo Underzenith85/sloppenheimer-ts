@@ -1,5 +1,5 @@
 {
-  "name": "@symphony/adapter-node",
+  "name": "@sloppenheimer/adapter-node",
   "version": "0.1.0",
   "private": true,
   "description": "Host-platform adapters: filesystem, Git source control, and workspace management.",
@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@effect/platform": "0.97.1",
-    "@symphony/core": "workspace:*",
+    "@sloppenheimer/core": "workspace:*",
     "effect": "3.22.1"
   },
   "devDependencies": {

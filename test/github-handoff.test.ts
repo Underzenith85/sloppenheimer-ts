@@ -2,17 +2,17 @@ import { it } from '@effect/vitest'
 import { Effect, Redacted } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import { makeGitHubPullRequestMonitor } from '@symphony/adapter-github/pull-requests.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import { classifyPullRequest } from '@symphony/core/domain/handoff.js'
-import { makeGitHubCodeReview } from '@symphony/adapter-github/code-review.js'
-import { issueBranchName } from '@symphony/core/domain/handoff.js'
-import type { GitHubProviderConfig } from '@symphony/adapter-github'
+import { makeGitHubPullRequestMonitor } from '@sloppenheimer/adapter-github/pull-requests.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import { classifyPullRequest } from '@sloppenheimer/core/domain/handoff.js'
+import { makeGitHubCodeReview } from '@sloppenheimer/adapter-github/code-review.js'
+import { issueBranchName } from '@sloppenheimer/core/domain/handoff.js'
+import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
 import { anIssue } from './harness/fixtures.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
-  repository: 'symphony',
+  repository: 'sloppenheimer',
   token: Redacted.make('secret'),
   tokenEnvironmentName: 'TEST_TOKEN',
   apiBaseUrl: 'https://api.github.test',
@@ -21,7 +21,7 @@ const provider: GitHubProviderConfig = {
 
 const handoffIssue: Issue = anIssue({
   id: issueId('28'),
-  identifier: issueIdentifier('example/symphony#28'),
+  identifier: issueIdentifier('example/sloppenheimer#28'),
   title: 'Migrate to pnpm',
   url: 'https://example.test/issues/28',
 })
@@ -45,8 +45,8 @@ describe('GitHub pull request handoff', (): void => {
 
       const result = yield* makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue)
 
-      expect(result).toEqual({ _tag: 'NoBranch', branchName: 'symphony/issue-28' })
-      expect(issueBranchName(handoffIssue)).toBe('symphony/issue-28')
+      expect(result).toEqual({ _tag: 'NoBranch', branchName: 'sloppenheimer/issue-28' })
+      expect(issueBranchName(handoffIssue)).toBe('sloppenheimer/issue-28')
       expect(fetchMock).toHaveBeenCalledTimes(1)
     }),
   )
@@ -61,8 +61,8 @@ describe('GitHub pull request handoff', (): void => {
             const url = requestUrl(input)
             const method = init?.method ?? 'GET'
             requests.push({ url, method })
-            if (url.endsWith('/git/ref/heads/symphony%2Fissue-28')) {
-              return Response.json({ ref: 'refs/heads/symphony/issue-28' })
+            if (url.endsWith('/git/ref/heads/sloppenheimer%2Fissue-28')) {
+              return Response.json({ ref: 'refs/heads/sloppenheimer/issue-28' })
             }
             if (url.includes('/pulls?')) {
               return Response.json([])
@@ -71,7 +71,7 @@ describe('GitHub pull request handoff', (): void => {
               expect(init?.body).toBe(
                 JSON.stringify({
                   base: 'main',
-                  head: 'symphony/issue-28',
+                  head: 'sloppenheimer/issue-28',
                   title: 'Migrate to pnpm',
                   body: 'Closes #28',
                 }),
@@ -87,7 +87,7 @@ describe('GitHub pull request handoff', (): void => {
 
         expect(result).toEqual({
           _tag: 'PullRequest',
-          branchName: 'symphony/issue-28',
+          branchName: 'sloppenheimer/issue-28',
           pullRequestUrl: 'https://example.test/pulls/31',
           pullRequestNumber: 31,
           created: true,
@@ -105,7 +105,7 @@ describe('GitHub pull request handoff', (): void => {
           const method = init?.method ?? 'GET'
           methods.push(method)
           if (url.includes('/git/ref/heads/')) {
-            return Response.json({ ref: 'refs/heads/symphony/issue-28' })
+            return Response.json({ ref: 'refs/heads/sloppenheimer/issue-28' })
           }
           if (url.includes('/pulls?')) {
             return Response.json([{ html_url: 'https://example.test/pulls/31' }])
@@ -128,7 +128,7 @@ describe('GitHub pull request handoff', (): void => {
       const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
         const url = requestUrl(input)
         expect(url).toContain('/pulls?state=open')
-        expect(url).toContain('head=example%3Asymphony%2Fissue-28')
+        expect(url).toContain('head=example%3Asloppenheimer%2Fissue-28')
         expect(url).toContain('base=main')
         return Response.json([{ html_url: 'https://example.test/pulls/65' }])
       })
@@ -138,7 +138,7 @@ describe('GitHub pull request handoff', (): void => {
 
       expect(result).toEqual({
         _tag: 'PullRequest',
-        branchName: 'symphony/issue-28',
+        branchName: 'sloppenheimer/issue-28',
         pullRequestUrl: 'https://example.test/pulls/65',
         pullRequestNumber: 65,
         created: false,
@@ -155,7 +155,7 @@ describe('GitHub pull request monitor', (): void => {
       Effect.gen(function* () {
         const fetchMock = vi.fn(async (): Promise<Response> =>
           Response.json({
-            html_url: 'https://github.test/example/symphony/pull/44',
+            html_url: 'https://github.test/example/sloppenheimer/pull/44',
             head: { sha: 'closed-head' },
             merged: false,
             state: 'closed',
@@ -262,7 +262,7 @@ describe('GitHub pull request monitor', (): void => {
       name: 'invalid head SHA',
       response: {
         state: 'open',
-        html_url: 'https://github.test/example/symphony/pull/44',
+        html_url: 'https://github.test/example/sloppenheimer/pull/44',
         head: { sha: 42 },
         merged: false,
         merge_commit_sha: null,
@@ -276,7 +276,7 @@ describe('GitHub pull request monitor', (): void => {
       name: 'invalid open mergeability',
       response: {
         state: 'open',
-        html_url: 'https://github.test/example/symphony/pull/44',
+        html_url: 'https://github.test/example/sloppenheimer/pull/44',
         head: { sha: 'sensitive-head-value' },
         merged: false,
         merge_commit_sha: null,
@@ -340,7 +340,7 @@ describe('GitHub pull request monitor', (): void => {
         if (url.endsWith('/pulls/41')) {
           return Response.json({
             state: 'open',
-            html_url: 'https://github.test/example/symphony/pull/41',
+            html_url: 'https://github.test/example/sloppenheimer/pull/41',
             head: { sha: 'head-1' },
             merged: false,
             mergeable: true,
@@ -377,7 +377,7 @@ describe('GitHub pull request monitor', (): void => {
             ],
             {
               headers: {
-                Link: '<https://api.github.test/repos/example/symphony/issues/41/comments?per_page=100&page=2>; rel="next"',
+                Link: '<https://api.github.test/repos/example/sloppenheimer/issues/41/comments?per_page=100&page=2>; rel="next"',
               },
             },
           )
@@ -452,7 +452,7 @@ describe('GitHub pull request monitor', (): void => {
           if (url.endsWith('/pulls/41')) {
             return Response.json({
               state: 'open',
-              html_url: 'https://github.test/example/symphony/pull/41',
+              html_url: 'https://github.test/example/sloppenheimer/pull/41',
               head: { sha: 'head-1' },
               merged: false,
               merge_commit_sha: null,
@@ -501,12 +501,12 @@ describe('GitHub pull request monitor', (): void => {
 
       expect(requests).toEqual([
         {
-          url: 'https://api.github.test/repos/example/symphony/pulls/41',
+          url: 'https://api.github.test/repos/example/sloppenheimer/pulls/41',
           method: 'GET',
           body: null,
         },
         {
-          url: 'https://api.github.test/repos/example/symphony/issues/41/comments',
+          url: 'https://api.github.test/repos/example/sloppenheimer/issues/41/comments',
           method: 'POST',
           body: JSON.stringify({ body: '@codex review' }),
         },

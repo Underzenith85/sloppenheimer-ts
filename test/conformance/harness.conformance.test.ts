@@ -2,7 +2,7 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, TestClock } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
 import { FakeTracker } from '../harness/fake-tracker.js'
 import { FakeWorkspaceProcess } from '../harness/fake-workspace-process.js'
 import { anIssue } from '../harness/fixtures.js'

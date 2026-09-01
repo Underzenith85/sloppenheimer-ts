@@ -10,10 +10,10 @@ import {
   type AgentEvent,
   type AgentLaunch,
   type AgentResult,
-} from '@symphony/adapter-codex/codex.js'
-import type { AgentError } from '@symphony/core/domain/errors.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
+} from '@sloppenheimer/adapter-codex/codex.js'
+import type { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.js'
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { anIssue } from '../harness/fixtures.js'
@@ -37,7 +37,7 @@ const runScenario = (
 ): Effect.Effect<ScenarioOutcome, AgentError> =>
   Effect.acquireUseRelease(
     Effect.promise(async () => {
-      const workspaceRoot = await mkdtemp(join(tmpdir(), 'symphony-conformance-'))
+      const workspaceRoot = await mkdtemp(join(tmpdir(), 'sloppenheimer-conformance-'))
       await mkdir(join(workspaceRoot, 'fake'))
       return workspaceRoot
     }),

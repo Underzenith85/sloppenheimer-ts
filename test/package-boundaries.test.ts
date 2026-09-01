@@ -18,10 +18,10 @@ const repoRoot = resolve(import.meta.dirname, '..')
  * fails instead, beside the lint rule that denies the import itself.
  */
 const permittedWorkspaceDependencies: Readonly<Record<string, readonly string[]>> = {
-  '@symphony/core': [],
-  '@symphony/adapter-node': ['@symphony/core'],
-  '@symphony/adapter-github': ['@symphony/adapter-node', '@symphony/core'],
-  '@symphony/adapter-codex': ['@symphony/adapter-node', '@symphony/core'],
+  '@sloppenheimer/core': [],
+  '@sloppenheimer/adapter-node': ['@sloppenheimer/core'],
+  '@sloppenheimer/adapter-github': ['@sloppenheimer/adapter-node', '@sloppenheimer/core'],
+  '@sloppenheimer/adapter-codex': ['@sloppenheimer/adapter-node', '@sloppenheimer/core'],
 }
 
 type Manifest = Readonly<{
@@ -84,7 +84,7 @@ const manifests = new Map(
 
 const workspaceDependenciesOf = (manifest: Manifest): readonly string[] =>
   Object.keys({ ...manifest.dependencies, ...manifest.devDependencies })
-    .filter((name) => name.startsWith('@symphony/'))
+    .filter((name) => name.startsWith('@sloppenheimer/'))
     .sort()
 
 describe('workspace package dependency direction', () => {
@@ -108,7 +108,7 @@ describe('workspace package dependency direction', () => {
 
   it('keeps the composition root at the repository root', () => {
     const root = readManifest(repoRoot)
-    expect(root.name).toBe('symphony-ts')
+    expect(root.name).toBe('sloppenheimer-ts')
     expect(root.private).toBe(true)
     expect(workspaceDependenciesOf(root)).toStrictEqual([...manifests.keys()].sort())
   })

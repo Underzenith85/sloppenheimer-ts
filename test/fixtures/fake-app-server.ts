@@ -82,8 +82,8 @@ const hasInitializePayload = (params: unknown): boolean => {
   }
   const clientInfo = params['clientInfo']
   return (
-    clientInfo['name'] === 'symphony_ts' &&
-    clientInfo['title'] === 'Symphony TypeScript' &&
+    clientInfo['name'] === 'sloppenheimer_ts' &&
+    clientInfo['title'] === 'Sloppenheimer TypeScript' &&
     clientInfo['version'] === '0.1.0' &&
     params['capabilities']['experimentalApi'] === true
   )
@@ -96,7 +96,7 @@ const hasThreadPayload = (params: unknown): params is JsonRecord & Readonly<{ cw
   params['cwd'] === process.cwd() &&
   params['approvalPolicy'] === expectedApprovalPolicy &&
   params['sandbox'] === expectedThreadSandbox &&
-  params['serviceName'] === 'symphony_ts' &&
+  params['serviceName'] === 'sloppenheimer_ts' &&
   (acceptAnyDynamicTools ||
     (expectedDynamicTools === null
       ? !Object.hasOwn(params, 'dynamicTools')
@@ -135,7 +135,7 @@ const handleInitialize = (id: unknown, params: unknown): void => {
     return
   }
   if (!hasInitializePayload(params)) {
-    startupViolation = 'initialize payload did not declare the Symphony client identity'
+    startupViolation = 'initialize payload did not declare the Sloppenheimer client identity'
     rejectRequest(id, startupViolation)
     return
   }
@@ -285,7 +285,7 @@ const handleTurnStart = (id: unknown, params: unknown): void => {
           callId: 'call-1',
           tool: 'github_add_comment',
           arguments: {
-            body: process.env['SYMPHONY_HOST_TOOL_TOKEN'] ?? 'host-side comment',
+            body: process.env['SLOPPENHEIMER_HOST_TOOL_TOKEN'] ?? 'host-side comment',
           },
         },
       })

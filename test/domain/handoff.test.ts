@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifyPullRequest } from '@symphony/core/domain/handoff.js'
+import { classifyPullRequest } from '@sloppenheimer/core/domain/handoff.js'
 import { anOpenPullRequest as observation } from '../harness/fixtures.js'
 
 describe('pull request handoff state machine', (): void => {
@@ -51,7 +51,7 @@ describe('pull request handoff state machine', (): void => {
       classifyPullRequest({
         number: 41,
         state: 'closed',
-        url: 'https://github.com/example/symphony/pull/41',
+        url: 'https://github.com/example/sloppenheimer/pull/41',
         headSha: 'abc123',
         merged: false,
         mergeCommitSha: null,

@@ -25,7 +25,7 @@ describe('CLI options', (): void => {
     })
   })
 
-  it('parses Symphony options before the option separator', (): void => {
+  it('parses Sloppenheimer options before the option separator', (): void => {
     expect(parseCliArguments(['--port', '0', '--', 'custom.md'])).toEqual({
       workflowPath: resolve('custom.md'),
       port: 0,

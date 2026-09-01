@@ -7,10 +7,10 @@ import {
   type AgentRunnerAdapter,
   type AgentRunnerRegistry,
   type ValidatedAgentRunner,
-} from '@symphony/core/domain/agent-runner-provider.js'
-import { environmentReferenceName } from '@symphony/core/config/env-reference.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
-import type { AgentEvent, AgentLifecycle, AgentTurnOutcome } from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/domain/agent-runner-provider.js'
+import { environmentReferenceName } from '@sloppenheimer/core/config/env-reference.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
+import type { AgentEvent, AgentLifecycle, AgentTurnOutcome } from '@sloppenheimer/core/telemetry.js'
 import { withEnvironment } from './environment.js'
 
 /**

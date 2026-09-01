@@ -2,7 +2,7 @@
 // formats the whole console uses. Nothing here knows what the console is for.
 
 type DetailPayload = Readonly<{
-  detail?: import('@symphony/core/telemetry.js').AgentDetailSnapshot
+  detail?: import('@sloppenheimer/core/telemetry.js').AgentDetailSnapshot
   error?: Readonly<{ message?: string }>
 }>
 
@@ -49,7 +49,7 @@ const requestStatus = async (
 }
 
 const post = async (path: string): Promise<void> => {
-  await request<unknown>(path, { method: 'POST', headers: { 'X-Symphony-CSRF': csrf } })
+  await request<unknown>(path, { method: 'POST', headers: { 'X-Sloppenheimer-CSRF': csrf } })
 }
 
 const formatDuration = (seconds: number): string => {

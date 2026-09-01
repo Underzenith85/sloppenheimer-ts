@@ -6,10 +6,10 @@ import {
   type AgentRunnerAdapter,
   type RegisteredAgentRunner,
   type ValidatedAgentRunner,
-} from '@symphony/core/domain/agent-runner-provider.js'
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
-import { isJsonObject } from '@symphony/core/support/json.js'
+} from '@sloppenheimer/core/domain/agent-runner-provider.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
+import { isJsonObject } from '@sloppenheimer/core/support/json.js'
 
 /**
  * Codex's own settings, and the validation that owns them.

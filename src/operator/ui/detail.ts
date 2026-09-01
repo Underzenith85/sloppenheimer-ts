@@ -3,9 +3,9 @@
 // and protocol facts are still here, one disclosure down, because they are what an operator needs
 // second rather than first.
 
-type AgentDetailSnapshot = import('@symphony/core/telemetry.js').AgentDetailSnapshot
-type AgentTimelineCategory = import('@symphony/core/telemetry.js').AgentTimelineCategory
-type AgentTimelineEvent = import('@symphony/core/telemetry.js').AgentTimelineEvent
+type AgentDetailSnapshot = import('@sloppenheimer/core/telemetry.js').AgentDetailSnapshot
+type AgentTimelineCategory = import('@sloppenheimer/core/telemetry.js').AgentTimelineCategory
+type AgentTimelineEvent = import('@sloppenheimer/core/telemetry.js').AgentTimelineEvent
 
 /** Supplied by the server from the same telemetry module the runtime uses. */
 declare const timelineCategories: readonly AgentTimelineCategory[]
@@ -208,7 +208,7 @@ const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
     // This host composes no code-review services, so no pull request will be opened for the work.
     return snapshot.status === 'retrying'
       ? 'Handoff is disabled on this host. The next attempt runs on schedule and continues the issue.'
-      : 'Handoff is disabled on this host. Symphony continues the issue itself rather than opening a pull request.'
+      : 'Handoff is disabled on this host. Sloppenheimer continues the issue itself rather than opening a pull request.'
   }
   if (handoff.outcome === 'merged') {
     return 'Merged. Nothing further is scheduled for this issue.'
@@ -221,7 +221,7 @@ const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
     return (
       'A pull request' +
       (number === null ? '' : ' #' + String(number)) +
-      ' is open. Symphony watches its checks and reviews, repairs it when asked, and merges it once it is clean.'
+      ' is open. Sloppenheimer watches its checks and reviews, repairs it when asked, and merges it once it is clean.'
     )
   }
   if (handoff.outcome === 'no_branch') {
@@ -230,7 +230,7 @@ const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
   if (snapshot.status === 'retrying') {
     return 'The next attempt runs on schedule; the work so far is kept in the same workspace.'
   }
-  return `On completion Symphony publishes ${handoff.expectedBranch ?? 'the issue branch'} with its host credential and opens a pull request for review.`
+  return `On completion Sloppenheimer publishes ${handoff.expectedBranch ?? 'the issue branch'} with its host credential and opens a pull request for review.`
 }
 
 const detailHealth = (snapshot: AgentDetailSnapshot): Readonly<{ kind: string; label: string }> => {

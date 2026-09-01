@@ -2,7 +2,7 @@
  * The Codex App Server's own reading of its protocol messages, as the bounded payload the timeline
  * retains.
  *
- * This lived in `@symphony/core`'s telemetry module while Codex was the only runner. It decodes one
+ * This lived in `@sloppenheimer/core`'s telemetry module while Codex was the only runner. It decodes one
  * backend's wire shapes — its item union, its notification envelope, its client-emitted event names
  * — so it belongs with that backend: a second runner normalizes its own messages and would be
  * actively misread by these schemas rather than merely unserved by them. What stays in core is the
@@ -17,14 +17,14 @@
 
 import { Schema } from 'effect'
 
-import type { JsonValue } from '@symphony/core/domain/domain.js'
+import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
 import {
   decodeOrNull,
   finiteNumber,
   nonEmptyString,
   protocolStruct,
   tolerant,
-} from '@symphony/core/support/schema.js'
+} from '@sloppenheimer/core/support/schema.js'
 import {
   bound,
   boundRedacted,
@@ -32,13 +32,13 @@ import {
   pathKey,
   redact,
   type Redactor,
-} from '@symphony/core/support/redaction.js'
+} from '@sloppenheimer/core/support/redaction.js'
 import {
   qualityPhaseOf,
   type AgentEventPayload,
   type FileChangeKind,
   type ToolState,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 
 const noPayload: AgentEventPayload = Object.freeze({ kind: 'none' })
 
@@ -299,7 +299,7 @@ export const clientPayload = (
     default: {
       return {
         kind: 'error',
-        // Client-side notices — stderr noise, an unmatched response, a message Symphony could not
+        // Client-side notices — stderr noise, an unmatched response, a message Sloppenheimer could not
         // decode — are reported, but they are not by themselves session failures.
         severity: 'warning',
         code: event,

@@ -77,7 +77,7 @@ export type Workflow = Readonly<{
 
 export const workflowDefaults = Object.freeze({
   pollingIntervalMs: 30_000,
-  workspaceRootBasename: 'symphony_workspaces',
+  workspaceRootBasename: 'sloppenheimer_workspaces',
   hookTimeoutMs: 60_000,
   maxConcurrentAgents: 10,
   maxTurns: 20,

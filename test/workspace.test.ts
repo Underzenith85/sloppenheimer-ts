@@ -5,14 +5,14 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, Either, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { issueIdentifier, type Workspace } from '@symphony/core/domain/domain.js'
-import type { HooksConfig } from '@symphony/core/config/workflow.js'
-import { makeWorkspaceManager } from '@symphony/adapter-node/workspace-manager.js'
+import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
+import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
+import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
   containedWorkspacePath,
   workspaceKey,
-} from '@symphony/core/domain/workspace-containment.js'
-import type { WorkspaceManagerPort } from '@symphony/core/ports/workspace.js'
+} from '@sloppenheimer/core/domain/workspace-containment.js'
+import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { hostFileSystem } from './harness/filesystem.js'
 import { processIsAlive } from './harness/processes.js'
 
@@ -44,13 +44,13 @@ describe('workspace safety', (): void => {
   })
 
   it('rejects paths that escape or equal the root', (): void => {
-    expect(Either.isLeft(containedWorkspacePath('/tmp/symphony-root', '..'))).toBe(true)
-    expect(Either.isLeft(containedWorkspacePath('/tmp/symphony-root', '.'))).toBe(true)
+    expect(Either.isLeft(containedWorkspacePath('/tmp/sloppenheimer-root', '..'))).toBe(true)
+    expect(Either.isLeft(containedWorkspacePath('/tmp/sloppenheimer-root', '.'))).toBe(true)
   })
 
   it.live('runs after_create once and reuses the directory', () =>
     Effect.gen(function* () {
-      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      const root = join('/tmp', `sloppenheimer-workspace-${crypto.randomUUID()}`)
       roots.push(root)
       const manager = yield* workspaceManager(root, {
         afterCreate: 'printf created > marker.txt',
@@ -91,7 +91,7 @@ const waitFor = (predicate: () => boolean, timeoutMs = 10_000): Effect.Effect<bo
   })
 
 const makeRoot = (): string => {
-  const root = join('/tmp', `symphony-hooks-${crypto.randomUUID()}`)
+  const root = join('/tmp', `sloppenheimer-hooks-${crypto.randomUUID()}`)
   roots.push(root)
   return root
 }
@@ -292,7 +292,7 @@ describe('hook phase semantics', (): void => {
 describe('workspace inspection and cleanup', (): void => {
   it.live('removes a missing workspace without running before_remove', () =>
     Effect.gen(function* () {
-      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      const root = join('/tmp', `sloppenheimer-workspace-${crypto.randomUUID()}`)
       roots.push(root)
       const manager = yield* workspaceManager(root, {
         afterCreate: null,
@@ -310,7 +310,7 @@ describe('workspace inspection and cleanup', (): void => {
 
   it.live('reports whether a contained workspace exists', () =>
     Effect.gen(function* () {
-      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      const root = join('/tmp', `sloppenheimer-workspace-${crypto.randomUUID()}`)
       roots.push(root)
       const manager = yield* workspaceManager(root, {
         afterCreate: null,
@@ -329,8 +329,8 @@ describe('workspace inspection and cleanup', (): void => {
 
   it.live('rejects symlinked workspaces before running removal hooks', () =>
     Effect.gen(function* () {
-      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
-      const outside = join('/tmp', `symphony-outside-${crypto.randomUUID()}`)
+      const root = join('/tmp', `sloppenheimer-workspace-${crypto.randomUUID()}`)
+      const outside = join('/tmp', `sloppenheimer-outside-${crypto.randomUUID()}`)
       roots.push(root, outside)
       yield* host(() => mkdir(root))
       yield* host(() => mkdir(outside))
@@ -354,7 +354,7 @@ describe('workspace inspection and cleanup', (): void => {
 
   it.live('logs and ignores before_remove failure while deleting the workspace', () =>
     Effect.gen(function* () {
-      const root = join('/tmp', `symphony-workspace-${crypto.randomUUID()}`)
+      const root = join('/tmp', `sloppenheimer-workspace-${crypto.randomUUID()}`)
       roots.push(root)
       const manager = yield* workspaceManager(root, {
         afterCreate: null,

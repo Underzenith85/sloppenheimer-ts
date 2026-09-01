@@ -1,10 +1,10 @@
 {
-  "name": "symphony-ts",
+  "name": "sloppenheimer-ts",
   "version": "0.1.0",
   "private": true,
   "description": "A strict TypeScript implementation of the OpenAI Symphony service specification",
   "bin": {
-    "symphony": "./dist/cli.js"
+    "sloppenheimer": "./dist/cli.js"
   },
   "type": "module",
   "scripts": {
@@ -24,10 +24,10 @@
   "dependencies": {
     "@effect/platform": "0.97.1",
     "@effect/platform-node": "0.108.1",
-    "@symphony/adapter-codex": "workspace:*",
-    "@symphony/adapter-github": "workspace:*",
-    "@symphony/adapter-node": "workspace:*",
-    "@symphony/core": "workspace:*",
+    "@sloppenheimer/adapter-codex": "workspace:*",
+    "@sloppenheimer/adapter-github": "workspace:*",
+    "@sloppenheimer/adapter-node": "workspace:*",
+    "@sloppenheimer/core": "workspace:*",
     "chokidar": "5.0.0",
     "effect": "3.22.1",
     "yaml": "2.9.0"

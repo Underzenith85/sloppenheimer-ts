@@ -18,9 +18,16 @@ import {
 } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { githubProviderOf, githubTrackerProvider } from '@symphony/adapter-github'
-import { telemetryFrom, type AgentEvent, type AgentResult } from '@symphony/adapter-codex/codex.js'
-import { cyclicIssueIdentifiers, findDependencyCycles } from '@symphony/core/domain/dependencies.js'
+import { githubProviderOf, githubTrackerProvider } from '@sloppenheimer/adapter-github'
+import {
+  telemetryFrom,
+  type AgentEvent,
+  type AgentResult,
+} from '@sloppenheimer/adapter-codex/codex.js'
+import {
+  cyclicIssueIdentifiers,
+  findDependencyCycles,
+} from '@sloppenheimer/core/domain/dependencies.js'
 import {
   issueId,
   issueIdentifier,
@@ -28,7 +35,7 @@ import {
   type Issue,
   type IssueId,
   type JsonObject,
-} from '@symphony/core/domain/domain.js'
+} from '@sloppenheimer/core/domain/domain.js'
 import {
   AgentError,
   SourceControlError,
@@ -36,16 +43,16 @@ import {
   WorkflowError,
   WorkspaceError,
   type HandoffStoreError,
-} from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/errors.js'
 import {
   loadHandoffs as loadHandoffsAgainstFileSystem,
   saveHandoffs as saveHandoffsAgainstFileSystem,
-} from '@symphony/core/core/handoff-store.js'
+} from '@sloppenheimer/core/core/handoff-store.js'
 import type {
   CodexReviewObservation,
   HandoffSnapshot,
   PullRequestObservation,
-} from '@symphony/core/domain/handoff.js'
+} from '@sloppenheimer/core/domain/handoff.js'
 import {
   issueIsRoutable,
   retainedCompletedDetails,
@@ -54,10 +61,10 @@ import {
   type AgentDetailLookup,
   type OrchestratorControl,
   type OrchestratorServices,
-} from '@symphony/core'
-import { makeRedactor } from '@symphony/core/support/redaction.js'
-import { normalizePayload } from '@symphony/adapter-codex/payload.js'
-import type { AgentDetailSnapshot } from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core'
+import { makeRedactor } from '@sloppenheimer/core/support/redaction.js'
+import { normalizePayload } from '@sloppenheimer/adapter-codex/payload.js'
+import type { AgentDetailSnapshot } from '@sloppenheimer/core/telemetry.js'
 import {
   CodeReviewFactory,
   SourceControlFactory,
@@ -80,10 +87,10 @@ import {
   type TrackerPort,
   type WorkspaceManagerPort,
   type WorkspaceSettings,
-} from '@symphony/core'
-import type { Workflow } from '@symphony/core/config/workflow.js'
+} from '@sloppenheimer/core'
+import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
-import type { PreflightResult } from '@symphony/core/ports/workflow.js'
+import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
@@ -117,8 +124,8 @@ const saveHandoffs = (
   handoffs: readonly HandoffSnapshot[],
 ): Effect.Effect<void, HandoffStoreError> =>
   onHostFileSystem(saveHandoffsAgainstFileSystem(path, handoffs))
-import type { HostToolSession } from '@symphony/core/domain/host-tools.js'
-import type { ValidatedTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
+import type { HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
+import type { ValidatedTrackerProvider } from '@sloppenheimer/core/domain/tracker-provider.js'
 import {
   auroraEvents,
   auroraRunner,
@@ -131,7 +138,7 @@ const makeIssue = (
   identifier: string,
   priority: number | null,
   createdAt: string | null,
-  labels: readonly string[] = ['symphony'],
+  labels: readonly string[] = ['sloppenheimer'],
   blockedBy: readonly BlockerRef[] = [],
 ): Issue =>
   anIssue({
@@ -142,7 +149,7 @@ const makeIssue = (
     createdAt: createdAt === null ? null : new Date(createdAt),
   })
 
-const testEnvironment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+const testEnvironment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
 
 const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
@@ -155,8 +162,8 @@ const workflow: Workflow = {
   tracker: runWithEnvironment(
     githubTrackerProvider.validate({
       owner: 'example',
-      repository: 'symphony',
-      token: '$SYMPHONY_TEST_TOKEN',
+      repository: 'sloppenheimer',
+      token: '$SLOPPENHEIMER_TEST_TOKEN',
     }),
     testEnvironment,
   ),
@@ -165,15 +172,15 @@ const workflow: Workflow = {
       kind: 'github',
       provider: {
         owner: 'example',
-        repository: 'symphony',
-        token: '$SYMPHONY_TEST_TOKEN',
+        repository: 'sloppenheimer',
+        token: '$SLOPPENHEIMER_TEST_TOKEN',
       },
-      requiredLabels: ['symphony', 'ready'],
+      requiredLabels: ['sloppenheimer', 'ready'],
       activeStates: ['open'],
       terminalStates: ['closed'],
     },
     pollingIntervalMs: 30_000,
-    workspaceRoot: '/tmp/symphony',
+    workspaceRoot: '/tmp/sloppenheimer',
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -215,11 +222,14 @@ describe('orchestrator policies', (): void => {
 
   it('matches required labels case-insensitively', (): void => {
     expect(
-      issueIsRoutable(makeIssue('GH-1', 1, null, ['Ready', 'SYMPHONY']), workflow.config.tracker),
+      issueIsRoutable(
+        makeIssue('GH-1', 1, null, ['Ready', 'SLOPPENHEIMER']),
+        workflow.config.tracker,
+      ),
     ).toBe(true)
-    expect(issueIsRoutable(makeIssue('GH-2', 1, null, ['symphony']), workflow.config.tracker)).toBe(
-      false,
-    )
+    expect(
+      issueIsRoutable(makeIssue('GH-2', 1, null, ['sloppenheimer']), workflow.config.tracker),
+    ).toBe(false)
   })
 
   /**
@@ -246,7 +256,7 @@ describe('orchestrator policies', (): void => {
 
   it('rejects a provider record marked non-dispatchable at the scheduler boundary', (): void => {
     const issue = {
-      ...makeIssue('GH-3', 1, null, ['symphony', 'ready']),
+      ...makeIssue('GH-3', 1, null, ['sloppenheimer', 'ready']),
       dispatchable: false,
     }
 
@@ -256,12 +266,18 @@ describe('orchestrator policies', (): void => {
   it('leaves blocker metadata to adapter-supplied dispatchability', (): void => {
     const openBlocker: BlockerRef = {
       id: '101',
-      identifier: issueIdentifier('example/symphony#1'),
+      identifier: issueIdentifier('example/sloppenheimer#1'),
       title: 'Foundation',
       state: 'open',
-      url: 'https://github.com/example/symphony/issues/1',
+      url: 'https://github.com/example/sloppenheimer/issues/1',
     }
-    const blocked = makeIssue('example/symphony#2', 1, null, ['ready', 'symphony'], [openBlocker])
+    const blocked = makeIssue(
+      'example/sloppenheimer#2',
+      1,
+      null,
+      ['ready', 'sloppenheimer'],
+      [openBlocker],
+    )
     const ready = { ...blocked, blockedBy: [{ ...openBlocker, state: 'closed' }] }
 
     expect(issueIsRoutable(blocked, workflow.config.tracker)).toBe(true)
@@ -278,11 +294,11 @@ describe('orchestrator policies', (): void => {
     })
     const issue = (number: number, blockers: readonly number[] = []): Issue =>
       makeIssue(
-        `example/symphony#${String(number)}`,
+        `example/sloppenheimer#${String(number)}`,
         null,
         null,
-        ['ready', 'symphony'],
-        blockers.map((number) => blocker(`example/symphony#${String(number)}`)),
+        ['ready', 'sloppenheimer'],
+        blockers.map((number) => blocker(`example/sloppenheimer#${String(number)}`)),
       )
     const graph = [
       issue(1),
@@ -296,11 +312,14 @@ describe('orchestrator policies', (): void => {
 
     expect(findDependencyCycles(graph)).toEqual([
       {
-        members: ['example/symphony#6', 'example/symphony#7'],
-        message: 'Dependency cycle members: example/symphony#6, example/symphony#7',
+        members: ['example/sloppenheimer#6', 'example/sloppenheimer#7'],
+        message: 'Dependency cycle members: example/sloppenheimer#6, example/sloppenheimer#7',
       },
     ])
-    expect([...cyclicIssueIdentifiers(graph)]).toEqual(['example/symphony#6', 'example/symphony#7'])
+    expect([...cyclicIssueIdentifiers(graph)]).toEqual([
+      'example/sloppenheimer#6',
+      'example/sloppenheimer#7',
+    ])
   })
 })
 
@@ -570,8 +589,10 @@ const makeHarness = (
           retryable: false,
         },
       }),
-      handoffCompletedWork: () => Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
-      findExistingHandoff: () => Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/test' }),
+      handoffCompletedWork: () =>
+        Effect.succeed({ _tag: 'NoBranch', branchName: 'sloppenheimer/test' }),
+      findExistingHandoff: () =>
+        Effect.succeed({ _tag: 'NoBranch', branchName: 'sloppenheimer/test' }),
       inspectPullRequest: () => Effect.die('unused'),
       mergePullRequest: () => Effect.die('unused'),
       requestPullRequestReview: () => Effect.die('unused'),
@@ -581,7 +602,7 @@ const makeHarness = (
       workspaceSettings.push(settings)
       return {
         create: () =>
-          Effect.succeed({ path: '/tmp/symphony-test', key: 'test', createdNow: false }),
+          Effect.succeed({ path: '/tmp/sloppenheimer-test', key: 'test', createdNow: false }),
         exists: () => Effect.succeed(true),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
@@ -660,7 +681,7 @@ const requireCodeReview = (
 const repairObservation = (number: number, headSha: string): PullRequestObservation =>
   anOpenPullRequest({
     number,
-    url: 'https://github.test/example/symphony/pull/65',
+    url: 'https://github.test/example/sloppenheimer/pull/65',
     headSha,
     mergeable: false,
     mergeState: 'dirty',
@@ -677,8 +698,8 @@ const saveRepairHandoff = (
     {
       issueId: issue.id,
       identifier: issue.identifier,
-      pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-      branchName: 'symphony/issue-20',
+      pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+      branchName: 'sloppenheimer/issue-20',
       state: 'repair_needed',
       headSha,
       reason: 'The pull request conflicts with protected main',
@@ -695,7 +716,7 @@ describe('host-owned source-control dispatch', (): void => {
   it.effect('publishes a normal run without exposing a credential to the agent launch', () =>
     Effect.gen(function* () {
       const issue = {
-        ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#165', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('165'),
       }
       const harness = makeHarness(workflow, () => [issue])
@@ -706,7 +727,7 @@ describe('host-owned source-control dispatch', (): void => {
         ...harness.ports,
         makeTracker: (provider) => ({
           ...harness.ports.makeTracker(provider),
-          secretEnvironmentNames: ['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'],
+          secretEnvironmentNames: ['SLOPPENHEIMER_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'],
         }),
         makeSourceControl: () => ({
           prepare: (_candidate, workspace, target) => {
@@ -745,24 +766,24 @@ describe('host-owned source-control dispatch', (): void => {
         }),
       )
 
-      expect(targets).toEqual([{ _tag: 'Normal', branchName: 'symphony/issue-165' }])
-      expect(publications).toEqual(['symphony/issue-165'])
+      expect(targets).toEqual([{ _tag: 'Normal', branchName: 'sloppenheimer/issue-165' }])
+      expect(publications).toEqual(['sloppenheimer/issue-165'])
       expect(launchSecretNames).toEqual(
-        expect.arrayContaining(['SYMPHONY_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
+        expect.arrayContaining(['SLOPPENHEIMER_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']),
       )
     }),
   )
 
   it.scoped('prepares and publishes a repair from the handoff exact head', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-source-control-repair-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-source-control-repair-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#165', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#165', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('165'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(join(workspaceRoot, '.symphony', 'handoffs.json'), issue, head)
+      yield* saveRepairHandoff(join(workspaceRoot, '.sloppenheimer', 'handoffs.json'), issue, head)
       const harness = makeHarness(isolated, () => [issue])
       const targets: SourceControlTarget[] = []
       const publications: string[] = []
@@ -808,10 +829,10 @@ describe('host-owned source-control dispatch', (): void => {
 
       expect(targets[0]).toEqual({
         _tag: 'Repair',
-        branchName: 'symphony/issue-20',
+        branchName: 'sloppenheimer/issue-20',
         expectedHeadSha: head,
       })
-      expect(publications).toEqual(['symphony/issue-20'])
+      expect(publications).toEqual(['sloppenheimer/issue-20'])
     }),
   )
 })
@@ -821,10 +842,10 @@ describe('restored pull request handoffs', (): void => {
     'rediscovers open pull requests for active issue branches when the store is missing',
     () =>
       Effect.gen(function* () {
-        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-recovered-handoff-')
+        const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-recovered-handoff-')
         const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
         const issue = {
-          ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+          ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
           id: issueId('20'),
         }
         const harness = makeHarness(isolated, () => [issue])
@@ -835,15 +856,15 @@ describe('restored pull request handoffs', (): void => {
             findExistingHandoff: (candidate) =>
               Effect.succeed({
                 _tag: 'PullRequest' as const,
-                branchName: `symphony/issue-${candidate.id}`,
-                pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+                branchName: `sloppenheimer/issue-${candidate.id}`,
+                pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
                 pullRequestNumber: 65,
                 created: false,
               }),
             inspectPullRequest: (number) =>
               Effect.succeed({
                 number,
-                url: 'https://github.test/example/symphony/pull/65',
+                url: 'https://github.test/example/sloppenheimer/pull/65',
                 headSha: 'recovered-head',
                 merged: false as const,
                 state: 'open' as const,
@@ -869,8 +890,8 @@ describe('restored pull request handoffs', (): void => {
         expect(snapshot.handoffs).toHaveLength(1)
         expect(snapshot.handoffs[0]).toMatchObject({
           issueId: issue.id,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           headSha: 'recovered-head',
           state: 'awaiting_checks',
         })
@@ -880,18 +901,18 @@ describe('restored pull request handoffs', (): void => {
           recovered: 1,
           failed: 0,
         })
-        expect(yield* loadHandoffs(join(workspaceRoot, '.symphony', 'handoffs.json'))).toHaveLength(
-          1,
-        )
+        expect(
+          yield* loadHandoffs(join(workspaceRoot, '.sloppenheimer', 'handoffs.json')),
+        ).toHaveLength(1)
       }),
   )
 
   it.scoped('skips non-dispatchable pull request records during recovery', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-nondispatchable-handoff-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-nondispatchable-handoff-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const pullRequestRecord = {
-        ...makeIssue('example/symphony#117', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#117', 1, null, ['sloppenheimer', 'ready']),
         dispatchable: false,
       }
       const harness = makeHarness(isolated, () => [pullRequestRecord])
@@ -903,7 +924,7 @@ describe('restored pull request handoffs', (): void => {
           findExistingHandoff: () =>
             Effect.sync(() => {
               discoveries += 1
-              return { _tag: 'NoBranch' as const, branchName: 'symphony/issue-117' }
+              return { _tag: 'NoBranch' as const, branchName: 'sloppenheimer/issue-117' }
             }),
         }),
       }
@@ -925,23 +946,23 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('supplements a partial store without duplicating its persisted handoff', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-partial-handoff-')
-      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-partial-handoff-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const first = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const second = {
-        ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#75', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('75'),
       }
       yield* saveHandoffs(storePath, [
         {
           issueId: first.id,
           identifier: first.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'awaiting_checks',
           headSha: 'first-head',
           reason: null,
@@ -961,8 +982,8 @@ describe('restored pull request handoffs', (): void => {
               expect(candidate.id).toBe(second.id)
               return {
                 _tag: 'PullRequest' as const,
-                branchName: 'symphony/issue-75',
-                pullRequestUrl: 'https://github.test/example/symphony/pull/95',
+                branchName: 'sloppenheimer/issue-75',
+                pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/95',
                 pullRequestNumber: 95,
                 created: false,
               }
@@ -970,7 +991,7 @@ describe('restored pull request handoffs', (): void => {
           inspectPullRequest: (number) =>
             Effect.succeed({
               number,
-              url: `https://github.test/example/symphony/pull/${String(number)}`,
+              url: `https://github.test/example/sloppenheimer/pull/${String(number)}`,
               headSha: number === 65 ? 'first-head' : 'second-head',
               merged: false as const,
               state: 'open' as const,
@@ -1005,9 +1026,9 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('reports a malformed store and does not replace it during recovery', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-malformed-handoff-')
-      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
-      yield* Effect.promise(() => mkdir(join(workspaceRoot, '.symphony')))
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-malformed-handoff-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      yield* Effect.promise(() => mkdir(join(workspaceRoot, '.sloppenheimer')))
       yield* Effect.promise(() => writeFile(storePath, '{malformed'))
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const harness = makeHarness(isolated)
@@ -1031,19 +1052,19 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('retains persisted entries through a transient GitHub hydration failure', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-transient-handoff-')
-      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-transient-handoff-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#75', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('75'),
       }
       yield* saveHandoffs(storePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/95',
-          branchName: 'symphony/issue-75',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/95',
+          branchName: 'sloppenheimer/issue-75',
           state: 'awaiting_checks',
           headSha: 'persisted-head',
           reason: null,
@@ -1078,7 +1099,7 @@ describe('restored pull request handoffs', (): void => {
           inspectPullRequest: (number) =>
             Effect.succeed({
               number,
-              url: 'https://github.test/example/symphony/pull/95',
+              url: 'https://github.test/example/sloppenheimer/pull/95',
               headSha: 'persisted-head',
               merged: false as const,
               state: 'open' as const,
@@ -1110,22 +1131,22 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('removes a restored handoff after its pull request is confirmed merged', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-restored-handoff-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-restored-handoff-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#63', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#63', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('63'),
       }
       yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/44',
-          branchName: 'symphony/issue-63',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/44',
+          branchName: 'sloppenheimer/issue-63',
           state: 'awaiting_checks',
           headSha: null,
           reason: 'GitHub pull request status is incomplete',
@@ -1179,7 +1200,7 @@ describe('restored pull request handoffs', (): void => {
         identifier: issue.identifier,
         title: issue.title,
         outcome: 'merged',
-        pullRequestUrl: 'https://github.test/example/symphony/pull/44',
+        pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/44',
         // The provider's merge time, not the instant this host noticed it. Dating it now would put
         // work merged days ago back into the console's recent-activity window.
         finishedAt: '2026-08-20T09:00:00.000Z',
@@ -1190,22 +1211,22 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('releases a restored closed handoff claim and dispatches by current routability', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-closed-handoff-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-closed-handoff-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#75', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#75', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('75'),
       }
       yield* saveHandoffs(handoffStorePath, [
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/50',
-          branchName: 'symphony/issue-75',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/50',
+          branchName: 'sloppenheimer/issue-75',
           state: 'awaiting_checks',
           headSha: 'closed-head',
           reason: null,
@@ -1237,7 +1258,7 @@ describe('restored pull request handoffs', (): void => {
               return {
                 number: pullRequestNumber,
                 state: 'closed' as const,
-                url: 'https://github.test/example/symphony/pull/50',
+                url: 'https://github.test/example/sloppenheimer/pull/50',
                 headSha: 'closed-head',
                 merged: false as const,
                 mergeCommitSha: null,
@@ -1284,15 +1305,15 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('isolates eligibility refresh failures between repair handoffs', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-isolated-handoff-refresh-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-isolated-handoff-refresh-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const failedIssue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const healthyIssue = {
-        ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#21', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('21'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1301,8 +1322,8 @@ describe('restored pull request handoffs', (): void => {
         [failedIssue, healthyIssue].map((issue, index) => ({
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: `https://github.test/example/symphony/pull/${65 + index}`,
-          branchName: `symphony/issue-${issue.id}`,
+          pullRequestUrl: `https://github.test/example/sloppenheimer/pull/${65 + index}`,
+          branchName: `sloppenheimer/issue-${issue.id}`,
           state: 'repair_needed' as const,
           headSha: head,
           reason: 'The pull request conflicts with protected main',
@@ -1371,14 +1392,14 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('awaits Codex review of the initial head before merging', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-initial-review-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-initial-review-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
         dispatchable: false,
       }
@@ -1387,8 +1408,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'awaiting_checks',
           headSha: initialHead,
           reason: null,
@@ -1413,7 +1434,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: initialHead,
               merged: false as const,
               mergeCommitSha: null,
@@ -1479,14 +1500,14 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('requests and awaits Codex review of the repaired head before merging', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repaired-review-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repaired-review-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
         dispatchable: false,
       }
@@ -1495,8 +1516,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'awaiting_checks',
           headSha: repairedHead,
           reason: null,
@@ -1517,7 +1538,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: repairedHead,
               merged: false as const,
               mergeCommitSha: null,
@@ -1591,14 +1612,14 @@ describe('restored pull request handoffs', (): void => {
     'migrates contaminated legacy counts and persists the repair baseline while running',
     () =>
       Effect.gen(function* () {
-        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-running-repair-')
-        const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+        const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-running-repair-')
+        const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
         const isolated: Workflow = {
           ...workflow,
           config: { ...workflow.config, workspaceRoot },
         }
         const issue = {
-          ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+          ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
           id: issueId('20'),
         }
         const reviewedHead = 'abcdef1234567890abcdef1234567890abcdef12'
@@ -1606,8 +1627,8 @@ describe('restored pull request handoffs', (): void => {
           {
             issueId: issue.id,
             identifier: issue.identifier,
-            pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-            branchName: 'symphony/issue-20',
+            pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+            branchName: 'sloppenheimer/issue-20',
             state: 'intervention_required',
             headSha: reviewedHead,
             reason: 'Repair limit reached. Unresolved review feedback',
@@ -1626,7 +1647,7 @@ describe('restored pull request handoffs', (): void => {
               Effect.succeed({
                 number,
                 state: 'open' as const,
-                url: 'https://github.test/example/symphony/pull/65',
+                url: 'https://github.test/example/sloppenheimer/pull/65',
                 headSha: reviewedHead,
                 merged: false as const,
                 mergeCommitSha: null,
@@ -1691,11 +1712,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('counts a repair only after GitHub exposes a distinct pull request head', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-progress-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-progress-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1705,8 +1726,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'repair_needed',
           headSha: originalHead,
           reason: 'Unresolved review feedback',
@@ -1727,7 +1748,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: currentHead,
               merged: false as const,
               mergeCommitSha: null,
@@ -1755,8 +1776,8 @@ describe('restored pull request handoffs', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-20',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
             }),
@@ -1791,11 +1812,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('releases a no-op repair claim when the handoff reaches intervention required', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-no-progress-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-no-progress-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1803,8 +1824,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'repair_needed',
           headSha: head,
           reason: 'The pull request conflicts with protected main',
@@ -1825,7 +1846,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: head,
               merged: false as const,
               mergeCommitSha: null,
@@ -1839,8 +1860,8 @@ describe('restored pull request handoffs', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-20',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
             }),
@@ -1879,11 +1900,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('attributes a repair head pushed just before a restart', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-restart-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-restart-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1893,8 +1914,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'repair_needed',
           headSha: originalHead,
           reason: 'Repair agent running. Unresolved review feedback',
@@ -1915,7 +1936,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: repairedHead,
               merged: false as const,
               mergeCommitSha: null,
@@ -1932,8 +1953,8 @@ describe('restored pull request handoffs', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-20',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
             }),
@@ -1959,11 +1980,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('detects a repair cycle back to the pre-repair head', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-cycle-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-cycle-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const initialHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1974,8 +1995,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'repair_needed',
           headSha: repairedHead,
           reason: 'Repair agent running. Unresolved review feedback',
@@ -1997,7 +2018,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: initialHead,
               merged: false as const,
               mergeCommitSha: null,
@@ -2011,8 +2032,8 @@ describe('restored pull request handoffs', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-20',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
             }),
@@ -2040,11 +2061,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('treats a repair interrupted by a restart as retryable, not a no-op', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-interrupted-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-interrupted-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2054,8 +2075,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'repair_needed',
           headSha: head,
           reason: 'Repair agent running. Unresolved review feedback',
@@ -2076,7 +2097,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: head,
               merged: false as const,
               mergeCommitSha: null,
@@ -2098,8 +2119,8 @@ describe('restored pull request handoffs', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-20',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
             }),
@@ -2127,11 +2148,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('releases a running repair identity when the operator cancels it', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-cancelled-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-cancelled-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2173,8 +2194,8 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('retains a stalled repair identity for its automatic retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-stalled-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-stalled-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         config: {
@@ -2184,7 +2205,7 @@ describe('restored pull request handoffs', (): void => {
         },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2234,15 +2255,15 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('refreshes and attributes a repair whose first dispatch was refused', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-refused-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         promptTemplate: '{{ issue.description }}',
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2264,8 +2285,8 @@ describe('restored pull request handoffs', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-20',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
             }),
@@ -2309,11 +2330,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('releases a refused repair identity when its queued retry is cancelled', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-cancelled-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-retry-cancelled-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2353,11 +2374,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('attributes a repair head when its continuation becomes unroutable', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-unroutable-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-unroutable-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2392,7 +2413,7 @@ describe('restored pull request handoffs', (): void => {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
-          currentIssue = { ...issue, labels: ['symphony'] }
+          currentIssue = { ...issue, labels: ['sloppenheimer'] }
           yield* TestClock.adjust('20 seconds')
           while (current.retrying.length !== 0) {
             yield* Effect.yieldNow()
@@ -2413,11 +2434,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('attributes a pushed head before dispatching a queued repair retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-attributed-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-retry-attributed-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2493,11 +2514,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('advances the execution attempt when a repair retry fails again', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-attempt-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-retry-attempt-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2545,8 +2566,8 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('admits a repair retry against the workflow it will be dispatched under', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-admission-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-admission-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         fingerprint: 'original',
@@ -2564,7 +2585,7 @@ describe('restored pull request handoffs', (): void => {
         },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2620,11 +2641,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('dispatches a repair retry against the tracker record it just refetched', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refetched-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-refetched-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2685,15 +2706,15 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('preserves a repair execution attempt across capacity deferral', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-retry-no-slot-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-retry-no-slot-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const repaired = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const occupier = {
-        ...makeIssue('example/symphony#21', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#21', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('21'),
       }
       // Unchanged throughout, and already review-settled, so the review gate passes and the capacity
@@ -2768,11 +2789,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('attributes a repair head when its issue leaves the active states mid-run', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-inactive-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-inactive-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2825,8 +2846,8 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('dispatches a repair retry through the workflow its handoff was captured under', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-reload-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-reload-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         fingerprint: 'original',
@@ -2840,7 +2861,7 @@ describe('restored pull request handoffs', (): void => {
         promptTemplate: 'a reloaded template that says nothing about the pull request',
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2899,9 +2920,9 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('cleans up a terminal repair retry in the workspace its repair ran in', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-cleanup-')
-      const reloadedRoot = yield* isolatedWorkspaceRoot('symphony-repair-cleanup-reloaded-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-cleanup-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-cleanup-reloaded-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = {
         ...workflow,
         fingerprint: 'original',
@@ -2914,7 +2935,7 @@ describe('restored pull request handoffs', (): void => {
         config: { ...isolated.config, workspaceRoot: reloadedRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2974,11 +2995,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('does not dispatch a fresh repair once a repair retry finds its issue terminal', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-terminal-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-terminal-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -2998,7 +3019,7 @@ describe('restored pull request handoffs', (): void => {
           create: () =>
             Effect.sync(() => {
               workspacesCreated += 1
-              return { path: '/tmp/symphony-test', key: 'test', createdNow: true }
+              return { path: '/tmp/sloppenheimer-test', key: 'test', createdNow: true }
             }),
         }),
         // The repair pushes nothing and fails, so a retry is queued behind it.
@@ -3047,14 +3068,14 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('does not dispatch repairs for an idle handoff whose issue is no longer eligible', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-ineligible-handoff-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-ineligible-handoff-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const handedOffIssue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
-      const currentIssue = { ...handedOffIssue, labels: ['symphony'] }
+      const currentIssue = { ...handedOffIssue, labels: ['sloppenheimer'] }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
       let launches = 0
       yield* saveRepairHandoff(handoffStorePath, handedOffIssue, head)
@@ -3102,11 +3123,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('does not dispatch a fresh repair once a running repair finds its issue terminal', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-terminal-run-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-terminal-run-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3161,11 +3182,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('attributes a repair head when the tracker omits the issue mid-run', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-missing-run-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-missing-run-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3219,11 +3240,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('attributes a repair head when the tracker omits the issue from a retry refresh', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-missing-issue-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-missing-issue-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3285,11 +3306,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('records that a refused repair dispatch never started a worker', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-record-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-refused-record-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3330,11 +3351,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('does not escalate a refused repair when its issue becomes terminal before retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-terminal-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-refused-terminal-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3384,11 +3405,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('settles a refused repair when tracker policy rejects its refresh retry', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-refresh-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-refused-refresh-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3466,11 +3487,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('settles a refused repair when tracker policy rejects its baseline inspection', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-refused-inspection-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-refused-inspection-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3532,11 +3553,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('does not attribute a manual head to a restored repair that never ran', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-repair-restored-refused-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-restored-refused-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const originalHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3545,8 +3566,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'repair_needed',
           headSha: originalHead,
           reason: 'The pull request conflicts with protected main',
@@ -3600,11 +3621,11 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('keeps observing a handoff that needs intervention', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-intervention-observed-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-intervention-observed-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
         dispatchable: false,
       }
@@ -3613,8 +3634,8 @@ describe('restored pull request handoffs', (): void => {
         {
           issueId: issue.id,
           identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/65',
-          branchName: 'symphony/issue-20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
           state: 'intervention_required',
           headSha: head,
           reason: 'Repair agent completed without changing the pull request head.',
@@ -3640,7 +3661,7 @@ describe('restored pull request handoffs', (): void => {
                 ? ({
                     number,
                     state: 'open' as const,
-                    url: 'https://github.test/example/symphony/pull/65',
+                    url: 'https://github.test/example/sloppenheimer/pull/65',
                     headSha: head,
                     merged: false as const,
                     mergeCommitSha: null,
@@ -3654,7 +3675,7 @@ describe('restored pull request handoffs', (): void => {
                 : ({
                     number,
                     state: 'closed' as const,
-                    url: 'https://github.test/example/symphony/pull/65',
+                    url: 'https://github.test/example/sloppenheimer/pull/65',
                     headSha: head,
                     merged: true as const,
                     mergeCommitSha: 'cccccccccccccccccccccccccccccccccccccccc',
@@ -3689,10 +3710,10 @@ describe('restored pull request handoffs', (): void => {
 
   it.scoped('does not turn a continuation retry into a pull request repair', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-retry-isolation-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-retry-isolation-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -3706,11 +3727,11 @@ describe('restored pull request handoffs', (): void => {
             Effect.sync(() => {
               handoffCalls += 1
               return handoffCalls === 1
-                ? ({ _tag: 'NoBranch', branchName: 'symphony/issue-20' } as const)
+                ? ({ _tag: 'NoBranch', branchName: 'sloppenheimer/issue-20' } as const)
                 : ({
                     _tag: 'PullRequest',
-                    branchName: 'symphony/issue-20',
-                    pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+                    branchName: 'sloppenheimer/issue-20',
+                    pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
                     pullRequestNumber: 65,
                     created: true,
                   } as const)
@@ -3719,7 +3740,7 @@ describe('restored pull request handoffs', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: head,
               merged: false as const,
               mergeCommitSha: null,
@@ -3859,7 +3880,7 @@ describe('startup terminal workspace cleanup', (): void => {
 
   it.effect('continues startup and dispatch when the terminal fetch fails', () =>
     Effect.gen(function* () {
-      const activeIssue = makeIssue('GH-4', 1, null, ['symphony', 'ready'])
+      const activeIssue = makeIssue('GH-4', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [activeIssue])
       let startupFetch = true
       const ports: TestPorts = {
@@ -3944,7 +3965,7 @@ describe('startup terminal workspace cleanup', (): void => {
   it.effect('does not dispatch until the startup sweep completes', () =>
     Effect.gen(function* () {
       const terminalIssue = { ...makeIssue('GH-5', null, null), state: 'closed' }
-      const activeIssue = makeIssue('GH-6', 1, null, ['symphony', 'ready'])
+      const activeIssue = makeIssue('GH-6', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [activeIssue])
       let resolveCleanup = (): void => undefined
       const cleanup = new Promise<void>((resolve) => {
@@ -4266,7 +4287,7 @@ describe('workflow hot reload', (): void => {
           runner: { ...workflow.config.runner, command: 'reloaded-codex app-server' },
         },
       }
-      const issue = makeIssue('GH-9', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('GH-9', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(initial, (effective) =>
         effective.fingerprint === reloaded.fingerprint ? [issue] : [],
       )
@@ -4305,8 +4326,8 @@ describe('workflow hot reload', (): void => {
     'keeps invalid reloads visible while reconciling without fetching dispatch candidates',
     () =>
       Effect.gen(function* () {
-        const runningIssue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
-        const candidate = makeIssue('GH-2', 2, null, ['symphony', 'ready'])
+        const runningIssue = makeIssue('GH-1', 1, null, ['sloppenheimer', 'ready'])
+        const candidate = makeIssue('GH-2', 2, null, ['sloppenheimer', 'ready'])
         let candidates: readonly Issue[] = [runningIssue]
         const initial = changedWorkflow({ fingerprint: 'last-known-good' })
         const harness = makeHarness(initial, () => candidates)
@@ -4355,8 +4376,8 @@ describe('workflow hot reload', (): void => {
     'publishes a credential validation failure without fetching or claiming candidates',
     () =>
       Effect.gen(function* () {
-        const candidate = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
-        const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+        const candidate = makeIssue('GH-1', 1, null, ['sloppenheimer', 'ready'])
+        const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
         let candidates: readonly Issue[] = []
         const initial = changedWorkflow({ fingerprint: 'last-known-good' })
         const harness = makeHarness(initial, () => candidates, undefined, environment)
@@ -4367,11 +4388,11 @@ describe('workflow hot reload', (): void => {
             yield* control.refresh
             const candidateFetches = harness.stateFetches()
             candidates = [candidate]
-            delete environment['SYMPHONY_TEST_TOKEN']
+            delete environment['SLOPPENHEIMER_TEST_TOKEN']
             yield* control.refresh
             const failedSnapshot = yield* control.snapshot
             const agentRunsAfterFailure = harness.agentRuns().length
-            environment['SYMPHONY_TEST_TOKEN'] = 'restored'
+            environment['SLOPPENHEIMER_TEST_TOKEN'] = 'restored'
             yield* control.refresh
             return {
               failedSnapshot,
@@ -4397,7 +4418,7 @@ describe('workflow hot reload', (): void => {
 
   it.effect('defers stalled-worker retry creation until validation recovers', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('GH-1', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('GH-1', 1, null, ['sloppenheimer', 'ready'])
       const initial: Workflow = {
         ...changedWorkflow({ fingerprint: 'last-known-good' }),
         config: {
@@ -4437,19 +4458,19 @@ describe('workflow hot reload', (): void => {
 
   it.scoped('reconciles a repair handoff without dispatching it during a failed tick', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-invalid-repair-tick-')
-      const handoffStorePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-invalid-repair-tick-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const initial: Workflow = {
         ...changedWorkflow({ fingerprint: 'last-known-good' }),
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#20', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
       yield* saveRepairHandoff(handoffStorePath, issue, head)
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
       const harness = makeHarness(initial, () => [issue], undefined, environment)
       let repairReady = false
       let inspections = 0
@@ -4492,11 +4513,11 @@ describe('workflow hot reload', (): void => {
           const candidatePassesBeforeFailure = candidatePasses
           const inspectionsBeforeFailure = inspections
           repairReady = true
-          delete environment['SYMPHONY_TEST_TOKEN']
+          delete environment['SLOPPENHEIMER_TEST_TOKEN']
           yield* control.refresh
           const failedSnapshot = yield* control.snapshot
           const launchesAfterFailure = launches
-          environment['SYMPHONY_TEST_TOKEN'] = 'restored'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'restored'
           yield* control.refresh
           return {
             failedSnapshot,
@@ -4700,13 +4721,13 @@ describe('workflow hot reload', (): void => {
 
   it.effect('uses the provider returned by dispatch preflight', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
       const harness = makeHarness(
         workflow,
         () => [],
         () => {
-          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
           return Effect.succeed([issue])
         },
         environment,
@@ -4726,7 +4747,7 @@ describe('workflow hot reload', (): void => {
 
   it.effect('cancels a running worker when the operator explicitly pauses its issue', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(changedWorkflow({ fingerprint: 'initial' }), () => [issue])
 
       const snapshot = yield* Effect.scoped(
@@ -4746,8 +4767,8 @@ describe('workflow hot reload', (): void => {
 describe('tracker credential revalidation', (): void => {
   it.effect('updates the tracker used by an active worker issue refresh', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
       const harness = makeHarness(workflow, () => [issue])
       let refreshIssue: AgentLaunch['refreshIssue'] | null = null
       const ports: TestPorts = {
@@ -4767,7 +4788,7 @@ describe('tracker credential revalidation', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
-          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
           yield* refreshActiveIssue()
         }),
@@ -4779,8 +4800,8 @@ describe('tracker credential revalidation', (): void => {
 
   it.effect("routes a live session's host tool calls to the tracker a rotation installed", () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
       const harness = makeHarness(workflow, () => [issue])
       const executedTokens: string[] = []
       let session: HostToolSession | null = null
@@ -4789,7 +4810,9 @@ describe('tracker credential revalidation', (): void => {
         environment,
         makeTracker: (provider) => ({
           ...harness.ports.makeTracker(provider),
-          toolSpecs: [{ name: 'symphony_issue_state', description: 'set state', inputSchema: {} }],
+          toolSpecs: [
+            { name: 'sloppenheimer_issue_state', description: 'set state', inputSchema: {} },
+          ],
           executeTool: () => {
             executedTokens.push(Redacted.value(githubProviderOf(provider).token))
             return Promise.resolve({ success: true, data: null })
@@ -4806,7 +4829,7 @@ describe('tracker credential revalidation', (): void => {
           return Effect.die('worker was launched without a host tool session')
         }
         return Effect.promise(async () => {
-          await current.execute('symphony_issue_state', null, current.context)
+          await current.execute('sloppenheimer_issue_state', null, current.context)
         })
       }
 
@@ -4814,7 +4837,7 @@ describe('tracker credential revalidation', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* harness.awaitAgentRun
-          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
           yield* callHostTool()
         }),
@@ -4826,7 +4849,7 @@ describe('tracker credential revalidation', (): void => {
 
   it.effect('rebuilds the tracker when the referenced secret is rotated in the environment', () =>
     Effect.gen(function* () {
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'first' }
       const harness = makeHarness(workflow)
 
       yield* Effect.scoped(
@@ -4836,7 +4859,7 @@ describe('tracker credential revalidation', (): void => {
             environment,
           })
           yield* control.refresh
-          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
         }),
       )
@@ -4855,7 +4878,7 @@ describe('tracker credential revalidation', (): void => {
       // only the tracker's, so a rotated runner credential passed preflight — it was revalidated —
       // and the session then launched with the superseded value. Codex caught this on #218.
       const environment: Record<string, string> = {
-        SYMPHONY_TEST_TOKEN: 'secret',
+        SLOPPENHEIMER_TEST_TOKEN: 'secret',
         AURORA_TEMPO: 'largo',
       }
       const environmentWorkflow: Workflow = {
@@ -4871,7 +4894,7 @@ describe('tracker credential revalidation', (): void => {
           runner: { ...workflow.config.runner, settings: { tempo: '$AURORA_TEMPO' } },
         },
       }
-      let issue = makeIssue('example/symphony#71', 1, null, ['symphony', 'ready'])
+      let issue = makeIssue('example/sloppenheimer#71', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(environmentWorkflow, () => [issue])
       const launched: unknown[] = []
       const ports: TestPorts = {
@@ -4897,7 +4920,7 @@ describe('tracker credential revalidation', (): void => {
           yield* control.refresh
           yield* awaitLaunch(1)
           environment['AURORA_TEMPO'] = 'presto'
-          issue = makeIssue('example/symphony#72', 1, null, ['symphony', 'ready'])
+          issue = makeIssue('example/sloppenheimer#72', 1, null, ['sloppenheimer', 'ready'])
           yield* control.refresh
           yield* awaitLaunch(2)
         }),
@@ -4909,7 +4932,7 @@ describe('tracker credential revalidation', (): void => {
 
   it.effect('retains the last known good tracker when the secret disappears', () =>
     Effect.gen(function* () {
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'first' }
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'first' }
       const harness = makeHarness(workflow)
 
       yield* Effect.scoped(
@@ -4919,7 +4942,7 @@ describe('tracker credential revalidation', (): void => {
             environment,
           })
           yield* control.refresh
-          delete environment['SYMPHONY_TEST_TOKEN']
+          delete environment['SLOPPENHEIMER_TEST_TOKEN']
           yield* control.refresh
         }),
       )
@@ -4934,8 +4957,8 @@ describe('tracker credential revalidation', (): void => {
 describe('rebuilt port lifecycle', (): void => {
   it.effect('keeps the tracker a rotation replaced until the run that used it ends', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
       let markStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
         markStarted = resolve
@@ -4958,7 +4981,7 @@ describe('rebuilt port lifecycle', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
-          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
 
           expect(
@@ -5021,8 +5044,8 @@ describe('rebuilt port lifecycle', (): void => {
 
   it.scoped("releases a run's superseded ports when it ends, even as its handoff lives on", () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
-      const environment: Record<string, string> = { SYMPHONY_TEST_TOKEN: 'secret' }
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
       let markStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
         markStarted = resolve
@@ -5032,7 +5055,7 @@ describe('rebuilt port lifecycle', (): void => {
         finishWorker = resolve
       })
       // An isolated root: this run really does hand off, so it reads and writes a handoff store.
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-superseded-handoff-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-superseded-handoff-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const harness = makeHarness(isolated, () => [issue], undefined, environment)
       const ports: TestPorts = {
@@ -5042,8 +5065,8 @@ describe('rebuilt port lifecycle', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-1',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/65',
+              branchName: 'sloppenheimer/issue-1',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: true,
             }),
@@ -5051,7 +5074,7 @@ describe('rebuilt port lifecycle', (): void => {
             Effect.succeed({
               number,
               state: 'open' as const,
-              url: 'https://github.test/example/symphony/pull/65',
+              url: 'https://github.test/example/sloppenheimer/pull/65',
               headSha: 'handoff-head',
               merged: false as const,
               mergeCommitSha: null,
@@ -5074,7 +5097,7 @@ describe('rebuilt port lifecycle', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* Effect.promise(() => started)
-          environment['SYMPHONY_TEST_TOKEN'] = 'rotated'
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
           yield* control.refresh
           expect(harness.releasedTrackers()).toHaveLength(1)
 
@@ -5099,11 +5122,11 @@ describe('rebuilt port lifecycle', (): void => {
 
   it.effect('keeps the workspace manager a reload replaced until the worker holding it ends', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#1', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
       const initial = changedWorkflow({ fingerprint: 'initial' })
       const reloaded: Workflow = {
         ...changedWorkflow({ fingerprint: 'reloaded' }),
-        config: { ...initial.config, workspaceRoot: '/tmp/symphony-reloaded' },
+        config: { ...initial.config, workspaceRoot: '/tmp/sloppenheimer-reloaded' },
       }
       let markStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -5135,9 +5158,9 @@ describe('rebuilt port lifecycle', (): void => {
           yield* control.refresh
 
           expect(harness.workspaceSettings().map((each) => each.root)).toEqual([
-            '/tmp/symphony',
-            '/tmp/symphony',
-            '/tmp/symphony-reloaded',
+            '/tmp/sloppenheimer',
+            '/tmp/sloppenheimer',
+            '/tmp/sloppenheimer-reloaded',
           ])
           // One release, not two: the instance the layer built was replaced at startup and freed on
           // the first poll, while the one the running worker holds outlives the reload.
@@ -5211,7 +5234,7 @@ describe('scheduler dependency hydration', (): void => {
         }),
       )
 
-      expect(requested).toContainEqual(['symphony', 'ready'])
+      expect(requested).toContainEqual(['sloppenheimer', 'ready'])
     }),
   )
 })
@@ -5314,7 +5337,7 @@ const awaitDetail = (
 describe('live agent detail', (): void => {
   it.effect('publishes an ordered, redacted, bounded timeline for a running agent', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#7', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#7', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       const factory = makeAgentFactory()
 
@@ -5325,7 +5348,7 @@ describe('live agent detail', (): void => {
             runAgent: factory.runAgent,
           })
           const agent = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#7'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#7'),
           )
           agent.notify('item/completed', {
             item: { type: 'agentMessage', text: 'pushed with s3cret-token-value' },
@@ -5351,7 +5374,7 @@ describe('live agent detail', (): void => {
           const detail = yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#7',
+              'example/sloppenheimer#7',
               (candidate) => candidate.timeline.events.length >= 5,
               'five retained events',
             ),
@@ -5363,7 +5386,7 @@ describe('live agent detail', (): void => {
 
       const detail = observed.detail
       expect(detail.status).toBe('running')
-      expect(detail.self).toBe('/api/v1/agents/example%2Fsymphony%237')
+      expect(detail.self).toBe('/api/v1/agents/example%2Fsloppenheimer%237')
       expect(observed.snapshot.running[0]?.detailUrl).toBe(detail.self)
       expect(detail.timeline.events.map((event) => event.category)).toEqual([
         'message',
@@ -5398,7 +5421,7 @@ describe('live agent detail', (): void => {
 
   it.effect('separates attempts across a retry while keeping one rising sequence', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#8', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#8', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       const factory = makeAgentFactory()
 
@@ -5409,23 +5432,23 @@ describe('live agent detail', (): void => {
             runAgent: factory.runAgent,
           })
           const first = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#8'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#8'),
           )
           first.notify('item/completed', { item: { type: 'reasoning' } })
           yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#8',
+              'example/sloppenheimer#8',
               (candidate) => candidate.timeline.events.length === 1,
               'the first attempt event',
             ),
           )
-          factory.agents.delete('example/symphony#8')
+          factory.agents.delete('example/sloppenheimer#8')
           first.settle('failed')
           const retrying = yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#8',
+              'example/sloppenheimer#8',
               (candidate) => candidate.status === 'retrying',
               'the scheduled retry',
             ),
@@ -5434,7 +5457,7 @@ describe('live agent detail', (): void => {
           expect(retrying.phase.phase).toBe('retrying')
           yield* TestClock.adjust('20 seconds')
           const second = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#8'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#8'),
           )
           second.notify('item/completed', {
             item: { type: 'commandExecution', command: 'pnpm test', status: 'completed' },
@@ -5442,7 +5465,7 @@ describe('live agent detail', (): void => {
           return yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#8',
+              'example/sloppenheimer#8',
               (candidate) =>
                 candidate.attempt.current === 1 &&
                 candidate.status === 'running' &&
@@ -5471,8 +5494,8 @@ describe('live agent detail', (): void => {
   it.effect('keeps concurrent agents in separate records', () =>
     Effect.gen(function* () {
       const issues = [
-        makeIssue('example/symphony#11', 1, null, ['symphony', 'ready']),
-        makeIssue('example/symphony#12', 1, null, ['symphony', 'ready']),
+        makeIssue('example/sloppenheimer#11', 1, null, ['sloppenheimer', 'ready']),
+        makeIssue('example/sloppenheimer#12', 1, null, ['sloppenheimer', 'ready']),
       ]
       const harness = makeHarness(
         changedWorkflow({ fingerprint: 'test', maxConcurrentAgents: 2 }),
@@ -5487,10 +5510,10 @@ describe('live agent detail', (): void => {
             runAgent: factory.runAgent,
           })
           const first = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#11'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#11'),
           )
           const second = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#12'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#12'),
           )
           first.notify('item/completed', { item: { type: 'reasoning' } })
           second.notify('item/completed', {
@@ -5502,7 +5525,7 @@ describe('live agent detail', (): void => {
           const left = yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#11',
+              'example/sloppenheimer#11',
               (candidate) => candidate.timeline.events.length === 1,
               'the first record',
             ),
@@ -5510,7 +5533,7 @@ describe('live agent detail', (): void => {
           const right = yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#12',
+              'example/sloppenheimer#12',
               (candidate) => candidate.timeline.events.length === 2,
               'the second record',
             ),
@@ -5532,13 +5555,13 @@ describe('live agent detail', (): void => {
   it.scoped('records handoff progress and keeps the completed record readable', () =>
     Effect.gen(function* () {
       // A handoff is persisted, so this run gets a workspace root of its own.
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-handoff-detail-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-handoff-detail-')
       const isolated: Workflow = {
         ...workflow,
         config: { ...workflow.config, workspaceRoot },
       }
       const issue = {
-        ...makeIssue('example/symphony#13', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#13', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('13'),
       }
       const harness = makeHarness(isolated, () => [issue])
@@ -5551,7 +5574,7 @@ describe('live agent detail', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest',
-              branchName: 'symphony/issue-13',
+              branchName: 'sloppenheimer/issue-13',
               pullRequestUrl: 'https://example.test/pull/61',
               pullRequestNumber: 61,
               created: true,
@@ -5563,13 +5586,13 @@ describe('live agent detail', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           const agent = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#13'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#13'),
           )
           agent.settle('completed')
           return yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#13',
+              'example/sloppenheimer#13',
               // The worker leaves `running` before the tracker is asked. Wait for both the
               // completed handoff and its mandatory continuation retry publication.
               (candidate) =>
@@ -5582,15 +5605,15 @@ describe('live agent detail', (): void => {
 
       expect(detail.status).toBe('retrying')
       expect(detail.handoff).toMatchObject({
-        expectedBranch: 'symphony/issue-13',
-        remoteBranch: { status: 'observed', name: 'symphony/issue-13' },
+        expectedBranch: 'sloppenheimer/issue-13',
+        remoteBranch: { status: 'observed', name: 'sloppenheimer/issue-13' },
         pullRequest: {
           status: 'created',
           number: 61,
           url: 'https://example.test/pull/61',
           state: 'awaiting_checks',
         },
-        dispatchLabels: { labels: ['symphony', 'ready'], status: 'not_performed' },
+        dispatchLabels: { labels: ['sloppenheimer', 'ready'], status: 'not_performed' },
         outcome: 'pull_request_open',
       })
       // Four handoff steps are followed by the mandatory continuation retry.
@@ -5610,10 +5633,10 @@ describe('live agent detail', (): void => {
 
   it.scoped('publishes the handoff transition before waiting on the tracker', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-handoff-timing-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-handoff-timing-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#19', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#19', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('19'),
       }
       const harness = makeHarness(isolated, () => [issue])
@@ -5631,7 +5654,7 @@ describe('live agent detail', (): void => {
           handoffCompletedWork: () =>
             blockHandoff
               ? Effect.sync(releaseHandoff).pipe(Effect.zipRight(Effect.never))
-              : Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-19' }),
+              : Effect.succeed({ _tag: 'NoBranch', branchName: 'sloppenheimer/issue-19' }),
         }),
       }
 
@@ -5639,7 +5662,7 @@ describe('live agent detail', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           const agent = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#19'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#19'),
           )
           agent.settle('completed')
           yield* Effect.promise(() => handoffReached)
@@ -5648,7 +5671,7 @@ describe('live agent detail', (): void => {
           return yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#19',
+              'example/sloppenheimer#19',
               (candidate) => candidate.phase.phase === 'handing_off',
               'the handoff transition',
             ),
@@ -5668,7 +5691,7 @@ describe('live agent detail', (): void => {
 
   it.effect('applies an agent update reported in the same turn the worker settles', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#21', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       const factory = makeAgentFactory()
 
@@ -5679,7 +5702,7 @@ describe('live agent detail', (): void => {
             runAgent: factory.runAgent,
           })
           const agent = yield* Effect.promise(() =>
-            awaitAgent(factory.agents, 'example/symphony#21'),
+            awaitAgent(factory.agents, 'example/sloppenheimer#21'),
           )
           // The offer the runner's callback makes has to be in the mailbox by the time the callback
           // returns. If it were only scheduled, the worker's own exit could overtake it and the
@@ -5689,7 +5712,7 @@ describe('live agent detail', (): void => {
           return yield* Effect.promise(() =>
             awaitDetail(
               control,
-              'example/symphony#21',
+              'example/sloppenheimer#21',
               (candidate) => candidate.status !== 'running',
               'the settled record',
             ),
@@ -5705,7 +5728,7 @@ describe('live agent detail', (): void => {
 
   it.effect('answers unknown, sessionless, and starting identifiers distinctly', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#14', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#14', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       const factory = makeAgentFactory()
 
@@ -5715,13 +5738,13 @@ describe('live agent detail', (): void => {
             ...harness.ports,
             runAgent: factory.runAgent,
           })
-          yield* Effect.promise(() => awaitAgent(factory.agents, 'example/symphony#14'))
+          yield* Effect.promise(() => awaitAgent(factory.agents, 'example/sloppenheimer#14'))
           yield* Effect.promise(() =>
-            awaitDetail(control, 'example/symphony#14', () => true, 'the running agent'),
+            awaitDetail(control, 'example/sloppenheimer#14', () => true, 'the running agent'),
           )
           return {
-            unknown: readDetail(control, 'example/symphony#404'),
-            running: readDetail(control, 'example/symphony#14'),
+            unknown: readDetail(control, 'example/sloppenheimer#404'),
+            running: readDetail(control, 'example/sloppenheimer#14'),
           }
         }),
       )
@@ -5733,7 +5756,7 @@ describe('live agent detail', (): void => {
 
   it.effect('keeps a retry scheduled before the session starts inspectable', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#16', 1, null, ['sloppenheimer', 'ready'])
       // Prompt rendering fails after the tick-wide validation gate admits the candidate, so the
       // retry is scheduled before any agent session exists — and its published link still has to
       // resolve.
@@ -5752,7 +5775,7 @@ describe('live agent detail', (): void => {
           })
           return yield* Effect.promise(() =>
             waitUntil(() => {
-              const found = readDetail(control, 'example/symphony#16')
+              const found = readDetail(control, 'example/sloppenheimer#16')
               return found._tag === 'Found' && found.detail.status === 'retrying' ? found : null
             }, 'the pre-launch retry to be inspectable'),
           )
@@ -5771,7 +5794,7 @@ describe('live agent detail', (): void => {
 
   it.effect('closes the detail of a queued retry an operator pauses away', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#17', 1, null, ['sloppenheimer', 'ready'])
       // The same prompt-rendering failure as above, so the issue is waiting to retry with no session
       // behind it when the pause drops the queued retry.
       const invalidPrompt = changedWorkflow({
@@ -5789,14 +5812,14 @@ describe('live agent detail', (): void => {
           })
           yield* Effect.promise(() =>
             waitUntil(() => {
-              const found = readDetail(control, 'example/symphony#17')
+              const found = readDetail(control, 'example/sloppenheimer#17')
               return found._tag === 'Found' && found.detail.status === 'retrying' ? found : null
             }, 'the pre-launch retry to be inspectable'),
           )
 
           yield* control.setIssuePaused(17, true)
 
-          return readDetail(control, 'example/symphony#17')
+          return readDetail(control, 'example/sloppenheimer#17')
         }),
       )
 
@@ -5822,7 +5845,7 @@ describe('live agent detail', (): void => {
     'serves detail while a tracker poll is blocked, and hands out immutable snapshots',
     () =>
       Effect.gen(function* () {
-        const issue = makeIssue('example/symphony#15', 1, null, ['symphony', 'ready'])
+        const issue = makeIssue('example/sloppenheimer#15', 1, null, ['sloppenheimer', 'ready'])
         let blockPolling = false
         const harness = makeHarness(
           workflow,
@@ -5843,13 +5866,13 @@ describe('live agent detail', (): void => {
               runAgent: factory.runAgent,
             })
             const agent = yield* Effect.promise(() =>
-              awaitAgent(factory.agents, 'example/symphony#15'),
+              awaitAgent(factory.agents, 'example/sloppenheimer#15'),
             )
             agent.notify('item/completed', { item: { type: 'reasoning' } })
             const before = yield* Effect.promise(() =>
               awaitDetail(
                 control,
-                'example/symphony#15',
+                'example/sloppenheimer#15',
                 (candidate) => candidate.timeline.events.length === 1,
                 'the first event',
               ),
@@ -5859,11 +5882,11 @@ describe('live agent detail', (): void => {
             blockPolling = true
             yield* Effect.forkScoped(control.refresh)
             yield* Effect.promise(settle)
-            const during = readDetail(control, 'example/symphony#15')
+            const during = readDetail(control, 'example/sloppenheimer#15')
             expect(during._tag).toBe('Found')
             const events = before.timeline.events as unknown as { push: (value: unknown) => number }
             expect(() => events.push('tampered')).toThrow()
-            const after = readDetail(control, 'example/symphony#15')
+            const after = readDetail(control, 'example/sloppenheimer#15')
             return { during, after }
           }),
         )
@@ -5882,10 +5905,13 @@ describe('aged-out agent detail', (): void => {
     'keeps reporting an evicted session as completed on later publications',
     () =>
       Effect.gen(function* () {
-        const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-aged-out-')
+        const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-aged-out-')
         const total = retainedCompletedDetails + 1
         const issues = Array.from({ length: total }, (_unused, index) => ({
-          ...makeIssue(`example/symphony#${String(index + 20)}`, 1, null, ['symphony', 'ready']),
+          ...makeIssue(`example/sloppenheimer#${String(index + 20)}`, 1, null, [
+            'sloppenheimer',
+            'ready',
+          ]),
           id: issueId(String(index + 20)),
         }))
         const isolated: Workflow = {
@@ -5907,7 +5933,7 @@ describe('aged-out agent detail', (): void => {
             handoffCompletedWork: (issue) =>
               Effect.succeed({
                 _tag: 'PullRequest',
-                branchName: `symphony/issue-${issue.id}`,
+                branchName: `sloppenheimer/issue-${issue.id}`,
                 pullRequestUrl: `https://example.test/pull/${issue.id}`,
                 pullRequestNumber: Number(issue.id),
                 created: true,
@@ -5992,7 +6018,7 @@ describe('session telemetry accounting', (): void => {
     'tracks metadata and rate limits without double-counting repeated absolute totals',
     () =>
       Effect.gen(function* () {
-        const issue = makeIssue('example/symphony#16', 1, null, ['symphony', 'ready'])
+        const issue = makeIssue('example/sloppenheimer#16', 1, null, ['sloppenheimer', 'ready'])
         const harness = makeHarness(workflow, () => [issue])
 
         yield* Effect.scoped(
@@ -6117,7 +6143,7 @@ describe('session telemetry accounting', (): void => {
           runner: { ...workflow.config.runner, stallTimeoutMs: 1 },
         },
       }
-      const issue = makeIssue('example/symphony#19', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#19', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(stalledWorkflow, () => [issue])
       let resolveStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -6170,7 +6196,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('does not launch the agent when beforeRun fails', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#24', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#24', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       let agentLaunches = 0
       let afterRunCount = 0
@@ -6218,7 +6244,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('schedules continuation attempt one after a normal exit without a branch', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#23', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#23', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       let handoffCount = 0
       let afterRunCount = 0
@@ -6236,7 +6262,7 @@ describe('session telemetry accounting', (): void => {
           handoffCompletedWork: () =>
             Effect.sync(() => {
               handoffCount += 1
-              return { _tag: 'NoBranch' as const, branchName: 'symphony/test' }
+              return { _tag: 'NoBranch' as const, branchName: 'sloppenheimer/test' }
             }),
         }),
         runAgent: () =>
@@ -6268,10 +6294,10 @@ describe('session telemetry accounting', (): void => {
 
   it.scoped('reconciles a pull request before starting its continuation', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-branch-continuation-')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-branch-continuation-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const issue = {
-        ...makeIssue('example/symphony#24', 1, null, ['symphony', 'ready']),
+        ...makeIssue('example/sloppenheimer#24', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('24'),
       }
       const harness = makeHarness(isolated, () => [issue])
@@ -6285,8 +6311,8 @@ describe('session telemetry accounting', (): void => {
           handoffCompletedWork: () =>
             Effect.succeed({
               _tag: 'PullRequest' as const,
-              branchName: 'symphony/issue-24',
-              pullRequestUrl: 'https://github.test/example/symphony/pull/24',
+              branchName: 'sloppenheimer/issue-24',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/24',
               pullRequestNumber: 24,
               created: true,
             }),
@@ -6326,7 +6352,7 @@ describe('session telemetry accounting', (): void => {
       expect(scheduled.handoffs).toEqual([
         expect.objectContaining({
           issueId: issue.id,
-          pullRequestUrl: 'https://github.test/example/symphony/pull/24',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/24',
           state: 'awaiting_checks',
         }),
       ])
@@ -6343,7 +6369,7 @@ describe('session telemetry accounting', (): void => {
     'uses continuation turns when the tracker has no CodeReviewPort and handoff is disabled',
     () =>
       Effect.gen(function* () {
-        const issue = makeIssue('example/symphony#139', 1, null, ['symphony', 'ready'])
+        const issue = makeIssue('example/sloppenheimer#139', 1, null, ['sloppenheimer', 'ready'])
         const secondKindWorkflow: Workflow = { ...workflow, tracker: stubProvider('secret') }
         const harness = makeHarness(secondKindWorkflow, () => [issue])
         const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
@@ -6376,13 +6402,13 @@ describe('session telemetry accounting', (): void => {
 
   it.scoped('preserves the persisted handoff store while handoff is disabled', () =>
     Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('symphony-disabled-handoff-')
-      const storePath = join(workspaceRoot, '.symphony', 'handoffs.json')
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-disabled-handoff-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
       const persisted = {
         issueId: issueId('75'),
-        identifier: issueIdentifier('example/symphony#75'),
-        pullRequestUrl: 'https://github.test/example/symphony/pull/95',
-        branchName: 'symphony/issue-75',
+        identifier: issueIdentifier('example/sloppenheimer#75'),
+        pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/95',
+        branchName: 'sloppenheimer/issue-75',
         state: 'awaiting_checks' as const,
         headSha: 'persisted-head',
         reason: null,
@@ -6457,7 +6483,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('interrupts a non-active refreshed issue without removing its workspace', () =>
     Effect.gen(function* () {
-      let currentIssue = makeIssue('example/symphony#20', 1, null, ['symphony', 'ready'])
+      let currentIssue = makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [currentIssue])
       let resolveStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -6502,7 +6528,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('keeps a running worker when only blocker metadata changes', () =>
     Effect.gen(function* () {
-      let currentIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
+      let currentIssue = makeIssue('example/sloppenheimer#21', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [currentIssue])
       let resolveStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -6523,10 +6549,10 @@ describe('session telemetry accounting', (): void => {
       }
       const blocker: BlockerRef = {
         id: '20',
-        identifier: issueIdentifier('example/symphony#20'),
+        identifier: issueIdentifier('example/sloppenheimer#20'),
         title: 'Prerequisite',
         state: 'open',
-        url: 'https://github.com/example/symphony/issues/20',
+        url: 'https://github.com/example/sloppenheimer/issues/20',
       }
 
       yield* Effect.scoped(
@@ -6539,7 +6565,9 @@ describe('session telemetry accounting', (): void => {
 
           const snapshot = yield* control.snapshot
           expect(interrupted).toBe(false)
-          expect(snapshot.running.map((entry) => entry.issueId)).toEqual(['example/symphony#21'])
+          expect(snapshot.running.map((entry) => entry.issueId)).toEqual([
+            'example/sloppenheimer#21',
+          ])
         }),
       )
     }),
@@ -6561,7 +6589,7 @@ describe('session telemetry accounting', (): void => {
           },
         },
       }
-      const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#26', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(perStateWorkflow, () => [issue])
       let resolveStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -6590,7 +6618,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('reports no saturated state when the workflow sets no per-state limit', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#27', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       let resolveStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -6614,7 +6642,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('updates running snapshot metadata when an active issue refreshes', () =>
     Effect.gen(function* () {
-      let currentIssue = makeIssue('example/symphony#25', 1, null, ['symphony', 'ready'])
+      let currentIssue = makeIssue('example/sloppenheimer#25', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [currentIssue])
       let resolveStarted = (): void => undefined
       const started = new Promise<void>((resolve) => {
@@ -6664,7 +6692,7 @@ describe('session telemetry accounting', (): void => {
           agent: { ...workflow.config.agent, maxRetryBackoffMs: 250 },
         },
       }
-      const issue = makeIssue('example/symphony#26', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#26', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(cappedWorkflow, () => [issue])
       let failureAt = 0
       const ports: TestPorts = {
@@ -6702,8 +6730,14 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('requeues a due retry when another worker occupies the only slot', () =>
     Effect.gen(function* () {
-      const retryingIssue = makeIssue('example/symphony#21', 1, null, ['symphony', 'ready'])
-      const occupyingIssue = makeIssue('example/symphony#22', 1, null, ['symphony', 'ready'])
+      const retryingIssue = makeIssue('example/sloppenheimer#21', 1, null, [
+        'sloppenheimer',
+        'ready',
+      ])
+      const occupyingIssue = makeIssue('example/sloppenheimer#22', 1, null, [
+        'sloppenheimer',
+        'ready',
+      ])
       let candidates: readonly Issue[] = [retryingIssue]
       const harness = makeHarness(workflow, () => candidates)
       let resolveOccupyingStarted = (): void => undefined
@@ -6758,7 +6792,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('finalizes a queued retry rejected by the tracker policy', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#27', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#27', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       const ports: TestPorts = {
         ...harness.ports,
@@ -6809,7 +6843,7 @@ describe('session telemetry accounting', (): void => {
 
   it.effect('retains ended usage while a retry starts a fresh absolute counter', () =>
     Effect.gen(function* () {
-      const issue = makeIssue('example/symphony#17', 1, null, ['symphony', 'ready'])
+      const issue = makeIssue('example/sloppenheimer#17', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       let runCount = 0
       let resolveSecondRun = (): void => undefined

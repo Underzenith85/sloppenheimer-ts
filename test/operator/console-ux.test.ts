@@ -132,7 +132,7 @@ describe('operator console information architecture', (): void => {
                 ...issue,
                 dispatchable: false,
                 readiness: 'blocked' as const,
-                reason: 'Waiting for example/symphony#50',
+                reason: 'Waiting for example/sloppenheimer#50',
                 blockedBy:
                   backlog.issues.find((candidate) => candidate.identifier === blockedIdentifier)
                     ?.blockedBy ?? [],
@@ -144,7 +144,7 @@ describe('operator console information architecture', (): void => {
 
     const card = console_.card(interventionIdentifier)
     expect(card.textContent).toContain('Not eligible')
-    expect(card.textContent).toContain('Not dispatchable: Waiting for example/symphony#50.')
+    expect(card.textContent).toContain('Not dispatchable: Waiting for example/sloppenheimer#50.')
   })
 
   it('tells a paused issue apart from one that was never made eligible', async (): Promise<void> => {
@@ -265,7 +265,7 @@ describe('operator console queues', (): void => {
       interventionIdentifier,
       repairIdentifier,
       cyclicIdentifier,
-      'example/symphony#71',
+      'example/sloppenheimer#71',
       escalatedBlockedIdentifier,
     ])
     expect(console_.text('#blocked-summary')).toContain('1 issues are waiting on a dependency')
@@ -345,7 +345,7 @@ describe('operator console orchestration actions', (): void => {
     expect(console_.card(runningIdentifier).querySelector('.action')?.textContent).toBe('Pause')
   })
 
-  it('says the issue is queued when Symphony is at capacity', async (): Promise<void> => {
+  it('says the issue is queued when Sloppenheimer is at capacity', async (): Promise<void> => {
     const state = consoleState()
     const console_ = await boot({ state: { ...state, maxConcurrentAgents: 2 } })
 
@@ -357,7 +357,7 @@ describe('operator console orchestration actions', (): void => {
 
     expect(console_.postLog).toContain('/api/v1/issues/50/start')
     expect(console_.card(readyTopIdentifier).querySelector('.row-feedback')?.textContent).toContain(
-      'Queued: Symphony is at capacity (2 of 2 agents). It starts when a slot frees.',
+      'Queued: Sloppenheimer is at capacity (2 of 2 agents). It starts when a slot frees.',
     )
   })
 
@@ -406,7 +406,7 @@ describe('operator console orchestration actions', (): void => {
     await console_.flush()
 
     expect(console_.card(readyTopIdentifier).querySelector('.row-feedback')?.textContent).toContain(
-      'Eligible. Symphony is selecting work',
+      'Eligible. Sloppenheimer is selecting work',
     )
   })
 
@@ -522,7 +522,7 @@ describe('operator console orchestration actions', (): void => {
     const action = console_.card(readyTopIdentifier).querySelector('.action')
     expect(action?.getAttribute('title')).toBeNull()
     const describedBy = action?.getAttribute('aria-describedby') ?? ''
-    expect(console_.text(`#${describedBy}`)).toContain('asks Symphony to reselect')
+    expect(console_.text(`#${describedBy}`)).toContain('asks Sloppenheimer to reselect')
     expect(action?.getAttribute('aria-label')).toContain(readyTopIdentifier)
   })
 
@@ -573,7 +573,7 @@ describe('operator console plan view', (): void => {
   })
 
   it('draws a satisfied edge for a completed blocker without calling its dependent blocked', async (): Promise<void> => {
-    const completedIdentifier = 'example/symphony#16'
+    const completedIdentifier = 'example/sloppenheimer#16'
     const backlog = consoleBacklog()
     const console_ = await boot({
       backlog: {
@@ -778,8 +778,8 @@ describe('operator console workflows', (): void => {
               usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
               rateLimits: [],
               workspace: {
-                pathKey: 'example_symphony_17',
-                branch: 'symphony/issue-17',
+                pathKey: 'example_sloppenheimer_17',
+                branch: 'sloppenheimer/issue-17',
                 dirtyFileCount: 3,
                 addedLines: 40,
                 deletedLines: 5,
@@ -789,10 +789,10 @@ describe('operator console workflows', (): void => {
                 pathsTruncated: false,
               },
               handoff: {
-                expectedBranch: 'symphony/issue-17',
+                expectedBranch: 'sloppenheimer/issue-17',
                 remoteBranch: { status: 'pending', name: null },
                 pullRequest: { status: 'pending', number: null, url: null, state: null },
-                dispatchLabels: { labels: ['symphony'], status: 'pending', reason: null },
+                dispatchLabels: { labels: ['sloppenheimer'], status: 'pending', reason: null },
                 outcome: 'in_progress',
                 reason: null,
               },

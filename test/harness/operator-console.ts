@@ -3,7 +3,7 @@ import { Window, type HTMLElement } from 'happy-dom'
 import { publishRefresh, publishState } from '../../src/operator/api.js'
 import { appJavaScript, appTemplate } from '../../src/operator/ui-assets.js'
 import type { BacklogSnapshot } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '@symphony/core'
+import type { OrchestratorSnapshot } from '@sloppenheimer/core'
 
 export type DetailResponse = Readonly<{ status: number; body: unknown }>
 

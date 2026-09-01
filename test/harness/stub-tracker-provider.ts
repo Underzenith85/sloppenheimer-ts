@@ -7,8 +7,8 @@ import {
   type TrackerProviderAdapter,
   type TrackerProviderRegistry,
   type ValidatedTrackerProvider,
-} from '@symphony/core/domain/tracker-provider.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/tracker-provider.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import { withEnvironment } from './environment.js'
 
 /**

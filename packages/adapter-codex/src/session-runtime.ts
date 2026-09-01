@@ -1,12 +1,12 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Deferred, Effect, Fiber, Option, Queue, Ref } from 'effect'
 
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { AgentError } from '@symphony/core/domain/errors.js'
-import type { HostToolSession } from '@symphony/core/domain/host-tools.js'
-import { currentInstant } from '@symphony/core/support/clock.js'
-import type { Redactor } from '@symphony/core/support/redaction.js'
-import type { AgentEvent, AgentLifecycle } from '@symphony/core/telemetry.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import type { HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
+import { currentInstant } from '@sloppenheimer/core/support/clock.js'
+import type { Redactor } from '@sloppenheimer/core/support/redaction.js'
+import type { AgentEvent, AgentLifecycle } from '@sloppenheimer/core/telemetry.js'
 import {
   claimOutstanding,
   expirePending,

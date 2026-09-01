@@ -11,7 +11,7 @@
 import { FileSystem } from '@effect/platform'
 import { Effect, Layer } from 'effect'
 
-import { AgentRunner, type AgentRunnerPort } from '@symphony/core/ports/agent-runner.js'
+import { AgentRunner, type AgentRunnerPort } from '@sloppenheimer/core/ports/agent-runner.js'
 import { runAgent } from './codex.js'
 import { codexAgentRunnerProvider } from './settings.js'
 

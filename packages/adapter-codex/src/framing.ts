@@ -9,7 +9,7 @@
 
 import { Chunk, Effect, Ref, Stream } from 'effect'
 
-import { AgentError } from '@symphony/core/domain/errors.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
 
 const lineFeed = 0x0a
 const carriageReturn = 0x0d

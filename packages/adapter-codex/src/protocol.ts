@@ -1,13 +1,13 @@
 /**
  * The Codex App Server wire shapes.
  *
- * Every notification and response Symphony reads is described here as a schema rather than poked at
+ * Every notification and response Sloppenheimer reads is described here as a schema rather than poked at
  * field by field where it is used. Two properties of the protocol make that worth doing:
  *
  * - It reports the same value under two spellings — `rate_limits` on the `codex/event/*`
  *   notifications, `rateLimits` on the typed ones. {@link protocolStruct} normalizes casing once,
  *   so each field below is named a single time.
- * - It is not versioned against Symphony. A field in an unexpected shape must therefore degrade to
+ * - It is not versioned against Sloppenheimer. A field in an unexpected shape must therefore degrade to
  *   absence rather than fail the turn that carried it, which is what {@link tolerant} states.
  *
  * The schemas decode *shape* only. Nothing here redacts or bounds: the raw text a notification
@@ -17,15 +17,15 @@
 
 import { Schema } from 'effect'
 
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { isJsonObject, isJsonValue } from '@symphony/core/support/json.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { isJsonObject, isJsonValue } from '@sloppenheimer/core/support/json.js'
 import {
   decodeOrNull,
   nonNegativeInteger,
   protocolStruct,
   tolerant,
-} from '@symphony/core/support/schema.js'
-import type { TokenCounts } from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/support/schema.js'
+import type { TokenCounts } from '@sloppenheimer/core/telemetry.js'
 
 /**
  * A complete token reading. Every field is required: a partial reading would understate the total,

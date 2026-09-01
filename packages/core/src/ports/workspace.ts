@@ -31,7 +31,7 @@ export type WorkspaceManagerFactoryPort = Readonly<{
   make: (settings: WorkspaceSettings) => Effect.Effect<WorkspaceManagerPort, never, Scope.Scope>
 }>
 
-export class WorkspaceManagerFactory extends Context.Tag('symphony/WorkspaceManagerFactory')<
+export class WorkspaceManagerFactory extends Context.Tag('sloppenheimer/WorkspaceManagerFactory')<
   WorkspaceManagerFactory,
   WorkspaceManagerFactoryPort
 >() {}
@@ -39,7 +39,7 @@ export class WorkspaceManagerFactory extends Context.Tag('symphony/WorkspaceMana
 export type WorkspaceManagerCell = AdapterCell<WorkspaceManagerPort, WorkspaceSettings, never>
 
 /** The workspace manager in force now, and the seam through which a reload replaces it. */
-export class CurrentWorkspaceManager extends Context.Tag('symphony/CurrentWorkspaceManager')<
+export class CurrentWorkspaceManager extends Context.Tag('sloppenheimer/CurrentWorkspaceManager')<
   CurrentWorkspaceManager,
   WorkspaceManagerCell
 >() {}

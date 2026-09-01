@@ -40,7 +40,7 @@ const fallbackWarning = (level: string, message: string): Effect.Effect<void> =>
   Effect.sync(() => {
     try {
       process.stderr.write(
-        `[symphony] logging_sink_failed=true level=${level} message=${JSON.stringify(boundedString(message))}\n`,
+        `[sloppenheimer] logging_sink_failed=true level=${level} message=${JSON.stringify(boundedString(message))}\n`,
       )
     } catch {
       // There is no remaining operator sink. Logging must never take down orchestration.

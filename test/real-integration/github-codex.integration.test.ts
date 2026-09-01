@@ -5,11 +5,11 @@ import { it } from '@effect/vitest'
 import { Effect, Redacted } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { runAgent, type AgentLaunch, type AgentResult } from '@symphony/adapter-codex/codex.js'
-import type { AgentError } from '@symphony/core/domain/errors.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
-import { githubProviderDefaults } from '@symphony/adapter-github/provider.js'
+import { runAgent, type AgentLaunch, type AgentResult } from '@sloppenheimer/adapter-codex/codex.js'
+import type { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import { makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'
+import { githubProviderDefaults } from '@sloppenheimer/adapter-github/provider.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 import { anIssue } from '../harness/fixtures.js'
@@ -24,13 +24,14 @@ const nonEmptyEnvironmentValue = (name: string): string | undefined => {
   return value === undefined || value.length === 0 ? undefined : value
 }
 
-const enabledInCi = environment['CI'] === 'true' && environment['SYMPHONY_REAL_INTEGRATION'] === '1'
-const repository = nonEmptyEnvironmentValue('SYMPHONY_INTEGRATION_REPOSITORY')
+const enabledInCi =
+  environment['CI'] === 'true' && environment['SLOPPENHEIMER_REAL_INTEGRATION'] === '1'
+const repository = nonEmptyEnvironmentValue('SLOPPENHEIMER_INTEGRATION_REPOSITORY')
 const githubToken = nonEmptyEnvironmentValue('GITHUB_TOKEN')
 const codexToken =
   nonEmptyEnvironmentValue('OPENAI_API_KEY') ?? nonEmptyEnvironmentValue('CODEX_ACCESS_TOKEN')
 const githubMissing = [
-  repository === undefined ? 'SYMPHONY_INTEGRATION_REPOSITORY' : null,
+  repository === undefined ? 'SLOPPENHEIMER_INTEGRATION_REPOSITORY' : null,
   githubToken === undefined ? 'GITHUB_TOKEN' : null,
 ].filter((name): name is string => name !== null)
 const codexMissing = [
@@ -92,7 +93,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
   codexIntegration('runs Codex in a disposable isolated workspace and always cleans it', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* Effect.promise(() =>
-        mkdtemp(join(tmpdir(), 'symphony-real-integration-')),
+        mkdtemp(join(tmpdir(), 'sloppenheimer-real-integration-')),
       )
       const identifier = `real-integration-${process.pid}-${Date.now().toString(36)}`
       const workspacePath = join(workspaceRoot, identifier)
@@ -104,7 +105,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
         labels: [],
       })
       const config = codexRunnerConfig({
-        command: environment['SYMPHONY_INTEGRATION_CODEX_COMMAND'] ?? 'codex app-server',
+        command: environment['SLOPPENHEIMER_INTEGRATION_CODEX_COMMAND'] ?? 'codex app-server',
         turnTimeoutMs: 90_000,
         readTimeoutMs: 10_000,
         stallTimeoutMs: 30_000,

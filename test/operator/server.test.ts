@@ -3,20 +3,20 @@ import { it } from '@effect/vitest'
 import { Chunk, Effect, Option } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
-import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
-import type { ServerError } from '@symphony/core/domain/errors.js'
-import type { HandoffSnapshot } from '@symphony/core/domain/handoff.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
+import type { ServerError } from '@sloppenheimer/core/domain/errors.js'
+import type { HandoffSnapshot } from '@sloppenheimer/core/domain/handoff.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { issueDetailPath } from '../../src/operator/api.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { AgentDetailLookup, OrchestratorSnapshot } from '@symphony/core'
+import type { AgentDetailLookup, OrchestratorSnapshot } from '@sloppenheimer/core'
 import { makeRouter, startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
   recordAgentEvent,
   type AgentDetailSnapshot,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T12:00:00.000Z',
@@ -41,9 +41,9 @@ const snapshot: OrchestratorSnapshot = {
   handoffs: [
     {
       issueId: '9',
-      identifier: 'example/symphony#9',
-      pullRequestUrl: 'https://github.com/example/symphony/pull/44',
-      branchName: 'symphony/issue-9',
+      identifier: 'example/sloppenheimer#9',
+      pullRequestUrl: 'https://github.com/example/sloppenheimer/pull/44',
+      branchName: 'sloppenheimer/issue-9',
       state: 'awaiting_checks',
       headSha: null,
       reason: 'Required CI checks are still running',
@@ -54,9 +54,9 @@ const snapshot: OrchestratorSnapshot = {
   running: [
     {
       issueId: issueId('17'),
-      identifier: 'example/symphony#17',
+      identifier: 'example/sloppenheimer#17',
       title: 'Operator console',
-      url: 'https://github.com/example/symphony/issues/17',
+      url: 'https://github.com/example/sloppenheimer/issues/17',
       state: 'open',
       attempt: null,
       startedAt: '2026-08-29T11:59:00.000Z',
@@ -72,7 +72,7 @@ const snapshot: OrchestratorSnapshot = {
       lastReportedTokens: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       workerHost: 'local',
       stallDeadline: '2026-08-29T12:04:00.000Z',
-      detailUrl: '/api/v1/agents/example%2Fsymphony%2317',
+      detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2317',
     },
   ],
   retrying: [],
@@ -88,12 +88,12 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     issueId: issueId('17'),
     identifier: issueIdentifier(identifier),
     title: 'Operator console',
-    url: 'https://github.com/example/symphony/issues/17',
+    url: 'https://github.com/example/sloppenheimer/issues/17',
     attempt: null,
     startedAt: new Date('2026-08-29T11:59:00.000Z'),
-    workspacePathKey: 'example_symphony_17',
-    expectedBranch: 'symphony/issue-17',
-    dispatchLabels: ['symphony'],
+    workspacePathKey: 'example_sloppenheimer_17',
+    expectedBranch: 'sloppenheimer/issue-17',
+    dispatchLabels: ['sloppenheimer'],
   })
   record = recordAgentEvent(record, {
     event: 'item/completed',
@@ -125,33 +125,33 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     stallTimeoutMs: 60_000,
     workerHost: 'local',
     handoffEnabled: true,
-    branch: 'symphony/issue-17',
+    branch: 'sloppenheimer/issue-17',
     retry: null,
   })
 }
 
 const detailLookups = new Map<string, AgentDetailLookup>([
-  ['example/symphony#17', { _tag: 'Found', detail: makeDetail('example/symphony#17') }],
+  ['example/sloppenheimer#17', { _tag: 'Found', detail: makeDetail('example/sloppenheimer#17') }],
   [
-    'example/symphony#18',
+    'example/sloppenheimer#18',
     {
       _tag: 'Found',
-      detail: { ...makeDetail('example/symphony#18'), status: 'retrying' },
+      detail: { ...makeDetail('example/sloppenheimer#18'), status: 'retrying' },
     },
   ],
-  ['example/symphony#19', { _tag: 'Completed', identifier: 'example/symphony#19' }],
+  ['example/sloppenheimer#19', { _tag: 'Completed', identifier: 'example/sloppenheimer#19' }],
   [
     // A GitHub owner and repository can together run well past a hundred characters; the endpoint
     // must accept every identifier the runtime snapshot publishes a link for.
     `${'o'.repeat(39)}/${'r'.repeat(100)}#7`,
     { _tag: 'Found', detail: makeDetail(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`) },
   ],
-  ['example/symphony#20', { _tag: 'NoSession', identifier: 'example/symphony#20' }],
+  ['example/sloppenheimer#20', { _tag: 'NoSession', identifier: 'example/sloppenheimer#20' }],
   [
-    'example/symphony#21',
+    'example/sloppenheimer#21',
     {
       _tag: 'Unavailable',
-      identifier: 'example/symphony#21',
+      identifier: 'example/sloppenheimer#21',
       reason: 'The agent session is still starting',
     },
   ],
@@ -167,14 +167,14 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
   agentDetail: (identifier) =>
     Effect.succeed(detailLookups.get(identifier) ?? { _tag: 'Unknown', identifier }),
   backlog: Effect.succeed({
-    controlLabel: 'symphony',
+    controlLabel: 'sloppenheimer',
     issues: [
       {
         number: 17,
-        identifier: 'example/symphony#17',
+        identifier: 'example/sloppenheimer#17',
         title: 'Operator console',
-        url: 'https://github.com/example/symphony/issues/17',
-        labels: ['symphony'],
+        url: 'https://github.com/example/sloppenheimer/issues/17',
+        labels: ['sloppenheimer'],
         priority: 1,
         createdAt: '2026-08-29T10:00:00.000Z',
         enabled: true,
@@ -189,10 +189,10 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
     ],
     nodes: [
       {
-        identifier: 'example/symphony#17',
+        identifier: 'example/sloppenheimer#17',
         number: 17,
         title: 'Operator console',
-        url: 'https://github.com/example/symphony/issues/17',
+        url: 'https://github.com/example/sloppenheimer/issues/17',
         state: 'open',
         readiness: 'ready',
         reason: null,
@@ -230,7 +230,7 @@ describe('operator server', (): void => {
       const state = await fetch(`${url}/api/v1/state`)
       const backlog = await fetch(`${url}/api/v1/backlog`)
       const script = await fetch(`${url}/app.js`)
-      const detail = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+      const detail = await fetch(`${url}/api/v1/${encodeURIComponent('example/sloppenheimer#17')}`)
 
       expect(page.status).toBe(200)
       expect(page.headers.get('content-security-policy')).toContain("default-src 'self'")
@@ -239,17 +239,17 @@ describe('operator server', (): void => {
       expect(await state.json()).toMatchObject({
         counts: { running: 1 },
         max_concurrent_agents: 2,
-        running: [{ issue_identifier: 'example/symphony#17', state: 'open' }],
+        running: [{ issue_identifier: 'example/sloppenheimer#17', state: 'open' }],
       })
       expect(await backlog.json()).toMatchObject({
-        nodes: [{ identifier: 'example/symphony#17', readiness: 'ready' }],
+        nodes: [{ identifier: 'example/sloppenheimer#17', readiness: 'ready' }],
         edges: [],
         cycles: [],
       })
       expect(await detail.json()).toMatchObject({
-        issue_identifier: 'example/symphony#17',
+        issue_identifier: 'example/sloppenheimer#17',
         status: 'running',
-        detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+        detail_url: '/api/v1/agents/example%2Fsloppenheimer%2317',
         retry: null,
       })
       const source = await script.text()
@@ -272,7 +272,7 @@ describe('operator server', (): void => {
   it.live('serves agent detail for a running agent without leaking the workspace or prompt', () =>
     withServer(makeBackend(), async (url) => {
       const response = await fetch(
-        `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
+        `${url}/api/v1/agents/${encodeURIComponent('example/sloppenheimer#17')}`,
       )
       const body = await response.text()
       const payload: unknown = JSON.parse(body)
@@ -283,14 +283,14 @@ describe('operator server', (): void => {
         version: 'v1',
         detail: {
           version: 'v1',
-          self: '/api/v1/agents/example%2Fsymphony%2317',
-          identifier: 'example/symphony#17',
+          self: '/api/v1/agents/example%2Fsloppenheimer%2317',
+          identifier: 'example/sloppenheimer#17',
           status: 'running',
           identity: { threadId: 'thread-1', turnId: 'turn-1', processId: 42, workerHost: 'local' },
           phase: { phase: 'running_command', operation: 'Running pnpm' },
           activity: { stallTimeoutMs: 60_000, stalled: false },
-          workspace: { pathKey: 'example_symphony_17', qualityPhase: 'check' },
-          handoff: { expectedBranch: 'symphony/issue-17', outcome: 'in_progress' },
+          workspace: { pathKey: 'example_sloppenheimer_17', qualityPhase: 'check' },
+          handoff: { expectedBranch: 'sloppenheimer/issue-17', outcome: 'in_progress' },
           timeline: { retained: 1, dropped: 0, limit: 200 },
         },
       })
@@ -304,15 +304,15 @@ describe('operator server', (): void => {
       withServer(makeBackend(), async (url) => {
         const detailFor = (identifier: string): Promise<Response> =>
           fetch(`${url}/api/v1/agents/${encodeURIComponent(identifier)}`)
-        const retrying = await detailFor('example/symphony#18')
-        const completed = await detailFor('example/symphony#19')
-        const sessionless = await detailFor('example/symphony#20')
-        const unavailable = await detailFor('example/symphony#21')
-        const missing = await detailFor('example/symphony#99')
+        const retrying = await detailFor('example/sloppenheimer#18')
+        const completed = await detailFor('example/sloppenheimer#19')
+        const sessionless = await detailFor('example/sloppenheimer#20')
+        const unavailable = await detailFor('example/sloppenheimer#21')
+        const missing = await detailFor('example/sloppenheimer#99')
         const malformed = await detailFor('not an identifier')
         const longIdentifier = await detailFor(`${'o'.repeat(39)}/${'r'.repeat(100)}#7`)
         const wrongMethod = await fetch(
-          `${url}/api/v1/agents/${encodeURIComponent('example/symphony#17')}`,
+          `${url}/api/v1/agents/${encodeURIComponent('example/sloppenheimer#17')}`,
           { method: 'POST' },
         )
 
@@ -344,29 +344,29 @@ describe('operator server', (): void => {
     withServer(makeBackend(), async (url) => {
       const detailFor = (identifier: string): Promise<Response> =>
         fetch(`${url}/api/v1/${encodeURIComponent(identifier)}`)
-      const running = await detailFor('example/symphony#17')
+      const running = await detailFor('example/sloppenheimer#17')
       // The issue has left the agent for the pull-request lifecycle. It is as known to this host as
       // a running one, and used to be reported as absent.
-      const handedOff = await detailFor('example/symphony#9')
-      const retrying = await detailFor('example/symphony#18')
-      const completed = await detailFor('example/symphony#19')
-      const starting = await detailFor('example/symphony#21')
-      const unknown = await detailFor('example/symphony#99')
+      const handedOff = await detailFor('example/sloppenheimer#9')
+      const retrying = await detailFor('example/sloppenheimer#18')
+      const completed = await detailFor('example/sloppenheimer#19')
+      const starting = await detailFor('example/sloppenheimer#21')
+      const unknown = await detailFor('example/sloppenheimer#99')
       const wrongMethod = await fetch(
-        `${url}/api/v1/${encodeURIComponent('example/symphony#17')}`,
+        `${url}/api/v1/${encodeURIComponent('example/sloppenheimer#17')}`,
         { method: 'POST' },
       )
 
       expect(running.status).toBe(200)
       expect(await running.json()).toMatchObject({
-        self: '/api/v1/example%2Fsymphony%2317',
+        self: '/api/v1/example%2Fsloppenheimer%2317',
         issue_id: '17',
-        issue_identifier: 'example/symphony#17',
-        issue_url: 'https://github.com/example/symphony/issues/17',
+        issue_identifier: 'example/sloppenheimer#17',
+        issue_url: 'https://github.com/example/sloppenheimer/issues/17',
         title: 'Operator console',
         status: 'running',
         tracked: true,
-        workspace: { path: 'example_symphony_17' },
+        workspace: { path: 'example_sloppenheimer_17' },
         attempts: { restart_count: 0, current_retry_attempt: 0 },
         running: {
           started_at: '2026-08-29T11:59:00.000Z',
@@ -383,12 +383,12 @@ describe('operator server', (): void => {
         logs: { retained: 1, dropped: 0, limit: 200, published: 1 },
         recent_events: [{ sequence: 1, category: 'command', attempt: 0 }],
         last_error: null,
-        detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+        detail_url: '/api/v1/agents/example%2Fsloppenheimer%2317',
       })
 
       expect(handedOff.status).toBe(200)
       expect(await handedOff.json()).toMatchObject({
-        issue_identifier: 'example/symphony#9',
+        issue_identifier: 'example/sloppenheimer#9',
         status: 'handoff',
         tracked: true,
         running: null,
@@ -420,7 +420,7 @@ describe('operator server', (): void => {
   it.live('never blends a stale snapshot row with a fresher detail record', () =>
     Effect.gen(function* () {
       const retryingDetail: AgentDetailSnapshot = {
-        ...makeDetail('example/symphony#17'),
+        ...makeDetail('example/sloppenheimer#17'),
         status: 'retrying',
         retry: { attempt: 2, dueAt: '2026-08-29T12:01:00.000Z', reason: 'turn failed' },
       }
@@ -430,7 +430,9 @@ describe('operator server', (): void => {
         agentDetail: () => Effect.succeed({ _tag: 'Found', detail: retryingDetail }),
       }
       yield* withServer(skewed, async (url) => {
-        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+        const response = await fetch(
+          `${url}/api/v1/${encodeURIComponent('example/sloppenheimer#17')}`,
+        )
         expect(response.status).toBe(200)
         expect(await response.json()).toMatchObject({
           status: 'retrying',
@@ -462,7 +464,9 @@ describe('operator server', (): void => {
           Effect.succeed({ _tag: 'Unavailable', identifier, reason: 'x' }),
       }
       yield* withServer(stalled, async (url) => {
-        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#17')}`)
+        const response = await fetch(
+          `${url}/api/v1/${encodeURIComponent('example/sloppenheimer#17')}`,
+        )
         expect(await response.json()).toMatchObject({
           status: 'running',
           running: { stall_deadline: '2026-08-29T12:04:00.000Z', stalled: true },
@@ -487,7 +491,7 @@ describe('operator server', (): void => {
           retrying: [
             {
               issueId: issueId('31'),
-              identifier: 'example/symphony#31',
+              identifier: 'example/sloppenheimer#31',
               title: 'Awaiting its first retry',
               url: null,
               // The first attempt failed; attempt 1 is scheduled and has not begun.
@@ -495,7 +499,7 @@ describe('operator server', (): void => {
               dueAt: '2026-08-29T12:01:00.000Z',
               error: 'turn failed',
               workerHost: 'local',
-              detailUrl: '/api/v1/agents/example%2Fsymphony%2331',
+              detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2331',
             },
           ],
         }),
@@ -503,7 +507,9 @@ describe('operator server', (): void => {
         agentDetail: (identifier) => Effect.succeed({ _tag: 'NoSession', identifier }),
       }
       yield* withServer(queued, async (url) => {
-        const response = await fetch(`${url}/api/v1/${encodeURIComponent('example/symphony#31')}`)
+        const response = await fetch(
+          `${url}/api/v1/${encodeURIComponent('example/sloppenheimer#31')}`,
+        )
         expect(await response.json()).toMatchObject({
           status: 'retrying',
           // No attempt beyond the first has started yet.
@@ -533,7 +539,7 @@ describe('operator server', (): void => {
               issueId: '7',
               identifier: 'GH-7',
               pullRequestUrl: 'https://example.test/pull/7',
-              branchName: 'symphony/gh-7',
+              branchName: 'sloppenheimer/gh-7',
               state: 'awaiting_checks',
               headSha: null,
               reason: null,
@@ -590,7 +596,7 @@ describe('operator server', (): void => {
         issueId: identifier,
         identifier,
         pullRequestUrl: `https://example.test/pull/${identifier}`,
-        branchName: `symphony/${identifier}`,
+        branchName: `sloppenheimer/${identifier}`,
         state: 'awaiting_checks',
         headSha: null,
         reason: null,
@@ -624,7 +630,7 @@ describe('operator server', (): void => {
         expect(shadowedBacklog.status).toBe(200)
         const backlogBody = (await shadowedBacklog.json()) as Record<string, unknown>
         // The backlog document, in the internal vocabulary its own consumer reads.
-        expect(backlogBody).toMatchObject({ controlLabel: 'symphony' })
+        expect(backlogBody).toMatchObject({ controlLabel: 'sloppenheimer' })
         expect(Array.isArray(backlogBody['nodes'])).toBe(true)
         expect(backlogBody['issue_identifier']).toBeUndefined()
 
@@ -642,7 +648,7 @@ describe('operator server', (): void => {
         const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
         const refreshed = await fetch(`${url}/api/v1/refresh`, {
           method: 'POST',
-          headers: { 'X-Symphony-CSRF': token },
+          headers: { 'X-Sloppenheimer-CSRF': token },
         })
         expect(refreshed.status).toBe(202)
         expect(await refreshed.json()).toMatchObject({ queued: true })
@@ -708,7 +714,7 @@ describe('operator server', (): void => {
       const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
       const accepted = await fetch(`${url}/api/v1/refresh`, {
         method: 'POST',
-        headers: { 'X-Symphony-CSRF': token },
+        headers: { 'X-Sloppenheimer-CSRF': token },
       })
 
       expect(accepted.status).toBe(202)
@@ -733,7 +739,7 @@ describe('operator server', (): void => {
         expect(token).toBeDefined()
         const accepted = await fetch(`${url}/api/v1/issues/17/pause`, {
           method: 'POST',
-          headers: { 'X-Symphony-CSRF': token ?? '' },
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
         })
 
         expect(accepted.status).toBe(202)

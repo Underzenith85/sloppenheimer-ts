@@ -2,15 +2,15 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, Logger, Redacted } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import { issueId, type JsonObject } from '@symphony/core/domain/domain.js'
-import { makeGitHubIssueControl, makeGitHubTracker } from '@symphony/adapter-github/issues.js'
-import type { IssueControlPort } from '@symphony/core/ports/issue-control.js'
-import type { TrackerPort } from '@symphony/core/ports/tracker.js'
-import type { GitHubProviderConfig } from '@symphony/adapter-github'
+import { issueId, type JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import { makeGitHubIssueControl, makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'
+import type { IssueControlPort } from '@sloppenheimer/core/ports/issue-control.js'
+import type { TrackerPort } from '@sloppenheimer/core/ports/tracker.js'
+import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
-  repository: 'symphony',
+  repository: 'sloppenheimer',
   token: Redacted.make('secret'),
   tokenEnvironmentName: 'CUSTOM_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
@@ -35,7 +35,7 @@ const githubDependency = (number: number, state = 'open'): JsonObject => ({
   number,
   title: `Blocker ${String(number)}`,
   state,
-  repository_url: 'https://api.example.test/repos/example/symphony',
+  repository_url: 'https://api.example.test/repos/example/sloppenheimer',
   html_url: `https://example.test/issues/${String(number)}`,
 })
 
@@ -85,7 +85,7 @@ describe('GitHub tracker pagination', (): void => {
   it.effect('combines all pages and removes duplicate issues', () =>
     Effect.gen(function* () {
       const secondPageUrl =
-        'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100&page=2'
+        'https://api.example.test/repos/example/sloppenheimer/issues?state=open&per_page=100&page=2'
       const fetchMock = vi.fn(
         async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
           if (requestUrl(input).includes('/dependencies/blocked_by')) {
@@ -111,7 +111,7 @@ describe('GitHub tracker pagination', (): void => {
         true,
       )
       expect(fetchMock.mock.calls.slice(0, 2).map(([input]) => requestUrl(input))).toEqual([
-        'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100',
+        'https://api.example.test/repos/example/sloppenheimer/issues?state=open&per_page=100',
         secondPageUrl,
       ])
     }),
@@ -120,7 +120,7 @@ describe('GitHub tracker pagination', (): void => {
   it.effect('preserves response decoding errors from later pages', () =>
     Effect.gen(function* () {
       const secondPageUrl =
-        'https://api.example.test/repos/example/symphony/issues?state=open&per_page=100&page=2'
+        'https://api.example.test/repos/example/sloppenheimer/issues?state=open&per_page=100&page=2'
       const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
         if (requestUrl(input) === secondPageUrl) {
           return Response.json({ issue: githubIssue(2) })
@@ -195,11 +195,14 @@ describe('GitHub native issue dependencies', (): void => {
         const url = requestUrl(input)
         return url.includes('/dependencies/blocked_by')
           ? Response.json([])
-          : Response.json([githubIssue(1, ['symphony']), githubIssue(2)])
+          : Response.json([githubIssue(1, ['sloppenheimer']), githubIssue(2)])
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      const issues = yield* (yield* trackerOf(provider)).fetchIssuesByStates(['open'], ['symphony'])
+      const issues = yield* (yield* trackerOf(provider)).fetchIssuesByStates(
+        ['open'],
+        ['sloppenheimer'],
+      )
 
       expect(issues).toHaveLength(2)
       expect(
@@ -207,7 +210,7 @@ describe('GitHub native issue dependencies', (): void => {
           .map(([input]) => requestUrl(input))
           .filter((url) => url.includes('/dependencies/blocked_by')),
       ).toEqual([
-        'https://api.example.test/repos/example/symphony/issues/1/dependencies/blocked_by?per_page=100',
+        'https://api.example.test/repos/example/sloppenheimer/issues/1/dependencies/blocked_by?per_page=100',
       ])
     }),
   )
@@ -295,7 +298,7 @@ describe('GitHub native issue dependencies', (): void => {
   it.effect('decodes blockers and follows dependency pagination', () =>
     Effect.gen(function* () {
       const next =
-        'https://api.example.test/repos/example/symphony/issues/2/dependencies/blocked_by?per_page=100&page=2'
+        'https://api.example.test/repos/example/sloppenheimer/issues/2/dependencies/blocked_by?per_page=100&page=2'
       const fetchMock = vi.fn(
         async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
           const url = requestUrl(input)
@@ -318,14 +321,14 @@ describe('GitHub native issue dependencies', (): void => {
       expect(issue?.blockedBy).toEqual([
         {
           id: '10003',
-          identifier: 'example/symphony#3',
+          identifier: 'example/sloppenheimer#3',
           title: 'Blocker 3',
           state: 'open',
           url: 'https://example.test/issues/3',
         },
         {
           id: '10004',
-          identifier: 'example/symphony#4',
+          identifier: 'example/sloppenheimer#4',
           title: 'Blocker 4',
           state: 'closed',
           url: 'https://example.test/issues/4',
@@ -404,7 +407,9 @@ describe('GitHub native issue dependencies', (): void => {
 
 const githubPullRequest = (number: number): JsonObject => ({
   ...githubIssue(number),
-  pull_request: { url: `https://api.example.test/repos/example/symphony/pulls/${String(number)}` },
+  pull_request: {
+    url: `https://api.example.test/repos/example/sloppenheimer/pulls/${String(number)}`,
+  },
 })
 
 /** Runs the effect against a collecting logger, so a test can assert on what it reported. */
@@ -456,7 +461,7 @@ describe('GitHub tracker state-list contract', (): void => {
           .map(([input]) => requestUrl(input))
           .filter((url) => url.includes('/dependencies/blocked_by')),
       ).toEqual([
-        'https://api.example.test/repos/example/symphony/issues/1/dependencies/blocked_by?per_page=100',
+        'https://api.example.test/repos/example/sloppenheimer/issues/1/dependencies/blocked_by?per_page=100',
       ])
     }),
   )
@@ -516,7 +521,7 @@ describe('GitHub tracker state-list contract', (): void => {
         page += 1
         return Response.json([githubIssue(page)], {
           headers: {
-            Link: `<https://api.example.test/repos/example/symphony/issues?state=open&per_page=100&page=${String(page + 1)}>; rel="next"`,
+            Link: `<https://api.example.test/repos/example/sloppenheimer/issues?state=open&per_page=100&page=${String(page + 1)}>; rel="next"`,
           },
         })
       })
@@ -598,8 +603,8 @@ describe('GitHub tracker normalization', (): void => {
               html_url: '',
               assignee: { login: '' },
               labels: [
-                { name: ' Symphony ' },
-                'SYMPHONY',
+                { name: ' Sloppenheimer ' },
+                'SLOPPENHEIMER',
                 { name: null },
                 { name: 'priority:2' },
                 3,
@@ -618,9 +623,9 @@ describe('GitHub tracker normalization', (): void => {
           node_id: 'node-11',
           issue_number: 11,
           owner: 'example',
-          repository: 'symphony',
+          repository: 'sloppenheimer',
         },
-        identifier: 'example/symphony#11',
+        identifier: 'example/sloppenheimer#11',
         title: 'Issue 11',
         description: 'Body text',
         priority: 2,
@@ -628,7 +633,7 @@ describe('GitHub tracker normalization', (): void => {
         branchName: null,
         url: null,
         assigneeId: null,
-        labels: ['symphony', 'priority:2'],
+        labels: ['sloppenheimer', 'priority:2'],
         blockedBy: [],
         dispatchable: true,
         createdAt: null,
@@ -760,7 +765,7 @@ describe('GitHub tracker dependency hydration selection', (): void => {
   it.effect('hydrates nothing for an empty dependency label list', () =>
     Effect.gen(function* () {
       const fetchMock = vi.fn(async (_input: string | URL | Request): Promise<Response> =>
-        Response.json([githubIssue(1, ['symphony'])]),
+        Response.json([githubIssue(1, ['sloppenheimer'])]),
       )
       vi.stubGlobal('fetch', fetchMock)
 

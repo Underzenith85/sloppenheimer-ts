@@ -5,31 +5,31 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { Effect, Either, Option, ParseResult, Schema } from 'effect'
 import { parse } from 'yaml'
 
-import { expandHomePath, resolvePathReference } from '@symphony/core/config/env-reference.js'
+import { expandHomePath, resolvePathReference } from '@sloppenheimer/core/config/env-reference.js'
 import {
   workflowDefaults,
   type EffectiveConfig,
   type RunnerConfig,
   type Workflow,
-} from '@symphony/core/config/workflow.js'
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/config/workflow.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import type {
   AgentRunnerRegistry,
   ValidatedAgentRunner,
-} from '@symphony/core/domain/agent-runner-provider.js'
-import type { PreflightResult } from '@symphony/core/ports/workflow.js'
+} from '@sloppenheimer/core/domain/agent-runner-provider.js'
+import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import type {
   TrackerProviderRegistry,
   ValidatedTrackerProvider,
-} from '@symphony/core/domain/tracker-provider.js'
+} from '@sloppenheimer/core/domain/tracker-provider.js'
 import {
   emptyJsonObject,
   isJsonObject,
   JsonConversionError,
   toJsonObject,
   toJsonValue,
-} from '@symphony/core/support/json.js'
+} from '@sloppenheimer/core/support/json.js'
 
 /**
  * Reading a workflow definition off disk is composition-root work: the shapes it produces

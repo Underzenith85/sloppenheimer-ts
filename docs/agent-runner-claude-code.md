@@ -5,7 +5,7 @@ agent-runner backend; do not open a separate ADR for it.
 
 ## What this adds
 
-Symphony dispatches work to exactly one coding agent today: Codex, over the App Server JSONL
+Sloppenheimer dispatches work to exactly one coding agent today: Codex, over the App Server JSONL
 protocol. This design makes the backend a _selection_ rather than a compile-time fact, and adds
 Claude Code as the second registered kind, so a workflow chooses its runner the same way it already
 chooses its tracker.
@@ -31,11 +31,11 @@ tracker concurrently is explicitly out of scope (see [Non-goals](#non-goals)).
 ## The port is right; its surroundings are not
 
 `AgentRunnerPort` (`packages/core/src/ports/agent-runner.ts`) was introduced by
-[#89](https://github.com/Underzenith85/symphony-ts/issues/89) and
-[#140](https://github.com/Underzenith85/symphony-ts/issues/140) precisely so that a second backend
-would be an adapter rather than a rewrite. That worked: `run` and `AgentLaunch` need no change, and
-`AgentEvent` is already a normalized, bounded, pre-redacted vocabulary rather than a Codex wire
-shape.
+[#89](https://github.com/Underzenith85/sloppenheimer-ts/issues/89) and
+[#140](https://github.com/Underzenith85/sloppenheimer-ts/issues/140) precisely so that a second
+backend would be an adapter rather than a rewrite. That worked: `run` and `AgentLaunch` need no
+change, and `AgentEvent` is already a normalized, bounded, pre-redacted vocabulary rather than a
+Codex wire shape.
 
 What did not get finished is everything _around_ the port. Codex is still named in six places above
 the adapter, and each one is a place a second runner would be misread rather than merely unsupported.
@@ -139,8 +139,8 @@ about the _selected_ runner, so both move onto the registered runner entry.
 **A real difference, worth stating.** Codex authenticates from the environment. Claude Code does not
 have to: a probe run in this container reported `apiKeySource: "none"` and authenticated from an
 on-disk profile under `$HOME`. Environment stripping therefore does not bound what the child can
-reach, and never did — it bounds only what Symphony hands it. That is fine for the invariant
-Symphony actually promises (tracker credentials never reach the agent), but it means the Claude
+reach, and never did — it bounds only what Sloppenheimer hands it. That is fine for the invariant
+Sloppenheimer actually promises (tracker credentials never reach the agent), but it means the Claude
 adapter must be explicit about what else the child inherits. See D12.
 
 ### D5 — Transport: `claude -p` in bidirectional stream-json
@@ -180,7 +180,7 @@ integrated.
 JSON under a byte limit, `diagnosticLines` / `diagnosticRecords` frame stderr. Nothing in it is
 Codex-specific. Move it, together with the spawn/shutdown/reap supervision and the
 redact-and-bound-at-ingest helpers (`boundedMessage`, `sessionSecretValues`, `makeCodexEnvironment`
-generalized to take the runner's auth names), into `@symphony/adapter-node`.
+generalized to take the runner's auth names), into `@sloppenheimer/adapter-node`.
 
 Both adapters then depend on it, and the accepted dependency direction is unchanged:
 
@@ -252,7 +252,7 @@ backend can produce.
 a host-supplied context, and an `execute` callback. Codex receives it through the App Server's
 dynamic-tool protocol. Claude Code receives it as an MCP server the adapter runs over stdio,
 declared with `--mcp-config` and `--strict-mcp-config`, with the tools allowed as
-`mcp__symphony__<name>`. `execute` is unchanged on the far side.
+`mcp__sloppenheimer__<name>`. `execute` is unchanged on the far side.
 
 This is the largest single cost in the adapter — the other pieces are ports of existing machinery;
 this one is new code. It also buys a check Codex does not get: `system/init` reports the
@@ -296,7 +296,7 @@ maps onto the `withheld` tool state the timeline already renders.
   collision is confusing and worth a follow-up issue, but changing it here would conflate two
   boundaries.
 - Migrating `WORKFLOW.md` itself to Claude Code. The alias in D1 keeps it on Codex; switching
-  Symphony's self-improvement loop to a different backend is a decision to take after the adapter has
+  Sloppenheimer's self-improvement loop to a different backend is a decision to take after the adapter has
   run against real issues.
 
 ## Message mapping

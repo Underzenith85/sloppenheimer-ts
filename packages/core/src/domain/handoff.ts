@@ -28,7 +28,7 @@ type PullRequestObservationDetails = Readonly<{
   codexReview?: CodexReviewObservation | null
   /**
    * When the provider recorded the merge, for a pull request that has one. It is kept apart from
-   * the instant Symphony observed it: a handoff restored from the store after a restart is
+   * the instant Sloppenheimer observed it: a handoff restored from the store after a restart is
    * observed now but may have merged days ago, and reporting the observation as the completion
    * would put long-finished work back in the console's recent-activity window.
    */
@@ -153,8 +153,8 @@ export type HandoffSnapshot = Readonly<{
 }>
 
 /**
- * The branch an issue's completed work is expected on. It is a Symphony naming convention rather
+ * The branch an issue's completed work is expected on. It is a Sloppenheimer naming convention rather
  * than a provider one, so the core lifecycle and any code-review adapter derive it from the same
  * rule.
  */
-export const issueBranchName = (issue: Issue): string => `symphony/issue-${issue.id}`
+export const issueBranchName = (issue: Issue): string => `sloppenheimer/issue-${issue.id}`

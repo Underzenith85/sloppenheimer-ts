@@ -2,10 +2,13 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { codexAgentRunner, layerCodexAgentRunner } from '@symphony/adapter-codex/agent-runner.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import { codexTurnOutcome, type AgentLaunch } from '@symphony/adapter-codex/codex.js'
-import { AgentRunner, type AgentRunnerPort } from '@symphony/core/ports/agent-runner.js'
+import {
+  codexAgentRunner,
+  layerCodexAgentRunner,
+} from '@sloppenheimer/adapter-codex/agent-runner.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import { codexTurnOutcome, type AgentLaunch } from '@sloppenheimer/adapter-codex/codex.js'
+import { AgentRunner, type AgentRunnerPort } from '@sloppenheimer/core/ports/agent-runner.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 import { anIssue } from '../../harness/fixtures.js'
@@ -19,7 +22,7 @@ const codexConfig = codexRunnerConfig({
 
 const issue: Issue = anIssue({
   id: issueId('19'),
-  identifier: issueIdentifier('example/symphony#19'),
+  identifier: issueIdentifier('example/sloppenheimer#19'),
   title: 'Bind the runner to a filesystem',
   labels: [],
 })
@@ -28,7 +31,7 @@ const issue: Issue = anIssue({
 const uncontainedLaunch: AgentLaunch = {
   issue,
   workspace: { path: '/etc', key: 'etc', createdNow: false },
-  workspaceRoot: '/tmp/symphony-agent-runner-root',
+  workspaceRoot: '/tmp/sloppenheimer-agent-runner-root',
   config: codexConfig,
   prompt: 'work',
   maxTurns: 1,

@@ -13,7 +13,7 @@ import {
   sessionSecretValues,
   telemetryFrom,
   type AgentLaunch,
-} from '@symphony/adapter-codex/codex.js'
+} from '@sloppenheimer/adapter-codex/codex.js'
 import { withEnvironment } from '../../harness/environment.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import {
@@ -21,15 +21,15 @@ import {
   issueIdentifier,
   type Issue,
   type Workspace,
-} from '@symphony/core/domain/domain.js'
-import type { VerifiedWorkspace } from '@symphony/core/domain/workspace-containment.js'
-import type { AgentError, WorkspaceError } from '@symphony/core/domain/errors.js'
-import type { AgentResult } from '@symphony/core/ports/agent-runner.js'
+} from '@sloppenheimer/core/domain/domain.js'
+import type { VerifiedWorkspace } from '@sloppenheimer/core/domain/workspace-containment.js'
+import type { AgentError, WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import type { AgentResult } from '@sloppenheimer/core/ports/agent-runner.js'
 import {
   assertWorkspaceIdentity as assertWorkspaceIdentityAgainstFileSystem,
   openVerifiedWorkspace as openVerifiedWorkspaceAgainstFileSystem,
   verifyWorkspaceForLaunch as verifyWorkspaceForLaunchAgainstFileSystem,
-} from '@symphony/adapter-node/workspace-identity.js'
+} from '@sloppenheimer/adapter-node/workspace-identity.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 import { anIssue } from '../../harness/fixtures.js'
 
@@ -245,7 +245,7 @@ const host = <Value>(work: () => Promise<Value>): Effect.Effect<Value> => Effect
 
 const makeRoot = (): Effect.Effect<string> =>
   host(async () => {
-    const root = await mkdtemp(join(tmpdir(), 'symphony-launch-'))
+    const root = await mkdtemp(join(tmpdir(), 'sloppenheimer-launch-'))
     roots.push(root)
     return root
   })
@@ -264,7 +264,7 @@ const codexConfig = codexRunnerConfig({
 
 const launchIssue: Issue = anIssue({
   id: issueId('13'),
-  identifier: issueIdentifier('example/symphony#13'),
+  identifier: issueIdentifier('example/sloppenheimer#13'),
   title: 'Revalidate containment',
 })
 

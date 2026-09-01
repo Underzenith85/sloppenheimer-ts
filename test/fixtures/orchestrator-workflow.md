@@ -3,7 +3,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: test-token
   required_labels: [ready]
   active_states: [open]
@@ -11,7 +11,7 @@ tracker:
 polling:
   interval_ms: 3600000
 workspace:
-  root: /tmp/symphony-orchestrator-test
+  root: /tmp/sloppenheimer-orchestrator-test
 agent:
   max_concurrent_agents: 1
   max_turns: 1

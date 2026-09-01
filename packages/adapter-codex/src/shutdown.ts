@@ -1,7 +1,10 @@
 import { Clock, Effect, Fiber } from 'effect'
 
-import { AgentError } from '@symphony/core/domain/errors.js'
-import { childProcessGroupIsAlive, signalChildGroup } from '@symphony/core/support/subprocess.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import {
+  childProcessGroupIsAlive,
+  signalChildGroup,
+} from '@sloppenheimer/core/support/subprocess.js'
 import { beginClose } from './connection-state.js'
 import {
   emitEvent,

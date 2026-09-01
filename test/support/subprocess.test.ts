@@ -7,7 +7,7 @@ import {
   parseProcessStatus,
   processGroupIsAlive,
   terminateChildProcess,
-} from '@symphony/core/support/subprocess.js'
+} from '@sloppenheimer/core/support/subprocess.js'
 
 const children: ChildProcess[] = []
 

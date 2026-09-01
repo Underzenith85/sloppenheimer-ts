@@ -2,8 +2,8 @@ import { it } from '@effect/vitest'
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { ValidatedTrackerProvider } from '@symphony/core/config/workflow.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import type { ValidatedTrackerProvider } from '@sloppenheimer/core/config/workflow.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { stubProvider, stubProviderToken } from '../harness/stub-tracker-provider.js'
 import {
   CurrentTracker,
@@ -12,7 +12,7 @@ import {
   tracker,
   TrackerFactory,
   type TrackerPort,
-} from '@symphony/core'
+} from '@sloppenheimer/core'
 
 const provider = (token: string): ValidatedTrackerProvider => stubProvider(token)
 

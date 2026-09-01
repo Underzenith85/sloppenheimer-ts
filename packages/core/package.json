@@ -1,5 +1,5 @@
 {
-  "name": "@symphony/core",
+  "name": "@sloppenheimer/core",
   "version": "0.1.0",
   "private": true,
   "description": "Domain types, ports, and orchestration policy. Depends on no adapter.",
