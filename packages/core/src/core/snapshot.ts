@@ -9,8 +9,10 @@ import {
   type CompletedSnapshot,
   type OrchestratorContext,
   type OrchestratorSnapshot,
+  type RetrySnapshot,
+  type RunningSnapshot,
 } from './runtime.js'
-import type { CompletedEntry, RuntimeState } from './state.js'
+import type { CompletedEntry, RetryEntry, RunningEntry, RuntimeState } from './state.js'
 import { handoffSnapshots } from './transitions.js'
 
 /**
@@ -48,6 +50,44 @@ const inspectableAgentsOf = (state: RuntimeState): readonly string[] =>
     .filter(([, published]) => published._tag === 'Found')
     .map(([identifier]) => identifier)
     .sort((left, right) => left.localeCompare(right))
+
+const runningSnapshot = (entry: RunningEntry): RunningSnapshot => ({
+  issueId: entry.issue.id,
+  identifier: entry.issue.identifier,
+  title: entry.issue.title,
+  url: entry.issue.url,
+  state: entry.issue.state,
+  attempt: entry.attempt,
+  startedAt: entry.startedAt.toISOString(),
+  lastEventAt: entry.lastEventAt?.toISOString() ?? null,
+  lastEvent: entry.lastEvent,
+  lastMessage: entry.lastMessage,
+  processId: entry.processId,
+  threadId: entry.threadId,
+  turnId: entry.turnId,
+  sessionId: entry.sessionId,
+  turnCount: entry.turnCount,
+  tokens: entry.tokens,
+  lastReportedTokens: entry.lastReportedTokens,
+  workerHost: 'local',
+  stallDeadline: stallDeadlineOf(
+    entry.lastEventAt ?? entry.startedAt,
+    entry.execution.stallTimeoutMs,
+  ),
+  detailUrl: agentDetailPath(entry.issue.identifier),
+})
+
+const retrySnapshot = (entry: RetryEntry): RetrySnapshot => ({
+  issueId: entry.issue.id,
+  identifier: entry.issue.identifier,
+  title: entry.issue.title,
+  url: entry.issue.url,
+  attempt: entry.attempt,
+  dueAt: new Date(entry.dueAt).toISOString(),
+  error: entry.error,
+  workerHost: 'local',
+  detailUrl: agentDetailPath(entry.issue.identifier),
+})
 
 const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
   issueId: entry.issueId,
@@ -125,42 +165,8 @@ export const createSnapshot = (
     },
     pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
     handoffs: handoffSnapshots(state),
-    running: running.map((entry) => ({
-      issueId: entry.issue.id,
-      identifier: entry.issue.identifier,
-      title: entry.issue.title,
-      url: entry.issue.url,
-      state: entry.issue.state,
-      attempt: entry.attempt,
-      startedAt: entry.startedAt.toISOString(),
-      lastEventAt: entry.lastEventAt?.toISOString() ?? null,
-      lastEvent: entry.lastEvent,
-      lastMessage: entry.lastMessage,
-      processId: entry.processId,
-      threadId: entry.threadId,
-      turnId: entry.turnId,
-      sessionId: entry.sessionId,
-      turnCount: entry.turnCount,
-      tokens: entry.tokens,
-      lastReportedTokens: entry.lastReportedTokens,
-      workerHost: 'local',
-      stallDeadline: stallDeadlineOf(
-        entry.lastEventAt ?? entry.startedAt,
-        entry.execution.stallTimeoutMs,
-      ),
-      detailUrl: agentDetailPath(entry.issue.identifier),
-    })),
-    retrying: [...state.retries.values()].map((entry) => ({
-      issueId: entry.issue.id,
-      identifier: entry.issue.identifier,
-      title: entry.issue.title,
-      url: entry.issue.url,
-      attempt: entry.attempt,
-      dueAt: new Date(entry.dueAt).toISOString(),
-      error: entry.error,
-      workerHost: 'local',
-      detailUrl: agentDetailPath(entry.issue.identifier),
-    })),
+    running: running.map(runningSnapshot),
+    retrying: [...state.retries.values()].map(retrySnapshot),
     completed: [...state.completed.values()]
       .sort((left, right) => right.finishedAt.getTime() - left.finishedAt.getTime())
       .slice(0, publishedCompletedWork)
