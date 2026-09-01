@@ -4,16 +4,14 @@ import { normalizeState } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
 import {
-  publishedCompletedWork,
   type AgentDetailLookup,
-  type CompletedSnapshot,
   type OrchestratorContext,
   type OrchestratorSnapshot,
   type RetrySnapshot,
   type RunningSnapshot,
 } from './runtime.js'
-import type { CompletedEntry, RetryEntry, RunningEntry, RuntimeState } from './state.js'
-import { handoffSnapshots } from './transitions.js'
+import type { RetryEntry, RunningEntry, RuntimeState } from './state.js'
+import { completionSnapshots, handoffSnapshots, publishedCompletions } from './transitions.js'
 
 /**
  * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
@@ -89,16 +87,6 @@ const retrySnapshot = (entry: RetryEntry): RetrySnapshot => ({
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 
-const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
-  issueId: entry.issueId,
-  identifier: entry.identifier,
-  title: entry.title,
-  url: entry.url,
-  outcome: entry.outcome,
-  finishedAt: entry.finishedAt.toISOString(),
-  pullRequestUrl: entry.pullRequestUrl,
-})
-
 /**
  * The operator's view of one instant. Pure in the state it is given: the value was read from the
  * cell in a single step, so nothing here has to defend against a container being edited underneath
@@ -161,16 +149,15 @@ export const createSnapshot = (
     counts: {
       running: state.running.size,
       retrying: state.retries.size,
-      completed: state.completed.size,
+      // What the host can report as finished, restored history included, so the count never
+      // disagrees with the list beside it.
+      completed: completionSnapshots(state).length,
     },
     pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
     handoffs: handoffSnapshots(state),
     running: running.map(runningSnapshot),
     retrying: [...state.retries.values()].map(retrySnapshot),
-    completed: [...state.completed.values()]
-      .sort((left, right) => right.finishedAt.getTime() - left.finishedAt.getTime())
-      .slice(0, publishedCompletedWork)
-      .map(completedSnapshot),
+    completed: publishedCompletions(state),
     saturatedStates: saturatedStatesOf(state),
     inspectableAgents: inspectableAgentsOf(state),
     totals: {

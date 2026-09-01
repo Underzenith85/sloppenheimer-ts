@@ -35,6 +35,17 @@ export class HandoffStoreError extends Data.TaggedError('HandoffStoreError')<{
   readonly cause?: unknown
 }> {}
 
+/**
+ * Kept apart from `HandoffStoreError` because the two stores fail for different reasons and cost
+ * different things: an unreadable handoff store risks abandoning a live pull request, while an
+ * unreadable completion store loses only the history the console shows.
+ */
+export class CompletionStoreError extends Data.TaggedError('CompletionStoreError')<{
+  readonly operation: 'read' | 'write'
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
 export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
   readonly category:
     | 'invalid_path'

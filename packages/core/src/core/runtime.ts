@@ -22,6 +22,7 @@ import {
 } from '../domain/domain.js'
 import { WorkflowError, type TrackerError } from '../domain/errors.js'
 import { classifyPullRequest, issueBranchName, type HandoffSnapshot } from '../domain/handoff.js'
+import { loadCompletions, saveCompletions } from './completion-store.js'
 import { loadHandoffs, saveHandoffs } from './handoff-store.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning } from '../support/logging.js'
@@ -61,7 +62,10 @@ import { releaseRepair, settleRepair } from './handoff-decision.js'
 import { agentRetryDelay, trackerRetryDelay } from './retry.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 import {
+  completionWindowMs,
   initialState,
+  publishedCompletedWork,
+  type CompletedSnapshot,
   type EffectiveWorkflow,
   type HandoffEntry,
   type RefreshOperation,
@@ -73,16 +77,12 @@ import {
 import * as Transitions from './transitions.js'
 import { rebuildEffectiveWorkflow } from './workflow-reload.js'
 
-/**
- * How much finished work the snapshot publishes. The console scopes its Finished view to a time
- * window, so the wire payload is bounded by recency rather than by however many issues a long
- * session has merged.
- */
-export const publishedCompletedWork = 50
-
 export {
+  completionWindowMs,
+  publishedCompletedWork,
   retainedCompletedDetails,
   type CompletedEntry,
+  type CompletedSnapshot,
   type EffectiveWorkflow,
   type ExecutionSnapshot,
   type HandoffEntry,
@@ -127,16 +127,6 @@ export type RunningSnapshot = Readonly<{
   stallDeadline: string | null
   /** Stable link to the versioned detail resource for this agent. */
   detailUrl: string
-}>
-
-export type CompletedSnapshot = Readonly<{
-  issueId: IssueId
-  identifier: string
-  title: string
-  url: string | null
-  outcome: 'merged'
-  finishedAt: string
-  pullRequestUrl: string | null
 }>
 
 export type RetrySnapshot = Readonly<{
@@ -317,6 +307,8 @@ export type OrchestratorContext = Readonly<{
     outcome: 'pull_request_open' | 'merged' | 'intervention_required',
   ) => Effect.Effect<void>
   persistHandoffs: Effect.Effect<void>
+  /** Records the finished work this host can still show, so a restart does not empty Finished. */
+  persistCompletions: Effect.Effect<void>
   recoverMissingHandoffs: Effect.Effect<void>
   reconcile: (retryDispatchAllowed: boolean) => Effect.Effect<void, never, Scope.Scope>
   hydrateRestoredHandoffs: Effect.Effect<void>
@@ -484,8 +476,55 @@ export const startOrchestratorRuntime = (
           }),
         )
 
+    const completionStorePath = resolve(
+      bootstrapWorkflow.workflow.config.workspaceRoot,
+      '.sloppenheimer',
+      'completions.json',
+    )
+    /**
+     * Finished work an earlier host recorded, restored to the window the console shows and no
+     * further. The store is read and written under exactly the condition the handoff store is:
+     * every completion comes from a merged handoff, so a handoff-disabled run has none to record
+     * and must not write its empty list over what an earlier enabled run left behind.
+     *
+     * A read failure loses history, not a claim, so it degrades the way the handoff store's does —
+     * logged, nothing restored — and additionally stops this host writing, so an unreadable
+     * document is preserved for inspection rather than silently replaced. It is deliberately not
+     * folded into the snapshot's `handoff_recovery`, which reports on recovering pull requests.
+     */
+    const restoredCompletions = yield* handoffStoreDisabled
+      ? Effect.succeed<readonly CompletedSnapshot[] | null>([])
+      : Effect.all([
+          onHostFileSystem(loadCompletions(completionStorePath)),
+          Clock.currentTimeMillis,
+        ])
+          .pipe(
+            Effect.map(([completions, now]) =>
+              completions
+                .filter(
+                  (completion) => now - Date.parse(completion.finishedAt) <= completionWindowMs,
+                )
+                .sort((left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt))
+                .slice(0, publishedCompletedWork),
+            ),
+          )
+          .pipe(
+            Effect.catchAll((error) =>
+              logError('completion store read failed; preserving store', {
+                action: 'completion_store_read',
+                outcome: 'failed',
+                path: completionStorePath,
+                error: error.message,
+              }).pipe(Effect.as<readonly CompletedSnapshot[] | null>(null)),
+            ),
+          )
+    const completionStoreDisabled = handoffStoreDisabled || restoredCompletions === null
+
     const state = yield* Ref.make(
-      Transitions.holdRetirements(initialState(bootstrapWorkflow, restored), bootstrap.retirements),
+      Transitions.holdRetirements(
+        initialState(bootstrapWorkflow, { ...restored, completions: restoredCompletions ?? [] }),
+        bootstrap.retirements,
+      ),
     )
     const mailbox = yield* Queue.unbounded<OrchestratorEvent>()
 
@@ -564,6 +603,31 @@ export const startOrchestratorRuntime = (
               path: handoffStorePath,
               error: error.message,
             })
+          }),
+        ),
+      )
+    })
+
+    /**
+     * Written whenever this host finishes a piece of work, so the Finished view survives a
+     * restart. A failure is logged and dropped: the completion itself is already recorded in
+     * memory and published, and losing the history of it must not disturb the merge that produced
+     * it.
+     */
+    const persistCompletions: Effect.Effect<void> = Effect.gen(function* () {
+      if (completionStoreDisabled) {
+        return
+      }
+      const current = yield* Ref.get(state)
+      yield* onHostFileSystem(
+        saveCompletions(completionStorePath, Transitions.publishedCompletions(current)),
+      ).pipe(
+        Effect.catchAll((error) =>
+          logError('completion store write failed', {
+            action: 'completion_store_write',
+            outcome: 'failed',
+            path: completionStorePath,
+            error: error.message,
           }),
         ),
       )
@@ -1169,6 +1233,7 @@ export const startOrchestratorRuntime = (
       cancelRunning,
       noteHandoffOutcome,
       persistHandoffs,
+      persistCompletions,
       recoverMissingHandoffs,
       reconcile,
       hydrateRestoredHandoffs,

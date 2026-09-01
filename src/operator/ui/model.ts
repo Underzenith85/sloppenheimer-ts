@@ -120,15 +120,20 @@ type WorkModel = Readonly<{
   capacity: Readonly<{ running: number; limit: number; full: boolean; known: boolean }>
 }>
 
-/** How far back Finished reaches. Stated once here and rendered as a label the tests can read. */
+/**
+ * How far back Finished reaches. Stated once here and rendered as a label the tests can read.
+ *
+ * The runtime restores persisted completions to this same window, and states its own copy of the
+ * span as `completionWindowMs`: these sources are classic browser scripts and cannot import it.
+ * `test/operator/console-ux.test.ts` holds the two to the same value.
+ */
 const finishedWindowMs = 24 * 60 * 60 * 1000
 const finishedWindowLabel = 'last 24 hours'
 /**
- * The full scope, which is a window *and* a lifetime: completions live in the running host's state,
- * so a restart empties the view even for work that merged inside the window. Saying so is the point
- * — a view that claimed a flat 24 hours would be claiming more than the host can know.
+ * The scope is now the window alone. Completions outlive the host that recorded them, so the view
+ * no longer has to warn that a restart clears it.
  */
-const finishedScopeLabel = 'work this host finished in the last 24 hours; a restart clears it'
+const finishedScopeLabel = 'work finished in the ' + finishedWindowLabel
 
 const workStateLabels: Readonly<Record<WorkState, string>> = {
   attention: 'Needs attention',
