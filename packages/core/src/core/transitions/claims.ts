@@ -1,6 +1,12 @@
 import type { Issue, IssueId } from '../../domain/domain.js'
 import { withEntry, withMember, withoutMember } from '../../support/collections.js'
-import { rememberedIdentifiers, type CompletedEntry, type RuntimeState } from '../state.js'
+import {
+  publishedCompletedWork,
+  rememberedIdentifiers,
+  type CompletedEntry,
+  type CompletedSnapshot,
+  type RuntimeState,
+} from '../state.js'
 
 /**
  * The claim lifecycle: which issues this orchestrator has taken responsibility for, and what they
@@ -46,3 +52,36 @@ export const completeIssue = (
   completed: withEntry(state.completed, id, finished),
   claimed: withoutMember(state.claimed, id),
 })
+
+/**
+ * Everything this host can say it finished, newest first: what it merged itself, followed by what
+ * an earlier host merged and this one restored.
+ *
+ * A restored completion is dropped the moment this host completes the same issue again, so a
+ * republished record never outlives the live one it describes.
+ */
+export const completionSnapshots = (state: RuntimeState): readonly CompletedSnapshot[] => {
+  const live = [...state.completed.values()].map((entry): CompletedSnapshot => ({
+    issueId: entry.issueId,
+    identifier: entry.identifier,
+    title: entry.title,
+    url: entry.url,
+    outcome: entry.outcome,
+    finishedAt: entry.finishedAt.toISOString(),
+    pullRequestUrl: entry.pullRequestUrl,
+  }))
+  const restored = state.restoredCompletions.filter(
+    (completion) => !state.completed.has(completion.issueId),
+  )
+  return [...live, ...restored].sort(
+    (left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt),
+  )
+}
+
+/**
+ * What the snapshot publishes and the completion store persists. Bounded rather than complete: a
+ * host that has merged thousands of issues owes the console the recent ones, and owes its
+ * successor no more than the console would show.
+ */
+export const publishedCompletions = (state: RuntimeState): readonly CompletedSnapshot[] =>
+  completionSnapshots(state).slice(0, publishedCompletedWork)

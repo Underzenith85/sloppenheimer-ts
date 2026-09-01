@@ -13,6 +13,7 @@ export {
   retainedCompletedDetails,
   sortIssues,
   type AgentDetailLookup,
+  type CompletedSnapshot,
   type OrchestratorContext,
   type OrchestratorControl,
   type OrchestratorServices,
