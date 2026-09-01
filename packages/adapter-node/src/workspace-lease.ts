@@ -3,7 +3,7 @@ import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, readlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { Effect, Either, Option, Ref } from 'effect'
+import { Effect, Either, Exit, Option, Ref } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { realDirectoryExists } from './filesystem.js'
@@ -20,9 +20,11 @@ import {
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import {
   discardStagedLease,
+  publishStagedLease,
   readLease,
+  stagedLeasePath,
   withdrawLease,
-  writeLease,
+  writeStagedLease,
 } from './workspace-lease-store.js'
 
 /**
@@ -172,38 +174,95 @@ export const leaseUnrenewedFor = (
     Option.zipWith(storageNow, info.mtime, (now, written) => now - written.getTime()),
   )
 
+/** What a renewal has written but not yet put in place. */
+type StagedRenewal = Readonly<{ renewed: WorkspaceLeaseRecord; stoodUntil: number }>
+
 /**
- * Says the lease again, answering with how long it now stands — or with nothing, when the record is
- * no longer this run's to say.
+ * Reads the record this run holds and writes its replacement where nothing refers to it yet.
+ *
+ * `None` where the record is no longer this run's to say — gone, released, another run's, or past
+ * its own expiry. Nothing here has changed the lease, so all of it may be interrupted; the caller
+ * names the staging file so that an interruption leaves a path it can take away.
  */
-const saidAgain = (
+const stageRenewal = (
   fileSystem: FileSystem.FileSystem,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
   owner: WorkspaceOwner,
   now: Date,
-): Effect.Effect<Option.Option<number>, WorkspaceError | PlatformError> =>
+  staged: string,
+): Effect.Effect<Option.Option<StagedRenewal>, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const existing = yield* readLease(fileSystem, paths.leasePath)
     const ours = Option.filter(existing, (lease) =>
       leaseIsOurs(lease, run, paths.runKey, owner.hostId, now),
     )
     if (Option.isNone(ours)) {
-      return Option.none<number>()
+      return Option.none<StagedRenewal>()
     }
     const renewed = renewedLease(ours.value, now)
-    yield* writeLease(fileSystem, paths, renewed)
-    // The record was standing when it was read, but writing it took time of its own: a write that
-    // landed after the record it renewed had expired is one cleanup may already have acted on.
-    if ((yield* currentInstant).getTime() < Date.parse(ours.value.expiresAt)) {
-      return Option.some(Date.parse(renewed.expiresAt))
+    yield* writeStagedLease(fileSystem, staged, renewed)
+    return Option.some({ renewed, stoodUntil: Date.parse(ours.value.expiresAt) })
+  })
+
+/**
+ * Puts a staged renewal in place, and answers with how long the lease now stands for.
+ *
+ * One rename, and then the one question the rename cannot answer for itself: the record was
+ * standing when it was read, but writing it took time of its own, and a write that landed after the
+ * record it renewed had expired is one cleanup may already have acted on. Rejecting it is not
+ * enough — the rename has already put a record back at a name cleanup may have emptied on its way
+ * to removing the workspace — so it is taken away again, and only when it is still exactly what
+ * this write left, so that a claim published in the meantime is put back rather than removed.
+ */
+const publishRenewal = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  staged: string,
+  prepared: StagedRenewal,
+): Effect.Effect<Option.Option<number>, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    yield* publishStagedLease(fileSystem, staged, paths.leasePath)
+    if ((yield* currentInstant).getTime() < prepared.stoodUntil) {
+      return Option.some(Date.parse(prepared.renewed.expiresAt))
     }
-    // And rejecting it afterwards is not enough, because the write has already put a record back at
-    // a name cleanup may have emptied on its way to removing the workspace. So it is taken away
-    // again — and only when it is still exactly what this write left, so that a claim published in
-    // the meantime is put back rather than removed.
-    yield* withdrawLease(fileSystem, paths, renewed)
+    yield* withdrawLease(fileSystem, paths, prepared.renewed)
     return Option.none<number>()
+  })
+
+/**
+ * One saying of a lease: interruptible up to the rename that publishes it, indivisible from there.
+ *
+ * Reading the record and staging its replacement can take as long as a slow or unreachable
+ * filesystem takes, and a run being cancelled must not have to wait all of that out — nothing has
+ * changed yet, so there is nothing to be caught halfway through. From the rename onwards there is:
+ * a record that stands longer than the caller has been told it does is a lease this run would go on
+ * to under-report, so publishing it and recording it are one step.
+ */
+const sayLease = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  owner: WorkspaceOwner,
+  now: Date,
+  restore: <Value, Failure, Requirements>(
+    effect: Effect.Effect<Value, Failure, Requirements>,
+  ) => Effect.Effect<Value, Failure, Requirements>,
+): Effect.Effect<Option.Option<number>, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    const staged = stagedLeasePath(paths.stagingPath)
+    const prepared = yield* restore(stageRenewal(fileSystem, paths, run, owner, now, staged)).pipe(
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit) ? Effect.void : discardStagedLease(fileSystem, staged),
+      ),
+    )
+    return yield* Option.match(prepared, {
+      onNone: () => Effect.succeed(Option.none<number>()),
+      onSome: (ready) =>
+        publishRenewal(fileSystem, paths, staged, ready).pipe(
+          Effect.ensuring(discardStagedLease(fileSystem, staged)),
+        ),
+    })
   })
 
 const leaseLost = (paths: RunWorkspacePaths): WorkspaceError =>
@@ -213,40 +272,12 @@ const leaseLost = (paths: RunWorkspacePaths): WorkspaceError =>
   })
 
 /**
- * Says once that a lease still stands, and answers with how long this run knows it stands for.
+ * One renewal: says the lease again, and records how long it now stands for.
  *
- * A host that cannot observe this one's process has nothing else to go on: renewal is what tells it
- * the run is still there. A filesystem that would not answer is not by itself a lease lost — the
- * record it could not write is still standing for the rest of its window, and the next renewal may
- * well land — but a run that has not managed to say its lease again by the time that window runs
- * out has lost it all the same, because that is the moment another host is free to take it.
- */
-const sayLeaseStands = (
-  fileSystem: FileSystem.FileSystem,
-  paths: RunWorkspacePaths,
-  run: WorkspaceRun,
-  owner: WorkspaceOwner,
-  standingUntil: number,
-): Effect.Effect<number, WorkspaceError> =>
-  Effect.gen(function* () {
-    const now = yield* currentInstant
-    const said = yield* Effect.either(saidAgain(fileSystem, paths, run, owner, now))
-    if (Either.isRight(said)) {
-      return yield* Option.match(said.right, {
-        onNone: () => Effect.fail(leaseLost(paths)),
-        onSome: (until) => Effect.succeed(until),
-      })
-    }
-    return now.getTime() < standingUntil ? standingUntil : yield* Effect.fail(leaseLost(paths))
-  })
-
-/**
- * Says a lease still stands, once, and records how long it now stands for.
- *
- * Failing is how a lost lease reaches the run: one another host may already be taking the workspace
- * back on is not one to go on working under. A filesystem that would not answer is not that, while
- * the window the run already has is still open — which is `sayLeaseStands`'s rule, and the reason
- * the first saying of a lease does not go through here.
+ * A filesystem that would not answer is not by itself a lease lost — the record it could not write
+ * is still standing for the rest of its window, and the next renewal may well land — but a run that
+ * has not managed to say its lease again by the time that window runs out has lost it all the same,
+ * because that is the moment another host is free to take it. Failing is how that reaches the run.
  */
 const sayLeaseAgain = (
   fileSystem: FileSystem.FileSystem,
@@ -255,14 +286,19 @@ const sayLeaseAgain = (
   owner: WorkspaceOwner,
   standing: Ref.Ref<number>,
 ): Effect.Effect<void, WorkspaceError> =>
-  // Writing the record and recording what it now stands for are one step. An interruption between
-  // them — the run ending as a renewal lands — would leave the window on disk longer than the
-  // window this run believes in, and the next renewal starting from the shorter one.
-  Effect.uninterruptible(
-    Ref.get(standing).pipe(
-      Effect.flatMap((until) => sayLeaseStands(fileSystem, paths, run, owner, until)),
-      Effect.flatMap((until) => Ref.set(standing, until)),
-    ),
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const until = yield* Ref.get(standing)
+      const now = yield* currentInstant
+      const said = yield* Effect.either(sayLease(fileSystem, paths, run, owner, now, restore))
+      if (Either.isLeft(said)) {
+        return yield* now.getTime() < until ? Effect.void : Effect.fail(leaseLost(paths))
+      }
+      return yield* Option.match(said.right, {
+        onNone: () => Effect.fail(leaseLost(paths)),
+        onSome: (stands) => Ref.set(standing, stands),
+      })
+    }),
   )
 
 /**
@@ -300,13 +336,13 @@ export const sayClaimStands = (
   owner: WorkspaceOwner,
   standing: Ref.Ref<number>,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
-  Effect.uninterruptible(
-    Effect.flatMap(currentInstant, (now) =>
-      Effect.flatMap(saidAgain(fileSystem, paths, run, owner, now), (said) =>
-        Option.match(said, {
-          onNone: () => Effect.fail(leaseLost(paths)),
-          onSome: (until) => Ref.set(standing, until),
-        }),
-      ),
-    ),
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const now = yield* currentInstant
+      const said = yield* sayLease(fileSystem, paths, run, owner, now, restore)
+      return yield* Option.match(said, {
+        onNone: () => Effect.fail(leaseLost(paths)),
+        onSome: (stands) => Ref.set(standing, stands),
+      })
+    }),
   )

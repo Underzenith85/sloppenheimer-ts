@@ -26,15 +26,7 @@ import {
  */
 
 /**
- * Stages a lease record for publication and hands the caller the path it was written to.
- *
- * The file is named for this write alone, so two writes to one lease path — a duplicate dispatch of
- * one run identity — cannot truncate each other's record. It is staged outside the issue directory,
- * because cleanup reads that directory as run workspaces and their leases and would take a
- * half-written record for one of them.
- */
-/**
- * Writes a record where nothing yet refers to it, and hands back the path it went to.
+ * Names a record's staging file, where nothing yet refers to it.
  *
  * The name is this write's alone, so two writes to one lease path — a duplicate dispatch of one run
  * identity — cannot truncate each other's record. It is staged outside the issue directory, because
@@ -115,8 +107,9 @@ const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
  * still. What it can do is refuse to remove anything that is not demonstrably its own: the name has
  * this module's shape, the entry is a plain file rather than a link or a directory, the contents
  * decode as a lease record, and it is older than any writer could be — aged on the storage's own
- * clock against `storageNow`, never this host's, which may be hours from the one that stamped it. A file reached through a
- * substituted path is a file the sweep does not recognize, and leaves alone.
+ * clock against `storageNow`, never this host's, which may be hours from the one that stamped it.
+ * A file reached through a substituted path is a file the sweep does not recognize, and leaves
+ * alone.
  */
 const isAbandonedRecord = (
   fileSystem: FileSystem.FileSystem,
@@ -209,10 +202,21 @@ export const writeLease = (
   Effect.suspend(() => {
     const staged = stagedLeasePath(paths.stagingPath)
     return writeStagedLease(fileSystem, staged, lease).pipe(
-      Effect.zipRight(fileSystem.rename(staged, paths.leasePath)),
+      Effect.zipRight(publishStagedLease(fileSystem, staged, paths.leasePath)),
       Effect.ensuring(discardStagedLease(fileSystem, staged)),
     )
   })
+
+/**
+ * Puts a staged record in place of the one already there: one rename, which is atomic and the whole
+ * of the change. A caller that must not be interrupted between writing a record and acting on it
+ * masks this alone, rather than the reading and staging that lead up to it.
+ */
+export const publishStagedLease = (
+  fileSystem: FileSystem.FileSystem,
+  staged: string,
+  leasePath: string,
+): Effect.Effect<void, PlatformError> => fileSystem.rename(staged, leasePath)
 
 /**
  * Reads the lease beside a run workspace. A lease that is not there is `none` — a run directory

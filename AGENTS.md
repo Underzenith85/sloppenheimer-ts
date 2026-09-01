@@ -600,7 +600,10 @@ lifecycle. This section is the architecture record for it; do not create a separ
   says its lease once as soon as it holds the claim — the published record carries the stamp of the
   file it was linked from, and until that write lands a second host reads it as having gone unsaid
   for however long publishing took. That first saying has to land: unlike a renewal, which has an
-  open window to fall back on, a claim that cannot be said is withdrawn rather than built on. It keeps renewing from the claim rather than from its own work,
+  open window to fall back on, a claim that cannot be said is withdrawn rather than built on. Either
+  way, saying a lease is interruptible up to the rename that publishes it — nothing has changed yet,
+  and a cancellation must not wait out a filesystem that will not answer — and indivisible from
+  there, so a record that stands longer than the run has been told never outlives the telling. It keeps renewing from the claim rather than from its own work,
   because an `after_create` hook is the caller's command and is not bounded either, and both provisioning and the run itself are
   raced against the renewal: a run that has lost its lease — the record gone, released, another
   run's, past its own expiry, or one it has not managed to say again by the time the window it knew
