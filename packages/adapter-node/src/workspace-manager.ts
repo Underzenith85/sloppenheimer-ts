@@ -24,7 +24,7 @@ import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.j
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { realDirectoryExists, reportedAs } from './filesystem.js'
-import { hostOwner, renewLease } from './workspace-lease.js'
+import { hostOwner, renewLease, storageInstant } from './workspace-lease.js'
 import {
   discardStagedLease,
   publishClaimedLease,
@@ -316,8 +316,17 @@ export const makeWorkspaceManager = (
     // nothing else ever reads that directory. Sweeping it here takes those away once per manager —
     // at startup, and again whenever a reload rebuilds one — and can never reach a record a live
     // writer is still holding, because such a record is seconds old.
-    const now = yield* currentInstant
-    yield* pruneStagedLeases(fileSystem, leaseStagingPath(root), now, stagedLeaseLifetimeMs)
+    const staging = leaseStagingPath(root)
+    // A root nothing has ever staged a record in has nothing to sweep, and building a manager over
+    // one creates no directories. Where there is something, it is aged on the filesystem's clock
+    // like every other record: this host's own may be hours from the one that stamped the file, and
+    // a claim in flight must not be swept out from under its own writer.
+    if (yield* Effect.orElseSucceed(realDirectoryExists(fileSystem, staging), () => false)) {
+      const storageNow = yield* Effect.orElseSucceed(storageInstant(fileSystem, staging), () =>
+        Option.none<number>(),
+      )
+      yield* pruneStagedLeases(fileSystem, staging, storageNow, stagedLeaseLifetimeMs)
+    }
     return {
       withLeasedWorkspace: (run, use, disposition) =>
         leaseRunWorkspace(fileSystem, hooks, root, owner, renewal, run, use, disposition),

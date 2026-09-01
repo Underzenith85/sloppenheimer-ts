@@ -114,14 +114,15 @@ const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
  * Node offers no `unlinkat`, so the removal that follows resolves a pathname the sweep cannot hold
  * still. What it can do is refuse to remove anything that is not demonstrably its own: the name has
  * this module's shape, the entry is a plain file rather than a link or a directory, the contents
- * decode as a lease record, and it is older than any writer could be. A file reached through a
+ * decode as a lease record, and it is older than any writer could be — aged on the storage's own
+ * clock against `storageNow`, never this host's, which may be hours from the one that stamped it. A file reached through a
  * substituted path is a file the sweep does not recognize, and leaves alone.
  */
 const isAbandonedRecord = (
   fileSystem: FileSystem.FileSystem,
   stagingPath: string,
   entry: string,
-  now: Date,
+  storageNow: Option.Option<number>,
   lifetimeMs: number,
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
@@ -135,7 +136,14 @@ const isAbandonedRecord = (
     const info = yield* fileSystem.stat(staged)
     const abandoned =
       info.type === 'File' &&
-      Option.exists(info.mtime, (modified) => now.getTime() - modified.getTime() > lifetimeMs)
+      Option.getOrElse(
+        Option.zipWith(
+          storageNow,
+          info.mtime,
+          (now, written) => now - written.getTime() > lifetimeMs,
+        ),
+        () => false,
+      )
     if (!abandoned) {
       return false
     }
@@ -160,7 +168,7 @@ const isAbandonedRecord = (
 export const pruneStagedLeases = (
   fileSystem: FileSystem.FileSystem,
   stagingPath: string,
-  now: Date,
+  storageNow: Option.Option<number>,
   lifetimeMs: number,
 ): Effect.Effect<void> =>
   Effect.scoped(
@@ -181,7 +189,7 @@ export const pruneStagedLeases = (
         if (!sameIdentity(verified, current)) {
           return
         }
-        if (yield* isAbandonedRecord(fileSystem, stagingPath, entry, now, lifetimeMs)) {
+        if (yield* isAbandonedRecord(fileSystem, stagingPath, entry, storageNow, lifetimeMs)) {
           yield* discardStagedLease(fileSystem, join(stagingPath, entry))
         }
       }

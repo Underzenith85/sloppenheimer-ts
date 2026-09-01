@@ -593,7 +593,8 @@ lifecycle. This section is the architecture record for it; do not create a separ
   for as long as it holds it, and one not said again in an hour belongs to a host that is gone. Whether the
   renewals have stopped is a duration, and durations need one clock: a second host measures how long
   the record has gone unwritten, from the record's own stamp against the time the filesystem itself
-  reports, never the writer's `expiresAt` against the reader's wall clock — two hosts an hour apart
+  reports — as does the sweep that takes away staged records no writer can still be holding — never
+  the writer's `expiresAt` against the reader's wall clock — two hosts an hour apart
   would read an expiry that never came, or one that came at once. The `expiresAt` in the record is
   the owner's own deadline on the owner's clock, which is the only host that reads it. A run
   starts renewing with the claim rather than with its own work, because an `after_create` hook is
