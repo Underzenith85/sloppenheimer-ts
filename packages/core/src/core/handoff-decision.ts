@@ -1,7 +1,13 @@
 import { Option } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
-import { classifyPullRequest, type PullRequestObservation } from '../domain/handoff.js'
+import {
+  classifyPullRequest,
+  outdatedThreadNote,
+  outdatedReviewThreads,
+  type HandoffDisposition,
+  type PullRequestObservation,
+} from '../domain/handoff.js'
 import type { HandoffEntry, RepairEntry } from './state.js'
 
 /** An observation of a pull request that is still open, and so has a head to reason about. */
@@ -16,8 +22,12 @@ export type HandoffAction =
   | Readonly<{ _tag: 'None' }>
   /** Ask for a Codex review of this head. */
   | Readonly<{ _tag: 'RequestReview'; headSha: string }>
-  /** Resolve stale review threads left behind by a verified repair. */
-  | Readonly<{ _tag: 'ResolveThreads'; threadIds: readonly string[] }>
+  /**
+   * Retire the review threads a verified head superseded. The head is carried so the write can be
+   * leased on it: the verdict is about this commit, and a pull request that has moved past it must
+   * refuse rather than resolve.
+   */
+  | Readonly<{ _tag: 'ResolveThreads'; headSha: string; threadIds: readonly string[] }>
   | Readonly<{ _tag: 'Merge'; headSha: string }>
   /**
    * Already merged when observed: the handoff is finished with. The instant is the provider's own
@@ -46,17 +56,28 @@ const decided = (
 })
 
 /**
- * Whether a repaired head has come back clean enough that the review threads raised against the
- * head before it are stale rather than outstanding.
+ * The merge states in which GitHub has finished deciding. `clean` is merge-ready, and `blocked` is
+ * a decided answer too: something the repository requires -- a review, or resolved conversations
+ * -- is outstanding, which is exactly the case retiring a thread has to be able to clear. Every
+ * other state is GitHub still working the answer out or reporting a signal against this head, and
+ * resolving on the strength of one would retire feedback ahead of the verdict.
  */
-const repairedHeadIsVerified = (
-  handoff: HandoffEntry,
-  observation: PullRequestObservation,
-): boolean =>
-  handoff.repairHeadShas.length > 0 &&
+const settledMergeStates = new Set(['clean', 'blocked'])
+
+/**
+ * Whether the head in hand has come back clean enough to retire the feedback the provider has
+ * already marked outdated against it. The review gate has passed by the time this is asked, so
+ * this states the rest of the condition: GitHub has settled, there is no conflict, and every check
+ * is green.
+ *
+ * It does not ask whether Sloppenheimer performed the repair. A pull request restored from the
+ * store, or one a human pushed the fix for, carries retired threads that nobody else will clear,
+ * and a protection rule requiring resolved conversations would otherwise hold it forever.
+ */
+const headIsVerified = (observation: PullRequestObservation): boolean =>
   observation.mergeable === true &&
-  observation.mergeState !== 'dirty' &&
-  observation.mergeState !== 'behind' &&
+  observation.mergeState !== null &&
+  settledMergeStates.has(observation.mergeState) &&
   observation.checks.every(
     (check) =>
       check.status === 'completed' &&
@@ -227,6 +248,23 @@ export const gateReview = (
 }
 
 /**
+ * What the operator is told about this observation: the disposition's own reason, plus a line for
+ * the outdated feedback that was deliberately kept out of it. Diagnostics retain what a repair
+ * request must not restate.
+ */
+const recordedReason = (
+  disposition: HandoffDisposition,
+  observation: PullRequestObservation,
+): string | null => {
+  const reason = 'reason' in disposition ? disposition.reason : null
+  const history = outdatedThreadNote(observation)
+  if (history === null) {
+    return reason
+  }
+  return reason === null ? history : `${reason}\n\n${history}`
+}
+
+/**
  * The whole per-observation state machine, as one function. The order is the order the orchestrator
  * applied inline before this was extracted, and each step can end the pass.
  */
@@ -262,15 +300,17 @@ export const observeHandoff = (
       return gated.value
     }
   }
-  const unresolvedThreadIds = observation.reviewThreads
-    .filter((thread) => !thread.resolved && thread.commentHeadSha !== observation.headSha)
-    .map((thread) => thread.id)
-  if (unresolvedThreadIds.length > 0 && repairedHeadIsVerified(next, observation)) {
+  // Only feedback the provider has retired is resolved, and only once the head that retired it
+  // has come back clean. A thread still raised against this head is outstanding work whoever
+  // wrote it, and withholding one from a repair request says nothing about it on GitHub.
+  const retiredThreadIds = outdatedReviewThreads(observation).map((thread) => thread.id)
+  if (observation.state === 'open' && retiredThreadIds.length > 0 && headIsVerified(observation)) {
     return decided(
       { ...next, state: 'awaiting_checks' },
       {
         _tag: 'ResolveThreads',
-        threadIds: unresolvedThreadIds,
+        headSha: observation.headSha,
+        threadIds: retiredThreadIds,
       },
     )
   }
@@ -279,7 +319,9 @@ export const observeHandoff = (
     ...next,
     state: disposition.state,
     headSha: observation.headSha,
-    reason: 'reason' in disposition ? disposition.reason : null,
+    // The operator's record keeps the withheld history; the repair request below carries the
+    // disposition's reason alone, so an agent is never handed feedback it cannot act on.
+    reason: recordedReason(disposition, observation),
   }
   switch (disposition.state) {
     case 'merged': {
@@ -302,7 +344,7 @@ export const observeHandoff = (
         return decided({
           ...settled,
           state: 'intervention_required',
-          reason: `Repair limit reached. ${disposition.reason}`,
+          reason: `Repair limit reached. ${settled.reason ?? disposition.reason}`,
         })
       }
       return decided(settled, {

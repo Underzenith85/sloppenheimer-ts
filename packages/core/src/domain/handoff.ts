@@ -7,13 +7,72 @@ export type PullRequestCheck = Readonly<{
   url: string | null
 }>
 
+/**
+ * One review thread, normalized. `resolved` and `outdated` are separate questions: a provider
+ * marks a thread outdated when the lines it was raised on are no longer part of the change as it
+ * stands, which retires the finding as a requirement without anyone having resolved it.
+ */
 export type PullRequestReviewThread = Readonly<{
   id: string
   resolved: boolean
+  /**
+   * Whether the thread no longer applies to the head that was inspected. An outdated thread is
+   * review history: it stays visible, and it never becomes a repair requirement.
+   */
+  outdated: boolean
   body: string
   url: string | null
+  /**
+   * The commit the thread's first comment was written against, when the provider reports one. It
+   * is provenance -- which review raised this -- and not a judgement about whether the finding
+   * still applies, which is what `outdated` answers.
+   */
   commentHeadSha?: string | null
 }>
+
+const unresolvedThreads = (
+  observation: PullRequestObservation,
+): readonly PullRequestReviewThread[] =>
+  observation.reviewThreads.filter((thread) => !thread.resolved)
+
+/**
+ * The review feedback a repair has to act on: unresolved, and still applying to the head that was
+ * inspected. "Unresolved" and "actionable now" are not the same question, and only this set may
+ * reach a repair agent.
+ */
+export const currentReviewThreads = (
+  observation: PullRequestObservation,
+): readonly PullRequestReviewThread[] =>
+  unresolvedThreads(observation).filter((thread) => !thread.outdated)
+
+/**
+ * Unresolved feedback the provider has already retired against this head. It is kept for
+ * auditability -- it is why the change looks the way it does -- but it is nobody's outstanding
+ * work, so it neither blocks a merge nor enters a repair request.
+ *
+ * It is also the only feedback that may be resolved on the provider's behalf: the provider marking
+ * a thread outdated is its own statement that a later head superseded the lines it was raised on.
+ * Selecting a thread here does not resolve it; the caller decides whether the head in hand has
+ * earned that, and withholding a thread from a repair request never resolves it.
+ */
+export const outdatedReviewThreads = (
+  observation: PullRequestObservation,
+): readonly PullRequestReviewThread[] =>
+  unresolvedThreads(observation).filter((thread) => thread.outdated)
+
+/**
+ * One line of provenance for the feedback that was withheld, for the operator rather than for the
+ * agent. It records that outdated findings exist and where to read them, without restating
+ * findings that a repair must not be asked to audit.
+ */
+export const outdatedThreadNote = (observation: PullRequestObservation): string | null => {
+  const retained = outdatedReviewThreads(observation)
+  if (retained.length === 0) {
+    return null
+  }
+  const references = retained.map((thread) => thread.url ?? thread.id).join(', ')
+  return `Retained review history (outdated, not part of this repair): ${String(retained.length)} thread${retained.length === 1 ? '' : 's'} -- ${references}`
+}
 
 export type CodexReviewObservation = Readonly<{
   headShaPrefix: string
@@ -88,9 +147,9 @@ export const classifyPullRequest = (observation: PullRequestObservation): Handof
   if (observation.mergeable === false || observation.mergeState === 'dirty') {
     return { state: 'repair_needed', reason: 'The pull request conflicts with protected main' }
   }
-  const unresolved = observation.reviewThreads.filter((thread) => !thread.resolved)
-  if (unresolved.length > 0 || observation.reviewDecision === 'CHANGES_REQUESTED') {
-    const details = unresolved.map((thread) => thread.body).filter((body) => body.length > 0)
+  const current = currentReviewThreads(observation)
+  if (current.length > 0 || observation.reviewDecision === 'CHANGES_REQUESTED') {
+    const details = current.map((thread) => thread.body).filter((body) => body.length > 0)
     return {
       state: 'repair_needed',
       reason:

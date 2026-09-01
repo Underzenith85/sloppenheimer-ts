@@ -392,6 +392,7 @@ describe('GitHub pull request monitor', (): void => {
                     {
                       id: 'thread-1',
                       isResolved: false,
+                      isOutdated: false,
                       comments: {
                         nodes: [
                           {
@@ -405,6 +406,7 @@ describe('GitHub pull request monitor', (): void => {
                     {
                       id: 'thread-2',
                       isResolved: false,
+                      isOutdated: true,
                       comments: {
                         nodes: [
                           {
@@ -431,11 +433,16 @@ describe('GitHub pull request monitor', (): void => {
       expect(result.checks[0]?.name).toBe('quality')
       expect(result.reviewThreads[0]).toMatchObject({
         resolved: false,
+        outdated: false,
         body: 'Fix this',
         commentHeadSha: 'reviewed-head',
       })
+      // Resolution and outdatedness are read as separate answers: GitHub retired this thread
+      // against the current head without anyone resolving it.
       expect(result.reviewThreads[1]).toMatchObject({
         id: 'thread-2',
+        resolved: false,
+        outdated: true,
         commentHeadSha: null,
       })
       expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
@@ -530,24 +537,144 @@ describe('GitHub pull request monitor', (): void => {
     }),
   )
 
+  const resolveAgainstHead = (headSha: string, bodies: string[]): void => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        if (requestUrl(input).endsWith('/pulls/41')) {
+          return Response.json({ head: { sha: headSha } })
+        }
+        if (typeof init?.body === 'string') {
+          bodies.push(init.body)
+        }
+        return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
+      }),
+    )
+  }
+
   it.effect('resolves review threads through explicit GraphQL mutations', () =>
     Effect.gen(function* () {
       const bodies: string[] = []
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-          if (typeof init?.body === 'string') {
-            bodies.push(init.body)
-          }
-          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
-        }),
-      )
+      resolveAgainstHead('head-1', bodies)
 
-      yield* makeGitHubPullRequestMonitor(provider).resolveThreads(['thread-1', 'thread-2'])
+      yield* makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
+        'thread-1',
+        'thread-2',
+      ])
 
       expect(bodies).toHaveLength(2)
       expect(bodies[0]).toContain('thread-1')
       expect(bodies[1]).toContain('thread-2')
+    }),
+  )
+
+  it.effect(
+    'reports a mutation GitHub answered with an error rather than counting it resolved',
+    () =>
+      Effect.gen(function* () {
+        const mutations: string[] = []
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+            if (requestUrl(input).endsWith('/pulls/41')) {
+              return Response.json({ head: { sha: 'head-1' } })
+            }
+            if (typeof init?.body === 'string') {
+              mutations.push(init.body)
+            }
+            // GraphQL refuses with HTTP 200 and an errors array, which the transport reports as a
+            // perfectly good response.
+            return Response.json({ data: null, errors: [{ message: 'Resource not accessible' }] })
+          }),
+        )
+
+        const failure = yield* Effect.flip(
+          makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
+            'thread-1',
+            'thread-2',
+          ]),
+        )
+
+        expect(failure.message).toBe(
+          'GitHub did not resolve review thread thread-1: Resource not accessible',
+        )
+        // The first refusal stops the rest rather than reporting the whole batch as resolved.
+        expect(mutations).toHaveLength(1)
+      }),
+  )
+
+  it.effect('reports a mutation that resolved nothing', () =>
+    Effect.gen(function* () {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request): Promise<Response> =>
+          requestUrl(input).endsWith('/pulls/41')
+            ? Response.json({ head: { sha: 'head-1' } })
+            : Response.json({ data: { resolveReviewThread: null } }),
+        ),
+      )
+
+      const failure = yield* Effect.flip(
+        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', ['thread-1']),
+      )
+
+      expect(failure.message).toBe(
+        'GitHub did not resolve review thread thread-1: the mutation reported no resolved thread',
+      )
+    }),
+  )
+
+  it.effect('refuses to resolve threads once the head has moved past the verdict', () =>
+    Effect.gen(function* () {
+      const bodies: string[] = []
+      resolveAgainstHead('head-2', bodies)
+
+      const failure = yield* Effect.flip(
+        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', ['thread-1']),
+      )
+
+      expect(failure.message).toBe(
+        'GitHub pull request head changed before its review threads were resolved',
+      )
+      expect(failure.retryable).toBe(true)
+      // Nothing was retired on the strength of a verdict about a commit the pull request has left.
+      expect(bodies).toEqual([])
+    }),
+  )
+
+  it.effect('stops a batch at the mutation where the head moved', () =>
+    Effect.gen(function* () {
+      const bodies: string[] = []
+      let head = 'head-1'
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          if (requestUrl(input).endsWith('/pulls/41')) {
+            return Response.json({ head: { sha: head } })
+          }
+          if (typeof init?.body === 'string') {
+            bodies.push(init.body)
+          }
+          // Someone pushes while the batch is part-way through.
+          head = 'head-2'
+          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
+        }),
+      )
+
+      const failure = yield* Effect.flip(
+        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
+          'thread-1',
+          'thread-2',
+        ]),
+      )
+
+      expect(failure.message).toBe(
+        'GitHub pull request head changed before its review threads were resolved',
+      )
+      // The first thread was retired under the verdict that judged it; the second is left for the
+      // next inspection to judge against the head that now exists.
+      expect(bodies).toHaveLength(1)
+      expect(bodies[0]).toContain('thread-1')
     }),
   )
 })
