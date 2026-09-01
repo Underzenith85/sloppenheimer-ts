@@ -130,6 +130,23 @@ export const noteWorkspaceExamined = (
         unexaminedWorkspaces: withMember(state.unexaminedWorkspaces, id),
       }
 
+/**
+ * Forgets what examining the workspaces established, because they are no longer those workspaces.
+ *
+ * The record is keyed by issue, and what it records is a fact about a directory: a reload that
+ * moves the workspace root leaves every one of those answers describing files somewhere else. A
+ * root switched back to one an earlier process used holds that process's retained work, and an
+ * issue still marked examined would have the dispatch pass skip straight past it and give an agent
+ * a workspace nobody has looked at.
+ *
+ * What is owed a look is not forgotten with it: an issue recorded unexamined is still owed one, and
+ * the examination that answers clears it.
+ */
+export const forgetWorkspaceExaminations = (state: RuntimeState): RuntimeState => ({
+  ...state,
+  examinedWorkspaces: new Set(),
+})
+
 export const setHandoffStoreError = (
   state: RuntimeState,
   error: RuntimeState['handoffStoreError'],

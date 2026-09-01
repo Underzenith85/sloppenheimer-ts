@@ -1149,6 +1149,152 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('publishes what an interrupted postflight left, rather than dispatching over it', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-postflight-cancelled-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-167',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/167',
+              pullRequestNumber: 167,
+              created: true,
+            }),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications.push({
+                branchName: prepared.target.branchName,
+                launchedSoFar: launched,
+              })
+              // The first publication never returns: the turn has succeeded and its change is in
+              // the worktree, and this is the window the cancellation lands in.
+              return publications.length === 1
+                ? Effect.never
+                : Effect.succeed({
+                    _tag: 'Published',
+                    branchName: prepared.target.branchName,
+                    headSha: 'recovered-head',
+                    commitCreated: false,
+                  })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          // The pause interrupts the fiber the postflight is running on. Nothing settles it: there
+          // is no delivery, and the worker never reports how it ended.
+          yield* control.setIssuePaused(167, true)
+          yield* control.setIssuePaused(167, false)
+          while (publications.length < 2) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+
+          // The change is published by the examination the resume owed this workspace, rather than
+          // inherited by a second agent as work of its own.
+          expect(publications[1]).toEqual({
+            branchName: 'sloppenheimer/issue-167',
+            launchedSoFar: 1,
+          })
+        }),
+      )
+    }),
+  )
+
+  it.scoped('examines a workspace again when a reload moves the workspace root', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-reload-root-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-reload-root-other-')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: reloadedRoot },
+      }
+      // Active and unroutable, so nothing dispatches into it and the examination is the only
+      // thing that ever looks at either root.
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(initial, () => [issue])
+      // The root this reload switches to already holds work a previous process never published.
+      let retained = false
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => retained,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => Effect.die('an unroutable issue must never be dispatched'),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          yield* control.refresh
+          // Looked at under the first root and found empty.
+          expect(publications).toEqual([])
+
+          retained = true
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          while (snapshot.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // What that answer was about is a directory under the root being left behind. Keeping it
+          // would have the dispatch pass skip an issue whose new workspace nobody has read.
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+          expect(publications).toEqual(['sloppenheimer/issue-167'])
+        }),
+      )
+    }),
+  )
+
   it.scoped('keeps the issue claimed while a delivery waits, so no agent joins it', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-claim-')

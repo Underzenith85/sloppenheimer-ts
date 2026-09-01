@@ -603,6 +603,15 @@ repair agent that had achieved nothing.
   request is open. An ordinary continuation leaves an unpublished workspace behind too, and the
   handoff that publication opens owes it the continuation its turn was owed — giving the claim up
   is what a delivered repair does, and reading an open pull request as one ends the session early.
+- A cancellation that keeps the workspace records it unexamined. The run was interrupted, so what
+  is in the worktree is whatever it had reached — an uncommitted edit, a commit that was never
+  pushed, a publication cut off midway — and the fiber that would have settled the postflight is
+  gone. That is what makes the preservation policy below true within one process rather than only
+  across a restart: the next pass looks, and publishes what it finds, instead of handing the
+  workspace to an agent as though it were empty.
+- An examination is an answer about a directory, so none of them survive a reload that moves the
+  workspace root. A root switched back to one an earlier process used holds that process's retained
+  work, and an issue still recorded examined would have the dispatch pass walk straight past it.
 - When a rediscovered publication cannot be delivered as it stands and the work goes back to the
   coding agent, a repair the recovery restored is put back in flight with it. A restored repair
   carries no attempt behind it, and that is exactly what the queued retry consults to decide whether
