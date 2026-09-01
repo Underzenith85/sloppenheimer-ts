@@ -79,7 +79,7 @@ describe('host Git source control interruption', (): void => {
     const sourceControl = sourceControlFor(fixture, {
       credential: Option.some({ username: 'x-access-token', password: Redacted.make('secret') }),
     })
-    const workspace = { path: fixture.workspace, key: 'issue-185', createdNow: true }
+    const workspace = { path: fixture.workspace, key: 'issue-185' }
     const prepared = await Effect.runPromise(
       sourceControl.prepare(issue, workspace, {
         _tag: 'Normal',
@@ -111,7 +111,7 @@ describe('host Git source control interruption', (): void => {
     const prepared = await Effect.runPromise(
       sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-185', createdNow: true },
+        { path: fixture.workspace, key: 'issue-185' },
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-185' },
       ),
     )
@@ -167,7 +167,7 @@ describe('host Git source control interruption', (): void => {
       Effect.flip(
         sourceControl.prepare(
           issue,
-          { path: fixture.workspace, key: 'issue-185', createdNow: true },
+          { path: fixture.workspace, key: 'issue-185' },
           { _tag: 'Normal', branchName: 'sloppenheimer/issue-185' },
         ),
       ),

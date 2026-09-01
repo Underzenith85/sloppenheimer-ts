@@ -3,14 +3,31 @@ import { Context, Effect, Layer, type Scope } from 'effect'
 import type { HooksConfig } from '../config/workflow.js'
 import type { IssueIdentifier, Workspace } from '../domain/domain.js'
 import type { WorkspaceError } from '../domain/errors.js'
+import type { WorkspaceRelease, WorkspaceRun } from '../domain/workspace-lease.js'
 import { makeAdapterCell, type AdapterCell } from './cell.js'
 
+/** A workspace and the run that holds its lease, which is what releasing it takes. */
+export type LeasedWorkspace = Readonly<{
+  run: WorkspaceRun
+  workspace: Workspace
+}>
+
 /**
- * The per-issue working directory lifecycle, including the operator-configured hooks that run
- * around it. `afterRun` cannot fail: the turn it follows already happened.
+ * The per-run working directory lifecycle, including the operator-configured hooks that run around
+ * it.
+ *
+ * `acquire` allocates a workspace for exactly one dispatched run or repair attempt and leases it to
+ * that run: a second acquisition of the same run identity fails, before anything is launched.
+ * `release` ends that ownership — a run that published its work leaves nothing behind, and every
+ * other ending leaves the directory as a named recovery artifact. Neither `release` nor `afterRun`
+ * can fail: the run they follow already happened.
+ *
+ * `exists` and `remove` are per-issue, because cleanup is: an issue that reached a terminal state
+ * takes its retained workspaces with it, and never a workspace another run still holds.
  */
 export type WorkspaceManagerPort = Readonly<{
-  create: (identifier: IssueIdentifier) => Effect.Effect<Workspace, WorkspaceError>
+  acquire: (run: WorkspaceRun) => Effect.Effect<LeasedWorkspace, WorkspaceError>
+  release: (leased: LeasedWorkspace, release: WorkspaceRelease) => Effect.Effect<void>
   exists: (identifier: IssueIdentifier) => Effect.Effect<boolean, WorkspaceError>
   beforeRun: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
   afterRun: (workspace: Workspace) => Effect.Effect<void>

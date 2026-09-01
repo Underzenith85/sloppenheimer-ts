@@ -85,10 +85,12 @@ import {
   type SourceControlTarget,
   type PortsConfiguration,
   type TrackerPort,
+  type LeasedWorkspace,
   type WorkspaceManagerPort,
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
@@ -601,8 +603,12 @@ const makeHarness = (
     makeWorkspaces: (settings) => {
       workspaceSettings.push(settings)
       return {
-        create: () =>
-          Effect.succeed({ path: '/tmp/sloppenheimer-test', key: 'test', createdNow: false }),
+        acquire: (run) =>
+          Effect.succeed({
+            run,
+            workspace: { path: `/tmp/sloppenheimer-test/run-${String(run.runId)}`, key: 'test' },
+          }),
+        release: () => Effect.void,
         exists: () => Effect.succeed(true),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
@@ -3016,10 +3022,10 @@ describe('restored pull request handoffs', (): void => {
         }),
         makeWorkspaces: (settings) => ({
           ...harness.ports.makeWorkspaces(settings),
-          create: () =>
+          acquire: (run) =>
             Effect.sync(() => {
               workspacesCreated += 1
-              return { path: '/tmp/sloppenheimer-test', key: 'test', createdNow: true }
+              return { run, workspace: { path: '/tmp/sloppenheimer-test', key: 'test' } }
             }),
         }),
         // The repair pushes nothing and fails, so a retry is queued behind it.
@@ -4760,6 +4766,155 @@ describe('workflow hot reload', (): void => {
       )
 
       expect(snapshot.counts.running).toBe(0)
+    }),
+  )
+})
+
+describe('per-run workspace leases', (): void => {
+  /** Records what the orchestrator asked the workspace manager for, in the order it asked. */
+  const recordingWorkspaces =
+    (
+      harness: TestHarness,
+      acquired: LeasedWorkspace[],
+      released: Readonly<{ path: string; release: WorkspaceRelease }>[],
+    ): TestPorts['makeWorkspaces'] =>
+    (settings) => {
+      const base = harness.ports.makeWorkspaces(settings)
+      return {
+        ...base,
+        acquire: (run) =>
+          Effect.map(base.acquire(run), (leased) => {
+            acquired.push(leased)
+            return leased
+          }),
+        release: (leased, release) =>
+          Effect.sync(() => {
+            released.push({ path: leased.workspace.path, release })
+          }),
+      }
+    }
+
+  it.effect('leases four concurrent runs four distinct workspaces', () =>
+    Effect.gen(function* () {
+      const issues = [1, 2, 3, 4].map((number) =>
+        makeIssue(`example/sloppenheimer#${String(number)}`, 1, null, ['sloppenheimer', 'ready']),
+      )
+      const concurrent: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          agent: { ...workflow.config.agent, maxConcurrentAgents: 4 },
+        },
+      }
+      const harness = makeHarness(concurrent, () => issues)
+      const acquired: LeasedWorkspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+      }
+
+      const running = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.counts.running < 4) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return { counts: current.counts, releasedWhileRunning: [...released] }
+        }),
+      )
+
+      // Four sessions running at once are four run identities, and so four workspaces: nothing is
+      // shared, and no lease is let go of while its run is still live.
+      expect(running.counts.running).toBe(4)
+      expect(new Set(acquired.map((leased) => leased.run.runId)).size).toBe(4)
+      expect(new Set(acquired.map((leased) => leased.workspace.path)).size).toBe(4)
+      expect(running.releasedWhileRunning).toEqual([])
+      // Closing the host interrupts all four, and every one of them gives its lease back.
+      expect(new Set(released.map((each) => each.path))).toEqual(
+        new Set(acquired.map((leased) => leased.workspace.path)),
+      )
+    }),
+  )
+
+  it.effect('keeps a cancelled run workspace for recovery', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: LeasedWorkspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          yield* control.setIssuePaused(1, true)
+        }),
+      )
+
+      // The pause interrupts the worker, and an interrupted run has published nothing: its
+      // workspace is kept, under the reason it is being kept for.
+      expect(released).toEqual([
+        {
+          path: acquired[0]?.workspace.path,
+          release: { _tag: 'Retained', reason: 'run cancelled before publication' },
+        },
+      ])
+    }),
+  )
+
+  it.effect('leases a retry its own workspace and keeps the failed attempt', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: LeasedWorkspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      let launches = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+        // The first attempt fails, which is what queues the retry; the second one stays running.
+        runAgent: (launch) =>
+          Effect.suspend(() => {
+            launches += 1
+            return launches === 1
+              ? Effect.fail(
+                  new AgentError({ category: 'process_exited', message: 'worker failed' }),
+                )
+              : harness.ports.runAgent(launch)
+          }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('20 seconds')
+          while (current.counts.running === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+        }),
+      )
+
+      // The retry starts in a workspace of its own, and the attempt that failed keeps its own
+      // rather than handing its leftovers to the run that follows it.
+      expect(acquired).toHaveLength(2)
+      expect(acquired[1]?.workspace.path).not.toBe(acquired[0]?.workspace.path)
+      expect(released[0]).toMatchObject({
+        path: acquired[0]?.workspace.path,
+        release: { _tag: 'Retained', reason: 'run failed before publication: worker failed' },
+      })
     }),
   )
 })

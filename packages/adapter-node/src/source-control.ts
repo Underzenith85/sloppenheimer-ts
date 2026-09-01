@@ -18,8 +18,9 @@ import {
 export type { GitCredential, GitSourceControlSettings } from './git-process.js'
 
 /**
- * Host Git source control: preparing a workspace's repository from the protected base or from an
- * exact repair head, and publishing the agent's work back under an expected-head lease.
+ * Host Git source control: preparing a run's own workspace from the branch's published head, the
+ * exact head of a repair, or the protected base, and publishing the agent's work back under an
+ * expected-head lease.
  *
  * How a git invocation is run, authenticated, and read when it fails lives in `git-process.ts`;
  * this module decides only which invocations to make and what their output means.
@@ -53,25 +54,6 @@ const revParse = (
   Effect.map(runGit(settings, operation, workspace.path, ['rev-parse', revision]), (value) =>
     value.trim(),
   )
-
-const currentBranch = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(
-    Effect.map(
-      runGit(settings, operation, workspace.path, ['symbolic-ref', '--short', 'HEAD']),
-      (value) => value.trim(),
-    ),
-  )
-
-const currentHead = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(revParse(settings, operation, workspace, 'HEAD'))
 
 const status = (
   settings: GitSourceControlSettings,
@@ -109,9 +91,10 @@ const initialize = (
   )
 
 /**
- * The head a repair must start from, or `none` for normal work, which starts from the protected
- * base instead. Absence here chooses the next branch rather than crossing a data boundary, so it is
- * an `Option` and never leaves this module.
+ * The head a repair must start from, or `none` for normal work, which starts from the branch's own
+ * published head instead, or from the protected base when it has none. Absence here chooses the
+ * next branch rather than crossing a data boundary, so it is an `Option` and never leaves this
+ * module.
  */
 const expectedRepairHead = (
   target: SourceControlTarget,
@@ -138,9 +121,8 @@ const expectedRepairHead = (
  *
  * Uninterruptible as a pair. `checkout -B` carries a tracked edit across when the file is identical
  * in both commits, so an interruption between the two would leave the target branch checked out and
- * still dirty — and the next preparation reads exactly that as unfinished agent work to preserve,
- * publishing an edit no agent made. The two commands are local and bounded, so an interruption
- * waits them out rather than settling halfway through.
+ * still dirty, and the run that inherited it would publish an edit no agent made. The two commands
+ * are local and bounded, so an interruption waits them out rather than settling halfway through.
  */
 const resetToBaseline = (
   settings: GitSourceControlSettings,
@@ -156,6 +138,38 @@ const resetToBaseline = (
       Effect.asVoid,
     ),
   )
+
+/**
+ * The baseline a run starts from, and the fetch that makes it available locally.
+ *
+ * A repair starts from the exact pull-request head it was dispatched against. Normal work starts
+ * from the branch's own published head when the branch exists, and from the protected base when it
+ * does not: since [#166](https://github.com/Underzenith85/sloppenheimer-ts/issues/166) every run is
+ * given a workspace of its own, so what a previous attempt left in a shared worktree is no longer
+ * what carries an issue forward — the published branch is. Work that was never published survives
+ * only in that attempt's retained workspace, and is never silently adopted here.
+ */
+const fetchBaseline = (
+  settings: GitSourceControlSettings,
+  workspace: Workspace,
+  target: SourceControlTarget,
+  observedRemoteHead: Option.Option<string>,
+  baseSha: string,
+): Effect.Effect<string, SourceControlError> =>
+  Effect.gen(function* () {
+    const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
+    const publishedHead = Option.orElse(repairHead, () => observedRemoteHead)
+    if (Option.isNone(publishedHead)) {
+      return baseSha
+    }
+    yield* runGit(settings, 'prepare', workspace.path, [
+      'fetch',
+      '--no-tags',
+      'origin',
+      `+refs/heads/${target.branchName}:refs/remotes/origin/${target.branchName}`,
+    ])
+    return publishedHead.value
+  })
 
 const prepareRepository = (
   settings: GitSourceControlSettings,
@@ -179,25 +193,16 @@ const prepareRepository = (
       `refs/remotes/origin/${settings.baseBranch}`,
     )
     const observedRemoteHead = yield* remoteHead(settings, 'prepare', workspace, target.branchName)
-    const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
-    if (Option.isSome(repairHead)) {
-      yield* runGit(settings, 'prepare', workspace.path, [
-        'fetch',
-        '--no-tags',
-        'origin',
-        `+refs/heads/${target.branchName}:refs/remotes/origin/${target.branchName}`,
-      ])
-    }
-
-    const branch = yield* currentBranch(settings, 'prepare', workspace)
-    const head = yield* currentHead(settings, 'prepare', workspace)
-    const dirty = (yield* status(settings, 'prepare', workspace)).length > 0
-    const baselineSha = Option.getOrElse(repairHead, () => baseSha)
-    const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
-    const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
-    if (!preserve) {
-      yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
-    }
+    const baselineSha = yield* fetchBaseline(
+      settings,
+      workspace,
+      target,
+      observedRemoteHead,
+      baseSha,
+    )
+    // The workspace belongs to this run alone, so there is never anything in it to keep: the branch
+    // is put at the baseline unconditionally rather than after asking what the directory holds.
+    yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
     const prepared: PreparedRepository = {
       workspace,
       target,

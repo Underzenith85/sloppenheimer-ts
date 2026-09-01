@@ -92,6 +92,7 @@ export {
   layerCurrentWorkspaceManager,
   WorkspaceManagerFactory,
   workspaces,
+  type LeasedWorkspace,
   type WorkspaceManagerCell,
   type WorkspaceManagerFactoryPort,
   type WorkspaceManagerPort,

@@ -5,7 +5,7 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
-import { makeGitRepository, git } from './harness/git-repository.js'
+import { commitFile, makeGitRepository, git } from './harness/git-repository.js'
 import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
 const roots: string[] = []
@@ -31,7 +31,7 @@ describe('host Git source control', (): void => {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
       const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const workspace = { path: fixture.workspace, key: 'issue-165' }
       const prepared = yield* sourceControl.prepare(issue, workspace, {
         _tag: 'Normal',
         branchName: 'sloppenheimer/issue-165',
@@ -59,6 +59,53 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live("continues a fresh workspace from the branch's published head", () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() =>
+        commitFile(fixture.seed, 'attempt-one.ts', 'first attempt\n', 'first attempt'),
+      )
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const publishedHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      const sourceControl = sourceControlFor(fixture)
+
+      // The workspace is empty, as every run's own workspace is. What carries the issue forward is
+      // therefore the published branch, not what a previous attempt left in a shared worktree.
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
+      )
+      expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(publishedHead)
+      expect(prepared.baselineSha).toBe(publishedHead)
+      expect(yield* host(() => readFile(join(fixture.workspace, 'attempt-one.ts'), 'utf8'))).toBe(
+        'first attempt\n',
+      )
+
+      yield* host(() => writeFile(join(fixture.workspace, 'attempt-two.ts'), 'second attempt\n'))
+      const published = yield* sourceControl.publish(issue, prepared)
+
+      // The second attempt builds on the first rather than resetting the branch over it. The
+      // published head is a rebase of both commits onto the protected base, so what is asserted is
+      // the work the branch carries, not the identity of a commit rebasing rewrites.
+      expect(published._tag).toBe('Published')
+      const remoteHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(remoteHead)
+      expect(
+        yield* host(() => git(fixture.workspace, ['show', `${remoteHead}:attempt-one.ts`])),
+      ).toBe('first attempt')
+      expect(
+        yield* host(() => git(fixture.workspace, ['show', `${remoteHead}:attempt-two.ts`])),
+      ).toBe('second attempt')
+    }),
+  )
+
   it.live('reports an empty diff without creating a remote branch', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
@@ -66,7 +113,7 @@ describe('host Git source control', (): void => {
       const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { path: fixture.workspace, key: 'issue-165' },
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
 

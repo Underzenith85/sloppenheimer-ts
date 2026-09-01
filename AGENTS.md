@@ -45,6 +45,33 @@ it; do not create a separate ADR.
   stays in force. Do not add a runner cell to make that reload succeed without a deliberate design
   decision about what happens to a session already running under the previous kind.
 
+## Workspaces
+
+[#166](https://github.com/Underzenith85/sloppenheimer-ts/issues/166) settled the workspace
+lifecycle. This section is the architecture record for it; do not create a separate ADR.
+
+- A workspace belongs to one dispatched run or repair attempt, never to an issue. The path is
+  `<root>/<issue key>/<run key>`, where the run key names the run number and the host that
+  allocated it: the run number restarts with the process that counts it, so the host is what keeps
+  two hosts — and a host and its own predecessor — from ever naming one directory.
+- Ownership is an exclusive lease, not orchestrator memory. Creating the run directory is the claim
+  itself, so a duplicate dispatch fails before a process is launched, and the lease record beside it
+  names the issue, the run, and the host process that holds it. It is released on success, failure,
+  cancellation and shutdown alike, and it outlives the host that wrote it, so a restart and a second
+  host reading the same root both see who owns what.
+- **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves
+  nothing behind; every other ending keeps its workspace as a retained recovery artifact naming why,
+  which no later run adopts. `SourceControlPort.prepare` agrees with that and no longer preserves a
+  dirty worktree: a normal run starts from its branch's published head when the branch exists, and
+  from the protected base when it does not, so an attempt that ran out of turns is continued by what
+  it published rather than by what a shared directory happened to hold. A repair still starts from
+  the exact pull-request head. Do not reintroduce a preserve branch in `prepare` without revisiting
+  this decision — the two contradicted each other before #166, which is the defect it removed.
+- Cleanup never removes a workspace whose lease is still held by a running owner. An issue's
+  retained workspaces go when the issue reaches a terminal state.
+- The remote executors under #21-#24 inherit this contract: whatever allocates the workspace, every
+  run gets its own refs, index, worktree and lifecycle, and holds a lease for as long as it runs.
+
 ## Repository structure
 
 Sloppenheimer is a private pnpm workspace. `pnpm-workspace.yaml` declares `packages/*` beside the

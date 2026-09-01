@@ -30,7 +30,7 @@ const issue: Issue = anIssue({
 /** A launch whose workspace is not contained by its root, which launch verification refuses first. */
 const uncontainedLaunch: AgentLaunch = {
   issue,
-  workspace: { path: '/etc', key: 'etc', createdNow: false },
+  workspace: { path: '/etc', key: 'etc' },
   workspaceRoot: '/tmp/sloppenheimer-agent-runner-root',
   config: codexConfig,
   prompt: 'work',

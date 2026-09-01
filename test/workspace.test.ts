@@ -1,17 +1,25 @@
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { existsSync } from 'node:fs'
-import { access, mkdir, readFile, rm, symlink } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
 import { Clock, Effect, Either, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
+import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
   containedWorkspacePath,
   workspaceKey,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
+import {
+  encodeLease,
+  heldLease,
+  type WorkspaceLeaseRecord,
+} from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { hostFileSystem } from './harness/filesystem.js'
 import { processIsAlive } from './harness/processes.js'
@@ -48,7 +56,7 @@ describe('workspace safety', (): void => {
     expect(Either.isLeft(containedWorkspacePath('/tmp/sloppenheimer-root', '.'))).toBe(true)
   })
 
-  it.live('runs after_create once and reuses the directory', () =>
+  it.live('runs after_create for every run workspace rather than reusing one directory', () =>
     Effect.gen(function* () {
       const root = join('/tmp', `sloppenheimer-workspace-${crypto.randomUUID()}`)
       roots.push(root)
@@ -60,12 +68,12 @@ describe('workspace safety', (): void => {
         timeoutMs: 5_000,
       })
 
-      const first = yield* manager.create(issueIdentifier('GH-8'))
-      const second = yield* manager.create(issueIdentifier('GH-8'))
+      const first = yield* acquire(manager, 'GH-8', 1)
+      const second = yield* acquire(manager, 'GH-8', 2)
 
-      expect(first.createdNow).toBe(true)
-      expect(second.createdNow).toBe(false)
+      expect(second.path).not.toBe(first.path)
       expect(yield* host(() => readFile(join(first.path, 'marker.txt'), 'utf8'))).toBe('created')
+      expect(yield* host(() => readFile(join(second.path, 'marker.txt'), 'utf8'))).toBe('created')
     }),
   )
 })
@@ -105,11 +113,36 @@ const hooks = (overrides: Partial<HooksConfig> = {}): HooksConfig => ({
   ...overrides,
 })
 
-const workspaceFor = (root: string, key: string): Workspace => ({
-  path: join(root, key),
-  key,
-  createdNow: false,
-})
+/**
+ * One run's workspace, as the manager allocates it. Every acquisition is a fresh directory leased
+ * to that run, so a test that wants two of them asks for two run numbers rather than reusing one
+ * path it computed for itself.
+ */
+const acquire = (
+  manager: WorkspaceManagerPort,
+  identifier: string,
+  runId = 1,
+): Effect.Effect<Workspace, WorkspaceError> =>
+  Effect.map(
+    manager.acquire({ identifier: issueIdentifier(identifier), runId }),
+    (leased) => leased.workspace,
+  )
+
+/**
+ * A workspace a run has finished with and left behind: on disk, named by its lease, and leased to
+ * nobody — which is what cleanup is entitled to remove.
+ */
+const retained = (
+  manager: WorkspaceManagerPort,
+  identifier: string,
+  runId = 1,
+): Effect.Effect<Workspace, WorkspaceError> =>
+  Effect.flatMap(manager.acquire({ identifier: issueIdentifier(identifier), runId }), (leased) =>
+    Effect.as(
+      manager.release(leased, { _tag: 'Retained', reason: 'the run ended without publishing' }),
+      leased.workspace,
+    ),
+  )
 
 describe('hook process hardening', (): void => {
   it.live('drains a hook that writes far more than the capture limit', () =>
@@ -120,9 +153,9 @@ describe('hook process hardening', (): void => {
         hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'a'` }),
       )
 
-      const workspace = yield* manager.create(issueIdentifier('GH-100'))
+      const workspace = yield* acquire(manager, 'GH-100')
 
-      expect(workspace.createdNow).toBe(true)
+      expect(existsSync(workspace.path)).toBe(true)
     }),
   )
 
@@ -134,7 +167,7 @@ describe('hook process hardening', (): void => {
         hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'b' >&2; exit 3` }),
       )
 
-      const error = yield* Effect.flip(manager.create(issueIdentifier('GH-101')))
+      const error = yield* Effect.flip(acquire(manager, 'GH-101'))
 
       expect(error.category).toBe('hook_failed')
       expect(error.message).toContain('exited with 3')
@@ -146,10 +179,10 @@ describe('hook process hardening', (): void => {
   it.live('reports a nonzero exit with the hook phase', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-102'))
+      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-102')
       const manager = yield* workspaceManager(root, hooks({ beforeRun: 'echo "boom" >&2; exit 7' }))
 
-      const error = yield* Effect.flip(manager.beforeRun(workspaceFor(root, 'GH-102')))
+      const error = yield* Effect.flip(manager.beforeRun(workspace))
 
       expect(error.category).toBe('hook_failed')
       expect(error.message).toContain('before_run hook exited with 7')
@@ -160,8 +193,7 @@ describe('hook process hardening', (): void => {
   it.live('terminates the whole hook process tree on timeout', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-103'))
-      const workspace = workspaceFor(root, 'GH-103')
+      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-103')
       const manager = yield* workspaceManager(
         root,
         hooks({
@@ -186,8 +218,7 @@ describe('hook process hardening', (): void => {
     () =>
       Effect.gen(function* () {
         const root = makeRoot()
-        yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-109'))
-        const workspace = workspaceFor(root, 'GH-109')
+        const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-109')
         const manager = yield* workspaceManager(
           root,
           hooks({
@@ -213,8 +244,7 @@ describe('hook process hardening', (): void => {
   it.live('terminates the hook process tree when the effect is interrupted', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-104'))
-      const workspace = workspaceFor(root, 'GH-104')
+      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-104')
       const manager = yield* workspaceManager(
         root,
         hooks({ beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait' }),
@@ -239,7 +269,7 @@ describe('hook phase semantics', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
 
-      const error = yield* Effect.flip(manager.create(issueIdentifier('GH-105')))
+      const error = yield* Effect.flip(acquire(manager, 'GH-105'))
 
       expect(error.category).toBe('hook_failed')
       expect(error.message).toContain('after_create')
@@ -249,19 +279,17 @@ describe('hook phase semantics', (): void => {
   it.live('treats after_run as best effort', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-106'))
+      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-106')
       const manager = yield* workspaceManager(root, hooks({ afterRun: 'exit 1' }))
 
-      expect(yield* manager.afterRun(workspaceFor(root, 'GH-106'))).toBeUndefined()
+      expect(yield* manager.afterRun(workspace)).toBeUndefined()
     }),
   )
 
   it.live('removes the workspace even when before_remove fails', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      const created = yield* (yield* workspaceManager(root, hooks())).create(
-        issueIdentifier('GH-107'),
-      )
+      const created = yield* retained(yield* workspaceManager(root, hooks()), 'GH-107')
       const manager = yield* workspaceManager(root, hooks({ beforeRemove: 'exit 1' }))
 
       yield* manager.remove(issueIdentifier('GH-107'))
@@ -282,7 +310,7 @@ describe('hook phase semantics', (): void => {
       yield* manager.remove(issueIdentifier('GH-108'))
       expect(existsSync(marker)).toBe(false)
 
-      yield* (yield* workspaceManager(root, hooks())).create(issueIdentifier('GH-108'))
+      yield* retained(yield* workspaceManager(root, hooks()), 'GH-108')
       yield* manager.remove(issueIdentifier('GH-108'))
       expect(existsSync(marker)).toBe(true)
     }),
@@ -322,7 +350,7 @@ describe('workspace inspection and cleanup', (): void => {
       const identifier = issueIdentifier('GH-11')
 
       expect(yield* manager.exists(identifier)).toBe(false)
-      yield* manager.create(identifier)
+      yield* acquire(manager, 'GH-11')
       expect(yield* manager.exists(identifier)).toBe(true)
     }),
   )
@@ -363,11 +391,209 @@ describe('workspace inspection and cleanup', (): void => {
         beforeRemove: 'exit 7',
         timeoutMs: 5_000,
       })
-      const workspace = yield* manager.create(issueIdentifier('GH-10'))
+      const workspace = yield* retained(manager, 'GH-10')
 
       yield* manager.remove(issueIdentifier('GH-10'))
 
       yield* host(() => expect(access(workspace.path)).rejects.toThrow())
+    }),
+  )
+})
+
+/** The pid of a process that has certainly exited: the owner a crashed host left behind. */
+const exitedProcessId = async (): Promise<number> => {
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' })
+  await once(child, 'exit')
+  if (child.pid === undefined) {
+    throw new Error('the fixture process did not report a pid')
+  }
+  return child.pid
+}
+
+/**
+ * A run workspace left on disk by another host, with the lease record that host would have
+ * written. Nothing in the manager may adopt it: the test writes it exactly as a crashed or
+ * concurrent host would.
+ */
+const foreignWorkspace = async (
+  root: string,
+  identifier: string,
+  owner: WorkspaceLeaseRecord['owner'],
+): Promise<string> => {
+  const runKey = 'run-9-previoushost'
+  const path = join(root, workspaceKey(issueIdentifier(identifier)), runKey)
+  await mkdir(path, { recursive: true })
+  await writeFile(join(path, 'unpublished.txt'), 'work the host never pushed\n')
+  await writeFile(
+    `${path}.lease`,
+    encodeLease(
+      heldLease({ identifier: issueIdentifier(identifier), runId: 9 }, runKey, owner, new Date()),
+    ),
+  )
+  return path
+}
+
+/** The lease record beside a run workspace, as cleanup and recovery read it. */
+const leaseOf = async (workspacePath: string): Promise<WorkspaceLeaseRecord> =>
+  JSON.parse(await readFile(`${workspacePath}.lease`, 'utf8')) as WorkspaceLeaseRecord
+
+describe('run workspace allocation and leases', (): void => {
+  it.live('allocates four concurrent runs four isolated directories', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      // Two attempts of one issue and two of another, all live at once: the rule is that no two
+      // runs share a directory, not merely that no two issues do.
+      const runs = [
+        { identifier: issueIdentifier('GH-166'), runId: 1 },
+        { identifier: issueIdentifier('GH-166'), runId: 2 },
+        { identifier: issueIdentifier('GH-167'), runId: 3 },
+        { identifier: issueIdentifier('GH-167'), runId: 4 },
+      ]
+
+      const leased = yield* Effect.all(
+        runs.map((run) => manager.acquire(run)),
+        { concurrency: 'unbounded' },
+      )
+      yield* Effect.all(
+        leased.map((each, index) =>
+          host(() => writeFile(join(each.workspace.path, 'work.txt'), `run-${String(index)}`)),
+        ),
+        { concurrency: 'unbounded' },
+      )
+
+      const paths = leased.map((each) => each.workspace.path)
+      const inodes = yield* host(() =>
+        Promise.all(paths.map(async (path) => (await stat(path)).ino)),
+      )
+      // Distinct paths are not enough on their own: four names can be four links to one directory,
+      // and it is the directory the agent's git metadata and worktree live in.
+      expect(new Set(paths).size).toBe(4)
+      expect(new Set(inodes).size).toBe(4)
+      for (const [index, path] of paths.entries()) {
+        expect(path.startsWith(`${root}/`)).toBe(true)
+        expect(yield* host(() => readdir(path))).toEqual(['work.txt'])
+        expect(yield* host(() => readFile(join(path, 'work.txt'), 'utf8'))).toBe(
+          `run-${String(index)}`,
+        )
+      }
+    }),
+  )
+
+  it.live('refuses a second acquisition of one run identity before anything is launched', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const run = { identifier: issueIdentifier('GH-168'), runId: 7 }
+      yield* manager.acquire(run)
+
+      const refused = yield* Effect.flip(manager.acquire(run))
+
+      expect(refused.category).toBe('lease_conflict')
+    }),
+  )
+
+  it.live('keeps a failed attempt as a named artifact and starts its retry clean', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = issueIdentifier('GH-169')
+      const first = yield* manager.acquire({ identifier, runId: 1 })
+      yield* host(() => writeFile(join(first.workspace.path, 'unpublished.txt'), 'in progress\n'))
+
+      yield* manager.release(first, { _tag: 'Retained', reason: 'worker failed' })
+      const second = yield* manager.acquire({ identifier, runId: 2 })
+
+      // The retry inherits nothing, and what the failed attempt holds is explained by its lease
+      // rather than left for a later run to find and adopt.
+      expect(second.workspace.path).not.toBe(first.workspace.path)
+      expect(yield* host(() => readdir(second.workspace.path))).toEqual([])
+      expect(yield* host(() => readdir(first.workspace.path))).toEqual(['unpublished.txt'])
+      expect(yield* host(() => leaseOf(first.workspace.path))).toMatchObject({
+        identifier,
+        runId: 1,
+        status: 'retained',
+        reason: 'worker failed',
+      })
+    }),
+  )
+
+  it.live('takes the workspace of a run that published, and the issue directory with it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = issueIdentifier('GH-170')
+      const leased = yield* manager.acquire({ identifier, runId: 1 })
+
+      yield* manager.release(leased, { _tag: 'Completed' })
+
+      expect(existsSync(leased.workspace.path)).toBe(false)
+      expect(existsSync(`${leased.workspace.path}.lease`)).toBe(false)
+      expect(yield* manager.exists(identifier)).toBe(false)
+    }),
+  )
+
+  it.live('cannot clean up a workspace a live run holds', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = issueIdentifier('GH-171')
+      const leased = yield* manager.acquire({ identifier, runId: 1 })
+
+      yield* manager.remove(identifier)
+      expect(existsSync(leased.workspace.path)).toBe(true)
+
+      yield* manager.release(leased, { _tag: 'Retained', reason: 'worker cancelled' })
+      yield* manager.remove(identifier)
+
+      expect(existsSync(leased.workspace.path)).toBe(false)
+      expect(yield* manager.exists(identifier)).toBe(false)
+    }),
+  )
+
+  it.live('never enters a workspace a departed host left, and cleans it up afterwards', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-172'
+      const abandoned = yield* host(async () =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'a host that is gone',
+          processId: await exitedProcessId(),
+        }),
+      )
+
+      // The run number a restarted host counts from starts again at one, so the workspace name
+      // carries the host as well: this acquisition cannot land on the abandoned directory even
+      // when it reuses that host's run number.
+      const leased = yield* manager.acquire({ identifier: issueIdentifier(identifier), runId: 9 })
+      expect(leased.workspace.path).not.toBe(abandoned)
+      expect(yield* host(() => readdir(leased.workspace.path))).toEqual([])
+
+      yield* manager.release(leased, { _tag: 'Completed' })
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // With its owner gone, the artifact is cleanup's to take once the issue is finished with.
+      expect(existsSync(abandoned)).toBe(false)
+    }),
+  )
+
+  it.live('leaves a workspace a second live host still holds', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-173'
+      const held = yield* host(() =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'another live host',
+          processId: process.pid,
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      expect(existsSync(held)).toBe(true)
+      expect(existsSync(`${held}.lease`)).toBe(true)
     }),
   )
 })

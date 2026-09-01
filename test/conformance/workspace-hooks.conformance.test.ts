@@ -49,13 +49,13 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
       const root = yield* Effect.promise(makeRoot)
       const identifier = issueIdentifier('owner/repository#19')
       const failed = yield* workspaceManager(root, hooks({ beforeRun: 'exit 7' }))
-      const failedWorkspace = yield* failed.create(identifier)
+      const failedWorkspace = (yield* failed.acquire({ identifier, runId: 1 })).workspace
       const rejected = yield* Effect.flip(failed.beforeRun(failedWorkspace))
       expect(rejected.message).toContain('hook exited with 7')
 
       const timedOut = yield* workspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
-      const reused = yield* timedOut.create(identifier)
-      const expired = yield* Effect.flip(timedOut.beforeRun(reused))
+      const second = (yield* timedOut.acquire({ identifier, runId: 2 })).workspace
+      const expired = yield* Effect.flip(timedOut.beforeRun(second))
       expect(expired.message).toContain('hook timed out')
     }),
   )
@@ -68,8 +68,12 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
         root,
         hooks({ afterRun: 'exit 8', beforeRemove: 'exit 9' }),
       )
-      const workspace = yield* manager.create(identifier)
+      const leased = yield* manager.acquire({ identifier, runId: 1 })
+      const workspace = leased.workspace
       yield* manager.afterRun(workspace)
+      // The run releases its lease before cleanup: an issue's workspaces are removable only once
+      // no live run holds one.
+      yield* manager.release(leased, { _tag: 'Retained', reason: 'run failed' })
       yield* manager.remove(identifier)
       yield* Effect.promise(() =>
         expect(access(workspace.path)).rejects.toMatchObject({ code: 'ENOENT' }),

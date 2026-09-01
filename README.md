@@ -80,8 +80,8 @@ provenance, without making another plaintext token copy, and removes that name p
 fallback aliases `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environments. Codex's own
 `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` authentication sources are always preserved, and tracker
 configuration may not reuse those names. Each eligible issue must carry the `sloppenheimer` label.
-Workspaces live under `.sloppenheimer/workspaces` and are never treated as trusted paths until
-containment checks pass. Containment is re-verified immediately before every agent launch, not only
+Workspaces live under `.sloppenheimer/workspaces`, one directory per issue holding one directory
+per dispatched run, and are never treated as trusted paths until containment checks pass. Containment is re-verified immediately before every agent launch, not only
 at creation: the path must be a strict descendant of the configured root both as written and after
 symlink resolution, and must be a real directory that still exists. The verified real path — not
 the caller-supplied one — becomes the Codex subprocess cwd and the thread and turn `cwd`, so a
@@ -600,19 +600,46 @@ which services to compose — the same point at which `server.port` is read. Edi
 host does not take effect on the reload; restart the host. Every other key in the workflow, and the
 handoff behaviour itself, continues to follow the reloaded definition.
 
+### Workspace allocation and leases
+
+Every dispatched run and repair attempt receives its own workspace: `<root>/<issue key>/<run key>`,
+where the run key names the run number and the host that allocated it. Two attempts on one issue
+therefore share no worktree, no index and no ref store, and two hosts pointed at one root can never
+name the same directory. The agent's cwd is the run directory; the host writes nothing inside it.
+
+Ownership is a lease file beside the run directory rather than orchestrator memory. Creating the
+run directory is the exclusive claim — the kernel refuses the second creation of a name that exists,
+so a duplicate dispatch fails before any process is launched — and the lease record written next to
+it names the issue, the run, the host and its process id. A run releases its lease on success,
+failure, cancellation and shutdown alike.
+
+A run that published its work leaves nothing behind. Every other ending keeps the workspace and
+rewrites its lease as a retained recovery artifact naming why it was kept, which is never adopted by
+a later run: retained workspaces go when the issue reaches a terminal state, and cleanup skips any
+workspace whose lease is still held by a running owner — this host, or a second one. A lease left by
+a host that is gone stops holding anything back, because its process is no longer there.
+
+Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
+normal run starts from its branch's own published head when the branch exists, and from the
+protected base when it does not, so an attempt that ran out of turns is continued by the branch it
+published; a repair still starts from the exact pull-request head it was dispatched against. Work an
+attempt never published survives only in that attempt's retained workspace.
+
 ### Workspace hooks
 
 Each hook runs `bash -lc <script>` in the workspace directory as its own process group.
 
 | Hook            | When                                                     | Failure                             |
 | --------------- | -------------------------------------------------------- | ----------------------------------- |
-| `after_create`  | Once, immediately after a workspace directory is created | Fatal — the workspace is not usable |
+| `after_create`  | Immediately after a run's workspace directory is created | Fatal — the workspace is not usable |
 | `before_run`    | Before every agent launch                                | Fatal — the issue is retried        |
 | `after_run`     | After every agent turn                                   | Best effort — logged and ignored    |
-| `before_remove` | Before removing an existing workspace                    | Best effort — removal continues     |
+| `before_remove` | Before removing a run's workspace                        | Best effort — removal continues     |
 
-`before_remove` runs only when the workspace directory is actually present, so a startup sweep over
-closed issues does not execute it for workspaces that were never created.
+A workspace belongs to one run, so `after_create` runs once per dispatched run rather than once per
+issue, and `before_remove` runs once for each workspace a removal actually takes. `before_remove`
+runs only when the workspace directory is actually present, so a startup sweep over closed issues
+does not execute it for workspaces that were never created.
 
 Both output streams are drained continuously, so a chatty hook cannot fill a pipe and hang; only a
 bounded head of each stream is kept for diagnostics and is marked truncated when it overflows. A

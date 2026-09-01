@@ -3,9 +3,13 @@ import { describe, expect, it } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
 import {
+  containedRunWorkspacePath,
   containedWorkspacePath,
   declaredWorkspacePath,
+  isLeaseEntry,
   isStrictDescendant,
+  leasePathFor,
+  runWorkspaceKey,
   resolvedWithinRootRejection,
   sameDirectoryIdentity,
   verifiedDirectoryRejection,
@@ -25,7 +29,7 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 
 const root = '/srv/sloppenheimer/workspaces'
 
-const workspaceAt = (path: string): Workspace => ({ path, key: 'key', createdNow: false })
+const workspaceAt = (path: string): Workspace => ({ path, key: 'key' })
 
 const verified: VerifiedWorkspace = {
   path: `${root}/issue-13`,
@@ -115,6 +119,48 @@ describe('workspace path containment', (): void => {
 
   it('treats a nested key as contained', (): void => {
     expect(accepted(containedWorkspacePath(root, 'a/b'))).toBe(`${root}/a/b`)
+  })
+})
+
+describe('run workspace paths', (): void => {
+  it('names a run by its number and by the host that allocated it', (): void => {
+    expect(runWorkspaceKey(3, 'host-a')).toBe('run-3-hosta')
+    expect(runWorkspaceKey(3, 'host-b')).not.toBe(runWorkspaceKey(3, 'host-a'))
+    expect(runWorkspaceKey(4, 'host-a')).not.toBe(runWorkspaceKey(3, 'host-a'))
+  })
+
+  it('strips anything a path could read as a separator out of the owner', (): void => {
+    expect(runWorkspaceKey(1, '../../etc')).toBe('run-1-etc')
+  })
+
+  it('places a run under its issue, and the lease beside the run', (): void => {
+    const paths = accepted(
+      containedRunWorkspacePath(root, issueIdentifier('GH-7'), runWorkspaceKey(2, 'hostx')),
+    )
+
+    expect(paths).toEqual({
+      issueKey: 'GH-7',
+      issuePath: `${root}/GH-7`,
+      runKey: 'run-2-hostx',
+      runPath: `${root}/GH-7/run-2-hostx`,
+      leasePath: `${root}/GH-7/run-2-hostx.lease`,
+    })
+    // The lease is a sibling of the worktree, never a file inside it: the agent's own directory is
+    // what publication commits.
+    expect(isStrictDescendant(paths.issuePath, paths.runPath)).toBe(true)
+    expect(isStrictDescendant(root, paths.runPath)).toBe(true)
+  })
+
+  it('rejects a run key that leaves the issue directory', (): void => {
+    for (const runKey of ['..', '.', '../sibling', 'nested/../..']) {
+      pathRejection(containedRunWorkspacePath(root, issueIdentifier('GH-7'), runKey))
+    }
+  })
+
+  it('tells a lease record apart from a run directory', (): void => {
+    expect(isLeaseEntry('run-2-hostx.lease')).toBe(true)
+    expect(isLeaseEntry('run-2-hostx')).toBe(false)
+    expect(leasePathFor(`${root}/GH-7/run-2-hostx`)).toBe(`${root}/GH-7/run-2-hostx.lease`)
   })
 })
 

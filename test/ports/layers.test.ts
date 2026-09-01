@@ -55,7 +55,8 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   Layer.succeed(WorkspaceManagerFactory, {
     make: (settings) =>
       Effect.succeed({
-        create: () => Effect.succeed({ path: settings.root, key: 'key', createdNow: true }),
+        acquire: (run) => Effect.succeed({ run, workspace: { path: settings.root, key: 'key' } }),
+        release: () => Effect.void,
         exists: () => Effect.succeed(false),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
@@ -85,9 +86,11 @@ describe('port layer composition', (): void => {
         const runner = yield* AgentRunner
         const loader = yield* WorkflowLoader
         const watcher = yield* WorkflowWatcher
-        const workspace = yield* currentWorkspaces.create(
-          issueIdentifier('example/sloppenheimer#1'),
-        )
+        const leased = yield* currentWorkspaces.acquire({
+          identifier: issueIdentifier('example/sloppenheimer#1'),
+          runId: 1,
+        })
+        const workspace = leased.workspace
         const result = yield* runner.run({
           issue: anIssue({
             id: issueId('1'),

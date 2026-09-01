@@ -1,9 +1,10 @@
-import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
+import { Cause, Effect, Exit, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
-import { AgentError, type WorkspaceError } from '../domain/errors.js'
+import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
+import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo } from '../support/logging.js'
@@ -158,41 +159,77 @@ const runSession = (
   )
 }
 
+/** The publication-bracketed body of one run, inside the workspace the run leases. */
+const runWithSourceControl = (
+  launch: SessionLaunch,
+  workspace: Workspace,
+): Effect.Effect<void, AgentError | WorkspaceError | SourceControlError> => {
+  const { issue, sessionPorts, target } = launch
+  const sourceControl = MutableRef.get(sessionPorts).sourceControl
+  if (sourceControl === null) {
+    return runSession(launch, workspace)
+  }
+  return sourceControl.prepare(issue, workspace, target).pipe(
+    Effect.flatMap((prepared) =>
+      runSession(launch, workspace).pipe(
+        Effect.zipRight(
+          Effect.suspend(() => {
+            const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
+            return publisher.publish(issue, prepared)
+          }),
+        ),
+        Effect.tap((outcome) =>
+          logInfo('host source-control publication completed', {
+            ...logContext(issue),
+            action: 'source_control_publish',
+            outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
+            branch: outcome.branchName,
+          }),
+        ),
+        Effect.asVoid,
+      ),
+    ),
+  )
+}
+
 /**
- * The whole of one run as a fiber body: a workspace, the source-control preparation and publication
- * that bracket the session when the host owns the repository, and the `WorkerExited` that reports
- * how it ended. Every exit path offers that event, so a run can never end unobserved.
+ * What becomes of the run's workspace once the run has ended. A run that reached the end of
+ * publication has nothing left in the directory that is not in the repository; every other ending —
+ * a failure, a cancellation, an interrupted shutdown — leaves work that only the directory holds,
+ * so the workspace stays as a recovery artifact under the reason it is being kept for.
+ */
+const workspaceRelease = (
+  exit: Exit.Exit<void, AgentError | WorkspaceError | SourceControlError>,
+): WorkspaceRelease =>
+  Exit.match(exit, {
+    onSuccess: (): WorkspaceRelease => ({ _tag: 'Completed' }),
+    onFailure: (cause): WorkspaceRelease => ({
+      _tag: 'Retained',
+      reason: Option.match(Cause.failureOption(cause), {
+        onNone: () =>
+          Cause.isInterrupted(cause)
+            ? 'run cancelled before publication'
+            : 'run ended abnormally before publication',
+        onSome: (error) => `run failed before publication: ${error.message}`,
+      }),
+    }),
+  })
+
+/**
+ * The whole of one run as a fiber body: the workspace this run leases for itself, the source-control
+ * preparation and publication that bracket the session when the host owns the repository, and the
+ * `WorkerExited` that reports how it ended. Every exit path offers that event, so a run can never
+ * end unobserved, and every exit path releases the lease — including the interruption that a
+ * cancellation or a shutdown ends the run with.
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
-  const { context, issue, attempt, runId, execution, sessionPorts, target } = launch
-  return execution.workspaces.create(issue.identifier).pipe(
-    Effect.flatMap((workspace) => {
-      const sourceControl = MutableRef.get(sessionPorts).sourceControl
-      if (sourceControl === null) {
-        return runSession(launch, workspace)
-      }
-      return sourceControl.prepare(issue, workspace, target).pipe(
-        Effect.flatMap((prepared) =>
-          runSession(launch, workspace).pipe(
-            Effect.zipRight(
-              Effect.suspend(() => {
-                const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                return publisher.publish(issue, prepared)
-              }),
-            ),
-            Effect.tap((outcome) =>
-              logInfo('host source-control publication completed', {
-                ...logContext(issue),
-                action: 'source_control_publish',
-                outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
-                branch: outcome.branchName,
-              }),
-            ),
-            Effect.asVoid,
-          ),
-        ),
-      )
-    }),
+  const { context, issue, attempt, runId, execution } = launch
+  return execution.workspaces.acquire({ identifier: issue.identifier, runId }).pipe(
+    Effect.flatMap((leased) =>
+      Effect.onExit(runWithSourceControl(launch, leased.workspace), (exit) =>
+        execution.workspaces.release(leased, workspaceRelease(exit)),
+      ),
+    ),
     Effect.matchEffect({
       onFailure: (error) =>
         Queue.offer(context.mailbox, {
