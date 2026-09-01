@@ -23,7 +23,7 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
-import { realDirectoryExists, reportedAs } from './filesystem.js'
+import { pinDirectory, realDirectoryExists, reportedAs } from './filesystem.js'
 import { dropLease, holdLease, hostOwner } from './workspace-lease.js'
 import {
   discardStagedLease,
@@ -253,25 +253,38 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
         ),
         reportedAs('create_failed', 'failed to create workspace'),
       )
-      yield* publishRunClaim(fileSystem, paths, staged).pipe(
-        reportedAs('create_failed', 'failed to create workspace'),
-      )
-      // From here this process has the lease, which is something it knows rather than something it
-      // reads back: a release whose write does not land must not leave a record every later reading
-      // in this process takes for a live run.
-      holdLease(paths.leasePath)
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
-      // From here the lease is this run's own. Provisioning that does not finish keeps the
-      // workspace under the reason it failed for, rather than leaving a lease nobody holds.
-      yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
-        Effect.onExit((exit) =>
-          Exit.isSuccess(exit)
-            ? Effect.void
-            : Effect.ignore(
-                retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
-              ),
-        ),
-      )
+      // The link that publishes the claim, the run directory, and the `after_create` hook all
+      // resolve through the issue directory, so it is held still for the three of them and
+      // confirmed to be the one that was inspected before each. A directory swapped for a link
+      // between them would otherwise have this run claiming, creating and running somewhere else.
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const stillTheIssueDirectory = yield* pinDirectory(
+            fileSystem,
+            paths.issuePath,
+            'workspace directory',
+          )
+          yield* stillTheIssueDirectory
+          yield* publishRunClaim(fileSystem, paths, staged)
+          // From here this process has the lease, which is something it knows rather than something
+          // it reads back: a release whose write does not land must not leave a record every later
+          // reading in this process takes for a live run.
+          holdLease(paths.leasePath)
+          // Provisioning that does not finish keeps the workspace under the reason it failed for,
+          // rather than leaving a lease nobody holds.
+          yield* stillTheIssueDirectory
+          yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
+            Effect.onExit((exit) =>
+              Exit.isSuccess(exit)
+                ? Effect.void
+                : Effect.ignore(
+                    retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
+                  ),
+            ),
+          )
+        }),
+      ).pipe(reportedAs('create_failed', 'failed to create workspace'))
       return yield* restore(use(workspace)).pipe(
         Effect.onExit((exit) =>
           releaseRunWorkspace(

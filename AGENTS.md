@@ -605,12 +605,15 @@ lifecycle. This section is the architecture record for it; do not create a separ
   event — and a workspace deleted from under a live run is unrecoverable where a workspace left
   behind is merely untidy. This was built once with a renewable lease and taken out again: every
   clock it introduced was a way for one host to delete another's work.
-  Cleanup removes by pathname, and a pathname resolves through whatever its parents are at that
-  instant, so it reads the issue directory as an identity, holds it open for the whole pass — which
-  pins the inode — and re-confirms device and inode immediately before each destructive step. A
-  directory moved aside and replaced under its name stops the cleanup rather than being followed
-  there. It is the same rule the staged-record sweep follows, and it has the same limit: Node offers
-  no `unlinkat`, so the last instant cannot be closed by identity alone.
+  Every step that names a path resolves it through whatever its parents are at that instant, so a
+  directory is held still while it is being acted through: opened, which pins its inode, and
+  confirmed by device and inode again immediately before each step. Acquisition holds the issue
+  directory that way across the link that publishes the claim, the run directory it creates, and the
+  `after_create` hook; cleanup holds it across the reads, the `before_remove` hook, the renames and
+  the removals; the staged-record sweep holds its own the same way. A directory moved aside and
+  replaced under its name stops the caller rather than being followed there. The limit is Node's:
+  there is no `openat` or `unlinkat`, so the last instant before each step cannot be closed by
+  identity alone — what bounds it is that no path outside the configured root is ever named.
   Cleanup still fences what it does take. Deciding a workspace is free and removing it are two
   steps with an operator's `before_remove` hook between them, so the record is moved aside in one
   rename first and the decision made again on what was actually taken. Moving it aside frees the

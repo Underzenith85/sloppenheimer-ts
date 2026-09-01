@@ -9,14 +9,12 @@ import {
   isLeaseEntry,
   leasePathFor,
   leaseStagingPath,
-  rejectWorkspace,
-  sameIdentity,
   workspaceKey,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import {
-  directoryIdentity,
+  pinDirectory,
   realDirectoryExists,
   removeDirectoryIfEmpty,
   reportedAs,
@@ -199,23 +197,10 @@ export const removeIssueWorkspaces = (
       if (!(yield* realDirectoryExists(fileSystem, issuePath))) {
         return
       }
-      const verified = yield* directoryIdentity(fileSystem, issuePath, 'workspace directory')
-      const handle = yield* fileSystem.open(issuePath, { flag: 'r' })
-      const held = yield* handle.stat
-      const pinned = Option.exists(held.ino, (inode) =>
-        sameIdentity(verified, { deviceId: held.dev, inode }),
-      )
-      if (!pinned) {
-        return
-      }
-      const stillTheIssueDirectory = Effect.flatMap(
-        directoryIdentity(fileSystem, issuePath, 'workspace directory'),
-        (current) =>
-          sameIdentity(verified, current)
-            ? Effect.void
-            : Effect.fail(
-                rejectWorkspace(`workspace directory was replaced during cleanup: ${issuePath}`),
-              ),
+      const stillTheIssueDirectory = yield* pinDirectory(
+        fileSystem,
+        issuePath,
+        'workspace directory',
       )
       const remaining = yield* removeFreeRunWorkspaces(
         fileSystem,

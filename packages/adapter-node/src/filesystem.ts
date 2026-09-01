@@ -1,11 +1,12 @@
 import { type FileSystem } from '@effect/platform'
 import { SystemError, type PlatformError } from '@effect/platform/Error'
 import { rmdir } from 'node:fs/promises'
-import { Effect, Option } from 'effect'
+import { Effect, Option, type Scope } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import {
   rejectWorkspace,
+  sameIdentity,
   type DirectoryIdentity,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 
@@ -141,6 +142,44 @@ export const directoryIdentity = (
       onNone: () => Effect.fail(rejectWorkspace(`${what} has no identity: ${path}`)),
       onSome: (inode) => Effect.succeed({ deviceId: info.dev, inode }),
     })
+  })
+
+/**
+ * Holds a directory still for the length of a scope, and hands back the check that says it is still
+ * the one that was held.
+ *
+ * Every removal and every creation below names a path, and a path resolves through whatever its
+ * parents are at that instant. Opening the directory pins its inode, so one removed and recreated
+ * under that name cannot be followed; the check re-reads device and inode, so one moved aside and
+ * replaced — by a link, or by another directory — stops the caller rather than being followed
+ * there. Node offers no `openat`, so the last instant before each step cannot be closed by identity
+ * alone: what bounds it is that no path outside the configured root is ever named, and that a step
+ * whose ground has moved does not run.
+ */
+export const pinDirectory = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+  what: string,
+): Effect.Effect<
+  Effect.Effect<void, WorkspaceError | PlatformError>,
+  WorkspaceError | PlatformError,
+  Scope.Scope
+> =>
+  Effect.gen(function* () {
+    const verified = yield* directoryIdentity(fileSystem, path, what)
+    const handle = yield* fileSystem.open(path, { flag: 'r' })
+    const held = yield* handle.stat
+    const pinned = Option.exists(held.ino, (inode) =>
+      sameIdentity(verified, { deviceId: held.dev, inode }),
+    )
+    if (!pinned) {
+      return yield* Effect.fail(rejectWorkspace(`${what} could not be held still: ${path}`))
+    }
+    return Effect.flatMap(directoryIdentity(fileSystem, path, what), (current) =>
+      sameIdentity(verified, current)
+        ? Effect.void
+        : Effect.fail(rejectWorkspace(`${what} was replaced while it was in use: ${path}`)),
+    )
   })
 
 /** Applies that shape to an operation's error channel. */
