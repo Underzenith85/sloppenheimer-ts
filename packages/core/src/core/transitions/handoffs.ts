@@ -122,7 +122,13 @@ export const noteWorkspaceExamined = (
         examinedWorkspaces: withMember(state.examinedWorkspaces, id),
         unexaminedWorkspaces: withoutMember(state.unexaminedWorkspaces, id),
       }
-    : { ...state, unexaminedWorkspaces: withMember(state.unexaminedWorkspaces, id) }
+    : {
+        ...state,
+        // Forgotten rather than merely flagged: what is on disk is unknown again, so the pass that
+        // clears this has to look rather than read its own earlier answer.
+        examinedWorkspaces: withoutMember(state.examinedWorkspaces, id),
+        unexaminedWorkspaces: withMember(state.unexaminedWorkspaces, id),
+      }
 
 export const setHandoffStoreError = (
   state: RuntimeState,

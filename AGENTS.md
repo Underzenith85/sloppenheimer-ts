@@ -599,6 +599,12 @@ repair agent that had achieved nothing.
   carries no attempt behind it, and that is exactly what the queued retry consults to decide whether
   to dispatch a repair or a bare continuation — one that would edit the branch with no expected-head
   lease and without the pull request's prompt, leaving the stale repair identity on the handoff.
+- A branch that has diverged from the retained work is refused rather than published over. The
+  publication's lease is read at preparation time, so a divergence that predates the preparation
+  satisfies it trivially: rebasing onto the protected base and force-pushing would delete the
+  commits the remote holds and the workspace does not. Both sides are real work, so neither is
+  thrown away to make the other publishable — the preparation fails as a retryable `lease_conflict`
+  with the worktree preserved, and an operator decides.
 - A workspace the branch has moved past is not retained work and is not preserved either. The
   preparation resets it, for the same reason the inspection calls it clean: the next agent would
   otherwise start from a commit the remote has built on, and publishing from there force-pushes
@@ -621,6 +627,10 @@ happens to the work.
 - A cancellation that removes the workspace discards it, and drops the retained delivery in the
   same step, so a delivery can never come due against a directory that no longer exists. That is
   the terminal-issue path, and only it.
+- A discard is only true once the workspace is gone, so the removal happens before anything records
+  one. A removal that failed leaves the files where they were: it is recorded as a delivery failure
+  naming the reason, and the workspace goes back to being unexamined, which is what refuses a
+  dispatch into it until a pass has established what it holds.
 - A delivery that comes due re-reads its issue immediately before publishing. An issue that has
   since gone terminal or left its active states has its work discarded rather than pushed: putting
   a branch and a pull request on the remote for work nobody asked for any more is the one thing

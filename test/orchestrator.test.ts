@@ -1893,6 +1893,97 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('keeps a discarded workspace unexamined when its removal failed', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-discard-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      let reported = issue
+      const harness = makeHarness(isolated, () => [reported])
+      let launched = 0
+      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: () =>
+            Effect.fail(
+              new WorkspaceError({
+                category: 'remove_failed',
+                message: 'the workspace directory is busy',
+              }),
+            ),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications.push({
+                branchName: prepared.target.branchName,
+                launchedSoFar: launched,
+              })
+              return publications.length === 1
+                ? Effect.fail(deliveryFailure())
+                : Effect.succeed({
+                    _tag: 'Published',
+                    branchName: prepared.target.branchName,
+                    headSha: 'recovered-head',
+                    commitCreated: false,
+                  })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // Closed, so the delivery due next discards the work with the workspace holding it —
+          // and the removal that would make that true fails.
+          reported = { ...issue, state: 'closed' }
+          yield* TestClock.adjust('5 minutes')
+          while (snapshot.delivering.length > 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          const lookup = yield* control.agentDetail(issue.identifier)
+          expect(lookup._tag).toBe('Found')
+          if (lookup._tag === 'Found') {
+            // Not `not_performed`: the files are where they were, and reporting them gone is what
+            // would let the next agent on this issue inherit them as its own work.
+            expect(lookup.detail.handoff.publication).toMatchObject({ status: 'failed' })
+            expect(lookup.detail.handoff.publication.reason).toContain('could not be removed')
+          }
+
+          // Reopened. The workspace still holds the change, so it is examined and published rather
+          // than handed to an agent that never produced it.
+          reported = issue
+          while (publications.length < 2) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+          expect(publications[1]).toEqual({
+            branchName: 'sloppenheimer/issue-167',
+            launchedSoFar: 1,
+          })
+        }),
+      )
+    }),
+  )
+
   it.scoped('keeps the workspace manager a reload replaced until its delivery settles', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-reload-')

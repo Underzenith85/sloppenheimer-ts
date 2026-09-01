@@ -170,6 +170,52 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live('refuses a branch that has diverged from the retained work, keeping both sides', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      yield* sourceControl.prepare(issue, workspace, target)
+      // A turn that committed and could not push: the work is in the workspace and on no remote.
+      yield* host(() =>
+        commitFile(
+          fixture.workspace,
+          'implementation.ts',
+          'export const done = true\n',
+          'retained',
+        ),
+      )
+
+      // Meanwhile the branch is created from the same base and advanced by somebody else, so the
+      // two sides now hold commits neither has.
+      yield* host(() => git(fixture.seed, ['checkout', '-B', 'sloppenheimer/issue-165', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+
+      // Preserving this and refreshing the lease to the head just read would force-push the
+      // retained commit over the other one under a lease that trivially matches.
+      const failure = yield* Effect.flip(sourceControl.prepare(issue, workspace, target))
+
+      expect(failure).toMatchObject({
+        _tag: 'SourceControlError',
+        category: 'lease_conflict',
+        retryable: true,
+        worktreePreserved: true,
+      })
+      // Neither side is thrown away to make the other publishable.
+      expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
+        'retained',
+      )
+      expect(
+        yield* host(() =>
+          git(fixture.remote, ['log', '-1', '--pretty=%s', 'sloppenheimer/issue-165']),
+        ),
+      ).toBe('somebody else')
+    }),
+  )
+
   it.live('resets a workspace the branch has moved past, rather than preserving a stale head', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)

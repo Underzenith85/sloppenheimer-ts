@@ -91,10 +91,47 @@ const holdDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Effec
     })
   })
 
-/** Discards the work with the workspace holding it, because the issue is finished with. */
+/**
+ * Discards the work with the workspace holding it, because the issue is finished with.
+ *
+ * The removal is what makes the discard true, so it happens before anything says so. A removal
+ * that failed leaves the files exactly where they were: calling that discarded would report work
+ * as gone while it sits on disk, waiting for the next agent on this issue to inherit it as its own.
+ * The workspace goes back to being unexamined instead, which is what refuses that dispatch until a
+ * pass has established what is in it.
+ */
 const discardDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Effect.Effect<void> =>
   Effect.gen(function* () {
+    const removed = yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(asSettled)
     const discardedAt = yield* currentInstant
+    if (removed._tag === 'Failed') {
+      yield* logWarning('delivery workspace cleanup failed; the work is still on disk', {
+        ...logContext(entry.issue),
+        action: 'workspace_cleanup',
+        outcome: 'failed',
+        error: removed.error.message,
+      })
+      yield* Ref.update(context.state, (current) =>
+        Transitions.releaseClaim(
+          Transitions.noteWorkspaceExamined(
+            Transitions.updateDetail(current, entry.issue.id, (record) =>
+              recordPublication(record, discardedAt, {
+                status: 'failed',
+                branch: entry.prepared.target.branchName,
+                baselineSha: entry.prepared.baselineSha,
+                category: entry.failure.category,
+                attempts: entry.attempt,
+                message: `The issue no longer wants this work, and the workspace holding it could not be removed: ${removed.error.message}`,
+              }),
+            ),
+            entry.issue.id,
+            false,
+          ),
+          entry.issue.id,
+        ),
+      )
+      return
+    }
     yield* Ref.update(context.state, (current) =>
       Transitions.releaseClaim(
         Transitions.updateDetail(current, entry.issue.id, (record) =>
@@ -107,16 +144,6 @@ const discardDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Ef
           }),
         ),
         entry.issue.id,
-      ),
-    )
-    yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(
-      Effect.catchAll((error) =>
-        logWarning('delivery workspace cleanup failed', {
-          ...logContext(entry.issue),
-          action: 'workspace_cleanup',
-          outcome: 'failed',
-          error: error.message,
-        }),
       ),
     )
   })

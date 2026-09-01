@@ -183,6 +183,50 @@ const resetToBaseline = (
     ),
   )
 
+/**
+ * Refuses a preserved workspace the remote branch has moved on from independently.
+ *
+ * Publication rebases onto the protected base and force-pushes under a lease read at preparation
+ * time, so a divergence that predates the preparation satisfies that lease trivially: the push
+ * would delete the commits the remote holds and this workspace does not. The lease answers whether
+ * the branch moved while the turn ran, never whether the retained work was built on what the branch
+ * carries now — and after a restart those are different questions, because the host was not there
+ * for the interval the lease covers.
+ *
+ * Retained rather than reset, and typed retryable: both sides hold real work, and the one thing
+ * that must not happen is either being thrown away to make the other publishable.
+ */
+const refuseDivergedBranch = (
+  settings: GitSourceControlSettings,
+  workspace: Workspace,
+  target: SourceControlTarget,
+  observedRemoteHead: Option.Option<string>,
+  head: Option.Option<string>,
+): Effect.Effect<void, SourceControlError> =>
+  Effect.gen(function* () {
+    if (Option.isNone(observedRemoteHead) || Option.isNone(head)) {
+      return
+    }
+    const carried = yield* containedIn(
+      settings,
+      'prepare',
+      workspace,
+      observedRemoteHead.value,
+      head.value,
+    )
+    if (carried) {
+      return
+    }
+    yield* Effect.fail(
+      new SourceControlError({
+        category: 'lease_conflict',
+        message: `remote branch ${target.branchName} carries work this workspace does not (remote ${observedRemoteHead.value}, retained ${head.value})`,
+        retryable: true,
+        worktreePreserved: true,
+      }),
+    )
+  })
+
 const prepareRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
@@ -232,7 +276,9 @@ const prepareRepository = (
         !(yield* containedIn(settings, 'prepare', workspace, head.value, delivered))
       : false
     const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
-    if (!preserve) {
+    if (preserve) {
+      yield* refuseDivergedBranch(settings, workspace, target, observedRemoteHead, head)
+    } else {
       yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
     }
     const prepared: PreparedRepository = {
