@@ -25,7 +25,7 @@ import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.j
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { realDirectoryExists, reportedAs } from './filesystem.js'
-import { hostOwner, renewLease, sayLeaseAgain, storageInstant } from './workspace-lease.js'
+import { hostOwner, renewLease, sayClaimStands, storageInstant } from './workspace-lease.js'
 import {
   discardStagedLease,
   publishClaimedLease,
@@ -78,33 +78,6 @@ const prepareRunClaim = (
     const lease = heldLease(run, paths.runKey, owner, acquiredAt)
     yield* writeStagedLease(fileSystem, staged, lease)
     return lease
-  })
-
-/**
- * The claim, once published, still standing — and taken back where it is not.
- *
- * A record is written before it is linked into place, and a host stopped between the two for longer
- * than a lease stands would publish one that had already expired: cleanup elsewhere could take it
- * before this run had even made its directory, and the run would provision under a lease it no
- * longer held. So the claim is read against the clock that wrote it, and one that no longer stands
- * is withdrawn rather than built on.
- */
-const claimStillStands = (
-  fileSystem: FileSystem.FileSystem,
-  paths: RunWorkspacePaths,
-  claim: WorkspaceLeaseRecord,
-): Effect.Effect<void, WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    if ((yield* currentInstant).getTime() < Date.parse(claim.expiresAt)) {
-      return
-    }
-    yield* Effect.ignore(withdrawLease(fileSystem, paths, claim))
-    return yield* Effect.fail(
-      new WorkspaceError({
-        category: 'lease_conflict',
-        message: `workspace claim expired before it was published: ${paths.leasePath}`,
-      }),
-    )
   })
 
 /**
@@ -276,7 +249,6 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
         reportedAs('create_failed', 'failed to create workspace'),
       )
       yield* publishRunClaim(fileSystem, paths, staged).pipe(
-        Effect.zipRight(claimStillStands(fileSystem, paths, claim)),
         reportedAs('create_failed', 'failed to create workspace'),
       )
       // What the run knows its lease stands for, carried across both of the races below: the
@@ -284,8 +256,11 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       const standing = yield* Ref.make(Date.parse(claim.expiresAt))
       // Said once here rather than an interval from now, because the published record still carries
       // the stamp of the file it was linked from: until this write lands, a second host reads the
-      // lease as having gone unsaid for however long the claim took to publish.
-      yield* sayLeaseAgain(fileSystem, paths, run, owner, standing).pipe(
+      // lease as having gone unsaid for however long the claim took to publish. A claim this run
+      // cannot say — one that expired while it was being published, or one the filesystem would not
+      // take — is withdrawn rather than built on.
+      yield* sayClaimStands(fileSystem, paths, run, owner, standing).pipe(
+        Effect.onError(() => Effect.ignore(withdrawLease(fileSystem, paths, claim))),
         reportedAs('create_failed', 'failed to create workspace'),
       )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }

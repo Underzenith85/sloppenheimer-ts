@@ -25,7 +25,7 @@ import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.j
 import {
   hostOwner,
   renewLease,
-  sayLeaseAgain,
+  sayClaimStands,
 } from '@sloppenheimer/adapter-node/workspace-lease.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
@@ -984,13 +984,37 @@ describe('run workspace allocation and leases', (): void => {
       yield* host(() => writeFile(paths.leasePath, encodeLease(claimed)))
       const standing = yield* Ref.make(Date.parse(claimed.expiresAt))
 
-      yield* sayLeaseAgain(fileSystem, paths, run, hostOwner, standing)
+      yield* sayClaimStands(fileSystem, paths, run, hostOwner, standing)
 
       const said = yield* host(() => leaseOf(paths.runPath))
       expect(Date.parse(said.expiresAt)).toBeGreaterThan(Date.parse(claimed.expiresAt))
       expect(said.acquiredAt).toBe(claimed.acquiredAt)
       // And what the run believes moves with it, so the next renewal starts from the window it has.
       expect(yield* Ref.get(standing)).toBe(Date.parse(said.expiresAt))
+    }).pipe(Effect.provide(hostFileSystem)),
+  )
+
+  it.live('refuses a claim it cannot say, where a renewal would have waited', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const fileSystem = yield* FileSystem.FileSystem
+      const runKey = 'run-1-a-host'
+      const paths = yield* containedRunWorkspacePath(root, issueIdentifier('GH-191'), runKey)
+      const run = { identifier: issueIdentifier('GH-191'), runId: 1 }
+      const claimed = heldLease(run, runKey, hostOwner, new Date())
+      yield* host(() => mkdir(paths.issuePath, { recursive: true }))
+      yield* host(() => writeFile(paths.leasePath, encodeLease(claimed)))
+      // Nowhere to stage a record, so the write cannot land. A renewal would wait for the next one,
+      // having a window still open; a claim has nothing to wait on but the stamp it arrived with.
+      yield* host(() => writeFile(paths.stagingPath, 'not a directory\n'))
+      const standing = yield* Ref.make(Date.parse(claimed.expiresAt))
+
+      const refused = yield* Effect.exit(
+        sayClaimStands(fileSystem, paths, run, hostOwner, standing),
+      )
+
+      expect(Exit.isFailure(refused)).toBe(true)
+      expect(readFileSync(paths.leasePath, 'utf8')).toBe(encodeLease(claimed))
     }).pipe(Effect.provide(hostFileSystem)),
   )
 

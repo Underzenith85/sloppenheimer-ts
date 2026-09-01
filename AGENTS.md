@@ -599,7 +599,8 @@ lifecycle. This section is the architecture record for it; do not create a separ
   the owner's own deadline on the owner's clock, which is the only host that reads it. A run
   says its lease once as soon as it holds the claim — the published record carries the stamp of the
   file it was linked from, and until that write lands a second host reads it as having gone unsaid
-  for however long publishing took. It keeps renewing from the claim rather than from its own work,
+  for however long publishing took. That first saying has to land: unlike a renewal, which has an
+  open window to fall back on, a claim that cannot be said is withdrawn rather than built on. It keeps renewing from the claim rather than from its own work,
   because an `after_create` hook is the caller's command and is not bounded either, and both provisioning and the run itself are
   raced against the renewal: a run that has lost its lease — the record gone, released, another
   run's, past its own expiry, or one it has not managed to say again by the time the window it knew

@@ -243,15 +243,12 @@ const sayLeaseStands = (
 /**
  * Says a lease still stands, once, and records how long it now stands for.
  *
- * A run says it once itself, as soon as it has the claim: the record it published carries the stamp
- * of the file it was linked from, which is as old as whatever happened between writing that file
- * and linking it, and a run must not build anything on a record another host could already be
- * reading as unrenewed. The loop below says it again on every interval after that.
- *
  * Failing is how a lost lease reaches the run: one another host may already be taking the workspace
- * back on is not one to go on working under.
+ * back on is not one to go on working under. A filesystem that would not answer is not that, while
+ * the window the run already has is still open — which is `sayLeaseStands`'s rule, and the reason
+ * the first saying of a lease does not go through here.
  */
-export const sayLeaseAgain = (
+const sayLeaseAgain = (
   fileSystem: FileSystem.FileSystem,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
@@ -286,3 +283,30 @@ export const renewLease = (
   standing: Ref.Ref<number>,
 ): Effect.Effect<never, WorkspaceError> =>
   Effect.forever(Effect.delay(sayLeaseAgain(fileSystem, paths, run, owner, standing), intervalMs))
+
+/**
+ * The first saying of a lease, as soon as its claim is published — and it has to land.
+ *
+ * The published record carries the stamp of the file it was linked from, which is as old as
+ * whatever happened between writing that file and linking it, and a second host reads that stamp
+ * rather than this one's word for it. So the run says the lease before it builds anything on the
+ * claim, and unlike a renewal this one tolerates nothing: a claim that cannot be said again is a
+ * claim to give up, not to provision under while the record sits at a stamp nobody refreshed.
+ */
+export const sayClaimStands = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  owner: WorkspaceOwner,
+  standing: Ref.Ref<number>,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.uninterruptible(
+    Effect.flatMap(currentInstant, (now) =>
+      Effect.flatMap(saidAgain(fileSystem, paths, run, owner, now), (said) =>
+        Option.match(said, {
+          onNone: () => Effect.fail(leaseLost(paths)),
+          onSome: (until) => Ref.set(standing, until),
+        }),
+      ),
+    ),
+  )
