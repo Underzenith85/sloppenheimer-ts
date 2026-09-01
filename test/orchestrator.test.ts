@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { it } from '@effect/vitest'
 import {
   Clock,
+  Deferred,
   Effect,
   Exit,
   Fiber,
@@ -1248,6 +1249,91 @@ describe('agent turn completion separated from work publication', (): void => {
           while ((yield* control.snapshot).handoffs.length === 0) {
             yield* Effect.yieldNow()
           }
+          expect(launched).toBe(1)
+        }),
+      )
+    }),
+  )
+
+  it.scoped('retains a delivery whose discard could not remove the workspace, and retries it', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-discard-retry-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      let reported: Issue = issue
+      const harness = makeHarness(isolated, () => [reported])
+      let launched = 0
+      let removals = 0
+      // The second removal is held until the retained state has been looked at: a single clock
+      // adjustment runs the whole chain otherwise, and what this asserts is the state in between.
+      const release = yield* Deferred.make<void>()
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          // The first removal fails: the files are still there, so the discard it would have
+          // made true has not happened.
+          remove: () =>
+            Effect.suspend(() => {
+              removals += 1
+              return removals === 1
+                ? Effect.fail(
+                    new WorkspaceError({
+                      category: 'remove_failed',
+                      message: 'the workspace directory is busy',
+                    }),
+                  )
+                : Deferred.await(release)
+            }),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            () => Effect.fail(deliveryFailure()),
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+          }
+
+          // Closed, so the delivery due next discards the work — and the first removal fails.
+          reported = { ...issue, state: 'closed' }
+          while (removals < 2) {
+            yield* TestClock.adjust('5 minutes')
+            yield* Effect.yieldNow()
+          }
+          snapshot = yield* control.snapshot
+
+          // Not reported as discarded while the files are on disk. The delivery survived the
+          // failed removal, is on the next attempt number, and still holds the claim: no agent has
+          // been sent at the issue in the meantime.
+          expect(snapshot.delivering).toHaveLength(1)
+          expect(snapshot.delivering[0]?.attempt).toBe(2)
+          expect(launched).toBe(1)
+
+          yield* Deferred.succeed(release, undefined)
+          snapshot = yield* control.snapshot
+          while (snapshot.delivering.length > 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+          }
+
+          // The second removal made the discard true, so the delivery and its claim are gone.
           expect(launched).toBe(1)
         }),
       )
