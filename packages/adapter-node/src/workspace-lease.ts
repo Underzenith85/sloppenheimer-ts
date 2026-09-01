@@ -106,6 +106,16 @@ export const leaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
   leaseIsClaimed(lease, hostOwner.hostId, observeOwner(lease.owner))
 
 /**
+ * A sibling temporary file no other write can be holding at the same time.
+ *
+ * A run key carries the host that allocated it, so two hosts never write one lease path — but two
+ * writes to one path within a host would otherwise share this file, and either could truncate what
+ * the other was about to publish. The name is therefore this write's alone, and one left behind by
+ * a host that died before its own cleanup is an ordinary free entry that issue cleanup removes.
+ */
+const temporaryLeasePath = (path: string): string => `${path}.${randomUUID()}.tmp`
+
+/**
  * Publishes a lease under a name that must not already exist, which is what claims a run's
  * workspace.
  *
@@ -119,21 +129,30 @@ export const claimLease = (
   path: string,
   lease: WorkspaceLeaseRecord,
 ): Effect.Effect<void, PlatformError> =>
-  fileSystem
-    .writeFileString(`${path}.tmp`, encodeLease(lease), { mode: 0o600 })
-    .pipe(
-      Effect.zipRight(fileSystem.link(`${path}.tmp`, path)),
-      Effect.ensuring(Effect.ignore(fileSystem.remove(`${path}.tmp`, { force: true }))),
-    )
+  Effect.suspend(() => {
+    const temporary = temporaryLeasePath(path)
+    return fileSystem
+      .writeFileString(temporary, encodeLease(lease), { mode: 0o600 })
+      .pipe(
+        Effect.zipRight(fileSystem.link(temporary, path)),
+        Effect.ensuring(Effect.ignore(fileSystem.remove(temporary, { force: true }))),
+      )
+  })
 
 export const writeLease = (
   fileSystem: FileSystem.FileSystem,
   path: string,
   lease: WorkspaceLeaseRecord,
 ): Effect.Effect<void, PlatformError> =>
-  fileSystem
-    .writeFileString(`${path}.tmp`, encodeLease(lease), { mode: 0o600 })
-    .pipe(Effect.zipRight(fileSystem.rename(`${path}.tmp`, path)))
+  Effect.suspend(() => {
+    const temporary = temporaryLeasePath(path)
+    return fileSystem
+      .writeFileString(temporary, encodeLease(lease), { mode: 0o600 })
+      .pipe(
+        Effect.zipRight(fileSystem.rename(temporary, path)),
+        Effect.ensuring(Effect.ignore(fileSystem.remove(temporary, { force: true }))),
+      )
+  })
 
 /**
  * Reads the lease beside a run workspace. A lease that is not there is `none` — a run directory
