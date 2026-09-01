@@ -590,12 +590,18 @@ lifecycle. This section is the architecture record for it; do not create a separ
   An owner is probed only when both sides name the same process namespace: two containers can share
   a kernel and a root while each sees only its own ids, so anything weaker — the machine's boot
   identifier included, which both of them share — would read a stranger's process as the owner. Those are reclaimed by renewal instead: a run says its lease still stands every few minutes
-  for as long as it holds it, and one not said again in an hour belongs to a host that is gone. It
+  for as long as it holds it, and one not said again in an hour belongs to a host that is gone. Whether the
+  renewals have stopped is a duration, and durations need one clock: a second host measures how long
+  the record has gone unwritten, from the record's own stamp against the time the filesystem itself
+  reports, never the writer's `expiresAt` against the reader's wall clock — two hosts an hour apart
+  would read an expiry that never came, or one that came at once. The `expiresAt` in the record is
+  the owner's own deadline on the owner's clock, which is the only host that reads it. A run
   starts renewing with the claim rather than with its own work, because an `after_create` hook is
   the caller's command and is not bounded either, and both provisioning and the run itself are
   raced against the renewal: a run that has lost its lease — the record gone, released, another
   run's, past its own expiry, or one it has not managed to say again by the time the window it knew
-  about ran out — stops rather than working on in a directory that is no longer its own, and lets go
+  about ran out — stops, and takes back a renewal that crossed the expiry it was renewing rather
+  than leaving a record at a name cleanup may have emptied; it stops rather than working on in a directory that is no longer its own, and lets go
   of the record rather than publishing one for a workspace it no longer holds, and a run that ends stops the renewal before the record is rewritten. Cleanup takes the
   other side of that: it moves a record it has decided is free out of the way in one rename before
   anything destructive runs, so a `before_remove` hook never runs against a lease that could still

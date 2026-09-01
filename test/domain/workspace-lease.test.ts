@@ -27,8 +27,8 @@ const owner: WorkspaceOwner = {
   startMarker: '918273',
   namespace: 'boot-1/pid:[4026531836]',
 }
-/** While the run that took the lease could still plausibly be running. */
-const soonAfter = new Date('2026-08-31T10:30:00.000Z')
+/** How long the record has gone unwritten while the run holding it is still renewing. */
+const saidRecently = 30 * 1_000
 const running = (startMarker: string | null): OwnerObservation => ({ _tag: 'Running', startMarker })
 const gone: OwnerObservation = { _tag: 'Gone' }
 const unobservable: OwnerObservation = { _tag: 'Unobservable' }
@@ -112,58 +112,59 @@ describe('workspace lease records', (): void => {
 
 describe('who a lease belongs to', (): void => {
   it('is claimed while the host that wrote it says so', (): void => {
-    expect(leaseIsClaimed(lease, 'host-a', gone, soonAfter)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-a', gone, saidRecently)).toBe(true)
     expect(
       leaseIsClaimed(
         retainedLease(lease, 'released', releasedAt),
         'host-a',
         running('918273'),
-        soonAfter,
+        saidRecently,
       ),
     ).toBe(false)
   })
 
   it('is claimed by another host only while that host is running', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running('918273'), soonAfter)).toBe(true)
-    expect(leaseIsClaimed(lease, 'host-b', gone, soonAfter)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('918273'), saidRecently)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', gone, saidRecently)).toBe(false)
   })
 
   it('is not claimed by a process that merely inherited the recorded id', (): void => {
     // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
-    expect(leaseIsClaimed(lease, 'host-b', running('554433'), soonAfter)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('554433'), saidRecently)).toBe(false)
   })
 
   it('leaves an owner this host cannot observe alone', (): void => {
     // Two containers sharing a workspace root read their own process ids, not each other's, so an
     // owner in another namespace is never concluded to be gone.
-    expect(leaseIsClaimed(lease, 'host-b', unobservable, soonAfter)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', unobservable, saidRecently)).toBe(true)
     expect(
       leaseIsClaimed(
         retainedLease(lease, 'released', releasedAt),
         'host-b',
         unobservable,
-        soonAfter,
+        saidRecently,
       ),
     ).toBe(false)
   })
 
-  it('stops claiming an unobservable owner once no run could still be holding it', (): void => {
+  it('stops claiming an unobservable owner once the renewals have stopped', (): void => {
     // The one rule that reclaims a crashed host's workspaces where the kernel names nothing to
-    // compare — and it waits out the run the owner was configured for, which the lease states.
-    const muchLater = new Date(Date.parse(lease.expiresAt) + 1_000)
+    // compare, and it waits out far more missed renewals than a slow filesystem could cause. How
+    // long the record has gone unwritten is the caller's to measure, on the storage's own clock.
+    const unsaidForTooLong = leaseValidityMs + 1_000
 
-    expect(leaseIsClaimed(lease, 'host-b', unobservable, muchLater)).toBe(false)
-    expect(leaseIsClaimed(lease, 'host-b', running('918273'), muchLater)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', unobservable, unsaidForTooLong)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('918273'), unsaidForTooLong)).toBe(true)
   })
 
   it('takes a running owner at face value when either marker is missing', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running(null), soonAfter)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', running(null), saidRecently)).toBe(true)
     expect(
       leaseIsClaimed(
         { ...lease, owner: { ...owner, startMarker: null } },
         'host-b',
         running('554433'),
-        soonAfter,
+        saidRecently,
       ),
     ).toBe(true)
   })

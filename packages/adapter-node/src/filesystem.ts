@@ -6,7 +6,8 @@ import { Effect } from 'effect'
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 
 /**
- * The filesystem questions the workspace adapters ask that `FileSystem` does not answer directly.
+ * The filesystem questions the workspace adapters ask that `FileSystem` does not answer directly,
+ * and the shape they report a host's refusal in.
  */
 
 /**
@@ -102,3 +103,20 @@ export const realDirectoryExists = (
       () => Effect.succeed(false),
     ),
   )
+
+/**
+ * The one shape every operation reports through: a containment or lease rejection is already the
+ * answer and travels unchanged, and anything else becomes this operation's own category.
+ */
+const workspaceFailure =
+  (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
+  (cause: WorkspaceError | PlatformError): WorkspaceError =>
+    cause instanceof WorkspaceError ? cause : new WorkspaceError({ category, message, cause })
+
+/** Applies that shape to an operation's error channel. */
+export const reportedAs =
+  (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
+  <Value>(
+    effect: Effect.Effect<Value, WorkspaceError | PlatformError>,
+  ): Effect.Effect<Value, WorkspaceError> =>
+    Effect.mapError(effect, workspaceFailure(category, message))

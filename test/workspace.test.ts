@@ -465,6 +465,9 @@ const foreignWorkspace = async (
       heldLease({ identifier: issueIdentifier(identifier), runId: 9 }, runKey, owner, acquiredAt),
     ),
   )
+  // When the record was last written, which is what a second host reads rather than the expiry the
+  // owner wrote into it: the two hosts share the filesystem's clock and nothing else.
+  await utimes(`${path}.lease`, acquiredAt, acquiredAt)
   return path
 }
 
@@ -954,6 +957,33 @@ describe('run workspace allocation and leases', (): void => {
         ? Cause.failureOption(lost.cause)
         : Option.none<WorkspaceError>()
       expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
+    }).pipe(Effect.provide(hostFileSystem)),
+  )
+
+  it.live('never says a lease again once it has expired', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const fileSystem = yield* FileSystem.FileSystem
+      const runKey = 'run-1-a-host'
+      const paths = yield* containedRunWorkspacePath(root, issueIdentifier('GH-189'), runKey)
+      const run = { identifier: issueIdentifier('GH-189'), runId: 1 }
+      // This host's own record, expired: another host is already free to take the workspace on the
+      // strength of it, so writing it back would be taking it out from under whoever did.
+      const expired = encodeLease(
+        heldLease(run, runKey, hostOwner, new Date(Date.now() - 2 * leaseValidityMs)),
+      )
+      yield* host(() => mkdir(paths.issuePath, { recursive: true }))
+      yield* host(() => writeFile(paths.leasePath, expired))
+
+      const lost = yield* Effect.exit(
+        renewLease(fileSystem, paths, run, hostOwner, 10, Date.now() + 60_000),
+      )
+
+      const failure = Exit.isFailure(lost)
+        ? Cause.failureOption(lost.cause)
+        : Option.none<WorkspaceError>()
+      expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
+      expect(readFileSync(paths.leasePath, 'utf8')).toBe(expired)
     }).pipe(Effect.provide(hostFileSystem)),
   )
 

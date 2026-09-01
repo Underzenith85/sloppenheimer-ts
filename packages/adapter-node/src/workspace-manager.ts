@@ -3,15 +3,11 @@ import type { PlatformError } from '@effect/platform/Error'
 import { Cause, Effect, Exit, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
-import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
+import type { Workspace } from '@sloppenheimer/core/domain/domain.js'
 import {
   containedRunWorkspacePath,
-  containedWorkspacePath,
-  isLeaseEntry,
-  leasePathFor,
   leaseStagingPath,
   runWorkspaceKey,
-  workspaceKey,
   type RunWorkspacePaths,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
@@ -27,21 +23,22 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
-import { realDirectoryExists, removeDirectoryIfEmpty } from './filesystem.js'
+import { realDirectoryExists, reportedAs } from './filesystem.js'
+import { hostOwner, renewLease } from './workspace-lease.js'
 import {
   discardStagedLease,
-  hostOwner,
-  leaseIsLive,
   publishClaimedLease,
   pruneStagedLeases,
   readLease,
-  renewLease,
-  returnLease,
   stagedLeasePath,
-  takeLease,
   writeLease,
   writeStagedLease,
-} from './workspace-lease.js'
+} from './workspace-lease-store.js'
+import {
+  issueHoldsWorkspace,
+  removeIssueWorkspaces,
+  removeRunWorkspace,
+} from './workspace-cleanup.js'
 import { runHook } from './workspace-hooks.js'
 
 /**
@@ -104,109 +101,6 @@ const publishRunClaim = (
         ),
     ),
   )
-
-/**
- * The one shape every operation reports through: a containment or lease rejection is already the
- * answer and travels unchanged, and anything else becomes this operation's own category.
- */
-const workspaceFailure =
-  (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
-  (cause: WorkspaceError | PlatformError): WorkspaceError =>
-    cause instanceof WorkspaceError ? cause : new WorkspaceError({ category, message, cause })
-
-/** Applies that shape to an operation's error channel. */
-const reportedAs =
-  (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
-  <Value>(
-    effect: Effect.Effect<Value, WorkspaceError | PlatformError>,
-  ): Effect.Effect<Value, WorkspaceError> =>
-    Effect.mapError(effect, workspaceFailure(category, message))
-
-/** The run keys an issue directory holds, from its run directories and its lease records alike. */
-const runKeysIn = (entries: readonly string[]): readonly string[] => [
-  ...new Set(
-    entries.map((entry) => (isLeaseEntry(entry) ? entry.slice(0, -'.lease'.length) : entry)),
-  ),
-]
-
-/** Removes one run's directory and the lease record beside it, hooks first. */
-const removeRunWorkspace = (
-  fileSystem: FileSystem.FileSystem,
-  hooks: HooksConfig,
-  runPath: string,
-): Effect.Effect<void, WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    if (hooks.beforeRemove !== null && (yield* realDirectoryExists(fileSystem, runPath))) {
-      yield* runHook('before_remove', hooks.beforeRemove, runPath, hooks.timeoutMs).pipe(
-        Effect.catchAll(() => Effect.void),
-      )
-    }
-    yield* fileSystem.remove(runPath, { force: true, recursive: true })
-    yield* fileSystem.remove(leasePathFor(runPath), { force: true })
-  })
-
-/**
- * Removes one run workspace that no live owner holds, unless taking its record shows otherwise.
- *
- * Reading a lease and removing what it names are two steps, and a `before_remove` hook stands
- * between them: an owner this host cannot observe could say its lease still stands in that time,
- * and the removal would then be taking a workspace back off a live run. So the record is taken out
- * of the way before anything destructive runs, and the removal proceeds only if what was taken is
- * still the record that was decided on. A lease that stands again goes back where it was, and the
- * run keeps its workspace.
- */
-const removeFreeRunWorkspace = (
-  fileSystem: FileSystem.FileSystem,
-  hooks: HooksConfig,
-  runPath: string,
-  stagingPath: string,
-): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    const leasePath = leasePathFor(runPath)
-    const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
-    const now = yield* currentInstant
-    if (Option.exists(taken, (record) => leaseIsLive(record.lease, now))) {
-      yield* Option.match(taken, {
-        onNone: () => Effect.void,
-        onSome: (record) => returnLease(fileSystem, record, leasePath),
-      })
-      return false
-    }
-    yield* removeRunWorkspace(fileSystem, hooks, runPath)
-    yield* Option.match(taken, {
-      onNone: () => Effect.void,
-      onSome: (record) => discardStagedLease(fileSystem, record.path),
-    })
-    return true
-  })
-
-/**
- * Every run workspace of one issue that no live owner holds, removed; the run keys that were left
- * alone are returned, because an issue directory still holding one of them cannot go with them.
- */
-const removeFreeRunWorkspaces = (
-  fileSystem: FileSystem.FileSystem,
-  hooks: HooksConfig,
-  issuePath: string,
-  stagingPath: string,
-): Effect.Effect<readonly string[], WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    const entries = yield* fileSystem.readDirectory(issuePath)
-    const now = yield* currentInstant
-    const held: string[] = []
-    for (const key of runKeysIn(entries)) {
-      const runPath = yield* containedWorkspacePath(issuePath, key)
-      const lease = yield* readLease(fileSystem, leasePathFor(runPath))
-      if (Option.exists(lease, (record) => leaseIsLive(record, now))) {
-        held.push(key)
-        continue
-      }
-      if (!(yield* removeFreeRunWorkspace(fileSystem, hooks, runPath, stagingPath))) {
-        held.push(key)
-      }
-    }
-    return held
-  })
 
 /** Reports a failure that a release has no one left to report it to. */
 const warnRelease = (path: string, error: WorkspaceError): Effect.Effect<void> =>
@@ -315,56 +209,6 @@ const releaseRunWorkspace = (
     ),
     Effect.catchAll((error) => warnRelease(leased.workspace.path, error)),
   )
-
-/** An issue's retained workspaces, and never one a live run still holds. */
-const removeIssueWorkspaces = (
-  fileSystem: FileSystem.FileSystem,
-  hooks: HooksConfig,
-  root: string,
-  identifier: IssueIdentifier,
-): Effect.Effect<void, WorkspaceError> =>
-  Effect.gen(function* () {
-    const issuePath = yield* containedWorkspacePath(root, workspaceKey(identifier))
-    if (!(yield* realDirectoryExists(fileSystem, issuePath))) {
-      return
-    }
-    const held = yield* removeFreeRunWorkspaces(
-      fileSystem,
-      hooks,
-      issuePath,
-      leaseStagingPath(root),
-    )
-    if (held.length > 0) {
-      yield* logWarning('leased workspaces kept during cleanup', {
-        action: 'workspace_cleanup',
-        outcome: 'skipped',
-        path: issuePath,
-        leased: held.length,
-      })
-      return
-    }
-    // Not a recursive removal: a run acquired while the scan was running would be swept up with
-    // the container it had just been created in. `rmdir` refuses a directory that is no longer
-    // empty, so a workspace that appeared during cleanup survives it.
-    yield* removeDirectoryIfEmpty(issuePath)
-  }).pipe(reportedAs('remove_failed', 'failed to remove workspace'))
-
-/**
- * Whether the issue holds a workspace at all: an issue directory emptied by the last run to let go
- * of its own is nothing to clean up, and says so.
- */
-const issueHoldsWorkspace = (
-  fileSystem: FileSystem.FileSystem,
-  root: string,
-  identifier: IssueIdentifier,
-): Effect.Effect<boolean, WorkspaceError> =>
-  Effect.gen(function* () {
-    const path = yield* containedWorkspacePath(root, workspaceKey(identifier))
-    if (!(yield* realDirectoryExists(fileSystem, path))) {
-      return false
-    }
-    return (yield* fileSystem.readDirectory(path)).length > 0
-  }).pipe(reportedAs('inspect_failed', 'failed to inspect workspace'))
 
 /**
  * One run's whole hold on a workspace: the claim, the directory it names, and the release that

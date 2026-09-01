@@ -99,8 +99,10 @@ const leaseSchema = Schema.Struct({
   reason: Schema.NullOr(Schema.String),
   acquiredAt: timestamp,
   /**
-   * When the run that took this lease can no longer be running, by its own workflow's limits. It is
-   * what a host that cannot observe the owner waits for rather than guessing at.
+   * When this lease stops standing unless the run says it again — on the clock of the host that
+   * wrote it, and so meaningful to that host alone. It is what the run itself renews against; a
+   * second host reads how long the record has gone unwritten instead, because two wall clocks are
+   * not one clock.
    */
   expiresAt: timestamp,
   releasedAt: Schema.NullOr(timestamp),
@@ -233,7 +235,10 @@ export const leaseIsOurs = (
  * that names neither — stays claimed rather than being probed against whatever process happens to
  * carry that id here. What reclaims those is renewal: a run says its lease still stands for as long
  * as it holds it, and one that has not been said again in far longer than the interval between
- * renewals belongs to a host that is no longer there to say it.
+ * renewals belongs to a host that is no longer there to say it. How long it has gone unsaid is the
+ * caller's to measure, and it must measure it on one clock — the record's own storage, never the
+ * writer's `expiresAt` against the reader's wall clock, which two hosts an hour apart would read as
+ * an expiry that never came or one that came at once.
  *
  * Within one namespace, a process id alone still does not identify a process: a host restarted into
  * the same id, the ordinary case for a container's PID 1, would otherwise keep its predecessor's
@@ -246,7 +251,7 @@ export const leaseIsClaimed = (
   lease: WorkspaceLeaseRecord,
   hostId: string,
   observation: OwnerObservation,
-  now: Date,
+  unrenewedForMs: number,
 ): boolean => {
   if (lease.status !== 'held') {
     return false
@@ -255,7 +260,7 @@ export const leaseIsClaimed = (
     return true
   }
   if (observation._tag === 'Unobservable') {
-    return now.getTime() < Date.parse(lease.expiresAt)
+    return unrenewedForMs < leaseValidityMs
   }
   if (observation._tag === 'Gone') {
     return false
