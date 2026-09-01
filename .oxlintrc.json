@@ -55,11 +55,18 @@
       // exemption naming the issue that removes it.
       //
       // This entry is the part that needs no exemption: #224 brought the three adapter packages
-      // under both limits by extraction, and #225 the telemetry record, so the rule is on for them
-      // now and nothing there can drift back over without failing `pnpm check`.  Telemetry is named
-      // by path rather than by package because the rest of `packages/core/src` is still over the
-      // bar; #211 turns the rule on for the package as a whole, and each module still over it then
-      // takes an exemption naming the issue that removes it.
+      // under both limits by extraction, #225 the telemetry record, and #226 the operator console
+      // and API, so the rule is on for them now and nothing there can drift back over without
+      // failing `pnpm check`.  Telemetry is named by path rather than by package because the rest of
+      // `packages/core/src` is still over the bar; #211 turns the rule on for the package as a
+      // whole, and each module still over it then takes an exemption naming the issue that removes
+      // it.  `src/operator/**` is the whole of the composition root that #226 covers; #211 owns
+      // turning the rule on for the rest of `src/`.
+      //
+      // The limits apply to `src/operator/ui/` as they do everywhere else.  Those files are classic
+      // scripts sharing one global scope rather than modules, so splitting one is splitting a
+      // script: the parts are new entries in the ordered list in `src/operator/ui-assets.ts`, not
+      // new imports.
       //
       // 100 rather than ESLint's 50, because `Effect.gen` pipelines are vertically expensive: each
       // `Effect.matchEffect` branch costs six to eight lines of structure, so a 50-line bar flags
@@ -70,7 +77,8 @@
         "packages/adapter-github/src/**",
         "packages/adapter-node/src/**",
         "packages/core/src/telemetry.ts",
-        "packages/core/src/telemetry/**"
+        "packages/core/src/telemetry/**",
+        "src/operator/**"
       ],
       "rules": {
         "max-lines": ["error", { "max": 500, "skipBlankLines": false, "skipComments": false }],
