@@ -297,12 +297,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               (event.attempt ?? 0) + 1,
               event.error,
               false,
+              settled.repairRun,
             )
             break
           }
           const codeReview = settled.execution.codeReview
           if (Option.isNone(codeReview)) {
-            yield* context.scheduleRetry(settled.issue, 1, null, true)
+            yield* context.scheduleRetry(settled.issue, 1, null, true, settled.repairRun)
             break
           }
           // Published before the tracker call, not after it: the worker is already out of the
@@ -340,6 +341,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               (event.attempt ?? 0) + 1,
               `handoff failed: ${handoff.error.message}`,
               false,
+              settled.repairRun,
             )
             break
           }
@@ -357,7 +359,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 }),
               ),
             )
-            yield* context.scheduleRetry(settled.issue, 1, null, true)
+            yield* context.scheduleRetry(settled.issue, 1, null, true, settled.repairRun)
             break
           }
           const observedAt = yield* currentInstant
@@ -411,7 +413,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
               observedAt: handedOffAt,
             })
-            return [existing !== undefined && Option.isSome(existing.repair), next] as const
+            return [settled.repairRun, next] as const
           })
           yield* context.persistHandoffs
           yield* logInfo('worker handed off pull request', {
@@ -427,7 +429,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               Transitions.releaseClaim(current, event.issueId),
             )
           } else {
-            yield* context.scheduleRetry(settled.issue, 1, null, true)
+            yield* context.scheduleRetry(settled.issue, 1, null, true, false)
           }
           break
         }
@@ -458,9 +460,11 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           const current = yield* Ref.get(context.state)
           const effective = current.lastKnownGood
           const handoff = Option.fromNullable(current.handoffs.get(event.issueId))
-          const repairHandoff = Option.filter(handoff, (entry) =>
-            Option.exists(entry.repair, (repair) => repair.inFlight),
-          )
+          const repairHandoff = due.value.repairRun
+            ? Option.filter(handoff, (entry) =>
+                Option.exists(entry.repair, (repair) => repair.inFlight),
+              )
+            : Option.none<HandoffEntry>()
           const refreshTracker = Option.match(repairHandoff, {
             onNone: () => effective.tracker,
             onSome: (entry) => entry.execution.tracker,
@@ -474,6 +478,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               event.attempt + 1,
               `retry refresh failed: ${refreshResult.error.message}`,
               false,
+              due.value.repairRun,
               refreshResult.error,
             )
             if (!scheduled && Option.isSome(repairHandoff)) {
@@ -519,6 +524,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
                 event.attempt + 1,
                 `repair baseline refresh failed: ${inspected.error.message}`,
                 false,
+                true,
                 inspected.error,
               )
               if (!scheduled) {
@@ -578,6 +584,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               issue.value,
               event.attempt + 1,
               'no available orchestrator slots',
+              false,
               false,
             )
             break
