@@ -1,4 +1,4 @@
-# Symphony for TypeScript
+# Sloppenheimer for TypeScript
 
 A Node.js 24 and native TypeScript 7 implementation of the
 [OpenAI Symphony specification](https://github.com/openai/symphony/blob/main/SPEC.md).
