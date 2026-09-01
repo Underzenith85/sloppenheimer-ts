@@ -54,11 +54,14 @@ the design, not a starting point to negotiate down: `exactOptionalPropertyTypes`
   implementing a port, which is the harness pattern to follow.
 - Formatting is Oxfmt's: no semicolons, single quotes, 100-column width, trailing commas. Numeric
   literals over four digits take separators (`10_000`).
-- Names are whole words. `argumentsValue`, `secretEnvironmentNames`, `retirePrevious` — not `args`,
-  `envs`, `prev`. A name that needs a comment to expand it is the wrong name.
-- Modules cap at 500 lines and functions at 100, enforced where `.oxlintrc.json` turns the limits on
-  and being extended package by package. Write to the limit even where it is not yet enforced; the
-  way past it is extraction, not an exemption.
+- Names are whole words: `argumentsValue`, `secretEnvironmentNames`, `retirePrevious`, not `envs`
+  or `prev`. A name that needs a comment to expand it is the wrong name. The exception is a term of
+  art the platform itself uses — `args` for a process argument vector, as in
+  `packages/adapter-node/src/git-process.ts`, reads as the thing being spawned rather than as an
+  abbreviation.
+- Modules cap at 500 lines and functions at 100, enforced everywhere with no exemption. **Module
+  and function size** below has the thresholds and what to do when one is in the way; the way past
+  a limit is extraction, never a raised threshold.
 
 ## Effect is the default vocabulary
 
@@ -86,11 +89,12 @@ another effect.
 
 The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.TaggedError` classes —
 `WorkflowError`, `TrackerError`, `WorkspaceError`, `SourceControlError`, `AgentError`,
-`HandoffStoreError`, `ServerError`. Each carries a human `message`, an optional `cause`, a
+`HandoffStoreError`, `CompletionStoreError`, `ServerError`. Each carries a human `message`, an
+optional `cause`, a
 discriminator its callers branch on, and whatever else they need to decide — `retryable` and
 `retryAfterMs` on `TrackerError`, `worktreePreserved` on `SourceControlError`. The discriminator is
-a `category` union in every one of them except `HandoffStoreError`, which distinguishes only the
-`operation: 'read' | 'write'` that failed.
+a `category` union in every one of them except the two store errors, `HandoffStoreError` and
+`CompletionStoreError`, which distinguish only the `operation: 'read' | 'write'` that failed.
 
 - Extend an existing discriminator before adding an error class. A new class is warranted only when
   a new port needs a failure that no existing port's callers can handle.
@@ -117,9 +121,16 @@ escapes as a defect. `authoredFields` in
 `WorkflowError`, wrapped once in `Effect.try` that maps the caught value back. `decodeTrackerOrThrow`
 in `packages/adapter-github/src/client.ts` is the same idea factored out, and its doc comment says so.
 
-Keep that pattern inside one module, and keep the wrapping `Effect.try` in view of the throw. A
-throwing helper exported for a caller elsewhere to wrap is not this pattern; it is a rethrown
-exception with extra steps.
+Keep the wrapping `Effect.try` in view of the throw wherever you can: a helper that throws in the
+middle of a module, for a wrapper at its edge, is easy to read and hard to misuse.
+
+One helper is deliberately not local to its wrapper. `trackerProviderOf` in
+`packages/core/src/domain/tracker-provider.ts` — and `githubProviderOf`, which re-exports it —
+throws a `WorkflowError` when a validated selection is not the kind an adapter registered for, and
+each factory in `src/tracker-adapters.ts` calls it inside its own `Effect.try`. It is shared by
+every capability of every registered provider, so it is written once and its callers supply the
+boundary. If you export a throwing helper, say so in its doc comment as that one does, and make
+every call site wrap it.
 
 The second is the process boundary that runs before there is a runtime to fail into:
 `parseCliArguments` in `src/config/cli-options.ts` throws on a malformed argument, and its caller
@@ -198,7 +209,7 @@ below follows from that shape.
   then a decision, then a write spread across several effects. Most of them happen in the mailbox
   loop, which is what orders event-driven work, but the loop is not the only writer: a runner
   callback buffers telemetry through `runFromCallback` in `core/dispatch.ts`, and `requestRefresh`
-  in `core/runtime.ts` registers its waiter before offering the tick. Each of those is a single
+  in `core/runtime/scheduling.ts` registers its waiter before offering the tick. Each of those is a single
   atomic transition, which is what lets it run beside the loop. (The doc comment on `RuntimeState`
   still calls the loop the single writer; this section is the accurate one.)
 - Transitions are pure functions of the state and what happened, living in
@@ -423,11 +434,37 @@ change which tests each profile runs.
   — extends `tsconfig.package.json`, declares `@types/node` itself, is added to
   `tsconfig.build.json`'s references and to the root `tsconfig.json` `paths`, and is asserted in
   `test/package-boundaries.test.ts`.
-- **Dependencies** are pinned exactly, never with a range. A new one needs a reason that survives
-  the question "what does this do that Effect or Node does not". The Effect trio moves as a set.
+- **Dependencies** on an external package are pinned to an exact version, never a range. A new one
+  needs a reason that survives the question "what does this do that Effect or Node does not". The
+  Effect trio moves as a set. A dependency on another package in this workspace is `workspace:*`,
+  which is not a range: there is one version of each, in this repository.
 - **Adding an adapter** of an existing kind is one entry in the registry beside the composition root
   — `src/tracker-adapters.ts` or `src/agent-runners.ts` — and no change under `config/` or `core/`.
   Backend-specific settings are validated in that backend's adapter, never in `packages/core`.
+
+## Module and function size
+
+[#211](https://github.com/Underzenith85/sloppenheimer-ts/issues/211) set the bar: **500 lines a
+module, 100 lines a function**, counting blank lines and comments. `.oxlintrc.json` configures
+`max-lines` and `max-lines-per-function` at those thresholds for every source directory in the
+workspace, so `pnpm lint` — and therefore `pnpm check` — fails on a module or function that grows
+past one.
+
+- 100 rather than ESLint's default 50, because `Effect.gen` pipelines are vertically expensive: an
+  `Effect.matchEffect` branch costs six to eight lines of structure, so a 50-line bar flags
+  idiomatic Effect code that is not complex.
+- The rules are scoped to sources, never to `test/`, where `max-lines-per-function` would count a
+  `describe` callback and flag suite structure rather than complexity.
+- There is no exemption anywhere today. A module that genuinely has to exceed one of these takes an
+  `overrides` entry of its own naming the issue that removes it again — the same convention the
+  import allow-lists use. Never raise a threshold to accommodate a file.
+
+The orchestrator is the worked example. `packages/core/src/core/runtime.ts` is assembly and nothing
+else; every operation the running host performs lives in a module under `core/runtime/` and takes
+the cells it needs — the state `Ref`, the mailbox, the handoff store — as a parameter rather than
+closing over the factory's scope. `OrchestratorContext` is those module-level functions bound to
+one set of cells, built by `core/runtime/context.ts`. Add an operation as a module beside them, not
+as a closure inside the factory.
 
 ## Module import direction
 

@@ -42,12 +42,17 @@ import {
   TrackerError,
   WorkflowError,
   WorkspaceError,
+  type CompletionStoreError,
   type HandoffStoreError,
 } from '@sloppenheimer/core/domain/errors.js'
 import {
   loadHandoffs as loadHandoffsAgainstFileSystem,
   saveHandoffs as saveHandoffsAgainstFileSystem,
 } from '@sloppenheimer/core/core/handoff-store.js'
+import {
+  loadCompletions as loadCompletionsAgainstFileSystem,
+  saveCompletions as saveCompletionsAgainstFileSystem,
+} from '@sloppenheimer/core/core/completion-store.js'
 import type {
   CodexReviewObservation,
   HandoffSnapshot,
@@ -59,6 +64,7 @@ import {
   sortIssues,
   startOrchestrator,
   type AgentDetailLookup,
+  type CompletedSnapshot,
   type OrchestratorControl,
   type OrchestratorServices,
 } from '@sloppenheimer/core'
@@ -124,6 +130,17 @@ const saveHandoffs = (
   handoffs: readonly HandoffSnapshot[],
 ): Effect.Effect<void, HandoffStoreError> =>
   onHostFileSystem(saveHandoffsAgainstFileSystem(path, handoffs))
+
+const loadCompletions = (
+  path: string,
+): Effect.Effect<readonly CompletedSnapshot[], CompletionStoreError> =>
+  onHostFileSystem(loadCompletionsAgainstFileSystem(path))
+
+const saveCompletions = (
+  path: string,
+  completions: readonly CompletedSnapshot[],
+): Effect.Effect<void, CompletionStoreError> =>
+  onHostFileSystem(saveCompletionsAgainstFileSystem(path, completions))
 import type { HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
 import type { ValidatedTrackerProvider } from '@sloppenheimer/core/domain/tracker-provider.js'
 import {
@@ -3782,6 +3799,313 @@ describe('restored pull request handoffs', (): void => {
   )
 })
 
+describe('persisted finished work', (): void => {
+  /** The instant every test in this block dates its finished work against. */
+  const now = Date.parse('2026-08-31T12:00:00.000Z')
+
+  const awaitingChecks = (issue: Issue): HandoffSnapshot => ({
+    issueId: issue.id,
+    identifier: issue.identifier,
+    pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/44',
+    branchName: 'sloppenheimer/issue-63',
+    state: 'awaiting_checks',
+    headSha: null,
+    reason: null,
+    repairAttempts: 0,
+    observedAt: new Date(now).toISOString(),
+  })
+
+  /** A code review that reports the pull request as already merged, at the instant given. */
+  const mergedAt =
+    (harness: TestHarness, instant: string) =>
+    (provider: ValidatedTrackerProvider): CodeReviewPort => ({
+      ...requireCodeReview(harness.ports, provider),
+      inspectPullRequest: (pullRequestNumber) =>
+        Effect.succeed({
+          number: pullRequestNumber,
+          state: 'closed' as const,
+          url: null,
+          headSha: null,
+          merged: true as const,
+          mergeCommitSha: null,
+          mergedAt: instant,
+          mergeable: null,
+          mergeState: 'unknown',
+          checks: [],
+          reviewDecision: null,
+          reviewThreads: [],
+        }),
+    })
+
+  const completion = (identifier: string, finishedAt: string): CompletedSnapshot => ({
+    issueId: issueId(identifier),
+    identifier,
+    title: identifier,
+    url: null,
+    outcome: 'merged',
+    finishedAt,
+    pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/9',
+  })
+
+  it.scoped('carries finished work across a restart, dated by the provider merge time', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-store-')
+      const completionStorePath = join(workspaceRoot, '.sloppenheimer', 'completions.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#63', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('63'),
+      }
+      yield* saveHandoffs(join(workspaceRoot, '.sloppenheimer', 'handoffs.json'), [
+        awaitingChecks(issue),
+      ])
+      const merging = makeHarness(isolated, () => [issue])
+
+      const before = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...merging.ports,
+            makeCodeReview: mergedAt(merging, '2026-08-31T09:00:00.000Z'),
+          })
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      // That host is gone. A second one comes up against the same workspace, and the tracker no
+      // longer lists an issue whose pull request merged.
+      const restarted = makeHarness(isolated)
+      const after = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', restarted.ports)
+          yield* control.refresh
+          return {
+            snapshot: yield* control.snapshot,
+            detail: yield* control.agentDetail(issue.identifier),
+          }
+        }),
+      )
+
+      expect(before.completed).toHaveLength(1)
+      expect(yield* loadCompletions(completionStorePath)).toEqual(before.completed)
+      // The window is a window again rather than a lifetime: the restart no longer empties it.
+      expect(after.snapshot.completed).toEqual(before.completed)
+      expect(after.snapshot.completed[0]).toMatchObject({
+        identifier: issue.identifier,
+        outcome: 'merged',
+        pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/44',
+        finishedAt: '2026-08-31T09:00:00.000Z',
+      })
+      expect(after.snapshot.counts.completed).toBe(1)
+      // The deliberate half of #172. A restored completion is republished history and nothing
+      // more: it holds no claim and no session, so the versioned agent-detail resource answers
+      // exactly as it did before this store existed.
+      expect(after.detail).toEqual({ _tag: 'Unknown', identifier: issue.identifier })
+    }),
+  )
+
+  it.scoped('writes both stores beside the workspace root a reload moved to', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-reload-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-reloaded-')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      // The reload moves the workspace root; the stores describe one host's state and must follow
+      // it, or the next startup reads them from a directory this host never wrote to.
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        config: { ...isolated.config, workspaceRoot: reloadedRoot },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#63', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('63'),
+      }
+      yield* saveHandoffs(join(workspaceRoot, '.sloppenheimer', 'handoffs.json'), [
+        awaitingChecks(issue),
+      ])
+      // The issue hydrates the restored handoff but is never offered for dispatch: this test is
+      // about where the stores are written, not about putting an agent on the issue.
+      const harness = makeHarness(
+        isolated,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      // The pull request stays unfinished until the reload has taken effect, so the merge this
+      // asserts on is one the host records under the root it moved to.
+      const openHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let merged = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (pullRequestNumber) =>
+            merged
+              ? mergedAt(
+                  harness,
+                  '2026-08-31T09:00:00.000Z',
+                )(provider).inspectPullRequest(pullRequestNumber)
+              : Effect.succeed(
+                  anOpenPullRequest({
+                    number: pullRequestNumber,
+                    headSha: openHead,
+                    // Its review is already in hand and its checks have not finished, so the
+                    // handoff sits at awaiting checks and calls nothing while the reload lands.
+                    codexReview: { headShaPrefix: openHead.slice(0, 7), status: 'completed' },
+                    checks: [
+                      { name: 'quality', status: 'in_progress', conclusion: null, url: null },
+                    ],
+                  }),
+                ),
+        }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          let current = yield* control.snapshot
+          while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          merged = true
+          yield* control.refresh
+        }),
+      )
+
+      expect(
+        yield* loadCompletions(join(reloadedRoot, '.sloppenheimer', 'completions.json')),
+      ).toMatchObject([{ identifier: issue.identifier, finishedAt: '2026-08-31T09:00:00.000Z' }])
+      // The handoff store follows the same root: the merged handoff is gone from the store beside
+      // the workspace this host is now using, not left recorded only beside the one it booted with.
+      expect(yield* loadHandoffs(join(reloadedRoot, '.sloppenheimer', 'handoffs.json'))).toEqual([])
+      expect(
+        yield* loadCompletions(join(workspaceRoot, '.sloppenheimer', 'completions.json')),
+      ).toEqual([])
+    }),
+  )
+
+  it.scoped('restores only the finished work the console would still show', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-window-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      yield* saveCompletions(join(workspaceRoot, '.sloppenheimer', 'completions.json'), [
+        completion('example/sloppenheimer#70', new Date(now - 2 * 60 * 60 * 1000).toISOString()),
+        completion(
+          'example/sloppenheimer#71',
+          new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString(),
+        ),
+      ])
+      const harness = makeHarness(isolated)
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      expect(snapshot.completed.map((entry) => entry.identifier)).toEqual([
+        'example/sloppenheimer#70',
+      ])
+      expect(snapshot.counts.completed).toBe(1)
+    }),
+  )
+
+  it.scoped('carries restored history to a moved root without waiting for a merge', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-migrate-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-migrated-')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        config: { ...isolated.config, workspaceRoot: reloadedRoot },
+      }
+      const restored = completion(
+        'example/sloppenheimer#70',
+        new Date(now - 2 * 60 * 60 * 1000).toISOString(),
+      )
+      yield* saveCompletions(join(workspaceRoot, '.sloppenheimer', 'completions.json'), [restored])
+      const harness = makeHarness(isolated)
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          let current = yield* control.snapshot
+          while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+        }),
+      )
+
+      // Nothing merged while this host ran, and nothing ever might: the move itself is what has to
+      // carry the history across, or a restart under the new root loses it.
+      expect(
+        yield* loadCompletions(join(reloadedRoot, '.sloppenheimer', 'completions.json')),
+      ).toEqual([restored])
+    }),
+  )
+
+  it.scoped('starts without its history when the completion store cannot be read', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-unreadable-')
+      const completionStorePath = join(workspaceRoot, '.sloppenheimer', 'completions.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#63', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('63'),
+      }
+      yield* saveHandoffs(join(workspaceRoot, '.sloppenheimer', 'handoffs.json'), [
+        awaitingChecks(issue),
+      ])
+      yield* Effect.promise(() => writeFile(completionStorePath, '{"version":1,"completions":['))
+      const merging = makeHarness(isolated, () => [issue])
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...merging.ports,
+            makeCodeReview: mergedAt(merging, '2026-08-31T09:00:00.000Z'),
+          })
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      // Startup carried on, and this host's own merge is still reported.
+      expect(snapshot.completed).toHaveLength(1)
+      // The unreadable document is preserved rather than replaced, exactly as an unreadable
+      // handoff store is: what it holds has not been read, so it must not be written over.
+      expect(yield* Effect.promise(() => readFile(completionStorePath, 'utf8'))).toBe(
+        '{"version":1,"completions":[',
+      )
+    }),
+  )
+})
+
 describe('startup terminal workspace cleanup', (): void => {
   it.effect(
     'fetches every terminal state once, cleans every issue, and continues after a cleanup failure',
@@ -6416,6 +6740,19 @@ describe('session telemetry accounting', (): void => {
         observedAt: new Date(0).toISOString(),
       }
       yield* saveHandoffs(storePath, [persisted])
+      // Every completion comes from a merged handoff, so the completion store is under the same
+      // gate: a run that cannot finish anything must not write its empty list over this.
+      const completionStorePath = join(workspaceRoot, '.sloppenheimer', 'completions.json')
+      const finished: CompletedSnapshot = {
+        issueId: issueId('74'),
+        identifier: 'example/sloppenheimer#74',
+        title: 'Merged before handoff was disabled',
+        url: null,
+        outcome: 'merged',
+        finishedAt: new Date(0).toISOString(),
+        pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/94',
+      }
+      yield* saveCompletions(completionStorePath, [finished])
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
       const harness = makeHarness(isolated)
       const { makeCodeReview: omittedCodeReview, ...trackerOnlyPorts } = harness.ports
@@ -6430,7 +6767,9 @@ describe('session telemetry accounting', (): void => {
       )
 
       expect(snapshot.handoffs).toEqual([])
+      expect(snapshot.completed).toEqual([])
       expect(yield* loadHandoffs(storePath)).toEqual([persisted])
+      expect(yield* loadCompletions(completionStorePath)).toEqual([finished])
     }),
   )
 
