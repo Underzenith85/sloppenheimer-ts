@@ -343,6 +343,142 @@ Rejected: adopting Turborepo or Nx to orchestrate the two stages. The build is t
 one `package.json` script; a task runner would add a configuration surface and a cache to manage in
 exchange for ordering that `&&` already expresses.
 
+### D14 — The design language is ported, not reinvented
+
+The instance console has a real visual identity, and it is not default dashboard chrome: warm off-white
+ink on near-black, an acid-lime accent, a Georgia display serif at `clamp(38px, 6vw, 76px)` against
+Inter body text and monospace eyebrows, and a film-grain overlay. The coordinator is a second surface
+of the same product, so it inherits that identity rather than proposing another one.
+
+The token set ports verbatim into `packages/coordinator-ui` as custom properties, which is already how
+it is expressed (`src/operator/ui/styles.css:1-15`). It survives the move with no contrast re-derivation
+needed — measured against both the page (`#0b0c0b`) and panel (`#151615`) surfaces, every token clears
+WCAG AA for body text:
+
+| Token     | Hex       | vs page | vs panel | Role                   |
+| --------- | --------- | ------- | -------- | ---------------------- |
+| `--ink`   | `#f4f0e6` | 17.2:1  | 15.9:1   | primary text           |
+| `--acid`  | `#d7ff64` | 17.2:1  | 15.9:1   | accent, ready, healthy |
+| `--sky`   | `#8fd8ff` | 12.5:1  | 11.6:1   | in progress, running   |
+| `--amber` | `#ffc46b` | 12.5:1  | 11.5:1   | blocked, repair needed |
+| `--coral` | `#ff826b` | 8.1:1   | 7.5:1    | attention, stalled     |
+| `--muted` | `#9d9b93` | 7.0:1   | 6.5:1    | secondary text         |
+
+One measured weakness is worth carrying forward as a known constraint rather than discovering later.
+Under deuteranopia, `--amber` and `--coral` are the palette's closest adjacent pair at ΔE 11.4 — above
+the ≥8 floor, but the weakest separation in the set. Those two encode _blocked / repair-needed_ versus
+_attention / stalled_: precisely the distinction an operator triaging four instances must not get
+wrong. D20 is what keeps that safe, and it is the reason D20 is not merely inherited boilerplate.
+
+Rejected: adopting a component library's stock theme — shadcn's neutral palette, MUI, Ant. Each
+replaces a considered identity with a generic one, and pays migration cost in the wrong direction.
+
+### D15 — Tokens as custom properties, components as CSS Modules
+
+One `tokens.css` holding the custom properties above; per-component `.module.css` files for everything
+else. No global cascade beyond tokens and a reset.
+
+Rejected: Tailwind. Two specific reasons rather than a taste argument. The identity here lives in a
+small token set plus a handful of treatments Tailwind expresses only as arbitrary-value escapes — the
+grain overlay, the clamped display serif, the chip tinting — which is the framework being worked
+around rather than used. And this repository asserts _rendered DOM structure_
+(`test/operator/console-ux.test.ts`, `test/harness/accessibility.ts`); a DOM whose class attributes are
+forty utility tokens long makes those assertions materially harder to read and write. If the team
+prefers Tailwind anyway, note that the decision is nearly reversible: the token layer is identical
+either way, since Tailwind v4's `@theme` consumes the same custom properties.
+
+Rejected: CSS-in-JS (styled-components, emotion). Runtime style computation on a view that re-renders
+on a 3s cadence, for dynamic styling this design does not need.
+
+Rejected, narrowly: vanilla-extract. The closest competitor and genuinely good — typed styles, zero
+runtime — but it adds a build-time dependency and a second way to express tokens in exchange for
+type-checking that a token file plus CSS Modules mostly delivers.
+
+### D16 — Headless primitives, not a styled component library
+
+Radix UI primitives, unstyled, for the interactions where correctness is hard and invisible: the detail
+dialog (focus trap, focus restoration, escape handling, scroll locking), tabs, popover, tooltip, and
+menu.
+
+The reasoning is a split. Identity is ours and belongs in our CSS; focus management is a solved problem
+with no identity in it, and it is exactly where accessibility regressions hide. The instance console
+hand-rolls its dialog behavior in `detail.ts` and does it correctly — including tracking the trigger
+element for focus restoration (`detail.ts:55`) — but that is a thing to have working, not a thing to
+rewrite.
+
+Rejected: shadcn/ui. It is Radix plus a Tailwind theme; adopting it means adopting both D15's rejected
+framework and D14's rejected aesthetic.
+
+### D17 — Density is an explicit mode; compact is the default
+
+The instance console reads `innerWidth` rather than using a media query, so the rendered DOM differs
+between layouts and the small-screen contract can be asserted (`app.ts:14-20`). Keep that mechanism and
+add a deliberate density control on top of it.
+
+The emphasis inverts. One instance with twenty issues reads well as cards; four instances with twenty
+issues each does not, and the coordinator's job is precisely the second case. So: **compact** — one
+line per row — is the desktop default, **comfortable** — today's cards — is available and is what
+narrow viewports get, and **wallboard** is a third mode showing attention items only, at large type,
+with controls hidden.
+
+Wallboard is not a flourish. Half of what a multi-instance view is for is being visible on a screen
+nobody is sitting in front of, and it is cheap: the same data, one more density token set, no controls.
+
+### D18 — Live data must never move the target
+
+This is the central ergonomic problem of a control plane that repaints every three seconds, and it
+deserves to be a decision rather than a bug filed later. An operator reaching for `Pause` on row four
+must not have row four become something else mid-reach.
+
+- A list does not reorder while any row inside it has focus or hover. The new order is computed, held,
+  and applied on blur or after a brief idle.
+- A row with an action in flight is pinned until that action settles. The instance console already
+  holds this concept in `inFlight` and `rowFeedback` (`app.ts:33-34`) along with the reconciliation rule
+  that a poll must not erase what the operator was just told; the React version keeps both.
+- Entry is animated; position is not. Motion that says "this is new" is informative. Motion that
+  reshuffles a list under a cursor is disorienting and defeats aiming.
+- A row that leaves the set is never removed under the pointer. It transitions to a resolved state and
+  is dropped at the next interaction-free moment.
+- `prefers-reduced-motion` suppresses entry animation too, not only decoration. The blanket rule at
+  `styles.css:785-793` already does this and ports as-is.
+
+In TanStack Query terms: `placeholderData: keepPreviousData` so a refetch never blanks a list,
+structural sharing left on so unchanged rows keep identity and skip re-render, and ordering done in
+`select` so it is memoized rather than recomputed in render.
+
+### D19 — Staleness has a visual language, and it disables control
+
+D6 says freshness is always visible; this says what that looks like, because "grey it out" is not a
+specification and gets it wrong in a particular way.
+
+Three per-instance states. **Live** shows no marker at all — absence is the signal, and a badge on
+every healthy row is noise. **Stale** (no successful poll for three intervals) marks the _instance
+group header_ with a dotted rule and the age of the newest document held; individual rows are not
+badged, because badging twenty rows for one host's problem buries the twenty rows. **Unreachable** puts
+the error in the group header and de-emphasises the rows without making them unreadable — the last
+known state is exactly what the operator still needs.
+
+The part that is easy to get wrong: **a stale or unreachable instance's action controls are disabled,
+with the reason in text.** Firing a pause at a host the coordinator cannot see produces a request whose
+outcome nobody can report. A disabled control that does not say why is its own defect, so the reason is
+rendered, not left to a `title` attribute — the same standard `actionDescriptions` already holds in
+`app.ts:59-68`.
+
+### D20 — Status is never carried by colour alone
+
+Inherited from the instance console, where `dom.ts` states it at the `chip` helper: the chip always
+spells its meaning and the class only tints what the text already says.
+
+It binds harder here for two reasons. D14 measured amber and coral as the palette's weakest pair under
+deuteranopia, and those two carry the blocked-versus-attention distinction. And D17's compact mode
+creates real pressure to drop the label and keep a colour stripe, since the stripe is free and the label
+costs horizontal space. That trade is refused: the label is what the density budget is spent on, and the
+`border-left-color` treatment (`styles.css:703-707`) stays decoration that reinforces a label rather
+than becoming the label.
+
+The `@media (forced-colors: active)` block at `styles.css:796-808` ports too, extended to the
+coordinator's own components.
+
 ## Monorepo layout
 
 Three new units, all under `packages/` alongside the existing four:
@@ -416,6 +552,51 @@ package's tests would mean either a fourth configuration or a glob that reaches 
 and neither is worth the convention break. happy-dom is already a devDependency and already drives the
 instance console's suite.
 
+## Ergonomics
+
+The decisions above cover how it looks and how it behaves under live data. Four more things decide
+whether it is pleasant to operate, and none of them is a styling question.
+
+**The primary loop is triage, so it is keyboard-first.** `j`/`k` to move between rows, `Enter` to open
+detail, the row's primary action on a single key, and a `⌘K` palette to jump to an instance or an issue
+by name. The instance console already implements arrow-key navigation across its view tabs
+(`app.ts:612-626`); this extends the idea rather than introducing it. At four instances the palette
+stops being a nicety — scanning for the right row with a pointer is the slow path.
+
+**Focus is restored, always.** Opening the detail panel and closing it returns focus to the control that
+opened it. `detail.ts` tracks `detailTrigger` for exactly this, and D16's dialog primitive does it as a
+matter of course. The failure mode — closing a panel and landing at the top of the document — is the
+kind of thing that never appears in a screenshot and makes a tool unusable by keyboard.
+
+**The URL is the state.** Which instances are shown, which view, the search term, and any open detail
+belong in the URL, so a view is linkable, survives a reload, and can be pasted into an incident thread.
+The instance console already syncs a hash (`syncFromHash`); the coordinator has more state worth
+sharing, not less.
+
+**Empty states carry information.** "Nothing needs attention across four instances" and "nothing needs
+attention, but two of four instances are unreachable" are opposite situations, and a single empty
+illustration for both is actively misleading. Per D19 the second is not an empty state at all — it is an
+alert that happens to have no rows under it.
+
+## Performance
+
+Little of this is expensive, and it is worth saying why so effort does not go to the wrong place.
+
+Classification runs in the coordinator (D7), so the browser receives work already sorted into buckets
+and does no per-frame computation. The heaviest client-side work is rendering rows that mostly did not
+change, which structural sharing plus stable keys already handles (D18).
+
+Virtualization is deliberately deferred. Below roughly two hundred rows it costs more in complexity and
+in broken find-in-page than it returns; TanStack Virtual is the answer if a deployment exceeds that, and
+the row count is knowable from the aggregate document, so the threshold can be measured rather than
+guessed.
+
+The one real trap is the 1s timer that keeps elapsed times and stall countdowns live (D10). It must
+update the timer nodes, not re-render the rows that contain them — a per-second re-render of every
+visible row is how a dashboard becomes a laptop fan. The instance console already scopes its tick to the
+open detail panel (`app.ts:863-866`); the coordinator has more timers on screen at once and needs the
+same discipline applied per node.
+
 ## What changes inside the instance
 
 Deliberately small. Four things:
@@ -437,6 +618,12 @@ Each phase is independently valuable and independently revertible.
 `ui-assets.ts` and `copy-operator-ui.mjs` to inline it. Pure refactor, no behavior change, existing
 console tests are the proof.
 
+**Phase 0b — the primitives, before any screen.** `tokens.css` ported per D14, and the four components
+everything else is built from: chip, row, panel, button. Point `test/harness/accessibility.ts` at their
+rendered output, and confirm oxfmt covers TSX, while the surface is four components rather than a
+console. Composing screens out of primitives that were designed after the screens is how a design system
+ends up as a folder of one-offs.
+
 **Phase 1 — read-only aggregation over tunnels.** Registry, pollers, aggregate document, and a minimal
 React app. Instances are reached through operator-established SSH tunnels, so no instance change is
 needed yet; the coordinator obtains a CSRF token by reading the instance's own page, which is
@@ -452,8 +639,12 @@ freshness, because a control plane over a view that might be silently stale is w
 plane.
 
 **Phase 4 — the console proper.** The full React surface: filtering, search, the detail panel,
-per-instance capacity, keyboard navigation, and the accessibility contract the existing console holds
-itself to in `test/operator/console-ux.test.ts`.
+per-instance capacity, the density modes from D17, the keyboard loop and command palette, and the
+accessibility contract the existing console holds itself to in `test/operator/console-ux.test.ts`.
+
+D18 is the one to build in from the start rather than retrofit. "The list must not reorder under an
+active pointer" is a constraint on how state is held, not a coat of polish, and discovering it after the
+list is written means rewriting the list.
 
 Read-only comes first even though the destination is a control plane. Aggregation and staleness are
 where the design risk is; mutation is mostly plumbing once the view is trustworthy.
