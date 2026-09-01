@@ -29,7 +29,7 @@ const sanitize = (value: unknown, depth = 0): unknown => {
   )
 }
 
-const sanitizeFields = (fields: LogFields): LogFields =>
+export const sanitizeLogFields = (fields: LogFields): LogFields =>
   Object.fromEntries(
     Object.entries({ action: 'unspecified', outcome: 'unknown', error: null, ...fields }).map(
       ([key, value]) => [key, isSecretKey(key) ? '[REDACTED]' : sanitize(value)],
@@ -54,10 +54,16 @@ const safe = (
 ): Effect.Effect<void> => effect.pipe(Effect.catchAllCause(() => fallbackWarning(level, message)))
 
 export const logInfo = (message: string, fields: LogFields = {}): Effect.Effect<void> =>
-  safe('info', message, Effect.logInfo(message, sanitizeFields(fields)))
+  safe('info', message, Effect.logInfo(message, sanitizeLogFields(fields)))
 
 export const logWarning = (message: string, fields: LogFields = {}): Effect.Effect<void> =>
-  safe('warning', message, Effect.logWarning(message, sanitizeFields(fields)))
+  safe('warning', message, Effect.logWarning(message, sanitizeLogFields(fields)))
 
 export const logError = (message: string, fields: LogFields = {}): Effect.Effect<void> =>
-  safe('error', message, Effect.logError(message, sanitizeFields(fields)))
+  safe('error', message, Effect.logError(message, sanitizeLogFields(fields)))
+
+/** Propagates bounded, redacted context to every log emitted inside an operation. */
+export const withLogAnnotations =
+  (fields: LogFields) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    effect.pipe(Effect.annotateLogs(sanitizeLogFields(fields)))

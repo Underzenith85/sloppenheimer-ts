@@ -9,6 +9,9 @@ App Server JSONL client, polling and hot reload, concurrency limits, reconciliat
 bounded exponential retries, and a loopback operator console. `WORKFLOW.md` is configured so this
 implementation can dispatch Codex to improve itself from labeled GitHub issues.
 
+Operational logs, traces, metrics, cardinality constraints, and suggested alerts are documented in
+[Operational observability](docs/operational-observability.md).
+
 ## Requirements
 
 - Node.js 24

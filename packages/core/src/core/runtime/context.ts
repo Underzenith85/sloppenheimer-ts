@@ -2,6 +2,7 @@ import { Effect, Ref } from 'effect'
 
 import type { WorkflowError } from '../../domain/errors.js'
 import type { Workflow } from '../../config/workflow.js'
+import { setRuntimeGauges } from '../../support/observability.js'
 import type { EffectiveWorkflow, RuntimePorts } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { rebuildEffectiveWorkflow } from '../workflow-reload.js'
@@ -16,6 +17,13 @@ import {
 import { requestTick, scheduleNextTick, scheduleRetry } from './scheduling.js'
 import { persistHandoffs } from './store.js'
 import type { OrchestratorContext, RuntimeCells } from './types.js'
+
+/** Publishes operator detail and derives saturation gauges from the same authoritative state. */
+const publishRuntimeState = (cells: RuntimeCells): Effect.Effect<void> =>
+  Ref.update(cells.state, Transitions.publishDetails).pipe(
+    Effect.zipRight(Ref.get(cells.state)),
+    Effect.flatMap((state) => setRuntimeGauges(state.running.size, state.retries.size)),
+  )
 
 /**
  * Rebuilds the ports for a workflow and adopts it, recording the instances it displaced.
@@ -69,5 +77,5 @@ export const orchestratorContext = (
   scheduleNextTick: scheduleNextTick(cells),
   requestTick: (source) => requestTick(cells, source),
   runFromCallback,
-  publish: Ref.update(cells.state, Transitions.publishDetails),
+  publish: publishRuntimeState(cells),
 })

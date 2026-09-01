@@ -5,6 +5,12 @@ import { issueBranchName } from '../../domain/handoff.js'
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo, logWarning } from '../../support/logging.js'
 import {
+  agentOutcomes,
+  handoffOutcomes,
+  recordOutcome,
+  type AgentOutcome,
+} from '../../support/observability.js'
+import {
   createAgentDetailRecord,
   recordAttemptStarted,
   recordCancellation,
@@ -119,6 +125,7 @@ export const cancelRunning = (
   cleanupWorkspace: boolean,
   reason = 'the orchestrator cancelled the run',
   repairDisposition: RepairDisposition = 'release',
+  agentOutcome: AgentOutcome = 'cancelled',
 ): Effect.Effect<Option.Option<RunningEntry>> =>
   Effect.gen(function* () {
     const before = yield* Ref.get(cells.state)
@@ -174,6 +181,7 @@ export const cancelRunning = (
         ),
       )
     }
+    yield* recordOutcome(agentOutcomes, agentOutcome)
     return Option.some(settled)
   })
 
@@ -233,5 +241,16 @@ export const noteHandoffOutcome = (
         },
         outcome,
       }),
+    ),
+  ).pipe(
+    Effect.zipRight(
+      recordOutcome(
+        handoffOutcomes,
+        outcome === 'merged'
+          ? 'merged'
+          : outcome === 'intervention_required'
+            ? 'intervention'
+            : 'completed',
+      ),
     ),
   )

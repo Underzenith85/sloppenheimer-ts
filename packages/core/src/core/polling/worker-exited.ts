@@ -2,6 +2,7 @@ import { Clock, Effect, Option, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo } from '../../support/logging.js'
+import { handoffOutcomes, recordOutcome, withOperationalSpan } from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { recordHandoff } from '../../telemetry.js'
 import type { CodeReviewPort, HandoffResult } from '../../ports/index.js'
@@ -88,6 +89,7 @@ const adoptOpenedHandoff = (
       branch: result.branchName,
       pull_request_url: result.pullRequestUrl,
     })
+    yield* recordOutcome(handoffOutcomes, 'completed')
     if (completedRepair) {
       yield* Ref.update(context.state, (current) =>
         Transitions.releaseClaim(current, event.issueId),
@@ -126,6 +128,7 @@ const requestHandoff = (
     yield* context.publish
     const handoff = yield* codeReview.handoffCompletedWork(settled.issue).pipe(asSettled)
     if (handoff._tag === 'Failed') {
+      yield* recordOutcome(handoffOutcomes, 'failed')
       const failedAt = yield* currentInstant
       yield* Ref.update(context.state, (current) =>
         Transitions.updateDetail(current, event.issueId, (record) =>
@@ -148,6 +151,7 @@ const requestHandoff = (
     }
     const result = handoff.value
     if (result._tag === 'NoBranch') {
+      yield* recordOutcome(handoffOutcomes, 'no_branch')
       const absentAt = yield* currentInstant
       yield* Ref.update(context.state, (current) =>
         Transitions.updateDetail(current, event.issueId, (record) =>
@@ -216,5 +220,11 @@ export const onWorkerExited = (
       yield* context.scheduleRetry(settled.issue, 1, null, true, settled.repairRun)
       return
     }
-    yield* requestHandoff(context, event, settled, codeReview.value)
+    yield* requestHandoff(context, event, settled, codeReview.value).pipe(
+      withOperationalSpan('handoff', {
+        issue_id: event.issueId,
+        run_id: event.runId,
+        attempt: event.attempt,
+      }),
+    )
   })

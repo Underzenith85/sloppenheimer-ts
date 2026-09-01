@@ -6,7 +6,15 @@ import { issueBranchName } from '../domain/handoff.js'
 import { AgentError, type WorkspaceError } from '../domain/errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
-import { logError, logInfo } from '../support/logging.js'
+import { logError, logInfo, withLogAnnotations } from '../support/logging.js'
+import {
+  agentDuration,
+  agentOutcomes,
+  dispatchOutcomes,
+  observeDuration,
+  recordOutcome,
+  withOperationalSpan,
+} from '../support/observability.js'
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
@@ -165,7 +173,7 @@ const runSession = (
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution, sessionPorts, target } = launch
-  return execution.workspaces.create(issue.identifier).pipe(
+  const worker = execution.workspaces.create(issue.identifier).pipe(
     Effect.flatMap((workspace) => {
       const sourceControl = MutableRef.get(sessionPorts).sourceControl
       if (sourceControl === null) {
@@ -195,23 +203,43 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
     }),
     Effect.matchEffect({
       onFailure: (error) =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'failed',
-          error: error.message,
-        }).pipe(Effect.asVoid),
+        recordOutcome(agentOutcomes, 'failed').pipe(
+          Effect.zipRight(
+            Queue.offer(context.mailbox, {
+              _tag: 'WorkerExited',
+              issueId: issue.id,
+              runId,
+              attempt,
+              outcome: 'failed',
+              error: error.message,
+            }),
+          ),
+          Effect.asVoid,
+        ),
       onSuccess: () =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'normal',
-          error: null,
-        }).pipe(Effect.asVoid),
+        recordOutcome(agentOutcomes, 'normal').pipe(
+          Effect.zipRight(
+            Queue.offer(context.mailbox, {
+              _tag: 'WorkerExited',
+              issueId: issue.id,
+              runId,
+              attempt,
+              outcome: 'normal',
+              error: null,
+            }),
+          ),
+          Effect.asVoid,
+        ),
+    }),
+  )
+  return observeDuration(agentDuration, worker).pipe(
+    withOperationalSpan('agent.run', { run_id: runId }),
+    withLogAnnotations({
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      run_id: runId,
+      handoff: launch.repairRun,
     }),
   )
 }
@@ -244,7 +272,7 @@ const startingRun = (
 })
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
-export const dispatch = (
+const runDispatch = (
   context: OrchestratorContext,
   issue: Issue,
   attempt: number | null,
@@ -254,6 +282,7 @@ export const dispatch = (
   Effect.gen(function* () {
     const before = yield* Ref.get(context.state)
     if (before.running.has(issue.id)) {
+      yield* recordOutcome(dispatchOutcomes, 'already_running')
       return false
     }
     // Claiming and taking the queued retry are one transition: the issue must never be seen as
@@ -277,6 +306,7 @@ export const dispatch = (
     yield* context.detailRecord(issue, attempt, base.workflow.config.tracker.requiredLabels)
     const preflight = yield* revalidateCredentials(context, base).pipe(asSettled)
     if (preflight._tag === 'Failed') {
+      yield* recordOutcome(dispatchOutcomes, 'preflight_failed')
       yield* logError('action=dispatch outcome=failed', {
         ...logContext(issue),
         action: 'dispatch',
@@ -298,6 +328,7 @@ export const dispatch = (
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(asSettled)
     if (renderedPrompt._tag === 'Failed') {
+      yield* recordOutcome(dispatchOutcomes, 'prompt_failed')
       yield* context.scheduleRetry(
         issue,
         (attempt ?? 0) + 1,
@@ -335,5 +366,29 @@ export const dispatch = (
       action: 'dispatch',
       outcome: 'started',
     })
+    yield* recordOutcome(dispatchOutcomes, 'started')
     return true
   })
+
+/** One dispatch span carries issue, attempt, and handoff context through every nested log. */
+export const dispatch = (
+  context: OrchestratorContext,
+  issue: Issue,
+  attempt: number | null,
+  effectiveOverride?: EffectiveWorkflow,
+  sourceTarget?: SourceControlTarget,
+): Effect.Effect<boolean, never, Scope.Scope> =>
+  runDispatch(context, issue, attempt, effectiveOverride, sourceTarget).pipe(
+    withOperationalSpan('dispatch', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      handoff: sourceTarget?._tag === 'Repair',
+    }),
+    withLogAnnotations({
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      handoff: sourceTarget?._tag === 'Repair',
+    }),
+  )
