@@ -126,6 +126,29 @@ const publishRetained = (
   })
 
 /**
+ * Throws away what a finished issue's workspace holds, because the issue is finished with.
+ *
+ * Publishing here would put a branch — and a pull request's next head — behind work nobody asked
+ * for any more, which is the one case the policy calls a discard. Answers whether the workspace is
+ * settled: a removal that failed leaves the files exactly where they were, and calling that
+ * examined would let a reactivation hand them to an agent as its own work.
+ */
+const discardFinished = (effective: EffectiveWorkflow, issue: Issue): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const removed = yield* effective.workspaces.remove(issue.identifier).pipe(asSettled)
+    if (removed._tag === 'Failed') {
+      yield* logWarning('terminal workspace cleanup failed; retrying later', {
+        ...logContext(issue),
+        action: 'workspace_cleanup',
+        outcome: 'failed',
+        error: removed.error.message,
+      })
+      return false
+    }
+    return true
+  })
+
+/**
  * One issue's workspace, examined and published if it holds anything.
  *
  * Answers whether the workspace was examined conclusively. `false` is a host that could not look —
@@ -162,21 +185,13 @@ const recoverIssue = (
     if (!exists.value) {
       return true
     }
-    if (!issueIsActive(issue, effective.workflow.config.tracker)) {
-      // The issue is finished with, so what is in its workspace goes with it rather than reaching
-      // the remote. Publishing here would put a branch — and a pull request's next head — behind
-      // work nobody asked for any more, which is the one case the policy calls a discard.
-      yield* effective.workspaces.remove(issue.identifier).pipe(
-        Effect.catchAll((error) =>
-          logWarning('terminal workspace cleanup failed', {
-            ...logContext(issue),
-            action: 'workspace_cleanup',
-            outcome: 'failed',
-            error: error.message,
-          }),
-        ),
-      )
-      return true
+    const open = current.handoffs.get(issue.id)
+    // A handoff's own activity rules where there is one, exactly as `repairPermission` reads them:
+    // a reload that narrowed the active states does not make the pull request's issue finished, and
+    // discarding on the current rules would delete a workspace whose repair reconciliation still
+    // considers eligible.
+    if (!issueIsActive(issue, open?.execution ?? effective.workflow.config.tracker)) {
+      return yield* discardFinished(effective, issue)
     }
     const workspace = yield* effective.workspaces.create(issue.identifier).pipe(asSettled)
     if (workspace._tag === 'Failed') {
@@ -188,9 +203,8 @@ const recoverIssue = (
       })
       return false
     }
-    const handoff = current.handoffs.get(issue.id)
     const prepared = yield* sourceControl
-      .prepare(issue, workspace.value, targetFor(issue, handoff))
+      .prepare(issue, workspace.value, targetFor(issue, open))
       .pipe(asSettled)
     if (prepared._tag === 'Failed') {
       yield* logWarning('delivery recovery could not prepare the repository; retrying later', {
@@ -225,7 +239,7 @@ const recoverIssue = (
       branch: prepared.value.target.branchName,
       changed_files: inspected.value.dirtyFileCount,
     })
-    yield* publishRetained(context, issue, effective, sourceControl, handoff, prepared.value)
+    yield* publishRetained(context, issue, effective, sourceControl, open, prepared.value)
     return true
   })
 

@@ -12,8 +12,8 @@ import { Effect, Option, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
 import { recordPublication } from '../telemetry.js'
-import { notePublication, reactivateRepair } from './repair.js'
-import { requestHandoff, type SettledWork } from './handoff-request.js'
+import { notePublication } from './repair.js'
+import { putRepairBehindRetry, requestHandoff, type SettledWork } from './handoff-request.js'
 import { postflightReason, type PostflightOutcome } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { RepairPublication } from './state.js'
@@ -93,34 +93,6 @@ const recordOutcome = (
     }
     yield* Ref.update(context.state, (current) =>
       Transitions.putHandoff(current, work.issue.id, next),
-    )
-    yield* context.persistHandoffs
-  })
-
-/**
- * Puts a repair back behind the retry that is now queued for it.
- *
- * Only reached when nothing more can be published from the workspace and the agent has to run
- * again. A repair rediscovered from a workspace after a restart is restored with no attempt behind
- * it, and the retry that comes due consults exactly that to decide whether to dispatch a repair or
- * a bare continuation — so without this the queued repair retry would arrive as an ordinary turn,
- * without the pull request's prompt or its expected head, and leave the old identity attached.
- */
-const putRepairBehindRetry = (
-  context: OrchestratorContext,
-  work: SettledWork,
-): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const handoff = (yield* Ref.get(context.state)).handoffs.get(work.issue.id)
-    if (handoff === undefined) {
-      return
-    }
-    const reactivated = reactivateRepair(handoff)
-    if (reactivated === handoff) {
-      return
-    }
-    yield* Ref.update(context.state, (current) =>
-      Transitions.putHandoff(current, work.issue.id, reactivated),
     )
     yield* context.persistHandoffs
   })

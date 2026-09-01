@@ -606,7 +606,11 @@ repair agent that had achieved nothing.
   very reason the state fetch omitted an issue may be that it went terminal while the host was down.
   An issue that is finished with has the work in its workspace discarded rather than published: a
   branch pushed, or a pull request's head moved, for work nobody asked for any more is the one case
-  the policy calls a discard.
+  the policy calls a discard. Finished is judged against a handoff's own activity rules where there
+  is one, exactly as `repairPermission` reads them: narrowing the active states does not finish a
+  pull request's issue, and discarding on the current rules would delete a workspace whose repair
+  the same pass still considers eligible. A removal that fails leaves the workspace unexamined,
+  because the files are still there and the discard did not happen.
 - A recovered publication carries the handoff's own ports, because a repair's verdict is judged
   against the workflow that created its pull request — but always this process's workspace manager,
   because that is the one that opened the workspace being published from. A delivery holding the

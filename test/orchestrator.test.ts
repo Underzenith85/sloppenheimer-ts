@@ -1438,6 +1438,173 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('keeps a handoff workspace the current workflow alone would call finished', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-retained-rules-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      // The workflow the handoff was created under counts this state as active; the one in force
+      // no longer does. A repair is judged against the former, so the workspace is not finished.
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          tracker: { ...workflow.config.tracker, activeStates: ['open', 'in progress'] },
+        },
+      }
+      const narrowedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-retained-other-')
+      // The root moves with it, which is what makes the sweep look at these workspaces again.
+      const narrowed: Workflow = {
+        ...changedWorkflow({ fingerprint: 'narrowed' }),
+        config: {
+          ...initial.config,
+          workspaceRoot: narrowedRoot,
+          tracker: { ...initial.config.tracker, activeStates: ['open'] },
+        },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+        state: 'in progress',
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(
+        initial,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      const removed: string[] = []
+      const publications: string[] = []
+      // Nothing under the first root, so the work this finds is the work the second root holds.
+      let retained = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+        }),
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => retained,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          expect(publications).toEqual([])
+          retained = true
+          harness.setWorkflow(narrowed)
+          while (publications.length === 0 && removed.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+        }),
+      )
+
+      // Narrowing the active states does not finish a pull request's issue. Deleting its workspace
+      // would take a diff whose repair the same pass still considers eligible.
+      expect(removed).toEqual([])
+      expect(publications).toEqual(['sloppenheimer/issue-20'])
+    }),
+  )
+
+  it.scoped("refuses dispatch when a finished issue's workspace could not be removed", () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-cleanup-failed-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      // Closed when the host starts, so only the sweep looks at it — and the removal that would
+      // settle the discard fails.
+      let reported = { ...issue, state: 'closed' }
+      const harness = makeHarness(isolated, () => [reported])
+      let launched = 0
+      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: () =>
+            Effect.fail(
+              new WorkspaceError({
+                category: 'remove_failed',
+                message: 'the workspace directory is busy',
+              }),
+            ),
+        }),
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push({
+                branchName: prepared.target.branchName,
+                launchedSoFar: launched,
+              })
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          expect(publications).toEqual([])
+
+          // Reopened. The files the failed discard left are still there, so the pass that admits
+          // this issue owes the workspace a look first.
+          reported = issue
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+        }),
+      )
+
+      // Published by the examination the failed removal left owing, rather than inherited by an
+      // agent that never produced it.
+      expect(publications[0]).toEqual({
+        branchName: 'sloppenheimer/issue-20',
+        launchedSoFar: 0,
+      })
+    }),
+  )
+
   it.scoped('sweeps a handoff workspace the active-state fetch leaves out', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-handoff-')

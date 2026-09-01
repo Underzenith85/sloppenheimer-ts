@@ -16,6 +16,7 @@ import { asSettled } from '../support/settled.js'
 import { recordHandoff } from '../telemetry.js'
 import type { CodeReviewPort, HandoffResult } from '../ports/index.js'
 import { logContext } from './policy.js'
+import { reactivateRepair } from './repair.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { ExecutionSnapshot } from './state.js'
 import * as Transitions from './transitions.js'
@@ -36,6 +37,34 @@ export type SettledWork = Readonly<{
   /** Whether the run that produced this work was repairing a pull request. */
   repairRun: boolean
 }>
+
+/**
+ * Puts a repair back behind the retry that is now queued for it.
+ *
+ * Only reached when nothing more can be published from the workspace and the agent has to run
+ * again. A repair rediscovered from a workspace after a restart is restored with no attempt behind
+ * it, and the retry that comes due consults exactly that to decide whether to dispatch a repair or
+ * a bare continuation — so without this the queued repair retry would arrive as an ordinary turn,
+ * without the pull request's prompt or its expected head, and leave the old identity attached.
+ */
+export const putRepairBehindRetry = (
+  context: OrchestratorContext,
+  work: SettledWork,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const handoff = (yield* Ref.get(context.state)).handoffs.get(work.issue.id)
+    if (handoff === undefined) {
+      return
+    }
+    const reactivated = reactivateRepair(handoff)
+    if (reactivated === handoff) {
+      return
+    }
+    yield* Ref.update(context.state, (current) =>
+      Transitions.putHandoff(current, work.issue.id, reactivated),
+    )
+    yield* context.persistHandoffs
+  })
 
 /**
  * Files an opened pull request as this issue's handoff, and settles what the run that opened it
@@ -158,13 +187,16 @@ export const requestHandoff = (
           }),
         ),
       )
-      yield* context.scheduleRetry(
+      const retried = yield* context.scheduleRetry(
         work.issue,
         (work.attempt ?? 0) + 1,
         `handoff failed: ${handoff.error.message}`,
         false,
         work.repairRun,
       )
+      if (retried && work.repairRun) {
+        yield* putRepairBehindRetry(context, work)
+      }
       return
     }
     const result = handoff.value
@@ -181,7 +213,10 @@ export const requestHandoff = (
           }),
         ),
       )
-      yield* context.scheduleRetry(work.issue, 1, null, true, work.repairRun)
+      const continued = yield* context.scheduleRetry(work.issue, 1, null, true, work.repairRun)
+      if (continued && work.repairRun) {
+        yield* putRepairBehindRetry(context, work)
+      }
       return
     }
     yield* adoptOpenedHandoff(context, work, result)
