@@ -34,9 +34,25 @@ const stripTypes = (source: string): string => {
 /**
  * The browser sources, in dependency order. They are plain scripts rather than modules — none of
  * them imports or exports — so the compiler typechecks them as one program and they can be served
- * as one classic script without a bundler. The order is the only thing this list encodes.
+ * as one classic script without a bundler. The order is the only thing this list encodes, and it is
+ * the only place it is encoded: `scripts/copy-operator-ui.mjs` copies whatever the compiler emitted,
+ * so a file added here is the whole of adding a file.
+ *
+ * Only the tail of the list is load-bearing. Nothing runs on load except `dom.ts`'s element lookups,
+ * the panel and timeline lookups that depend on them, and `app.ts`'s bootstrap, which calls into
+ * every other source and so has to come last.
  */
-const browserSources: readonly string[] = ['model', 'dom', 'detail', 'app']
+const browserSources: readonly string[] = [
+  'model',
+  'items',
+  'dom',
+  'explain',
+  'timeline',
+  'detail',
+  'cards',
+  'graph',
+  'app',
+]
 
 /**
  * From `dist/` the compiled browser sources sit next to this module. In source mode there

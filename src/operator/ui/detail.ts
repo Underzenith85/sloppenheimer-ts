@@ -2,54 +2,18 @@
 // how long has it been at it, what has it actually done, and what happens next. Process identity
 // and protocol facts are still here, one disclosure down, because they are what an operator needs
 // second rather than first.
-
-type AgentDetailSnapshot = import('@sloppenheimer/core/telemetry.js').AgentDetailSnapshot
-type AgentTimelineCategory = import('@sloppenheimer/core/telemetry.js').AgentTimelineCategory
-type AgentTimelineEvent = import('@sloppenheimer/core/telemetry.js').AgentTimelineEvent
-
-/** Supplied by the server from the same telemetry module the runtime uses. */
-declare const timelineCategories: readonly AgentTimelineCategory[]
-
-type TimelinePreset = 'summary' | 'failures' | 'everything' | 'custom'
-
-/**
- * What Summary keeps. Everything excluded from it is protocol bookkeeping — session handshakes,
- * private reasoning, chat turns, individual tool calls and usage accounting — none of which tells
- * an operator whether the agent is making progress.
- */
-const summaryCategories: readonly AgentTimelineCategory[] = [
-  'file',
-  'command',
-  'retry',
-  'error',
-  'cancellation',
-  'handoff',
-]
-
-const failureCategories: readonly AgentTimelineCategory[] = ['error', 'retry', 'cancellation']
-
-const presetCategories = (preset: TimelinePreset): readonly AgentTimelineCategory[] => {
-  if (preset === 'summary') {
-    return summaryCategories
-  }
-  if (preset === 'failures') {
-    return failureCategories
-  }
-  return timelineCategories
-}
+//
+// This file is the overlay itself: the panel's state, what opens and closes it, the deep link it
+// keeps in the address bar, and the focus it contains. The prose it renders comes from `explain.ts`
+// and the event list from `timeline.ts`.
 
 const detailPanel = element('#agent-detail')
 const detailStatus = element('#detail-status')
-const detailTimeline = element('#detail-timeline')
 const detailDiagnostics = element('#detail-diagnostics')
 const detailSummary = element('#detail-summary')
 const detailOutcome = element('#detail-outcome')
-const detailPresets = element('#detail-presets')
-const detailFilters = element('#detail-filters')
 const detailTitle = element('#detail-title')
 
-let activePreset: TimelinePreset = 'summary'
-const activeCategories = new Set<AgentTimelineCategory>(summaryCategories)
 let detail: AgentDetailSnapshot | null = null
 let detailIdentifier: string | null = null
 let detailTrigger: HTMLElement | null = null
@@ -72,195 +36,6 @@ const identifierFromHash = (): string | null => {
   } catch {
     return null
   }
-}
-
-const describeEvent = (event: AgentTimelineEvent): string => {
-  if (event.category === 'message') {
-    const who = event.role === 'user' ? 'User message' : 'Agent message'
-    return event.text === null ? who : who + ': ' + event.text + (event.truncated ? '…' : '')
-  }
-  if (event.category === 'reasoning') {
-    return 'Thinking (private reasoning is never retained)'
-  }
-  if (event.category === 'tool') {
-    const bytes =
-      event.outputBytes === null ? '' : ' · ' + String(event.outputBytes) + ' output bytes'
-    return 'Tool ' + event.name + ' · ' + event.state + bytes
-  }
-  if (event.category === 'command') {
-    const exit = event.exitCode === null ? '' : ' · exit ' + String(event.exitCode)
-    const quality = event.quality === null ? '' : ' · ' + event.quality
-    return (
-      'Command ' +
-      event.program +
-      ' (' +
-      String(event.argumentCount) +
-      ' arguments)' +
-      quality +
-      ' · ' +
-      event.state +
-      exit
-    )
-  }
-  if (event.category === 'file') {
-    let added = 0
-    let deleted = 0
-    for (const file of event.files) {
-      added += file.addedLines === null ? 0 : file.addedLines
-      deleted += file.deletedLines === null ? 0 : file.deletedLines
-    }
-    const first = event.files[0]
-    // One patch item can touch many files. The first is named, because that is what an operator
-    // scanning the timeline recognizes, and the rest are counted rather than listed.
-    const named =
-      first === undefined
-        ? 'files'
-        : first.change +
-          ' ' +
-          first.path +
-          (event.files.length > 1 ? ' and ' + String(event.files.length - 1) + ' more' : '')
-    return named + ' (+' + String(added) + ' / −' + String(deleted) + ') · ' + event.state
-  }
-  if (event.category === 'usage') {
-    const tokens =
-      event.tokens === null ? 'no token totals' : String(event.tokens.totalTokens) + ' tokens'
-    const limits = event.rateLimits
-      .map((window) => window.name + ' ' + String(window.usedPercent ?? 0) + '%')
-      .join(', ')
-    return 'Usage · ' + tokens + (limits.length === 0 ? '' : ' · ' + limits)
-  }
-  if (event.category === 'retry') {
-    const due = event.dueAt === null ? '' : ' · due ' + formatTime(event.dueAt)
-    return (
-      'Retry attempt ' +
-      String(event.attemptNumber) +
-      due +
-      (event.reason === null ? '' : ' · ' + event.reason)
-    )
-  }
-  if (event.category === 'error') {
-    return (
-      event.severity + (event.code === null ? '' : ' [' + event.code + ']') + ': ' + event.message
-    )
-  }
-  if (event.category === 'cancellation') {
-    return 'Cancelled: ' + event.reason
-  }
-  if (event.category === 'handoff') {
-    return (
-      'Handoff ' +
-      event.step.replaceAll('_', ' ') +
-      ' · ' +
-      event.status +
-      (event.message === null ? '' : ' · ' + event.message)
-    )
-  }
-  return event.event + (event.turnNumber === undefined ? '' : ' · turn ' + String(event.turnNumber))
-}
-
-// The published snapshot carries absolute timestamps, so the console decides for itself whether the
-// deadline has passed since the last fetch rather than waiting for the next one to say so.
-const stalledNow = (snapshot: AgentDetailSnapshot): boolean => {
-  if (snapshot.activity.stalled) {
-    return true
-  }
-  return (
-    snapshot.activity.stallDeadline !== null &&
-    new Date(snapshot.activity.stallDeadline).getTime() <= Date.now()
-  )
-}
-
-const idleNow = (snapshot: AgentDetailSnapshot): number => {
-  if (snapshot.activity.lastActivityAt === null) {
-    return Date.now() - new Date(snapshot.activity.startedAt).getTime()
-  }
-  return Date.now() - new Date(snapshot.activity.lastActivityAt).getTime()
-}
-
-const waitingExplanation = (snapshot: AgentDetailSnapshot): string => {
-  if (snapshot.status === 'retrying' && snapshot.retry !== null) {
-    const remaining = new Date(snapshot.retry.dueAt).getTime() - Date.now()
-    const because =
-      snapshot.retry.reason === null ? 'the attempt did not complete' : snapshot.retry.reason
-    return (
-      'Retrying because ' +
-      because +
-      '. Attempt ' +
-      String(snapshot.retry.attempt) +
-      ' starts in ' +
-      formatClock(remaining) +
-      '.'
-    )
-  }
-  if (snapshot.status === 'completed') {
-    return (
-      'The agent session has ended. ' + (snapshot.handoff.reason ?? 'No further work is scheduled.')
-    )
-  }
-  if (stalledNow(snapshot)) {
-    return 'Stalled: no protocol activity for ' + formatClock(idleNow(snapshot)) + '.'
-  }
-  if (snapshot.activity.stallDeadline === null) {
-    return (
-      (snapshot.phase.operation ?? telemetryLabel(snapshot.phase.phase)) +
-      '. Stall detection is disabled.'
-    )
-  }
-  const remaining = new Date(snapshot.activity.stallDeadline).getTime() - Date.now()
-  return (
-    (snapshot.phase.operation ?? telemetryLabel(snapshot.phase.phase)) +
-    '. Considered stalled in ' +
-    formatClock(remaining) +
-    '.'
-  )
-}
-
-/** What the operator should expect to happen next, in one sentence. */
-const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
-  const handoff = snapshot.handoff
-  if (!snapshot.handoffEnabled) {
-    // This host composes no code-review services, so no pull request will be opened for the work.
-    return snapshot.status === 'retrying'
-      ? 'Handoff is disabled on this host. The next attempt runs on schedule and continues the issue.'
-      : 'Handoff is disabled on this host. Sloppenheimer continues the issue itself rather than opening a pull request.'
-  }
-  if (handoff.outcome === 'merged') {
-    return 'Merged. Nothing further is scheduled for this issue.'
-  }
-  if (handoff.outcome === 'intervention_required' || handoff.outcome === 'failed') {
-    return 'Needs a human: ' + (handoff.reason ?? 'the handoff could not complete on its own.')
-  }
-  if (handoff.outcome === 'pull_request_open') {
-    const number = handoff.pullRequest.number
-    return (
-      'A pull request' +
-      (number === null ? '' : ' #' + String(number)) +
-      ' is open. Sloppenheimer watches its checks and reviews, repairs it when asked, and merges it once it is clean.'
-    )
-  }
-  if (handoff.outcome === 'no_branch') {
-    return 'No branch was produced, so no pull request will be opened for this attempt.'
-  }
-  if (snapshot.status === 'retrying') {
-    return 'The next attempt runs on schedule; the work so far is kept in the same workspace.'
-  }
-  return `On completion Sloppenheimer publishes ${handoff.expectedBranch ?? 'the issue branch'} with its host credential and opens a pull request for review.`
-}
-
-const detailHealth = (snapshot: AgentDetailSnapshot): Readonly<{ kind: string; label: string }> => {
-  if (stalledNow(snapshot)) {
-    return { kind: 'stalled', label: 'Stalled' }
-  }
-  if (snapshot.status === 'retrying') {
-    return { kind: 'retrying', label: 'Retrying' }
-  }
-  if (snapshot.errors.length > 0) {
-    return { kind: 'errors', label: String(snapshot.errors.length) + ' errors reported' }
-  }
-  if (snapshot.status === 'completed') {
-    return { kind: 'completed', label: 'Session ended' }
-  }
-  return { kind: 'healthy', label: 'Healthy' }
 }
 
 const renderDetailStatus = (): void => {
@@ -426,64 +201,6 @@ const renderDetailDiagnostics = (): void => {
   detailDiagnostics.replaceChildren(list)
 }
 
-const renderTimeline = (): void => {
-  if (detail === null) {
-    detailTimeline.replaceChildren(
-      text('li', 'empty', detailNotice.length > 0 ? detailNotice : 'No events yet.'),
-    )
-    return
-  }
-  const events = detail.timeline.events.filter((event) => activeCategories.has(event.category))
-  if (events.length === 0) {
-    detailTimeline.replaceChildren(text('li', 'empty', 'No events match the selected filters.'))
-    return
-  }
-  const items = events.map((event) => {
-    const item = document.createElement('li')
-    item.className = 'timeline-event category-' + event.category
-    item.append(text('span', 'timeline-time', formatTime(event.at)))
-    item.append(text('span', 'timeline-category', telemetryLabel(event.category)))
-    item.append(text('span', 'timeline-body', describeEvent(event)))
-    item.append(
-      text(
-        'small',
-        'timeline-meta',
-        'attempt ' + String(event.attempt) + ' · #' + String(event.sequence),
-      ),
-    )
-    return item
-  })
-  if (detail.timeline.dropped > 0) {
-    items.unshift(
-      text(
-        'li',
-        'timeline-dropped',
-        String(detail.timeline.dropped) + ' earlier events were dropped to keep retention bounded.',
-      ),
-    )
-  }
-  detailTimeline.replaceChildren(...items)
-}
-
-const syncFilterControls = (): void => {
-  for (const input of detailFilters.querySelectorAll<HTMLInputElement>('input[type=checkbox]')) {
-    input.checked = activeCategories.has(input.value as AgentTimelineCategory)
-  }
-  for (const button of detailPresets.querySelectorAll<HTMLButtonElement>('button')) {
-    button.setAttribute('aria-pressed', String(button.dataset['preset'] === activePreset))
-  }
-}
-
-const applyPreset = (preset: TimelinePreset): void => {
-  activePreset = preset
-  activeCategories.clear()
-  for (const category of presetCategories(preset)) {
-    activeCategories.add(category)
-  }
-  syncFilterControls()
-  renderTimeline()
-}
-
 const renderDetail = (): void => {
   detailTitle.textContent = detail === null ? (detailIdentifier ?? 'Agent detail') : detail.title
   element('#detail-operation').textContent =
@@ -522,46 +239,6 @@ const loadDetail = async (): Promise<void> => {
     detailNotice = 'Agent detail is temporarily unreachable. Retrying…'
   }
   renderDetail()
-}
-
-const buildFilters = (): void => {
-  const presets: readonly (readonly [TimelinePreset, string])[] = [
-    ['summary', 'Summary'],
-    ['failures', 'Errors and retries'],
-    ['everything', 'Everything'],
-  ]
-  detailPresets.replaceChildren(
-    ...presets.map(([preset, label]) => {
-      const button = text('button', 'preset', label)
-      button.type = 'button'
-      button.dataset['preset'] = preset
-      button.setAttribute('aria-pressed', String(preset === activePreset))
-      button.addEventListener('click', () => applyPreset(preset))
-      return button
-    }),
-  )
-  detailFilters.replaceChildren(
-    ...timelineCategories.map((category) => {
-      const label = document.createElement('label')
-      label.className = 'filter'
-      const input = document.createElement('input')
-      input.type = 'checkbox'
-      input.checked = activeCategories.has(category)
-      input.value = category
-      input.addEventListener('change', () => {
-        if (input.checked) {
-          activeCategories.add(category)
-        } else {
-          activeCategories.delete(category)
-        }
-        activePreset = 'custom'
-        syncFilterControls()
-        renderTimeline()
-      })
-      label.append(input, text('span', '', telemetryLabel(category)))
-      return label
-    }),
-  )
 }
 
 const markExpandedTrigger = (identifier: string | null): void => {
