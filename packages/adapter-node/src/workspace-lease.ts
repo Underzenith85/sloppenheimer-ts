@@ -154,10 +154,13 @@ export const storageInstant = (
       yield* fileSystem.makeDirectory(stagingPath, { recursive: true })
     }
     const probe = join(stagingPath, `${randomUUID()}.now`)
-    yield* fileSystem.writeFileString(probe, '', { mode: 0o600 })
-    return yield* Effect.ensuring(
-      Effect.map(fileSystem.stat(probe), (info) => Option.map(info.mtime, (at) => at.getTime())),
-      discardStagedLease(fileSystem, probe),
+    // The file is taken away by the same bracket that makes it, so nothing accumulates here: an
+    // interruption after the write cannot arrive before the removal that answers for it.
+    return yield* Effect.acquireUseRelease(
+      fileSystem.writeFileString(probe, '', { mode: 0o600 }),
+      () =>
+        Effect.map(fileSystem.stat(probe), (info) => Option.map(info.mtime, (at) => at.getTime())),
+      () => discardStagedLease(fileSystem, probe),
     )
   })
 
@@ -292,7 +295,10 @@ const sayLeaseAgain = (
       const now = yield* currentInstant
       const said = yield* Effect.either(sayLease(fileSystem, paths, run, owner, now, restore))
       if (Either.isLeft(said)) {
-        return yield* now.getTime() < until ? Effect.void : Effect.fail(leaseLost(paths))
+        // The clock is read again rather than reused: an attempt that blocked on the filesystem
+        // and then failed may itself have taken the rest of the window this run was standing on.
+        const failedAt = yield* currentInstant
+        return yield* failedAt.getTime() < until ? Effect.void : Effect.fail(leaseLost(paths))
       }
       return yield* Option.match(said.right, {
         onNone: () => Effect.fail(leaseLost(paths)),

@@ -96,8 +96,13 @@ const stagingIdentity = (
     })
   })
 
-/** The shape this module gives a staged record: a UUID and the suffix, and nothing else. */
-const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.lease$/u
+/**
+ * The shapes this module gives the files it stages: a UUID and one of two suffixes, and nothing
+ * else. `.lease` is a record on its way to being published; `.now` is a probe written to ask the
+ * storage what time it is.
+ */
+const stagedFileName =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(lease|now)$/u
 
 /**
  * Whether one entry is an abandoned staged record — and the last word on whether the sweep may
@@ -105,8 +110,9 @@ const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
  *
  * Node offers no `unlinkat`, so the removal that follows resolves a pathname the sweep cannot hold
  * still. What it can do is refuse to remove anything that is not demonstrably its own: the name has
- * this module's shape, the entry is a plain file rather than a link or a directory, the contents
- * decode as a lease record, and it is older than any writer could be — aged on the storage's own
+ * this module's shape, the entry is a plain file rather than a link or a directory, its contents
+ * are what that shape promises — a record that decodes as one, a probe that is empty — and it is
+ * older than any writer could be — aged on the storage's own
  * clock against `storageNow`, never this host's, which may be hours from the one that stamped it.
  * A file reached through a substituted path is a file the sweep does not recognize, and leaves
  * alone.
@@ -119,7 +125,7 @@ const isAbandonedRecord = (
   lifetimeMs: number,
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
-    if (!stagedRecordName.test(entry)) {
+    if (!stagedFileName.test(entry)) {
       return false
     }
     const staged = join(stagingPath, entry)
@@ -139,6 +145,11 @@ const isAbandonedRecord = (
       )
     if (!abandoned) {
       return false
+    }
+    // What each kind has to show for itself: a record decodes as one, and a probe is empty, which
+    // is what this module writes and what nothing else would leave under such a name.
+    if (entry.endsWith('.now')) {
+      return Number(info.size) === 0
     }
     const document = yield* fileSystem.readFileString(staged, 'utf8')
     return Either.isRight(decodeLease(staged, document))

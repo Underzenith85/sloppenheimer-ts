@@ -578,13 +578,19 @@ describe('run workspace allocation and leases', (): void => {
       const inFlight = join(staging, `${crypto.randomUUID()}.lease`)
       const somebodyElses = join(staging, `${crypto.randomUUID()}.lease`)
       const notOurName = join(staging, 'notes.txt')
+      // A probe, which is how this host asks the storage what time it is: empty by construction,
+      // and left behind only by a host killed between writing one and taking it away.
+      const probe = join(staging, `${crypto.randomUUID()}.now`)
+      const notAProbe = join(staging, `${crypto.randomUUID()}.now`)
       yield* host(() => writeFile(abandoned, record))
       yield* host(() => writeFile(inFlight, record))
       yield* host(() => writeFile(somebodyElses, 'a file that is not a lease record'))
       yield* host(() => writeFile(notOurName, record))
+      yield* host(() => writeFile(probe, ''))
+      yield* host(() => writeFile(notAProbe, "not empty, so not this host's probe"))
       const longAgo = new Date(Date.now() - 4 * 60 * 60 * 1_000)
       yield* Effect.all(
-        [abandoned, somebodyElses, notOurName].map((path) =>
+        [abandoned, somebodyElses, notOurName, probe, notAProbe].map((path) =>
           host(() => utimes(path, longAgo, longAgo)),
         ),
       )
@@ -599,6 +605,8 @@ describe('run workspace allocation and leases', (): void => {
       expect(existsSync(inFlight)).toBe(true)
       expect(existsSync(somebodyElses)).toBe(true)
       expect(existsSync(notOurName)).toBe(true)
+      expect(existsSync(probe)).toBe(false)
+      expect(existsSync(notAProbe)).toBe(true)
     }),
   )
 
