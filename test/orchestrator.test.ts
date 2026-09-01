@@ -3905,6 +3905,95 @@ describe('persisted finished work', (): void => {
     }),
   )
 
+  it.scoped('writes both stores beside the workspace root a reload moved to', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-reload-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-reloaded-')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      // The reload moves the workspace root; the stores describe one host's state and must follow
+      // it, or the next startup reads them from a directory this host never wrote to.
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        config: { ...isolated.config, workspaceRoot: reloadedRoot },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#63', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('63'),
+      }
+      yield* saveHandoffs(join(workspaceRoot, '.sloppenheimer', 'handoffs.json'), [
+        awaitingChecks(issue),
+      ])
+      // The issue hydrates the restored handoff but is never offered for dispatch: this test is
+      // about where the stores are written, not about putting an agent on the issue.
+      const harness = makeHarness(
+        isolated,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      // The pull request stays unfinished until the reload has taken effect, so the merge this
+      // asserts on is one the host records under the root it moved to.
+      const openHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      let merged = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (pullRequestNumber) =>
+            merged
+              ? mergedAt(
+                  harness,
+                  '2026-08-31T09:00:00.000Z',
+                )(provider).inspectPullRequest(pullRequestNumber)
+              : Effect.succeed(
+                  anOpenPullRequest({
+                    number: pullRequestNumber,
+                    headSha: openHead,
+                    // Its review is already in hand and its checks have not finished, so the
+                    // handoff sits at awaiting checks and calls nothing while the reload lands.
+                    codexReview: { headShaPrefix: openHead.slice(0, 7), status: 'completed' },
+                    checks: [
+                      { name: 'quality', status: 'in_progress', conclusion: null, url: null },
+                    ],
+                  }),
+                ),
+        }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          let current = yield* control.snapshot
+          while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          merged = true
+          yield* control.refresh
+        }),
+      )
+
+      expect(
+        yield* loadCompletions(join(reloadedRoot, '.sloppenheimer', 'completions.json')),
+      ).toMatchObject([{ identifier: issue.identifier, finishedAt: '2026-08-31T09:00:00.000Z' }])
+      // The handoff store follows the same root: the merged handoff is gone from the store beside
+      // the workspace this host is now using, not left recorded only beside the one it booted with.
+      expect(yield* loadHandoffs(join(reloadedRoot, '.sloppenheimer', 'handoffs.json'))).toEqual([])
+      expect(
+        yield* loadCompletions(join(workspaceRoot, '.sloppenheimer', 'completions.json')),
+      ).toEqual([])
+    }),
+  )
+
   it.scoped('restores only the finished work the console would still show', () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(now)

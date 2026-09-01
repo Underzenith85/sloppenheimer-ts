@@ -436,11 +436,18 @@ export const startOrchestratorRuntime = (
     const bootstrapWorkflow = yield* bootstrap.value
     yield* cleanupTerminalWorkspaces(bootstrapWorkflow)
 
-    const handoffStorePath = resolve(
-      bootstrapWorkflow.workflow.config.workspaceRoot,
-      '.sloppenheimer',
-      'handoffs.json',
-    )
+    /**
+     * Where a store lives, given the workspace root in force.
+     *
+     * A write reads that root from the workflow the host is running under rather than from the one
+     * it booted with: a reload may move `workspaceRoot`, and a store written beside a root the host
+     * has left is one the next startup would read nothing from. Both stores follow the same root,
+     * because they describe one host's state and a restart reads them from one directory.
+     */
+    const storePath = (workspaceRoot: string, file: string): string =>
+      resolve(workspaceRoot, '.sloppenheimer', file)
+    const bootstrapRoot = bootstrapWorkflow.workflow.config.workspaceRoot
+    const handoffStorePath = storePath(bootstrapRoot, 'handoffs.json')
     // Handoff disabled: the store is deliberately left unread, so the empty in-memory list must
     // never be written back over it. A later handoff-enabled run still has to restore those
     // pull requests.
@@ -476,11 +483,7 @@ export const startOrchestratorRuntime = (
           }),
         )
 
-    const completionStorePath = resolve(
-      bootstrapWorkflow.workflow.config.workspaceRoot,
-      '.sloppenheimer',
-      'completions.json',
-    )
+    const completionStorePath = storePath(bootstrapRoot, 'completions.json')
     /**
      * Finished work an earlier host recorded, restored to the window the console shows and no
      * further. The store is read and written under exactly the condition the handoff store is:
@@ -584,9 +587,8 @@ export const startOrchestratorRuntime = (
       if (handoffStoreDisabled || !current.startupRecoveryFinished || current.storeReadFailed) {
         return
       }
-      yield* onHostFileSystem(
-        saveHandoffs(handoffStorePath, Transitions.handoffSnapshots(current)),
-      ).pipe(
+      const path = storePath(current.lastKnownGood.workflow.config.workspaceRoot, 'handoffs.json')
+      yield* onHostFileSystem(saveHandoffs(path, Transitions.handoffSnapshots(current))).pipe(
         Effect.catchAll((error) =>
           Effect.gen(function* () {
             const observedAt = yield* currentInstant
@@ -600,7 +602,7 @@ export const startOrchestratorRuntime = (
             yield* logError('handoff store write failed', {
               action: 'handoff_store_write',
               outcome: 'failed',
-              path: handoffStorePath,
+              path,
               error: error.message,
             })
           }),
@@ -619,14 +621,18 @@ export const startOrchestratorRuntime = (
         return
       }
       const current = yield* Ref.get(state)
+      const path = storePath(
+        current.lastKnownGood.workflow.config.workspaceRoot,
+        'completions.json',
+      )
       yield* onHostFileSystem(
-        saveCompletions(completionStorePath, Transitions.publishedCompletions(current)),
+        saveCompletions(path, Transitions.publishedCompletions(current)),
       ).pipe(
         Effect.catchAll((error) =>
           logError('completion store write failed', {
             action: 'completion_store_write',
             outcome: 'failed',
-            path: completionStorePath,
+            path,
             error: error.message,
           }),
         ),
