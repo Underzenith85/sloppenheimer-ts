@@ -1799,6 +1799,173 @@ describe('agent turn completion separated from work publication', (): void => {
       )
     }),
   )
+
+  it.scoped('retries a rediscovered repair as a repair when its delivery cannot be retried', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-repair-fallback-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      // A repair a previous process was driving. It is restored with nothing behind it, because
+      // whatever was driving it is gone — which is exactly the state this test is about.
+      yield* saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
+          state: 'repair_needed',
+          headSha: head,
+          reason: 'The pull request conflicts with protected main',
+          repairAttempts: 0,
+          repairHeadShas: [],
+          repairStartedHeadSha: head,
+          repairWorkerStarted: true,
+          reviewRequestedHeadSha: head,
+          reviewCompletedHeadSha: head,
+          observedAt: new Date(0).toISOString(),
+        },
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      const targets: SourceControlTarget[] = []
+      const launchedDescriptions: (string | null)[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () => {
+          const host = failingSourceControl(
+            () => true,
+            // The worktree survives and nothing more can be published from it, so the work goes
+            // back to the agent rather than to another delivery attempt.
+            () => Effect.fail(deliveryFailure({ retryable: false })),
+          )
+          return {
+            ...host,
+            prepare: (candidate, workspace, target) => {
+              targets.push(target)
+              return host.prepare(candidate, workspace, target)
+            },
+          }
+        },
+        runAgent: ({ issue: launchedIssue }) => {
+          launchedDescriptions.push(launchedIssue.description)
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          // Nothing is waiting to publish: the retry the fallback queued is the agent's.
+          expect(snapshot.delivering).toEqual([])
+
+          yield* TestClock.adjust('5 minutes')
+          while (launchedDescriptions.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+        }),
+      )
+
+      // The queued retry was marked a repair, so it has to arrive as one: against the pull
+      // request's exact head, carrying its repair prompt. A bare continuation would edit the
+      // branch with no lease and leave the stale repair identity attached to the handoff.
+      expect(targets.filter((target) => target._tag === 'Normal')).toEqual([])
+      expect(targets).toContainEqual({
+        _tag: 'Repair',
+        branchName: 'sloppenheimer/issue-20',
+        expectedHeadSha: head,
+      })
+      expect(launchedDescriptions[0]).toContain('## Pull request repair')
+      expect(launchedDescriptions[0]).toContain(`Head: ${head}`)
+    }),
+  )
+
+  it.scoped('keeps the workspace manager a reload replaced until its delivery settles', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-reload-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-reloaded-')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: reloadedRoot },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      let reported = issue
+      const harness = makeHarness(initial, () => [reported])
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            () => Effect.fail(deliveryFailure()),
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          const beforeReload = harness.releasedWorkspaces().length
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          while (snapshot.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+
+          // The retained change is in a workspace this manager opened, and the delivery will reach
+          // for it again — to publish it, or to remove it. Releasing the manager with the reload
+          // would close the scope around the only copy of that work.
+          expect(harness.releasedWorkspaces()).toHaveLength(beforeReload)
+
+          // Closed, so the delivery discards the work with the workspace holding it — the one
+          // disposition that calls through the manager it has been carrying all along.
+          reported = { ...issue, state: 'closed' }
+          yield* TestClock.adjust('5 minutes')
+          while (snapshot.delivering.length > 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+
+          expect(harness.releasedWorkspaces().length).toBeGreaterThan(beforeReload)
+        }),
+      )
+    }),
+  )
 })
 
 describe('restored pull request handoffs', (): void => {

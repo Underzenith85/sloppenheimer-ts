@@ -103,6 +103,24 @@ export const notePublication = (
     }),
   })
 
+/**
+ * Puts an attempt behind a repair again.
+ *
+ * A repair restored from a snapshot carries `inFlight: false`: the process that was driving it is
+ * gone, and an unchanged head therefore reads as an interrupted repair rather than a completed one.
+ * Queueing another agent turn for that repair puts something behind it once more, and the flag is
+ * what the retry consults to dispatch it as the repair it is — with the pull request's prompt and
+ * its expected head — rather than as a bare continuation that would leave the identity attached.
+ */
+export const reactivateRepair = (handoff: HandoffEntry): HandoffEntry =>
+  Option.match(handoff.repair, {
+    onNone: () => handoff,
+    onSome: (repair) =>
+      repair.inFlight
+        ? handoff
+        : { ...handoff, repair: Option.some({ ...repair, inFlight: true }) },
+  })
+
 /** The repair is over: whatever it was carrying goes with it. */
 export const releaseRepair = (handoff: HandoffEntry): HandoffEntry =>
   Option.isNone(handoff.repair) ? handoff : { ...handoff, repair: Option.none() }

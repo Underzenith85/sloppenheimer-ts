@@ -568,6 +568,10 @@ repair agent that had achieved nothing.
   delivery keeps calling the tracker and the code-review port after the run that produced it has
   ended, so a workflow reload or a credential rotation adopts it exactly as it adopts a running run
   and a handoff.
+- Retirement waits for a retained delivery exactly as it waits for a running run and a handoff. A
+  delivery holds the workspace manager it will open the workspace through again — to publish the
+  change or, on the terminal path, to remove it — so releasing that manager's scope from under a
+  reload would take the only copy of the work with it.
 - "Repair agent completed without changing the pull request head" is reachable only when the
   inspected worktree was clean. The repair identity carries the postflight verdict for exactly this
   reason: an unchanged head alone cannot tell a no-op turn from a push that failed.
@@ -590,6 +594,11 @@ repair agent that had achieved nothing.
   candidate later and arrives with a workspace of its own; the dispatch pass examines its own
   candidates, so only the one sweep that has to precede the first reconciliation costs a tracker
   call.
+- When a rediscovered publication cannot be delivered as it stands and the work goes back to the
+  coding agent, a repair the recovery restored is put back in flight with it. A restored repair
+  carries no attempt behind it, and that is exactly what the queued retry consults to decide whether
+  to dispatch a repair or a bare continuation — one that would edit the branch with no expected-head
+  lease and without the pull request's prompt, leaving the stale repair identity on the handoff.
 - A workspace the branch has moved past is not retained work and is not preserved either. The
   preparation resets it, for the same reason the inspection calls it clean: the next agent would
   otherwise start from a commit the remote has built on, and publishing from there force-pushes

@@ -12,7 +12,7 @@ import { Effect, Option, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
 import { recordPublication } from '../telemetry.js'
-import { notePublication } from './repair.js'
+import { notePublication, reactivateRepair } from './repair.js'
 import { requestHandoff, type SettledWork } from './handoff-request.js'
 import { postflightReason, type PostflightOutcome } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
@@ -98,6 +98,34 @@ const recordOutcome = (
   })
 
 /**
+ * Puts a repair back behind the retry that is now queued for it.
+ *
+ * Only reached when nothing more can be published from the workspace and the agent has to run
+ * again. A repair rediscovered from a workspace after a restart is restored with no attempt behind
+ * it, and the retry that comes due consults exactly that to decide whether to dispatch a repair or
+ * a bare continuation — so without this the queued repair retry would arrive as an ordinary turn,
+ * without the pull request's prompt or its expected head, and leave the old identity attached.
+ */
+const putRepairBehindRetry = (
+  context: OrchestratorContext,
+  work: SettledWork,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const handoff = (yield* Ref.get(context.state)).handoffs.get(work.issue.id)
+    if (handoff === undefined) {
+      return
+    }
+    const reactivated = reactivateRepair(handoff)
+    if (reactivated === handoff) {
+      return
+    }
+    yield* Ref.update(context.state, (current) =>
+      Transitions.putHandoff(current, work.issue.id, reactivated),
+    )
+    yield* context.persistHandoffs
+  })
+
+/**
  * The postflight state machine's one effectful step: given what the host made of the workspace,
  * decide what the issue is owed.
  *
@@ -142,13 +170,16 @@ export const settlePostflight = (
           }),
         ),
       )
-      yield* context.scheduleRetry(
+      const retried = yield* context.scheduleRetry(
         work.issue,
         (work.attempt ?? 0) + 1,
         `delivery failed: ${outcome.failure.message}`,
         false,
         work.repairRun,
       )
+      if (retried && work.repairRun) {
+        yield* putRepairBehindRetry(context, work)
+      }
       return
     }
     const codeReview = work.execution.codeReview
