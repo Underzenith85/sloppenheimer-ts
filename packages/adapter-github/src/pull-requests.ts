@@ -289,9 +289,15 @@ const requestCodexReview = (
   })
 
 /**
- * Resolves review threads one at a time, so a rejected mutation stops the rest, and only while the
- * head the caller judged is still the head: a thread retired by a commit nobody has reviewed is
- * not this verdict's to close.
+ * Resolves review threads one at a time, so a rejected mutation stops the rest, and each behind its
+ * own read of the head: a thread retired by a commit nobody has reviewed is not this verdict's to
+ * close, and a batch is a sequence of writes rather than one, so a head that advances part-way
+ * through must stop the ones that have not happened yet.
+ *
+ * `resolveReviewThread` takes no expected head, so this is a read before a write and not a
+ * compare-and-swap: a head that lands between the two is a window GitHub gives no way to close.
+ * Reading per thread makes that window one mutation wide instead of a whole batch, and the threads
+ * left unresolved are judged again by the next inspection.
  */
 const resolveReviewThreads = (
   provider: GitHubProviderConfig,
@@ -300,31 +306,29 @@ const resolveReviewThreads = (
   expectedHeadSha: string,
   threadIds: readonly string[],
 ): Effect.Effect<void, TrackerError> =>
-  Effect.gen(function* () {
-    yield* assertHeadUnchanged(
-      provider,
-      prefix,
-      number,
-      expectedHeadSha,
-      'GitHub pull request head changed before its review threads were resolved',
-    )
-    yield* Effect.forEach(
-      threadIds,
-      (threadId) =>
-        Effect.flatMap(
-          json(provider, graphqlUrl(provider), {
-            method: 'POST',
-            body: JSON.stringify({
-              query:
-                'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
-              variables: { threadId },
-            }),
+  Effect.forEach(
+    threadIds,
+    (threadId) =>
+      Effect.gen(function* () {
+        yield* assertHeadUnchanged(
+          provider,
+          prefix,
+          number,
+          expectedHeadSha,
+          'GitHub pull request head changed before its review threads were resolved',
+        )
+        const value = yield* json(provider, graphqlUrl(provider), {
+          method: 'POST',
+          body: JSON.stringify({
+            query:
+              'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
+            variables: { threadId },
           }),
-          (value) => decodeThreadResolution(threadId, value),
-        ),
-      { concurrency: 1, discard: true },
-    )
-  })
+        })
+        yield* decodeThreadResolution(threadId, value)
+      }),
+    { concurrency: 1, discard: true },
+  )
 
 export const makeGitHubPullRequestMonitor = (
   provider: GitHubProviderConfig,

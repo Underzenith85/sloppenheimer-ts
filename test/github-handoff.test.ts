@@ -641,4 +641,40 @@ describe('GitHub pull request monitor', (): void => {
       expect(bodies).toEqual([])
     }),
   )
+
+  it.effect('stops a batch at the mutation where the head moved', () =>
+    Effect.gen(function* () {
+      const bodies: string[] = []
+      let head = 'head-1'
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          if (requestUrl(input).endsWith('/pulls/41')) {
+            return Response.json({ head: { sha: head } })
+          }
+          if (typeof init?.body === 'string') {
+            bodies.push(init.body)
+          }
+          // Someone pushes while the batch is part-way through.
+          head = 'head-2'
+          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
+        }),
+      )
+
+      const failure = yield* Effect.flip(
+        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
+          'thread-1',
+          'thread-2',
+        ]),
+      )
+
+      expect(failure.message).toBe(
+        'GitHub pull request head changed before its review threads were resolved',
+      )
+      // The first thread was retired under the verdict that judged it; the second is left for the
+      // next inspection to judge against the head that now exists.
+      expect(bodies).toHaveLength(1)
+      expect(bodies[0]).toContain('thread-1')
+    }),
+  )
 })
