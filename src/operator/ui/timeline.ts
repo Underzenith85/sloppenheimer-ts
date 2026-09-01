@@ -57,17 +57,11 @@ const renderTimeline = (): void => {
   }
   const items = events.map((event) => {
     const item = document.createElement('li')
-    item.className = 'timeline-event category-' + event.category
+    item.className = `timeline-event category-${event.category}`
     item.append(text('span', 'timeline-time', formatTime(event.at)))
     item.append(text('span', 'timeline-category', telemetryLabel(event.category)))
     item.append(text('span', 'timeline-body', describeEvent(event)))
-    item.append(
-      text(
-        'small',
-        'timeline-meta',
-        'attempt ' + String(event.attempt) + ' · #' + String(event.sequence),
-      ),
-    )
+    item.append(text('small', 'timeline-meta', `attempt ${event.attempt} · #${event.sequence}`))
     return item
   })
   if (detail.timeline.dropped > 0) {
@@ -75,7 +69,7 @@ const renderTimeline = (): void => {
       text(
         'li',
         'timeline-dropped',
-        String(detail.timeline.dropped) + ' earlier events were dropped to keep retention bounded.',
+        `${detail.timeline.dropped} earlier events were dropped to keep retention bounded.`,
       ),
     )
   }

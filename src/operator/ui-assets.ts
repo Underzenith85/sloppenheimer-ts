@@ -11,10 +11,8 @@ const read = (name: string): string =>
  * console never restates the telemetry category list. The value is supplied here, from
  * the same module the server uses, rather than being baked in by the build.
  */
-const categoryPrelude =
-  "'use strict'\nconst timelineCategories = Object.freeze(" +
-  JSON.stringify(timelineCategories) +
-  ')\n'
+const categories = JSON.stringify(timelineCategories)
+const categoryPrelude = `'use strict'\nconst timelineCategories = Object.freeze(${categories})\n`
 
 /**
  * Type stripping is still flagged experimental, so Node prints a warning the first time it

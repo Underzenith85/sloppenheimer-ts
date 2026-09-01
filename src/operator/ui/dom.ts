@@ -9,7 +9,7 @@ type DetailPayload = Readonly<{
 const element = <ElementType extends HTMLElement = HTMLElement>(selector: string): ElementType => {
   const match = document.querySelector<ElementType>(selector)
   if (match === null) {
-    throw new Error('Missing UI element: ' + selector)
+    throw new Error(`Missing UI element: ${selector}`)
   }
   return match
 }
@@ -34,7 +34,7 @@ const request = async <Value>(path: string, options: RequestInit = {}): Promise<
   const response = await fetch(path, options)
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as DetailPayload | null
-    const message = payload?.error?.message ?? 'Request failed with HTTP ' + String(response.status)
+    const message = payload?.error?.message ?? `Request failed with HTTP ${response.status}`
     throw new Error(message)
   }
   return response.json() as Promise<Value>
@@ -54,10 +54,10 @@ const post = async (path: string): Promise<void> => {
 
 const formatDuration = (seconds: number): string => {
   if (seconds < 60) {
-    return Math.round(seconds) + 's runtime'
+    return `${Math.round(seconds)}s runtime`
   }
   const minutes = Math.floor(seconds / 60)
-  return minutes + 'm ' + Math.round(seconds % 60) + 's runtime'
+  return `${minutes}m ${Math.round(seconds % 60)}s runtime`
 }
 
 const formatTime = (value: string): string =>
@@ -71,9 +71,9 @@ const formatClock = (milliseconds: number): string => {
   const total = Math.max(Math.round(milliseconds / 1000), 0)
   const minutes = Math.floor(total / 60)
   if (minutes === 0) {
-    return String(total) + 's'
+    return `${total}s`
   }
-  return String(minutes) + 'm ' + String(total % 60).padStart(2, '0') + 's'
+  return `${minutes}m ${String(total % 60).padStart(2, '0')}s`
 }
 
 /** How long ago, in words, for a timestamp the operator is scanning rather than reading exactly. */
@@ -84,9 +84,9 @@ const formatAgo = (value: string, now: number): string => {
   }
   const minutes = Math.floor(elapsed / 60_000)
   if (minutes < 60) {
-    return String(minutes) + 'm ago'
+    return `${minutes}m ago`
   }
-  return String(Math.floor(minutes / 60)) + 'h ago'
+  return `${Math.floor(minutes / 60)}h ago`
 }
 
 /** A CSS-safe suffix for a status token, so state is styled without interpolating raw text. */
@@ -107,7 +107,7 @@ const telemetryLabel = (value: string): string =>
  * class only tints what the text already says.
  */
 const chip = (kind: string, label: string): HTMLElement =>
-  text('span', 'chip chip-' + statusClass(kind), label)
+  text('span', `chip chip-${statusClass(kind)}`, label)
 
 const setNotice = (message: string): void => {
   notice.textContent = message
