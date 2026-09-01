@@ -196,10 +196,14 @@ export const verifiedRootRejection = (
   return Option.none()
 }
 
+/** Whether two probes describe one directory: the same inode on the same device. */
+export const sameIdentity = (left: DirectoryIdentity, right: DirectoryIdentity): boolean =>
+  left.deviceId === right.deviceId && left.inode === right.inode
+
 export const sameDirectoryIdentity = (
   verified: VerifiedWorkspace,
   identity: DirectoryIdentity,
-): boolean => identity.deviceId === verified.deviceId && identity.inode === verified.inode
+): boolean => sameIdentity(verified, identity)
 
 /**
  * The rebinding rule: the verified path must still be its own canonical form and must still hold

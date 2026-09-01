@@ -6,8 +6,13 @@ import { dirname, join } from 'node:path'
 import { Effect, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
-import { realDirectoryExists } from './filesystem.js'
-import type { RunWorkspacePaths } from '@sloppenheimer/core/domain/workspace-containment.js'
+import { isSymbolicLink, realDirectoryExists } from './filesystem.js'
+import {
+  rejectWorkspace,
+  sameIdentity,
+  type DirectoryIdentity,
+  type RunWorkspacePaths,
+} from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
   decodeLease,
   encodeLease,
@@ -165,12 +170,59 @@ export const publishClaimedLease = (
 ): Effect.Effect<void, PlatformError> =>
   fileSystem.link(staged, leasePath).pipe(Effect.ensuring(discardStagedLease(fileSystem, staged)))
 
+/** What the staging directory was when the sweep verified it, so a later step can say it still is. */
+const stagingIdentity = (
+  fileSystem: FileSystem.FileSystem,
+  stagingPath: string,
+): Effect.Effect<DirectoryIdentity, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (yield* isSymbolicLink(fileSystem, stagingPath)) {
+      return yield* Effect.fail(rejectWorkspace(`lease staging path is a link: ${stagingPath}`))
+    }
+    const info = yield* fileSystem.stat(stagingPath)
+    if (info.type !== 'Directory') {
+      return yield* Effect.fail(
+        rejectWorkspace(`lease staging path is not a directory: ${stagingPath}`),
+      )
+    }
+    return yield* Option.match(info.ino, {
+      onNone: () =>
+        Effect.fail(rejectWorkspace(`lease staging directory has no identity: ${stagingPath}`)),
+      onSome: (inode) => Effect.succeed({ deviceId: info.dev, inode }),
+    })
+  })
+
+/** Whether one staged entry is an abandoned record: a plain file, older than any live writer. */
+const isAbandonedRecord = (
+  fileSystem: FileSystem.FileSystem,
+  staged: string,
+  now: Date,
+  lifetimeMs: number,
+): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (yield* isSymbolicLink(fileSystem, staged)) {
+      return false
+    }
+    const info = yield* fileSystem.stat(staged)
+    return (
+      info.type === 'File' &&
+      Option.exists(info.mtime, (modified) => now.getTime() - modified.getTime() > lifetimeMs)
+    )
+  })
+
 /**
  * Takes away staged records no writer can still be holding.
  *
- * Staging is one write, so a record older than this belongs to a host that was killed between
- * writing it and publishing it. Nothing refers to such a file, but without this it would stay under
- * the staging directory for good, one per crash.
+ * Staging is one write, so a record older than the lifetime belongs to a host that was killed
+ * between writing it and publishing it. Nothing refers to such a file, but without this it would
+ * stay under the staging directory for good, one per crash.
+ *
+ * The sweep deletes, so it does not trust the path it was given: it holds the directory open for
+ * the whole pass, which pins the inode so a directory removed and recreated under that name cannot
+ * be followed, and it re-confirms the device and inode before every removal, the way a verified
+ * workspace is re-confirmed at each boundary. It removes only plain files, never a link or a
+ * directory. Node offers no `unlinkat`, so the last instant between confirming the directory and
+ * unlinking inside it cannot be closed; what can be is the window, and what it may ever remove.
  */
 export const pruneStagedLeases = (
   fileSystem: FileSystem.FileSystem,
@@ -178,23 +230,31 @@ export const pruneStagedLeases = (
   now: Date,
   lifetimeMs: number,
 ): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    if (!(yield* realDirectoryExists(fileSystem, stagingPath))) {
-      return
-    }
-    const entries = yield* fileSystem.readDirectory(stagingPath)
-    for (const entry of entries) {
-      const staged = join(stagingPath, entry)
-      const info = yield* fileSystem.stat(staged)
-      const abandoned = Option.exists(
-        info.mtime,
-        (modified) => now.getTime() - modified.getTime() > lifetimeMs,
+  Effect.scoped(
+    Effect.gen(function* () {
+      const verified = yield* stagingIdentity(fileSystem, stagingPath)
+      const handle = yield* fileSystem.open(stagingPath, { flag: 'r' })
+      const held = yield* handle.stat
+      // Holding the directory open keeps its inode allocated, so one removed and recreated under
+      // this name cannot be swept in its place — provided the handle is the directory verified.
+      const pinned = Option.exists(held.ino, (inode) =>
+        sameIdentity(verified, { deviceId: held.dev, inode }),
       )
-      if (abandoned) {
-        yield* discardStagedLease(fileSystem, staged)
+      if (!pinned) {
+        return
       }
-    }
-  }).pipe(Effect.ignore)
+      for (const entry of yield* fileSystem.readDirectory(stagingPath)) {
+        const current = yield* stagingIdentity(fileSystem, stagingPath)
+        if (!sameIdentity(verified, current)) {
+          return
+        }
+        const staged = join(stagingPath, entry)
+        if (yield* isAbandonedRecord(fileSystem, staged, now, lifetimeMs)) {
+          yield* discardStagedLease(fileSystem, staged)
+        }
+      }
+    }),
+  ).pipe(Effect.ignore)
 
 /**
  * Replaces a record this run already owns. Staged and renamed over the lease, the way the handoff

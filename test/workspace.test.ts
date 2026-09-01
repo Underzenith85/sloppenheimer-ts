@@ -572,6 +572,30 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('sweeps only plain records, never a link into somewhere else', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const outside = join('/tmp', `sloppenheimer-outside-${crypto.randomUUID()}`)
+      roots.push(outside)
+      yield* host(() => mkdir(outside))
+      const bystander = join(outside, 'someone-elses.txt')
+      yield* host(() => writeFile(bystander, 'not ours to sweep'))
+      const staging = join(root, '#lease-writes')
+      yield* host(() => mkdir(staging, { recursive: true }))
+      const pointer = join(staging, 'pointer.lease')
+      yield* host(() => symlink(bystander, pointer))
+      const longAgo = new Date(Date.now() - 4 * 60 * 60 * 1_000)
+      yield* host(() => utimes(bystander, longAgo, longAgo))
+
+      yield* workspaceManager(root, hooks())
+
+      // The sweep unlinks records, so it removes only what it has confirmed is a plain file: a
+      // link is left where it is, and what it points at is never touched.
+      expect(existsSync(pointer)).toBe(true)
+      expect(existsSync(bystander)).toBe(true)
+    }),
+  )
+
   it.live('refuses a staging directory that is a substituted path', () =>
     Effect.gen(function* () {
       const root = makeRoot()
