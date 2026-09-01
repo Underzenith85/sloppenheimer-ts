@@ -537,24 +537,52 @@ describe('GitHub pull request monitor', (): void => {
     }),
   )
 
+  const resolveAgainstHead = (headSha: string, bodies: string[]): void => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        if (requestUrl(input).endsWith('/pulls/41')) {
+          return Response.json({ head: { sha: headSha } })
+        }
+        if (typeof init?.body === 'string') {
+          bodies.push(init.body)
+        }
+        return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
+      }),
+    )
+  }
+
   it.effect('resolves review threads through explicit GraphQL mutations', () =>
     Effect.gen(function* () {
       const bodies: string[] = []
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-          if (typeof init?.body === 'string') {
-            bodies.push(init.body)
-          }
-          return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } })
-        }),
-      )
+      resolveAgainstHead('head-1', bodies)
 
-      yield* makeGitHubPullRequestMonitor(provider).resolveThreads(['thread-1', 'thread-2'])
+      yield* makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
+        'thread-1',
+        'thread-2',
+      ])
 
       expect(bodies).toHaveLength(2)
       expect(bodies[0]).toContain('thread-1')
       expect(bodies[1]).toContain('thread-2')
+    }),
+  )
+
+  it.effect('refuses to resolve threads once the head has moved past the verdict', () =>
+    Effect.gen(function* () {
+      const bodies: string[] = []
+      resolveAgainstHead('head-2', bodies)
+
+      const failure = yield* Effect.flip(
+        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', ['thread-1']),
+      )
+
+      expect(failure.message).toBe(
+        'GitHub pull request head changed before its review threads were resolved',
+      )
+      expect(failure.retryable).toBe(true)
+      // Nothing was retired on the strength of a verdict about a commit the pull request has left.
+      expect(bodies).toEqual([])
     }),
   )
 })

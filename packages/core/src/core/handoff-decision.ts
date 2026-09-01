@@ -22,8 +22,12 @@ export type HandoffAction =
   | Readonly<{ _tag: 'None' }>
   /** Ask for a Codex review of this head. */
   | Readonly<{ _tag: 'RequestReview'; headSha: string }>
-  /** Resolve stale review threads left behind by a verified repair. */
-  | Readonly<{ _tag: 'ResolveThreads'; threadIds: readonly string[] }>
+  /**
+   * Retire the review threads a verified head superseded. The head is carried so the write can be
+   * leased on it: the verdict is about this commit, and a pull request that has moved past it must
+   * refuse rather than resolve.
+   */
+  | Readonly<{ _tag: 'ResolveThreads'; headSha: string; threadIds: readonly string[] }>
   | Readonly<{ _tag: 'Merge'; headSha: string }>
   /**
    * Already merged when observed: the handoff is finished with. The instant is the provider's own
@@ -300,11 +304,12 @@ export const observeHandoff = (
   // has come back clean. A thread still raised against this head is outstanding work whoever
   // wrote it, and withholding one from a repair request says nothing about it on GitHub.
   const retiredThreadIds = outdatedReviewThreads(observation).map((thread) => thread.id)
-  if (retiredThreadIds.length > 0 && headIsVerified(observation)) {
+  if (observation.state === 'open' && retiredThreadIds.length > 0 && headIsVerified(observation)) {
     return decided(
       { ...next, state: 'awaiting_checks' },
       {
         _tag: 'ResolveThreads',
+        headSha: observation.headSha,
         threadIds: retiredThreadIds,
       },
     )

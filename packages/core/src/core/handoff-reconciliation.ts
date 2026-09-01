@@ -321,7 +321,7 @@ const perform = (
       }
       case 'ResolveThreads': {
         const resolved = yield* capability
-          .resolveReviewThreads(action.threadIds)
+          .resolveReviewThreads(handoff.pullRequestNumber, action.headSha, action.threadIds)
           .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
         yield* stageHandoff(context, id, afterThreadsResolved(handoff, resolved))
         return

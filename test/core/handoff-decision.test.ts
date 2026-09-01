@@ -458,7 +458,11 @@ describe('retiring feedback a head has superseded', (): void => {
       observedAt,
     )
 
-    expect(decision.action).toEqual({ _tag: 'ResolveThreads', threadIds: ['thread-1'] })
+    expect(decision.action).toEqual({
+      _tag: 'ResolveThreads',
+      headSha: 'head-1',
+      threadIds: ['thread-1'],
+    })
     expect(decision.handoff.state).toBe('awaiting_checks')
   })
 
@@ -476,7 +480,11 @@ describe('retiring feedback a head has superseded', (): void => {
       observedAt,
     )
 
-    expect(decision.action).toEqual({ _tag: 'ResolveThreads', threadIds: ['thread-1'] })
+    expect(decision.action).toEqual({
+      _tag: 'ResolveThreads',
+      headSha: 'head-1',
+      threadIds: ['thread-1'],
+    })
 
     const afterwards = observeHandoff(
       decision.handoff,
@@ -625,6 +633,7 @@ describe('the feedback a repair is asked to act on', (): void => {
     // rereview did not raise against it.
     expect(first.action).toEqual({
       _tag: 'ResolveThreads',
+      headSha: 'head-1',
       threadIds: ['thread-1', 'thread-2', 'thread-3', 'thread-4'],
     })
 
