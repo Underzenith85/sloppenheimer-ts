@@ -99,6 +99,14 @@ const waitFor = (predicate: () => boolean, timeoutMs = 10_000): Effect.Effect<bo
     return predicate()
   })
 
+/**
+ * What a timing-sensitive hook test allows a hook to reach its first command in. The tests below
+ * time a hook out on purpose, and each reads a file the hook's shell writes before it blocks: a
+ * deadline that a loaded CI runner's `bash -lc` startup can outrun would kill the shell before it
+ * wrote anything, so the deadline is generous while staying far shorter than the sleep it cuts.
+ */
+const hookStartupAllowanceMs = 3_000
+
 const makeRoot = (): string => {
   const root = join('/tmp', `sloppenheimer-hooks-${crypto.randomUUID()}`)
   roots.push(root)
@@ -199,7 +207,9 @@ describe('hook process hardening', (): void => {
         root,
         hooks({
           beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait',
-          timeoutMs: 250,
+          // Long enough that a loaded runner still starts `bash -lc` and records the grandchild
+          // before the deadline, and still a fraction of the `sleep` the timeout has to cut short.
+          timeoutMs: hookStartupAllowanceMs,
         }),
       )
 
@@ -226,7 +236,7 @@ describe('hook process hardening', (): void => {
             // The descendant redirects its inherited pipes, so the shell's `close` fires while the
             // process group is still alive.
             beforeRun: `sh -c 'trap "" TERM; sleep 300' >/dev/null 2>&1 & echo $! > grandchild.pid; wait`,
-            timeoutMs: 250,
+            timeoutMs: hookStartupAllowanceMs,
           }),
         )
 
