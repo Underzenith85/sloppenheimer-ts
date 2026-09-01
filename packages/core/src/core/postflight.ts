@@ -199,9 +199,19 @@ export type DeliveryEntry = Readonly<{
   repairRun: boolean
   observedAt: Date
   /**
-   * The timer the next attempt is waiting on, or `null` while an operator pause has suspended it.
-   * A pause stops agents; it does not throw away a change that already exists, so the entry
-   * outlives the timer and a resume arms a new one.
+   * When the publication now running took the delivery over, or `null` while it is still waiting.
+   *
+   * The attempt runs off the event loop, so this is what tells a handler whether the entry it is
+   * looking at is work waiting to be published or work being published right now — which decides
+   * whether there is a timer to call off, and whether a settlement arriving for it is this
+   * delivery's or a superseded attempt's.
+   */
+  publishingSince: Date | null
+  /**
+   * What the entry is waiting on: the timer until the next attempt, or the publication itself once
+   * {@link publishingSince} is set. `null` while an operator pause has suspended it — a pause stops
+   * agents; it does not throw away a change that already exists, so the entry outlives the timer
+   * and a resume arms a new one.
    */
   fiber: Fiber.Fiber<void> | null
 }>

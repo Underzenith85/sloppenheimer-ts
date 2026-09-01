@@ -156,10 +156,18 @@ const deliveringItem = (
   paused: ReadonlySet<number>,
   inspectable: ReadonlySet<string>,
 ): WorkItem => {
-  const eligibility = eligibilityOf(issue, paused)
+  const issueNumber = issue?.number ?? issueNumberOf(entry.issue_identifier)
+  // Read from the row's own issue number when the backlog no longer carries the issue. A delivery
+  // outlives its issue's presence there — an issue that closes while its work is held leaves the
+  // backlog, and asking the backlog whether it is paused would answer only that it is gone, which
+  // is what left the row offering a pause that had already happened and no way back.
+  const eligibility =
+    issue === undefined && issueNumber !== null && paused.has(issueNumber)
+      ? 'paused'
+      : eligibilityOf(issue, paused)
   return {
     identifier: entry.issue_identifier,
-    issueNumber: issue?.number ?? issueNumberOf(entry.issue_identifier),
+    issueNumber,
     title: entry.title,
     url: entry.issue_url,
     state: 'progress',

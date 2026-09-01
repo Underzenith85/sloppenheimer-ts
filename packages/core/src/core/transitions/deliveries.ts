@@ -1,4 +1,4 @@
-import { Option } from 'effect'
+import { type Fiber, Option } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
 import { withEntry, withoutEntry } from '../../support/collections.js'
@@ -48,6 +48,55 @@ export const takeDueDelivery = (
 }
 
 /**
+ * Takes the delivery an attempt has just reported on, and only that one.
+ *
+ * A settlement is this delivery's only while the entry is the one that attempt was publishing:
+ * anything that superseded it, held it, or dropped it in the meantime has already decided what
+ * becomes of the work, and a late report finds nothing to settle.
+ */
+export const takeAttemptedDelivery = (
+  state: RuntimeState,
+  id: IssueId,
+  attempt: number,
+): readonly [Option.Option<DeliveryEntry>, RuntimeState] => {
+  const entry = state.deliveries.get(id)
+  if (entry?.attempt !== attempt || entry.publishingSince === null) {
+    return [Option.none(), state]
+  }
+  return [Option.some(entry), { ...state, deliveries: withoutEntry(state.deliveries, id) }]
+}
+
+/**
+ * Hands over the delivery whose timer has come due, and records the fiber now publishing it.
+ *
+ * Deliberately not a removal. The publication runs off the event loop, so a poll can interleave
+ * with it, and an entry taken out of the state for the duration would be an issue with a claim
+ * nobody holds, no `delivering` row, and a workspace the recovery sweep counts as nobody's — with
+ * an agent free to be sent into the very worktree the push is reading. The entry stays where it is
+ * until the attempt reports back; what changes is what its fiber is, from a timer waiting to
+ * publish to the publication itself.
+ */
+export const beginDeliveryAttempt = (
+  state: RuntimeState,
+  id: IssueId,
+  attempt: number,
+  fiber: Fiber.Fiber<void>,
+  at: Date,
+): readonly [Option.Option<DeliveryEntry>, RuntimeState] => {
+  const entry = state.deliveries.get(id)
+  if (entry?.attempt !== attempt || entry.publishingSince !== null) {
+    return [Option.none(), state]
+  }
+  return [
+    Option.some(entry),
+    {
+      ...state,
+      deliveries: withEntry(state.deliveries, id, { ...entry, fiber, publishingSince: at }),
+    },
+  ]
+}
+
+/**
  * Puts a delivery back with no timer behind it. The work is retained and nothing is waiting to
  * publish it, which is where a delivery that came due for a paused issue belongs until the
  * operator lifts the pause.
@@ -56,7 +105,11 @@ export const holdDelivery = (state: RuntimeState, entry: DeliveryEntry): Runtime
   const claimed = claimIssue(state, entry.issue)
   return {
     ...claimed,
-    deliveries: withEntry(claimed.deliveries, entry.issue.id, { ...entry, fiber: null }),
+    deliveries: withEntry(claimed.deliveries, entry.issue.id, {
+      ...entry,
+      fiber: null,
+      publishingSince: null,
+    }),
   }
 }
 
@@ -70,7 +123,10 @@ export const suspendDelivery = (
   id: IssueId,
 ): readonly [Option.Option<DeliveryEntry>, RuntimeState] => {
   const entry = state.deliveries.get(id)
-  if (entry === undefined || entry.fiber === null) {
+  // A publication already under way is deliberately left to finish. Interrupting a push mid-flight
+  // is what leaves the remote in a state nobody can name, and the pause is not lost: the attempt
+  // settles, and whatever it schedules next reads the pause before it publishes anything.
+  if (entry === undefined || entry.fiber === null || entry.publishingSince !== null) {
     return [Option.none(), state]
   }
   return [

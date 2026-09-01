@@ -236,6 +236,47 @@ describe('operator console information architecture', (): void => {
     expect(card.querySelector('.action')?.textContent).toBe('Start agent')
   })
 
+  it('keeps the resume on a paused delivering row whose issue has left the backlog', async (): Promise<void> => {
+    const state = consoleState()
+    const backlog = consoleBacklog()
+    const console_ = await boot({
+      // The issue closed while its work was held, so the open backlog no longer carries it. The
+      // delivery does: the change is still in a workspace, and the resume is the only thing that
+      // re-arms the timer that would publish or discard it.
+      backlog: {
+        ...backlog,
+        issues: backlog.issues.filter((issue) => issue.identifier !== readyTopIdentifier),
+      },
+      state: {
+        ...state,
+        pausedIssueNumbers: [50],
+        counts: { ...state.counts, delivering: 1 },
+        delivering: [
+          {
+            issueId: issueId('50'),
+            identifier: readyTopIdentifier,
+            title: 'Publish the retained change',
+            url: null,
+            branchName: 'sloppenheimer/issue-50',
+            attempt: 1,
+            dueAt: new Date(Date.now() + 20_000).toISOString(),
+            category: 'authentication_failed',
+            reason: 'the host credential was rejected',
+            changedFileCount: 4,
+            repairRun: false,
+            observedAt: new Date(Date.now() - 5_000).toISOString(),
+            workerHost: 'local',
+            detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2350',
+          },
+        ],
+      },
+    })
+
+    const card = console_.card(readyTopIdentifier)
+    expect([...card.querySelectorAll('.chip')].map((chip) => chip.textContent)).toContain('Paused')
+    expect(card.querySelector('.action')?.textContent).toBe('Start agent')
+  })
+
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {
     const console_ = await boot()
 

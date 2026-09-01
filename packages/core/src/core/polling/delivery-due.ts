@@ -1,4 +1,4 @@
-import { Effect, Option, Ref, type Scope } from 'effect'
+import { Effect, Option, Queue, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
 import { logInfo, logWarning } from '../../support/logging.js'
@@ -9,10 +9,12 @@ import { identifierIssueNumber, issueIsActive, logContext, stateIsIn } from '../
 import { runPostflight } from '../postflight.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { DeliveryEntry } from '../postflight.js'
+import type { DeliveryAttemptResult } from '../runtime.js'
 import type { RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
 
 type DeliveryDue = Extract<OrchestratorEvent, { _tag: 'DeliveryDue' }>
+type DeliveryAttempted = Extract<OrchestratorEvent, { _tag: 'DeliveryAttempted' }>
 
 /**
  * What is owed to a delivery that has come due.
@@ -185,32 +187,32 @@ const discardDelivery = (
   })
 
 /**
- * A retained delivery's next publication attempt.
+ * The publication attempt itself: a tracker re-read, and then git.
  *
- * No agent runs and no attempt of the agent's is spent: this republishes the same preparation the
- * turn was launched against, and hands whatever comes back to the same settlement the turn's own
- * postflight went through.
+ * Runs on its own fiber, off the event loop. Everything here can block for as long as a network
+ * call can — a push waits on a child process that may never close — and the loop is the only thing
+ * that can process a tick, a worker exit, or the operator pause that would call this off. One hung
+ * push would otherwise freeze every issue the host is running.
+ *
+ * It decides nothing about the state. What it did comes back as an event, because the state is the
+ * loop's to write and the handlers stay serialized.
  */
-export const onDeliveryDue = (
+const runDeliveryAttempt = (
   context: OrchestratorContext,
-  event: DeliveryDue,
-): Effect.Effect<void, never, Scope.Scope> =>
+  entry: DeliveryEntry,
+): Effect.Effect<DeliveryAttemptResult, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const due = yield* Ref.modify(context.state, (current) =>
-      Transitions.takeDueDelivery(current, event.issueId, event.attempt),
-    )
-    if (Option.isNone(due)) {
-      return
-    }
-    const entry = due.value
     const disposition = yield* dispositionOf(yield* Ref.get(context.state), entry)
     if (disposition === 'hold') {
-      yield* holdDelivery(context, entry)
-      return
+      return { _tag: 'Held' } as const
     }
     if (disposition === 'discard') {
-      yield* discardDelivery(context, entry)
-      return
+      const removed = yield* entry.execution.workspaces
+        .remove(entry.issue.identifier)
+        .pipe(asSettled)
+      return removed._tag === 'Failed'
+        ? ({ _tag: 'DiscardFailed', error: removed.error.message } as const)
+        : ({ _tag: 'Discarded' } as const)
     }
     // Whichever instance the orchestrator holds now: a credential rotation between the failure and
     // this attempt is exactly the kind of thing that makes the retry worth having.
@@ -223,24 +225,8 @@ export const onDeliveryDue = (
         outcome: 'abandoned',
         error: 'the workflow in force composes no source-control capability',
       })
-      yield* Ref.update(context.state, (pending) =>
-        Transitions.releaseClaim(pending, event.issueId),
-      )
-      return
+      return { _tag: 'Abandoned' } as const
     }
-    const startedAt = yield* currentInstant
-    yield* Ref.update(context.state, (pending) =>
-      Transitions.updateDetail(pending, event.issueId, (record) =>
-        recordPublication(record, startedAt, {
-          status: 'pending',
-          branch: entry.prepared.target.branchName,
-          baselineSha: entry.prepared.baselineSha,
-          attempts: entry.attempt,
-          message: `Retrying delivery of the retained changes (attempt ${String(entry.attempt + 1)})`,
-        }),
-      ),
-    )
-    yield* context.publish
     const outcome = yield* runPostflight(sourceControl, entry.issue, entry.prepared)
     yield* logInfo('action=delivery outcome=attempted', {
       ...logContext(entry.issue),
@@ -250,6 +236,116 @@ export const onDeliveryDue = (
       branch: entry.prepared.target.branchName,
       error: outcome._tag === 'DeliveryFailed' ? outcome.failure.message : null,
     })
+    return { _tag: 'Settled', outcome } as const
+  })
+
+/**
+ * A retained delivery's next publication attempt.
+ *
+ * No agent runs and no attempt of the agent's is spent: this republishes the same preparation the
+ * turn was launched against, and hands whatever comes back to the same settlement the turn's own
+ * postflight went through.
+ *
+ * The attempt is forked rather than run here, and the delivery stays in the state while it runs —
+ * claimed, published as a `delivering` row, and counted as handled by the recovery sweep — so that
+ * a poll interleaving with the publication finds an issue something is demonstrably doing.
+ */
+export const onDeliveryDue = (
+  context: OrchestratorContext,
+  event: DeliveryDue,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const pending = yield* Ref.get(context.state)
+    const queued = pending.deliveries.get(event.issueId)
+    if (queued === undefined || queued.attempt !== event.attempt) {
+      return
+    }
+    const startedAt = yield* currentInstant
+    yield* Ref.update(context.state, (current) =>
+      Transitions.updateDetail(current, event.issueId, (record) =>
+        recordPublication(record, startedAt, {
+          status: 'pending',
+          branch: queued.prepared.target.branchName,
+          baselineSha: queued.prepared.baselineSha,
+          attempts: queued.attempt,
+          message: `Retrying delivery of the retained changes (attempt ${String(queued.attempt + 1)})`,
+        }),
+      ),
+    )
+    yield* context.publish
+    const fiber = yield* Effect.forkScoped(
+      Effect.flatMap(runDeliveryAttempt(context, queued), (result) =>
+        Queue.offer(context.mailbox, {
+          _tag: 'DeliveryAttempted' as const,
+          issueId: event.issueId,
+          attempt: event.attempt,
+          result,
+        }),
+      ).pipe(Effect.asVoid),
+    )
+    // Recorded after the fork so the entry names the fiber actually publishing it: a pause or a
+    // discard arriving mid-attempt interrupts the publication rather than a timer that has fired.
+    yield* Ref.update(
+      context.state,
+      (current) =>
+        Transitions.beginDeliveryAttempt(
+          current,
+          event.issueId,
+          event.attempt,
+          fiber,
+          startedAt,
+        )[1],
+    )
+  })
+
+/**
+ * What the loop owes the attempt that has reported back.
+ *
+ * The delivery is taken out of the state here, at the one moment nothing is acting on it: a
+ * `DeliveryAttempted` for an entry that has since been abandoned or superseded finds nothing and
+ * settles nothing, which is what makes an interrupted attempt harmless.
+ */
+export const onDeliveryAttempted = (
+  context: OrchestratorContext,
+  event: DeliveryAttempted,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const due = yield* Ref.modify(context.state, (current) =>
+      Transitions.takeAttemptedDelivery(current, event.issueId, event.attempt),
+    )
+    if (Option.isNone(due)) {
+      return
+    }
+    const entry = due.value
+    if (event.result._tag === 'Held') {
+      yield* holdDelivery(context, entry)
+      return
+    }
+    if (event.result._tag === 'DiscardFailed') {
+      yield* logWarning('delivery workspace cleanup failed; the work is still on disk', {
+        ...logContext(entry.issue),
+        action: 'workspace_cleanup',
+        outcome: 'failed',
+        error: event.result.error,
+      })
+      yield* retryDiscard(context, entry, event.result.error)
+      return
+    }
+    if (event.result._tag === 'Discarded') {
+      yield* discardDelivery(context, entry)
+      return
+    }
+    if (event.result._tag === 'Abandoned') {
+      // Nothing the host holds can publish this. The work stays on disk and the claim goes, so a
+      // workflow that composes source control again finds it where the recovery sweep looks.
+      yield* Ref.update(context.state, (current) =>
+        Transitions.releaseClaim(
+          Transitions.noteWorkspaceExamined(current, entry.issue.id, false),
+          entry.issue.id,
+        ),
+      )
+      return
+    }
     yield* settlePostflight(
       context,
       {
@@ -258,7 +354,7 @@ export const onDeliveryDue = (
         attempt: entry.workerAttempt,
         repairRun: entry.repairRun,
       },
-      outcome,
+      event.result.outcome,
       entry.attempt + 1,
     )
   })

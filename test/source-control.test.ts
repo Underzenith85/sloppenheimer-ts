@@ -238,6 +238,42 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live('settles an accepted push whose base has moved under the retry', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      const prepared = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+      const published = yield* sourceControl.publish(issue, prepared)
+
+      // The protected base advances between the push the client did not see succeed and the
+      // delivery's retry. Rebasing onto it rewrites the very commit the branch is carrying, so a
+      // question asked afterwards can only answer that the work is undelivered — and then every
+      // attempt fails the stale lease, spends the budget, and hands the agent back what is on the
+      // remote.
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'unrelated.ts', 'later\n', 'somebody else'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+
+      const retried = yield* sourceControl.publish(issue, prepared)
+
+      expect(retried).toMatchObject({
+        _tag: 'Published',
+        branchName: 'sloppenheimer/issue-165',
+        headSha: published._tag === 'Published' ? published.headSha : '',
+      })
+      // Untouched: the work was already there, so nothing was force-pushed over it.
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(published._tag === 'Published' ? published.headSha : '')
+    }),
+  )
+
   it.live('refuses a branch that has diverged from the retained work, keeping both sides', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)

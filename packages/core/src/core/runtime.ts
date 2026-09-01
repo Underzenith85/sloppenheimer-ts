@@ -51,6 +51,7 @@ export {
   publishedCompletedWork,
   type AgentDetailLookup,
   type CompletedSnapshot,
+  type DeliveryAttemptResult,
   type DeliveryRequest,
   type DeliverySnapshot,
   type OrchestratorContext,

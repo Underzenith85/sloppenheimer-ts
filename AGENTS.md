@@ -625,6 +625,27 @@ repair agent that had achieved nothing.
   pull request's issue, and discarding on the current rules would delete a workspace whose repair
   the same pass still considers eligible. A removal that fails leaves the workspace unexamined,
   because the files are still there and the discard did not happen.
+- A delivery's publication runs off the event loop. Everything else a handler does is memory and a
+  bounded call; a publication is git, and a push waits on a child process that may never close — so
+  running it inside the loop let one hung delivery stop every issue the host was running, ticks,
+  worker exits and the operator pause that would have called it off included. The attempt is forked
+  and reports back as an event, because the state it settles is still the loop's to write. The entry
+  stays in the state for the duration rather than being taken out and put back: claimed, published
+  as a `delivering` row, and counted as handled by the recovery sweep, so a poll interleaving with
+  the publication finds an issue something is demonstrably doing rather than a workspace nobody
+  owns. A settlement is applied only while the entry is the one that attempt was publishing;
+  anything that superseded, held or dropped it meanwhile has already decided what becomes of the
+  work. Nothing ever waits on an interrupt of a publication for the same reason nothing runs one on
+  the loop.
+- An operator pause does not interrupt a publication already under way. Cutting off a push mid-flight
+  is what leaves the remote in a state nobody can name, and the pause is not lost: the attempt
+  settles, and whatever is scheduled next re-reads the pause before publishing anything.
+- A publication asks whether the branch already carries its commit before rebasing, not after. The
+  rebase is what makes the question unanswerable: a protected base that moved since the accepted
+  push rewrites the very commit the branch holds, so the comparison could only ever answer that the
+  work is undelivered — and then every attempt fails the stale lease, spends the delivery budget,
+  and hands the agent back what is already on the remote. Containment rather than equality, because
+  a branch the push landed on may since have had commits built on top of it.
 - A recovered publication carries the handoff's own ports, because a repair's verdict is judged
   against the workflow that created its pull request — but always this process's workspace manager,
   because that is the one that opened the workspace being published from. A delivery holding the

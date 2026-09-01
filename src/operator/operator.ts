@@ -247,6 +247,67 @@ export const buildBacklogSnapshot = (
   }
 }
 
+type LoadedControl = Readonly<{
+  label: string
+  issues: IssueControlPort
+  terminalStates: readonly string[]
+}>
+
+/**
+ * Whether the host is holding unpublished work for this issue with nothing waiting to publish it.
+ * That is what makes a resume meaningful for an issue the open backlog has dropped.
+ */
+const heldDelivery = (snapshot: OrchestratorSnapshot, issueNumber: number): boolean =>
+  snapshot.delivering.some(
+    (entry) => Number(/#(\d+)$/u.exec(entry.identifier)?.[1] ?? Number.NaN) === issueNumber,
+  )
+
+/**
+ * Putting an issue back in the host's hands: the dispatch label goes back on, and the pause with it.
+ *
+ * An issue the open backlog no longer carries but the host holds retained work for is the one case
+ * with nothing to label — the issue is finished with, and what becomes of the change is the
+ * delivery's own re-read to decide. Lifting the pause is the whole of it, and without it the timer
+ * could never be re-armed and the workspace never freed.
+ */
+const enableIssue = (
+  orchestrator: OrchestratorControl,
+  control: LoadedControl,
+  issueNumber: number,
+): Effect.Effect<void, OperatorBackendError> =>
+  Effect.gen(function* () {
+    const openIssues = yield* control.issues.listOpenIssues()
+    const snapshot = yield* orchestrator.snapshot
+    const target = buildBacklogSnapshot(
+      openIssues,
+      control.label,
+      control.terminalStates,
+    ).issues.find((issue) => issue.number === issueNumber)
+    if (target === undefined) {
+      if (heldDelivery(snapshot, issueNumber)) {
+        return yield* orchestrator.setIssuePaused(issueNumber, false)
+      }
+      return yield* Effect.fail(
+        new TrackerError({
+          category: 'tracker_response',
+          message: 'issue is not present in the open backlog',
+          retryable: false,
+        }),
+      )
+    }
+    if (target.readiness !== 'ready') {
+      return yield* Effect.fail(
+        new TrackerError({
+          category: 'tracker_response',
+          message: target.reason ?? 'issue is not ready',
+          retryable: false,
+        }),
+      )
+    }
+    yield* control.issues.addLabel(issueNumber, control.label)
+    yield* orchestrator.setIssuePaused(issueNumber, false)
+  })
+
 export const makeOperatorBackend = (
   workflowPath: string,
   orchestrator: OrchestratorControl,
@@ -254,11 +315,6 @@ export const makeOperatorBackend = (
   Effect.map(
     Effect.all({ issueControl: CurrentIssueControl, loader: WorkflowLoader }),
     ({ issueControl, loader }): OperatorBackend => {
-      type LoadedControl = Readonly<{
-        label: string
-        issues: IssueControlPort
-        terminalStates: readonly string[]
-      }>
       /**
        * The workflow is reloaded per request, so the console reflects an edit without a restart. The
        * issue control itself is not rebuilt per request: the cell hands back the instance already in
@@ -298,43 +354,11 @@ export const makeOperatorBackend = (
           return buildBacklogSnapshot(openIssues, label, terminalStates, yield* pausedIssueNumbers)
         }),
         setIssueEnabled: (issueNumber, enabled) =>
-          loadControl.pipe(
-            Effect.flatMap(({ label, issues, terminalStates }) => {
-              if (!enabled) {
-                return orchestrator.setIssuePaused(issueNumber, true)
-              }
-              return issues.listOpenIssues().pipe(
-                Effect.flatMap((openIssues) => {
-                  const target = buildBacklogSnapshot(
-                    openIssues,
-                    label,
-                    terminalStates,
-                  ).issues.find((issue) => issue.number === issueNumber)
-                  if (target === undefined) {
-                    return Effect.fail(
-                      new TrackerError({
-                        category: 'tracker_response',
-                        message: 'issue is not present in the open backlog',
-                        retryable: false,
-                      }),
-                    )
-                  }
-                  if (target.readiness !== 'ready') {
-                    return Effect.fail(
-                      new TrackerError({
-                        category: 'tracker_response',
-                        message: target.reason ?? 'issue is not ready',
-                        retryable: false,
-                      }),
-                    )
-                  }
-                  return issues
-                    .addLabel(issueNumber, label)
-                    .pipe(Effect.zipRight(orchestrator.setIssuePaused(issueNumber, false)))
-                }),
+          enabled
+            ? loadControl.pipe(
+                Effect.flatMap((control) => enableIssue(orchestrator, control, issueNumber)),
               )
-            }),
-          ),
+            : orchestrator.setIssuePaused(issueNumber, true),
       }
     },
   )

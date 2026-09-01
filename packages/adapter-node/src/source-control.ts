@@ -10,11 +10,14 @@ import type {
   WorktreeInspection,
 } from '@sloppenheimer/core/ports/source-control.js'
 import {
-  gitIdentity,
-  runGit,
-  type GitOperation,
-  type GitSourceControlSettings,
-} from './git-process.js'
+  containedIn,
+  currentBranch,
+  currentHead,
+  remoteHead,
+  revParse,
+  status,
+} from './git-queries.js'
+import { gitIdentity, runGit, type GitSourceControlSettings } from './git-process.js'
 
 export type { GitCredential, GitSourceControlSettings } from './git-process.js'
 
@@ -25,61 +28,6 @@ export type { GitCredential, GitSourceControlSettings } from './git-process.js'
  * How a git invocation is run, authenticated, and read when it fails lives in `git-process.ts`;
  * this module decides only which invocations to make and what their output means.
  */
-
-const remoteHead = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-  branchName: string,
-): Effect.Effect<Option.Option<string>, SourceControlError> =>
-  Effect.map(
-    runGit(settings, operation, workspace.path, [
-      'ls-remote',
-      '--heads',
-      'origin',
-      `refs/heads/${branchName}`,
-    ]),
-    (output) => {
-      const sha = output.trim().split(/\s+/u)[0]
-      return sha === undefined || sha.length === 0 ? Option.none() : Option.some(sha)
-    },
-  )
-
-const revParse = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-  revision: string,
-): Effect.Effect<string, SourceControlError> =>
-  Effect.map(runGit(settings, operation, workspace.path, ['rev-parse', revision]), (value) =>
-    value.trim(),
-  )
-
-const currentBranch = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(
-    Effect.map(
-      runGit(settings, operation, workspace.path, ['symbolic-ref', '--short', 'HEAD']),
-      (value) => value.trim(),
-    ),
-  )
-
-const currentHead = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(revParse(settings, operation, workspace, 'HEAD'))
-
-const status = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<string, SourceControlError> =>
-  runGit(settings, operation, workspace.path, ['status', '--porcelain=v1', '--untracked-files=all'])
 
 const initialize = (
   settings: GitSourceControlSettings,
@@ -133,31 +81,6 @@ const expectedRepairHead = (
     }),
   )
 }
-
-/**
- * Whether `candidate` is already contained in `reference`, so it carries nothing that one lacks.
- *
- * A failure is read as "not contained": the caller acts on that by treating the commit as work,
- * and a commit that cannot be compared is safer inspected than assumed delivered.
- */
-const containedIn = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-  candidate: string,
-  reference: string,
-): Effect.Effect<boolean> =>
-  Effect.map(
-    Effect.either(
-      runGit(settings, operation, workspace.path, [
-        'merge-base',
-        '--is-ancestor',
-        candidate,
-        reference,
-      ]),
-    ),
-    (outcome) => outcome._tag === 'Right',
-  )
 
 /**
  * Puts the target branch at the baseline with nothing carried over.
@@ -404,6 +327,42 @@ const rebaseOntoBase = (
       ),
   )
 
+/**
+ * Whether the branch this would publish to already carries the commit in the workspace.
+ *
+ * Containment rather than equality, and against the branch as the remote has it now rather than as
+ * the preparation recorded it: a push that landed may since have had commits built on top of it,
+ * and the work is delivered either way. The branch ref is fetched first, because the question
+ * cannot be asked about a commit the workspace does not have.
+ */
+const alreadyOnRemote = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+  committedHead: string,
+): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const fetched = yield* Effect.either(
+      runGit(settings, 'publish', prepared.workspace.path, [
+        'fetch',
+        '--no-tags',
+        'origin',
+        `+refs/heads/${prepared.target.branchName}:refs/remotes/origin/${prepared.target.branchName}`,
+      ]),
+    )
+    if (fetched._tag === 'Left') {
+      // No such branch on the remote, or the remote could not be reached. Neither says the work is
+      // delivered, and assuming it was would discard a publication that never happened.
+      return false
+    }
+    return yield* containedIn(
+      settings,
+      'publish',
+      prepared.workspace,
+      committedHead,
+      `refs/remotes/origin/${prepared.target.branchName}`,
+    )
+  })
+
 const publishRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
@@ -441,6 +400,23 @@ const publishRepository = (
       return unchanged
     }
 
+    // Asked before the rebase, because the rebase is what would make the question unanswerable: the
+    // most likely way to arrive here twice is a push the remote accepted and the client did not see
+    // succeed, and a protected base that has moved since rewrites the very commit the branch is
+    // carrying. Answering `Published` makes the retry idempotent; leaving it to the lease check
+    // would reject every attempt against a tip that holds this work already, spend the delivery
+    // budget and hand the agent back what is on the remote.
+    const delivered = yield* alreadyOnRemote(settings, prepared, committedHead)
+    if (delivered) {
+      const already: PublicationOutcome = {
+        _tag: 'Published',
+        branchName: prepared.target.branchName,
+        headSha: committedHead,
+        commitCreated: dirty,
+      }
+      return already
+    }
+
     yield* runGit(settings, 'publish', prepared.workspace.path, [
       'fetch',
       '--no-tags',
@@ -455,20 +431,6 @@ const publishRepository = (
       prepared.workspace,
       prepared.target.branchName,
     )
-    // The branch already carries exactly what this would push, so the publication happened — the
-    // most likely way to arrive here is a push the remote accepted and the client did not see
-    // succeed. Answering `Published` makes the retry idempotent; leaving it to the lease check
-    // would reject every attempt against a tip that is this very commit, spend the delivery budget
-    // and hand the agent back work that is already on the remote.
-    if (Option.contains(actualRemoteHead, headSha)) {
-      const already: PublicationOutcome = {
-        _tag: 'Published',
-        branchName: prepared.target.branchName,
-        headSha,
-        commitCreated: dirty,
-      }
-      return already
-    }
     if (!sameHead(prepared.expectedRemoteHead, actualRemoteHead)) {
       return yield* Effect.fail(leaseFailure(prepared, actualRemoteHead))
     }

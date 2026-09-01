@@ -195,6 +195,22 @@ export type OrchestratorControl = Readonly<{
   awaitTermination: Effect.Effect<never>
 }>
 
+/**
+ * What one delivery attempt amounted to, decided off the event loop and settled on it.
+ *
+ * `Held` and `Discarded` are the dispositions a re-read of the issue reaches — an operator pause
+ * holds the work, an issue that is finished with discards it — and `DiscardFailed` is a removal
+ * that did not happen, which leaves the files exactly where they were. `Abandoned` is a host with
+ * nothing to publish through at all. `Settled` carries whatever the publication answered, for the
+ * same settlement a turn's own postflight goes through.
+ */
+export type DeliveryAttemptResult =
+  | Readonly<{ _tag: 'Held' }>
+  | Readonly<{ _tag: 'Discarded' }>
+  | Readonly<{ _tag: 'DiscardFailed'; error: string }>
+  | Readonly<{ _tag: 'Abandoned' }>
+  | Readonly<{ _tag: 'Settled'; outcome: PostflightOutcome }>
+
 export type OrchestratorEvent =
   | Readonly<{ _tag: 'Tick' }>
   | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; update: AgentEvent }>
@@ -226,6 +242,17 @@ export type OrchestratorEvent =
   | Readonly<{ _tag: 'RetryDue'; issueId: IssueId; attempt: number }>
   /** A retained delivery's next publication attempt is due. No agent runs for this. */
   | Readonly<{ _tag: 'DeliveryDue'; issueId: IssueId; attempt: number }>
+  /**
+   * What that attempt did, reported from the fiber that ran it. The attempt itself is git and
+   * tracker work, so it runs off the event loop; everything it decides comes back here, because
+   * the state it settles is the loop's to write.
+   */
+  | Readonly<{
+      _tag: 'DeliveryAttempted'
+      issueId: IssueId
+      attempt: number
+      result: DeliveryAttemptResult
+    }>
   | Readonly<{
       _tag: 'SetIssuePaused'
       issueNumber: number
@@ -296,7 +323,10 @@ export type RuntimeCells = Readonly<{
  * A delivery as its caller states it: everything but the schedule, which `scheduleDelivery`
  * decides, and the timer it forks to keep.
  */
-export type DeliveryRequest = Omit<DeliveryEntry, 'dueAt' | 'observedAt' | 'fiber'>
+export type DeliveryRequest = Omit<
+  DeliveryEntry,
+  'dueAt' | 'observedAt' | 'publishingSince' | 'fiber'
+>
 
 /**
  * What a runtime operation is handed when it is reached through the context rather than called

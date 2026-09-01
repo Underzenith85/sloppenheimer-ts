@@ -1841,6 +1841,81 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('keeps the event loop answering while a delivery publication hangs', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-loop-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      let attempts = 0
+      let release = (): void => undefined
+      const hanging = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            () => {
+              attempts += 1
+              // The turn's own publication fails, which retains the work; the delivery's retry then
+              // never returns — a push waiting on a child process that will not close.
+              return attempts === 1
+                ? Effect.fail(deliveryFailure())
+                : Effect.promise(() => hanging).pipe(
+                    Effect.as({
+                      _tag: 'Published',
+                      branchName: 'sloppenheimer/issue-167',
+                      headSha: 'published-head',
+                      commitCreated: true,
+                    }),
+                  )
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+          }
+
+          while (attempts < 2) {
+            yield* TestClock.adjust('5 minutes')
+            yield* Effect.yieldNow()
+          }
+
+          // The publication is in flight and will not return. Both of these complete only once the
+          // loop has run a handler, so neither answers while one hung push holds it.
+          yield* control.setIssuePaused(167, true)
+          yield* control.refresh
+
+          // And the delivery is still the state's while its attempt runs: an entry taken out for
+          // the duration would be an issue with a claim nobody holds and a workspace nobody has
+          // examined, with an agent free to be sent into the worktree the push is reading.
+          snapshot = yield* control.snapshot
+          expect(snapshot.delivering).toHaveLength(1)
+          expect(launched).toBe(1)
+
+          release()
+        }),
+      )
+    }),
+  )
+
   it.scoped('records the postflight takeover before the publication makes its first call', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-postflight-takeover-')

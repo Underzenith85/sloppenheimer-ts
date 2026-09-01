@@ -20,6 +20,21 @@ import type { DeliveryRequest, RuntimeCells } from './types.js'
  */
 
 /**
+ * Stops whatever a delivery was waiting on, without ever waiting for it.
+ *
+ * A timer dies at once, but a publication is git: it can be inside a push whose child process has
+ * not closed, and awaiting that interrupt on the event loop would block every issue the host is
+ * running — the very thing running the attempt off the loop exists to prevent. What the abandoned
+ * attempt eventually reports is discarded, because the entry it was publishing is gone.
+ */
+const stopDeliveryFiber = (entry: DeliveryEntry): Effect.Effect<void> =>
+  entry.fiber === null
+    ? Effect.void
+    : entry.publishingSince === null
+      ? Fiber.interrupt(entry.fiber)
+      : Fiber.interruptFork(entry.fiber)
+
+/**
  * Queues another publication attempt for work an agent has already produced.
  *
  * Answers whether a delivery was queued. `false` means the work cannot be delivered as it stands —
@@ -72,10 +87,16 @@ export const scheduleDelivery = (
     )
     const observedAt = yield* currentInstant
     const displaced = yield* Ref.modify(cells.state, (pending) =>
-      Transitions.scheduleDelivery(pending, { ...request, dueAt, observedAt, fiber }),
+      Transitions.scheduleDelivery(pending, {
+        ...request,
+        dueAt,
+        observedAt,
+        publishingSince: null,
+        fiber,
+      }),
     )
     if (Option.isSome(displaced) && displaced.value.fiber !== null) {
-      yield* Fiber.interrupt(displaced.value.fiber)
+      yield* stopDeliveryFiber(displaced.value)
     }
     yield* Ref.update(cells.state, (pending) =>
       Transitions.updateDetail(pending, request.issue.id, (record) =>
@@ -189,7 +210,7 @@ export const abandonDelivery = (
       return
     }
     if (dropped.value.fiber !== null) {
-      yield* Fiber.interrupt(dropped.value.fiber)
+      yield* stopDeliveryFiber(dropped.value)
     }
     const observedAt = yield* currentInstant
     yield* Ref.update(cells.state, (current) =>

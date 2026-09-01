@@ -5,7 +5,7 @@ import { recordPostflightStarted } from '../telemetry.js'
 import * as Transitions from './transitions.js'
 import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
-import { onDeliveryDue } from './polling/delivery-due.js'
+import { onDeliveryAttempted, onDeliveryDue } from './polling/delivery-due.js'
 import { onIssuePauseChanged } from './polling/issue-pause.js'
 import { onRetryDue } from './polling/retry-due.js'
 import { onTick } from './polling/tick.js'
@@ -70,6 +70,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
         }
         case 'DeliveryDue': {
           yield* onDeliveryDue(context, event)
+          break
+        }
+        case 'DeliveryAttempted': {
+          yield* onDeliveryAttempted(context, event)
           break
         }
         case 'SetIssuePaused': {

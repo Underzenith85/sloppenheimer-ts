@@ -89,7 +89,10 @@ const issue = (number: number, blockers: readonly BlockerRef[] = []): Issue =>
     blockedBy: blockers,
   })
 
-const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): OrchestratorSnapshot => ({
+const orchestratorSnapshot = (
+  pausedIssueNumbers: readonly number[],
+  delivering: OrchestratorSnapshot['delivering'] = [],
+): OrchestratorSnapshot => ({
   generatedAt: '2026-08-30T00:00:00.000Z',
   workflowPath: '/isolated/WORKFLOW.md',
   effectiveWorkflow: { fingerprint: 'operator', loadedAt: '2026-08-30T00:00:00.000Z' },
@@ -112,7 +115,7 @@ const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): Orchestrat
   handoffs: [],
   running: [],
   retrying: [],
-  delivering: [],
+  delivering,
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
   rateLimits: null,
 })
@@ -123,10 +126,11 @@ const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): Orchestrat
  */
 const fakeOrchestrator = (
   setIssuePaused: (issueNumber: number, paused: boolean) => void = () => undefined,
+  delivering: OrchestratorSnapshot['delivering'] = [],
 ): OrchestratorControl => {
   const paused = new Set<number>()
   return {
-    snapshot: Effect.sync(() => orchestratorSnapshot([...paused])),
+    snapshot: Effect.sync(() => orchestratorSnapshot([...paused], delivering)),
     refresh: Effect.succeed({
       coalesced: false,
       requestedAt: '2026-08-30T00:00:00.000Z',
@@ -423,6 +427,63 @@ describe('operator dependency graph', (): void => {
       )
 
       expect(enabled).toEqual([true, false])
+    }),
+  )
+
+  it.effect('lifts a pause on retained work whose issue has left the open backlog', () =>
+    Effect.gen(function* () {
+      const workflowPath = yield* temporaryWorkflow()
+      vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
+      const addLabel = vi.fn((issueNumber: number, label: string) => [issueNumber, label])
+      // The issue closed while its work was held, so it is not in the open backlog any more. The
+      // delivery is: the change is still in a workspace, and only a resume re-arms the attempt that
+      // publishes or discards it.
+      const control: IssueControlPort = {
+        listOpenIssues: () => Effect.succeed([]),
+        addLabel: (issueNumber, label) => {
+          addLabel(issueNumber, label)
+          return Effect.void
+        },
+      }
+      const resumed = vi.fn((issueNumber: number, paused: boolean) => [issueNumber, paused])
+      const orchestrator = fakeOrchestrator(resumed, [
+        {
+          issueId: issueId('1'),
+          identifier: issueIdentifier('example/sloppenheimer#1'),
+          title: 'Issue 1',
+          url: null,
+          branchName: 'sloppenheimer/issue-1',
+          attempt: 1,
+          dueAt: '2026-08-30T00:00:00.000Z',
+          category: 'authentication_failed',
+          reason: 'the host credential was rejected',
+          changedFileCount: 2,
+          repairRun: false,
+          observedAt: '2026-08-30T00:00:00.000Z',
+          workerHost: 'local',
+          detailUrl: '/api/v1/agents/example%2Fsloppenheimer%231',
+        },
+      ])
+
+      yield* runBackend(
+        workflowPath,
+        orchestrator,
+        (backend: OperatorBackend) =>
+          Effect.gen(function* () {
+            yield* orchestrator.setIssuePaused(1, true)
+            yield* backend.setIssueEnabled(1, true)
+          }),
+        layerCurrentIssueControl.pipe(
+          Layer.provide(
+            layerIssueControlFactory({ make: () => Effect.succeed(control), serves: () => true }),
+          ),
+        ),
+      )
+
+      // Lifting the pause is the whole of it. There is no label to put back on an issue that is
+      // finished with, and what becomes of the change is the delivery's own re-read to decide.
+      expect(resumed).toHaveBeenCalledWith(1, false)
+      expect(addLabel).not.toHaveBeenCalled()
     }),
   )
 
