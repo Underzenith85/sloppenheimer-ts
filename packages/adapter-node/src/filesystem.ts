@@ -1,9 +1,13 @@
 import { type FileSystem } from '@effect/platform'
 import { SystemError, type PlatformError } from '@effect/platform/Error'
 import { rmdir } from 'node:fs/promises'
-import { Effect } from 'effect'
+import { Effect, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import {
+  rejectWorkspace,
+  type DirectoryIdentity,
+} from '@sloppenheimer/core/domain/workspace-containment.js'
 
 /**
  * The filesystem questions the workspace adapters ask that `FileSystem` does not answer directly,
@@ -112,6 +116,32 @@ const workspaceFailure =
   (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
   (cause: WorkspaceError | PlatformError): WorkspaceError =>
     cause instanceof WorkspaceError ? cause : new WorkspaceError({ category, message, cause })
+
+/**
+ * What a directory is, as the kernel names it: the device it lives on and its inode.
+ *
+ * A pathname is not a directory. Anything this host is about to act on destructively is read as an
+ * identity first and re-read at each step after, so a directory renamed away and replaced under the
+ * same name — by a link, or by another directory — is not followed there.
+ */
+export const directoryIdentity = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+  what: string,
+): Effect.Effect<DirectoryIdentity, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (yield* isSymbolicLink(fileSystem, path)) {
+      return yield* Effect.fail(rejectWorkspace(`${what} is a link: ${path}`))
+    }
+    const info = yield* fileSystem.stat(path)
+    if (info.type !== 'Directory') {
+      return yield* Effect.fail(rejectWorkspace(`${what} is not a directory: ${path}`))
+    }
+    return yield* Option.match(info.ino, {
+      onNone: () => Effect.fail(rejectWorkspace(`${what} has no identity: ${path}`)),
+      onSome: (inode) => Effect.succeed({ deviceId: info.dev, inode }),
+    })
+  })
 
 /** Applies that shape to an operation's error channel. */
 export const reportedAs =

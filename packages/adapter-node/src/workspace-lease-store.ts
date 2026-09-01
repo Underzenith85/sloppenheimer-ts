@@ -5,12 +5,10 @@ import { dirname, join } from 'node:path'
 import { Effect, Either, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
-import { isSymbolicLink, realDirectoryExists } from './filesystem.js'
+import { directoryIdentity, isSymbolicLink, realDirectoryExists } from './filesystem.js'
 import { stagedLeaseIsLive } from './workspace-lease.js'
 import {
-  rejectWorkspace,
   sameIdentity,
-  type DirectoryIdentity,
   type RunWorkspacePaths,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
@@ -75,28 +73,6 @@ export const publishClaimedLease = (
 ): Effect.Effect<void, PlatformError> =>
   fileSystem.link(staged, leasePath).pipe(Effect.ensuring(discardStagedLease(fileSystem, staged)))
 
-/** What the staging directory was when the sweep verified it, so a later step can say it still is. */
-const stagingIdentity = (
-  fileSystem: FileSystem.FileSystem,
-  stagingPath: string,
-): Effect.Effect<DirectoryIdentity, WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    if (yield* isSymbolicLink(fileSystem, stagingPath)) {
-      return yield* Effect.fail(rejectWorkspace(`lease staging path is a link: ${stagingPath}`))
-    }
-    const info = yield* fileSystem.stat(stagingPath)
-    if (info.type !== 'Directory') {
-      return yield* Effect.fail(
-        rejectWorkspace(`lease staging path is not a directory: ${stagingPath}`),
-      )
-    }
-    return yield* Option.match(info.ino, {
-      onNone: () =>
-        Effect.fail(rejectWorkspace(`lease staging directory has no identity: ${stagingPath}`)),
-      onSome: (inode) => Effect.succeed({ deviceId: info.dev, inode }),
-    })
-  })
-
 /** The shape this module gives a staged record: a UUID and the suffix, and nothing else. */
 const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.lease$/u
 
@@ -159,7 +135,7 @@ export const pruneStagedLeases = (
 ): Effect.Effect<void> =>
   Effect.scoped(
     Effect.gen(function* () {
-      const verified = yield* stagingIdentity(fileSystem, stagingPath)
+      const verified = yield* directoryIdentity(fileSystem, stagingPath, 'lease staging path')
       const handle = yield* fileSystem.open(stagingPath, { flag: 'r' })
       const held = yield* handle.stat
       // Holding the directory open keeps its inode allocated, so one removed and recreated under
@@ -171,7 +147,7 @@ export const pruneStagedLeases = (
         return
       }
       for (const entry of yield* fileSystem.readDirectory(stagingPath)) {
-        const current = yield* stagingIdentity(fileSystem, stagingPath)
+        const current = yield* directoryIdentity(fileSystem, stagingPath, 'lease staging path')
         if (!sameIdentity(verified, current)) {
           return
         }

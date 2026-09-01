@@ -605,6 +605,12 @@ lifecycle. This section is the architecture record for it; do not create a separ
   event — and a workspace deleted from under a live run is unrecoverable where a workspace left
   behind is merely untidy. This was built once with a renewable lease and taken out again: every
   clock it introduced was a way for one host to delete another's work.
+  Cleanup removes by pathname, and a pathname resolves through whatever its parents are at that
+  instant, so it reads the issue directory as an identity, holds it open for the whole pass — which
+  pins the inode — and re-confirms device and inode immediately before each destructive step. A
+  directory moved aside and replaced under its name stops the cleanup rather than being followed
+  there. It is the same rule the staged-record sweep follows, and it has the same limit: Node offers
+  no `unlinkat`, so the last instant cannot be closed by identity alone.
   Cleanup still fences what it does take. Deciding a workspace is free and removing it are two
   steps with an operator's `before_remove` hook between them, so the record is moved aside in one
   rename first and the decision made again on what was actually taken. Moving it aside frees the

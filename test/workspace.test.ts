@@ -835,6 +835,41 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('stops rather than following an issue directory replaced under it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const identifier = 'GH-195'
+      const elsewhere = join(root, 'somewhere-else')
+      const decoy = join(elsewhere, 'run-9-previoushost')
+      yield* host(() => mkdir(decoy, { recursive: true }))
+      yield* host(() => writeFile(join(decoy, 'not-ours.txt'), 'another directory entirely\n'))
+      // The hook stands in for whatever could move the issue directory aside mid-cleanup and put a
+      // link in its place — after which every pathname under it resolves somewhere else.
+      const issuePath = join(root, workspaceKey(issueIdentifier(identifier)))
+      const manager = yield* workspaceManager(
+        root,
+        hooks({
+          beforeRemove: `cd ${JSON.stringify(root)} && rm -rf ${JSON.stringify(issuePath)} && ln -s ${JSON.stringify(elsewhere)} ${JSON.stringify(issuePath)}`,
+        }),
+      )
+      yield* host(async () =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'a host that is gone',
+          processId: await exitedProcessId(),
+          startMarker: null,
+          namespace: hostOwner.namespace,
+        }),
+      )
+
+      const outcome = yield* Effect.either(manager.remove(issueIdentifier(identifier)))
+
+      // The removal that would have followed the substituted path never runs, and what it would
+      // have reached is untouched.
+      expect(Either.isLeft(outcome)).toBe(true)
+      expect(existsSync(join(decoy, 'not-ours.txt'))).toBe(true)
+    }),
+  )
+
   it.live('leaves a claim that appeared while cleanup held the record aside', () =>
     Effect.gen(function* () {
       const root = makeRoot()
