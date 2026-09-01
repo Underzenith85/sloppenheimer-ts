@@ -121,7 +121,7 @@ describe('a child output pipe that fails', (): void => {
       Effect.flip(
         sourceControl.prepare(
           issue,
-          { path: fixture.workspace, key: 'issue-200', createdNow: true },
+          { path: fixture.workspace, key: 'issue-200' },
           { _tag: 'Normal', branchName: 'sloppenheimer/issue-200' },
         ),
       ),
@@ -135,31 +135,30 @@ describe('a child output pipe that fails', (): void => {
    * The classification reads git's diagnostics, not its data. `status --porcelain` writes the
    * workspace's own file names to stdout, and a failure carries whatever of that had been read; a
    * path — or, in the case above, a commit SHA — that happens to contain `403` is not an HTTP
-   * status, and must not turn a preparation failure into an authentication failure and a
+   * status, and must not turn a publication failure into an authentication failure and a
    * credential problem the operator does not have.
    */
   it('classifies a failure by git diagnostics rather than by output that looks like a status', async (): Promise<void> => {
     const fixture = await makeGitRepository()
     roots.push(fixture.root)
-    await writeFile(join(fixture.workspace, 'issue-403.ts'), 'untracked\n')
     const sourceControl = sourceControlFor(fixture)
+    const prepared = await Effect.runPromise(
+      sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-403' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-403' },
+      ),
+    )
+    await writeFile(join(fixture.workspace, 'issue-403.ts'), 'untracked\n')
 
     failPipeOnce({
       matches: (command, args) => command === 'git' && args[0] === 'status',
       pipe: 'stdout',
     })
 
-    const error = await Effect.runPromise(
-      Effect.flip(
-        sourceControl.prepare(
-          issue,
-          { path: fixture.workspace, key: 'issue-403', createdNow: true },
-          { _tag: 'Normal', branchName: 'sloppenheimer/issue-403' },
-        ),
-      ),
-    )
+    const error = await Effect.runPromise(Effect.flip(sourceControl.publish(issue, prepared)))
 
-    expect(error.category).toBe('prepare_failed')
+    expect(error.category).toBe('publication_failed')
   }, 30_000)
 
   it('reports a hook diagnostic as truncated rather than failing the hook on it', async (): Promise<void> => {
@@ -170,11 +169,18 @@ describe('a child output pipe that fails', (): void => {
         Effect.provide(hostFileSystem),
       ),
     )
-    const workspace = await Effect.runPromise(manager.create(issueIdentifier('GH-200')))
-
-    failPipeOnce({ matches: (command) => command === 'bash', pipe: 'stderr' })
-
-    const error = await Effect.runPromise(Effect.flip(manager.beforeRun(workspace)))
+    // The hook runs inside the lease that hands the workspace out, which is the only way the port
+    // offers one.
+    const error = await Effect.runPromise(
+      manager.withLeasedWorkspace(
+        { identifier: issueIdentifier('GH-200'), runId: 1 },
+        (workspace) =>
+          Effect.sync(() => {
+            failPipeOnce({ matches: (command) => command === 'bash', pipe: 'stderr' })
+          }).pipe(Effect.zipRight(Effect.flip(manager.beforeRun(workspace)))),
+        () => ({ _tag: 'Retained', reason: 'before_run failed' }),
+      ),
+    )
 
     // What a hook writes is diagnostic; its contract is the exit code. So the lost stderr does not
     // become the failure — the hook's own `exit 7` is still what is reported — but the diagnostic

@@ -1,9 +1,10 @@
-import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
+import { Cause, Effect, Exit, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
-import { AgentError, type WorkspaceError } from '../domain/errors.js'
+import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
+import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo } from '../support/logging.js'
@@ -159,61 +160,113 @@ const runSession = (
 }
 
 /**
- * The whole of one run as a fiber body: a workspace, the source-control preparation and publication
- * that bracket the session when the host owns the repository, and the `WorkerExited` that reports
- * how it ended. Every exit path offers that event, so a run can never end unobserved.
+ * Whether the host put what the run produced into the repository. A run the host owns no repository
+ * for reaches the end having published nothing, so what it made is still only in its workspace.
+ */
+type RunPublication = 'published' | 'not_published'
+
+/** The publication-bracketed body of one run, inside the workspace the run leases. */
+const runWithSourceControl = (
+  launch: SessionLaunch,
+  workspace: Workspace,
+): Effect.Effect<RunPublication, AgentError | WorkspaceError | SourceControlError> => {
+  const { issue, sessionPorts, target } = launch
+  const sourceControl = MutableRef.get(sessionPorts).sourceControl
+  if (sourceControl === null) {
+    return runSession(launch, workspace).pipe(Effect.as<RunPublication>('not_published'))
+  }
+  return sourceControl.prepare(issue, workspace, target).pipe(
+    Effect.flatMap((prepared) =>
+      runSession(launch, workspace).pipe(
+        Effect.zipRight(
+          Effect.suspend(() => {
+            const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
+            return publisher.publish(issue, prepared)
+          }),
+        ),
+        Effect.tap((outcome) =>
+          logInfo('host source-control publication completed', {
+            ...logContext(issue),
+            action: 'source_control_publish',
+            outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
+            branch: outcome.branchName,
+          }),
+        ),
+        // Both outcomes are a publication: the host read the whole worktree and put everything it
+        // found into the repository, which for `NoChanges` was nothing.
+        Effect.as<RunPublication>('published'),
+      ),
+    ),
+  )
+}
+
+/**
+ * What becomes of the run's workspace once the run has ended. A run whose work reached the
+ * repository has nothing left in the directory that is not in it; every other ending — a failure, a
+ * cancellation, an interrupted shutdown, or a composition with no source control to publish through
+ * at all — leaves work that only the directory holds, so the workspace stays as a recovery artifact
+ * under the reason it is being kept for.
+ */
+const workspaceRelease = (
+  exit: Exit.Exit<RunPublication, AgentError | WorkspaceError | SourceControlError>,
+): WorkspaceRelease =>
+  Exit.match(exit, {
+    onSuccess: (publication): WorkspaceRelease =>
+      publication === 'published'
+        ? { _tag: 'Completed' }
+        : { _tag: 'Retained', reason: 'run ended without publishing its work' },
+    onFailure: (cause): WorkspaceRelease => ({
+      _tag: 'Retained',
+      reason: Option.match(Cause.failureOption(cause), {
+        onNone: () =>
+          Cause.isInterrupted(cause)
+            ? 'run cancelled before publication'
+            : 'run ended abnormally before publication',
+        // What failed, never what the failure said: an agent or hook failure carries an excerpt of
+        // what the process wrote, and a lease record is a file on disk rather than a log the
+        // redaction rules pass over.
+        onSome: (error) => `run failed before publication: ${error._tag} ${error.category}`,
+      }),
+    }),
+  })
+
+/**
+ * The whole of one run as a fiber body: the workspace this run leases for itself, the source-control
+ * preparation and publication that bracket the session when the host owns the repository, and the
+ * `WorkerExited` that reports how it ended. Every exit path offers that event, so a run can never
+ * end unobserved, and every exit path releases the lease — including the interruption that a
+ * cancellation or a shutdown ends the run with.
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
-  const { context, issue, attempt, runId, execution, sessionPorts, target } = launch
-  return execution.workspaces.create(issue.identifier).pipe(
-    Effect.flatMap((workspace) => {
-      const sourceControl = MutableRef.get(sessionPorts).sourceControl
-      if (sourceControl === null) {
-        return runSession(launch, workspace)
-      }
-      return sourceControl.prepare(issue, workspace, target).pipe(
-        Effect.flatMap((prepared) =>
-          runSession(launch, workspace).pipe(
-            Effect.zipRight(
-              Effect.suspend(() => {
-                const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                return publisher.publish(issue, prepared)
-              }),
-            ),
-            Effect.tap((outcome) =>
-              logInfo('host source-control publication completed', {
-                ...logContext(issue),
-                action: 'source_control_publish',
-                outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
-                branch: outcome.branchName,
-              }),
-            ),
-            Effect.asVoid,
-          ),
-        ),
-      )
-    }),
-    Effect.matchEffect({
-      onFailure: (error) =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'failed',
-          error: error.message,
-        }).pipe(Effect.asVoid),
-      onSuccess: () =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'normal',
-          error: null,
-        }).pipe(Effect.asVoid),
-    }),
-  )
+  const { context, issue, attempt, runId, execution } = launch
+  return execution.workspaces
+    .withLeasedWorkspace(
+      { identifier: issue.identifier, runId },
+      (workspace) => runWithSourceControl(launch, workspace),
+      workspaceRelease,
+    )
+    .pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Queue.offer(context.mailbox, {
+            _tag: 'WorkerExited',
+            issueId: issue.id,
+            runId,
+            attempt,
+            outcome: 'failed',
+            error: error.message,
+          }).pipe(Effect.asVoid),
+        onSuccess: () =>
+          Queue.offer(context.mailbox, {
+            _tag: 'WorkerExited',
+            issueId: issue.id,
+            runId,
+            attempt,
+            outcome: 'normal',
+            error: null,
+          }).pipe(Effect.asVoid),
+      }),
+    )
 }
 
 /** What a started session is before it has reported anything: everything else arrives later. */

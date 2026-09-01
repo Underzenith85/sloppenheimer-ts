@@ -53,6 +53,7 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
     | 'hook_failed'
     | 'hook_timeout'
     | 'inspect_failed'
+    | 'lease_conflict'
     | 'remove_failed'
   readonly message: string
   readonly cause?: unknown

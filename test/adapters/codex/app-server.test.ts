@@ -81,7 +81,7 @@ const runScenario = (
     })
     const launch: AgentLaunch = {
       issue,
-      workspace: { path, key: 'issue-14', createdNow: false },
+      workspace: { path, key: 'issue-14' },
       workspaceRoot: root,
       config,
       prompt: 'do the work',
@@ -812,7 +812,7 @@ describe('App Server timeouts and shutdown', (): void => {
         const fiber = Effect.runFork(
           runAgentOnHost({
             issue,
-            workspace: { path, key: 'issue-14', createdNow: false },
+            workspace: { path, key: 'issue-14' },
             workspaceRoot: root,
             config: codexRunnerConfig({
               command: `node ${JSON.stringify(fakeAppServer)} immediate-completion`,
@@ -880,7 +880,7 @@ describe('App Server timeouts and shutdown', (): void => {
         const fiber = Effect.runFork(
           runAgentOnHost({
             issue,
-            workspace: { path, key: 'issue-14', createdNow: false },
+            workspace: { path, key: 'issue-14' },
             workspaceRoot: root,
             config,
             prompt: 'do the work',

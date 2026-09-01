@@ -345,7 +345,7 @@ describe('GitHub provider-native tool extension', (): void => {
 
         const result = yield* runAgentOnHost({
           issue,
-          workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
+          workspace: { path: workspacePath, key: 'issue-20' },
           workspaceRoot,
           config: configFor('host-tool', dynamicTools),
           prompt: 'exercise host tool',
@@ -410,7 +410,7 @@ describe('GitHub provider-native tool extension', (): void => {
 
         const result = yield* runAgentOnHost({
           issue,
-          workspace: { path: workspacePath, key: 'issue-20', createdNow: true },
+          workspace: { path: workspacePath, key: 'issue-20' },
           workspaceRoot,
           config: configFor('host-tool-unsupported', [{ type: 'function', ...spec }]),
           prompt: 'exercise unsupported tool',

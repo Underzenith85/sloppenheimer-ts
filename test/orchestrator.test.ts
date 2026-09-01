@@ -35,6 +35,7 @@ import {
   type Issue,
   type IssueId,
   type JsonObject,
+  type Workspace,
 } from '@sloppenheimer/core/domain/domain.js'
 import {
   AgentError,
@@ -95,6 +96,7 @@ import {
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
@@ -618,8 +620,20 @@ const makeHarness = (
     makeWorkspaces: (settings) => {
       workspaceSettings.push(settings)
       return {
-        create: () =>
-          Effect.succeed({ path: '/tmp/sloppenheimer-test', key: 'test', createdNow: false }),
+        // A real bracket, like the Node manager's: the release runs however the use ended, so a
+        // test can observe what a run's workspace was released as.
+        withLeasedWorkspace: (run, use, disposition) =>
+          Effect.acquireUseRelease(
+            Effect.succeed({
+              path: `/tmp/sloppenheimer-test/run-${String(run.runId)}`,
+              key: 'test',
+            }),
+            (workspace) => use(workspace),
+            (_workspace, exit) =>
+              Effect.sync(() => {
+                disposition(exit)
+              }),
+          ),
         exists: () => Effect.succeed(true),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
@@ -3036,11 +3050,10 @@ describe('restored pull request handoffs', (): void => {
         }),
         makeWorkspaces: (settings) => ({
           ...harness.ports.makeWorkspaces(settings),
-          create: () =>
+          withLeasedWorkspace: (_run, use) =>
             Effect.sync(() => {
               workspacesCreated += 1
-              return { path: '/tmp/sloppenheimer-test', key: 'test', createdNow: true }
-            }),
+            }).pipe(Effect.zipRight(use({ path: '/tmp/sloppenheimer-test', key: 'test' }))),
         }),
         // The repair pushes nothing and fails, so a retry is queued behind it.
         runAgent: () =>
@@ -5087,6 +5100,205 @@ describe('workflow hot reload', (): void => {
       )
 
       expect(snapshot.counts.running).toBe(0)
+    }),
+  )
+})
+
+describe('per-run workspace leases', (): void => {
+  /** Records what the orchestrator asked the workspace manager for, in the order it asked. */
+  const recordingWorkspaces =
+    (
+      harness: TestHarness,
+      acquired: Workspace[],
+      released: Readonly<{ path: string; release: WorkspaceRelease }>[],
+    ): TestPorts['makeWorkspaces'] =>
+    (settings) => {
+      const base = harness.ports.makeWorkspaces(settings)
+      return {
+        ...base,
+        withLeasedWorkspace: (run, use, disposition) => {
+          let leasedPath = ''
+          return base.withLeasedWorkspace(
+            run,
+            (workspace) => {
+              leasedPath = workspace.path
+              acquired.push(workspace)
+              return use(workspace)
+            },
+            (exit) => {
+              const release = disposition(exit)
+              released.push({ path: leasedPath, release })
+              return release
+            },
+          )
+        },
+      }
+    }
+
+  it.effect('leases four concurrent runs four distinct workspaces', () =>
+    Effect.gen(function* () {
+      const issues = [1, 2, 3, 4].map((number) =>
+        makeIssue(`example/sloppenheimer#${String(number)}`, 1, null, ['sloppenheimer', 'ready']),
+      )
+      const concurrent: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          agent: { ...workflow.config.agent, maxConcurrentAgents: 4 },
+        },
+      }
+      const harness = makeHarness(concurrent, () => issues)
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+      }
+
+      const running = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.counts.running < 4) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return { counts: current.counts, releasedWhileRunning: [...released] }
+        }),
+      )
+
+      // Four sessions running at once are four run identities, and so four workspaces: nothing is
+      // shared, and no lease is let go of while its run is still live.
+      expect(running.counts.running).toBe(4)
+      expect(new Set(acquired.map((workspace) => workspace.path)).size).toBe(4)
+      expect(running.releasedWhileRunning).toEqual([])
+      // Closing the host interrupts all four, and every one of them gives its lease back.
+      expect(new Set(released.map((each) => each.path))).toEqual(
+        new Set(acquired.map((workspace) => workspace.path)),
+      )
+    }),
+  )
+
+  it.effect('keeps a cancelled run workspace for recovery', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          yield* control.setIssuePaused(1, true)
+        }),
+      )
+
+      // The pause interrupts the worker, and an interrupted run has published nothing: its
+      // workspace is kept, under the reason it is being kept for.
+      expect(released).toEqual([
+        {
+          path: acquired[0]?.path,
+          release: { _tag: 'Retained', reason: 'run cancelled before publication' },
+        },
+      ])
+    }),
+  )
+
+  it.effect('keeps the workspace of a run that had no source control to publish through', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      // Composing no code-review services is what disables handoff, and this composition supplies
+      // no source control either: the run reaches its end having published nothing, so what the
+      // agent wrote is still only in the workspace.
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (released.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      expect(released[0]).toMatchObject({
+        path: acquired[0]?.path,
+        release: { _tag: 'Retained', reason: 'run ended without publishing its work' },
+      })
+    }),
+  )
+
+  it.effect('leases a retry its own workspace and keeps the failed attempt', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      let launches = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+        // The first attempt fails, which is what queues the retry; the second one stays running.
+        runAgent: (launch) =>
+          Effect.suspend(() => {
+            launches += 1
+            return launches === 1
+              ? Effect.fail(
+                  new AgentError({ category: 'process_exited', message: 'worker failed' }),
+                )
+              : harness.ports.runAgent(launch)
+          }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('20 seconds')
+          while (current.counts.running === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+        }),
+      )
+
+      // The retry starts in a workspace of its own, and the attempt that failed keeps its own
+      // rather than handing its leftovers to the run that follows it.
+      expect(acquired).toHaveLength(2)
+      expect(acquired[1]?.path).not.toBe(acquired[0]?.path)
+      expect(released[0]).toMatchObject({
+        path: acquired[0]?.path,
+        // The reason names what failed, not what it said: a failure message can carry an excerpt
+        // of what an agent or hook wrote, and the lease record is a file rather than a log.
+        release: {
+          _tag: 'Retained',
+          reason: 'run failed before publication: AgentError process_exited',
+        },
+      })
     }),
   )
 })

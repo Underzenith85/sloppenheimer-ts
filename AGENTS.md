@@ -531,7 +531,7 @@ The following port boundary was accepted in the 2026-08-30 architecture review:
 
 - `TrackerPort` contains only tracker-neutral issue operations: fetching normalized issues, adapter-supplied dispatch eligibility, dependency hydration, tracker credentials, and issue-state operations expressed in tracker-neutral terms.
 - Pull-request handoff is an optional application capability exposed through `CodeReviewPort`. It owns completed-work handoff and discovery of an existing handoff, inspection of a proposed change, protected merge, and review-thread resolution. The port may use honest pull-request and code-review vocabulary.
-- Repository preparation and publication are a tracker-neutral application capability exposed through `SourceControlPort`. The host owns Git metadata and credentials, prepares normal work from the protected base and repairs from an exact pull-request head, commits agent file changes, rebases under policy, and pushes with an expected-head lease. Agents edit only worktree files. Source control must not be folded into `TrackerPort`, and pull-request inspection and merge remain in `CodeReviewPort`.
+- Repository preparation and publication are a tracker-neutral application capability exposed through `SourceControlPort`. The host owns Git metadata and credentials, prepares normal work from the branch's published head or, where it has none, the protected base, and repairs from an exact pull-request head, commits agent file changes, rebases under policy, and pushes with an expected-head lease. Agents edit only worktree files. Source control must not be folded into `TrackerPort`, and pull-request inspection and merge remain in `CodeReviewPort`.
 - GitHub supplies both `TrackerPort` and `CodeReviewPort`; other tracker providers are not required to simulate code-review concepts that they do not support.
 - When handoff is enabled, a provider that does not supply `CodeReviewPort` is an operator-visible configuration error. When handoff is disabled, no `CodeReviewPort` is required and the application follows the core continuation lifecycle. The workflow key that selects between the two is `handoff.enabled`, read once by the composition root at startup ([#73](https://github.com/Underzenith85/sloppenheimer-ts/issues/73)).
 - `HandoffResult` belongs with `CodeReviewPort`, because its pull-request variant is a code-review concept rather than an issue-tracker concept.
@@ -568,6 +568,81 @@ it; do not create a separate ADR.
   changes `runner.kind` is refused with an operator-visible error and the last known good workflow
   stays in force. Do not add a runner cell to make that reload succeed without a deliberate design
   decision about what happens to a session already running under the previous kind.
+
+## Architecture record: workspaces
+
+[#166](https://github.com/Underzenith85/sloppenheimer-ts/issues/166) settled the workspace
+lifecycle. This section is the architecture record for it; do not create a separate ADR.
+
+- A workspace belongs to one dispatched run or repair attempt, never to an issue. The path is
+  `<root>/<issue key>/<run key>`, where the run key names the run number and the host that allocated
+  it: the run number restarts with the process that counts it, so the host is what keeps two hosts —
+  and a host and its own predecessor — from ever naming one directory.
+- Ownership is an exclusive lease, not orchestrator memory, and `WorkspaceManagerPort` hands a
+  workspace out only for the length of a use: `withLeasedWorkspace` is a bracket rather than an
+  acquire and a release a caller pairs up itself, because an interruption in the gap between them
+  would leave a lease that nobody holds and nobody will release. Publishing the lease is the claim —
+  the record is hard-linked into place, which is atomic and refuses an existing name — and the run
+  directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
+  elsewhere never finds a workspace without a lease. A lease is released on success, failure,
+  cancellation and shutdown alike, and it outlives the host that wrote it, so a restart and a second
+  host reading the same root both see who owns what.
+- **A lease is given up or observed to be free — never waited out.** The record names the host
+  process that holds it, when that process started, and the process namespace its id belongs to, and
+  those are the only things that can take one back: the owner released it, or its process is gone in
+  a namespace this host shares. A record naming _this_ process is claimed while this process still
+  has it, which it knows rather than reads: a release rewrites the record, and a release whose write
+  did not land would otherwise leave `held` beside a live id for a run that ended, and nothing in
+  the process could ever take it back. A host restarted into its predecessor's process id — the ordinary
+  case for a container's PID 1 — is caught by the start marker rather than by any clock. An owner
+  probed at all only where both sides name the same namespace: two containers can share a kernel and
+  a root while each sees only its own ids, so anything weaker, the machine's boot identifier
+  included, would read a stranger's process as the owner.
+  The deliberate limit is that an owner this host cannot place is claimed for good, and its
+  workspace stays a retained artifact that cleanup reports and never takes. Do not replace that with
+  an expiry, a renewal, or an age. Two hosts do not share a wall clock, a run has no upper bound —
+  `turn_timeout_ms` and `stall_timeout_ms` are idle timeouts, restarted by every turn and every
+  event — and a workspace deleted from under a live run is unrecoverable where a workspace left
+  behind is merely untidy. This was built once with a renewable lease and taken out again: every
+  clock it introduced was a way for one host to delete another's work.
+  Every step that names a path resolves it through whatever its parents are at that instant, so a
+  directory is held still while it is being acted through: opened, which pins its inode, and
+  confirmed by device and inode again immediately before each step that creates, renames, executes
+  in or removes. Acquisition holds the issue directory that way across the link that publishes the
+  claim, the run directory it creates and the `after_create` hook; the release holds it again across
+  its own hook and removals; cleanup holds it across the record it takes, the `before_remove` hook
+  and each removal; the staged-record sweep holds its own the same way. A directory moved aside and
+  replaced under its name stops the caller rather than being followed there.
+- **What that does and does not defend, so it is not extended without a reason.** It defends against
+  the substitutions this host can produce for itself and stumble into: a workspace path that
+  resolves outside the root, a symlink anywhere in the tree, a directory removed and recreated under
+  a name that was inspected earlier, and one host's cleanup crossing another's live run. It does not
+  defend against a process with write access to the workspace root that is actively racing this one.
+  It cannot: Node exposes no `openat`, `renameat` or `unlinkat`, so a confirmation and the step it
+  guards are always two syscalls, and every check narrows a window it can never close — while an
+  attacker with that access could write into the run directory the agent is already using and need
+  win no race at all. The workspace root is the host's own directory, and that is the boundary. Add
+  a confirmation where a step gained a genuinely wide gap — an operator's hook, a recursive
+  removal — and not to shorten a gap that is already two adjacent statements.
+  Cleanup still fences what it does take. Deciding a workspace is free and removing it are two
+  steps with an operator's `before_remove` hook between them, so the record is moved aside in one
+  rename first and the decision made again on what was actually taken. Moving it aside frees the
+  name, so an acquisition may claim it in that instant: a record goes back by `link`, which refuses
+  an occupied name, and cleanup removes only the directory it decided on and the record it took —
+  never whatever now sits at that name.
+- **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves
+  nothing behind; every other ending — including a composition with no `SourceControlPort` to
+  publish through — keeps its workspace as a retained recovery artifact naming why, which no later
+  run adopts. `SourceControlPort.prepare` agrees with that and no longer preserves a dirty worktree:
+  a normal run starts from its branch's published head when the branch exists, and from the
+  protected base when it does not, so an attempt that ran out of turns is continued by what it
+  published rather than by what a shared directory happened to hold. A repair still starts from the
+  exact pull-request head. Do not reintroduce a preserve branch in `prepare` without revisiting this
+  decision — the two contradicted each other before #166, which is the defect it removed.
+- Cleanup never removes a workspace whose lease is still held by a running owner. An issue's
+  retained workspaces go when the issue reaches a terminal state.
+- The remote executors under #21-#24 inherit this contract: whatever allocates the workspace, every
+  run gets its own refs, index, worktree and lifecycle, and holds a lease for as long as it runs.
 
 ## Testing
 

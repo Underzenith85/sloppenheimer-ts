@@ -55,7 +55,7 @@ describe('SourceControlPort conformance', (): void => {
         const sourceControl = sourceControlFor(fixture)
         const prepared = yield* sourceControl.prepare(
           issue,
-          { path: fixture.workspace, key: 'issue-165', createdNow: true },
+          { path: fixture.workspace, key: 'issue-165' },
           { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: expectedHead },
         )
         expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(expectedHead)
@@ -86,7 +86,7 @@ describe('SourceControlPort conformance', (): void => {
       const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { path: fixture.workspace, key: 'issue-165' },
         { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: expectedHead },
       )
       yield* host(() => commitFile(fixture.seed, 'collision.ts', 'collision\n', 'colliding push'))
@@ -116,7 +116,7 @@ describe('SourceControlPort conformance', (): void => {
       })
       const prepared = yield* sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { path: fixture.workspace, key: 'issue-165' },
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
       const server = createServer((_request, response) => {
