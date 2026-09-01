@@ -379,6 +379,68 @@ describe('protocol normalization', (): void => {
     })
   })
 
+  it('counts a header-shaped pair that follows content as the content it is', (): void => {
+    // A header sits in the header section, before any content. Once a line has been added or
+    // removed, a `---`/`+++` pair below it is a removed `-- heading` and an added `++ heading`,
+    // whatever it resembles.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/docs/notes.md',
+              kind: { type: 'update' },
+              diff: ['+ordinary', '--- heading', '+++ heading'].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/docs/notes.md', change: 'update', addedLines: 2, deletedLines: 1 }],
+    })
+  })
+
+  it('reopens the header section for each file of a whole-patch diff', (): void => {
+    // A change carries one file's diff, but a backend reporting the whole patch under `patch` sends
+    // several. Each `diff --git` opens that file's header section again, so the second file's
+    // header is read as one rather than counted as the two lines it resembles.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'patchApply',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/src/a.ts',
+              kind: { type: 'update' },
+              patch: [
+                'diff --git a/src/a.ts b/src/a.ts',
+                '--- a/src/a.ts',
+                '+++ b/src/a.ts',
+                '@@ -1 +1 @@',
+                '-old',
+                '+new',
+                'diff --git a/src/b.ts b/src/b.ts',
+                '--- /dev/null',
+                '+++ b/src/b.ts',
+                '@@ -0,0 +1 @@',
+                '+added',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/src/a.ts', change: 'update', addedLines: 2, deletedLines: 1 }],
+    })
+  })
+
   it('reads a change list reported as a map keyed by the path it changed', (): void => {
     expect(
       normalizePayload('item/completed', {

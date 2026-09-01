@@ -105,16 +105,18 @@ const newFileHeader = /^\+\+\+(?:[ \t]|$)/u
 /**
  * The lines one diff adds and removes.
  *
- * Neither the three characters nor the separator after them makes a header, because content wears
- * both: an added line reading `++counter` arrives as `+++counter`, and one reading `++ heading`
- * arrives as `+++ heading`. What distinguishes a header is that it comes in a pair — a `---` line
- * and the `+++` line right after it — and that it appears before the first hunk. Inside a hunk
- * every `+` and `-` line is content, which is what keeps a removed `-- x` above an added `++ y`
- * from reading as one.
+ * Nothing about a single line makes it a header. Neither the three characters nor the separator
+ * after them does, because content wears both: an added line reading `++counter` arrives as
+ * `+++counter`, and one reading `++ heading` arrives as `+++ heading`. What a header has is a
+ * position — the header section, before any content — and a shape: a `---` line with the `+++`
+ * line right after it, consumed together. Everything else is content, and a `+` or `-` line inside
+ * a hunk or after content has begun is content whatever it looks like, which is what keeps a
+ * removed `-- x` above an added `++ y` from reading as a header wherever it appears.
  *
- * A fragment carrying neither a hunk marker nor a pair is all content. What stays ambiguous is a
- * fragment with no hunk marker that opens on such a pair, where the header reading is taken. That
- * is the conventional shape, and a diff that means the other thing is indistinguishable.
+ * The header section reopens at each `diff --git`, so a diff carrying several files is read file by
+ * file. A concatenation that separates its files by header alone is not: after the first file's
+ * content, the second file's header counts as the two lines it resembles. One change carries one
+ * file's diff, so that shape does not arise from this protocol.
  *
  * Nothing else about the diff is read, and no part of it is returned.
  */
@@ -122,29 +124,33 @@ const diffCounts = (diff: string): Readonly<{ addedLines: number; deletedLines: 
   const lines = diff.split('\n')
   let addedLines = 0
   let deletedLines = 0
-  let inHunk = false
+  let inHeaderSection = true
+  let paired = false
   for (const [index, line] of lines.entries()) {
+    if (paired) {
+      // The `+++` half, consumed with the `---` half that named it.
+      paired = false
+      continue
+    }
     if (line.startsWith('@@')) {
-      inHunk = true
+      inHeaderSection = false
       continue
     }
     // A diff carrying more than one file opens a header section for each of them.
     if (line.startsWith('diff --git ')) {
-      inHunk = false
+      inHeaderSection = true
       continue
     }
-    // Either half of a pair, recognized from the other: the `---` line by the `+++` that follows
-    // it, and that `+++` line by the `---` before it.
-    const pairedHeader =
-      (oldFileHeader.test(line) && newFileHeader.test(lines[index + 1] ?? '')) ||
-      (newFileHeader.test(line) && oldFileHeader.test(lines[index - 1] ?? ''))
-    if (!inHunk && pairedHeader) {
+    if (inHeaderSection && oldFileHeader.test(line) && newFileHeader.test(lines[index + 1] ?? '')) {
+      paired = true
       continue
     }
     if (line.startsWith('+')) {
       addedLines += 1
+      inHeaderSection = false
     } else if (line.startsWith('-')) {
       deletedLines += 1
+      inHeaderSection = false
     }
   }
   return { addedLines, deletedLines }
