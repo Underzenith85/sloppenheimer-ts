@@ -29,16 +29,16 @@ import {
   bound,
   boundRedacted,
   commandSummary,
-  pathKey,
   redact,
   type Redactor,
 } from '@sloppenheimer/core/support/redaction.js'
 import {
   qualityPhaseOf,
   type AgentEventPayload,
-  type FileChangeKind,
   type ToolState,
 } from '@sloppenheimer/core/telemetry.js'
+
+import { fileChangesOf } from './file-changes.js'
 
 const noPayload: AgentEventPayload = Object.freeze({ kind: 'none' })
 
@@ -77,27 +77,12 @@ const itemSource = protocolStruct({
   commandLine: tolerant(commandSource),
   exitCode: tolerant(finiteNumber),
   durationMs: tolerant(finiteNumber),
-  changes: tolerant(Schema.Array(Schema.Unknown)),
+  changes: Schema.optional(Schema.Unknown),
   input: Schema.optional(Schema.Unknown),
   arguments: Schema.optional(Schema.Unknown),
   args: Schema.optional(Schema.Unknown),
   output: Schema.optional(Schema.Unknown),
   result: Schema.optional(Schema.Unknown),
-})
-
-/** The file an item reports changing, either as the item itself or as its first listed change. */
-const fileTargetSource = protocolStruct({
-  path: tolerant(nonEmptyString),
-  file: tolerant(nonEmptyString),
-  filePath: tolerant(nonEmptyString),
-  kind: tolerant(nonEmptyString),
-  type: tolerant(nonEmptyString),
-  change: tolerant(nonEmptyString),
-  changeKind: tolerant(nonEmptyString),
-  addedLines: tolerant(finiteNumber),
-  additions: tolerant(finiteNumber),
-  deletedLines: tolerant(finiteNumber),
-  deletions: tolerant(finiteNumber),
 })
 
 /** A notification's parameters, as far as the retained payload is concerned. */
@@ -108,7 +93,6 @@ const notificationSource = protocolStruct({
 })
 
 const decodeItem = decodeOrNull(itemSource)
-const decodeFileTarget = decodeOrNull(fileTargetSource)
 const decodeNotification = decodeOrNull(notificationSource)
 
 /** The size of a payload we deliberately do not retain, so an operator still sees its scale. */
@@ -125,7 +109,9 @@ const byteLength = (value: unknown): number | null => {
 
 const itemState = (method: string, status: string | null): ToolState => {
   const reported = status?.toLowerCase() ?? null
-  if (reported === 'failed' || reported === 'error') {
+  // `declined` is terminal and is not success: the patch or command it names never ran, so an item
+  // reporting it must not be left looking like one still in progress.
+  if (reported === 'failed' || reported === 'error' || reported === 'declined') {
     return 'failed'
   }
   if (reported === 'completed' || reported === 'succeeded' || method.endsWith('/completed')) {
@@ -133,24 +119,6 @@ const itemState = (method: string, status: string | null): ToolState => {
   }
   return 'started'
 }
-
-const fileChangeKinds = new Map<string, FileChangeKind>([
-  ['add', 'add'],
-  ['added', 'add'],
-  ['create', 'add'],
-  ['created', 'add'],
-  ['delete', 'delete'],
-  ['deleted', 'delete'],
-  ['remove', 'delete'],
-  ['removed', 'delete'],
-  ['update', 'update'],
-  ['updated', 'update'],
-  ['modify', 'update'],
-  ['modified', 'update'],
-])
-
-const changeKind = (value: string | null): FileChangeKind =>
-  fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
 
 const itemPayload = (
   method: string,
@@ -192,18 +160,12 @@ const itemPayload = (
     }
   }
   if (type.includes('file') || type.includes('patch') || type.includes('diff')) {
-    // The change list is authoritative when it carries one; an item that reports the file inline
-    // is read directly.
-    const target = decodeFileTarget(item.changes?.[0]) ?? decodeFileTarget(source)
-    const path = target?.path ?? target?.file ?? target?.filePath ?? null
+    // Every file the change list names, not merely its first: one patch item is how the App Server
+    // reports a multi-file edit, and the state is what says whether that edit was applied.
     return {
       kind: 'file',
-      path: path === null ? 'unknown' : pathKey(redactor(path)),
-      change: changeKind(
-        target?.kind ?? target?.type ?? target?.change ?? target?.changeKind ?? null,
-      ),
-      addedLines: target?.addedLines ?? target?.additions ?? null,
-      deletedLines: target?.deletedLines ?? target?.deletions ?? null,
+      state: itemState(method, status),
+      files: fileChangesOf(item.changes, source, redactor),
     }
   }
   if (type.includes('tool') || type.includes('search') || type.includes('mcp')) {

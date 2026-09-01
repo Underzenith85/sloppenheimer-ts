@@ -103,9 +103,23 @@ const describeEvent = (event: AgentTimelineEvent): string => {
     )
   }
   if (event.category === 'file') {
-    const added = event.addedLines === null ? 0 : event.addedLines
-    const deleted = event.deletedLines === null ? 0 : event.deletedLines
-    return event.change + ' ' + event.path + ' (+' + String(added) + ' / −' + String(deleted) + ')'
+    let added = 0
+    let deleted = 0
+    for (const file of event.files) {
+      added += file.addedLines === null ? 0 : file.addedLines
+      deleted += file.deletedLines === null ? 0 : file.deletedLines
+    }
+    const first = event.files[0]
+    // One patch item can touch many files. The first is named, because that is what an operator
+    // scanning the timeline recognizes, and the rest are counted rather than listed.
+    const named =
+      first === undefined
+        ? 'files'
+        : first.change +
+          ' ' +
+          first.path +
+          (event.files.length > 1 ? ' and ' + String(event.files.length - 1) + ' more' : '')
+    return named + ' (+' + String(added) + ' / −' + String(deleted) + ') · ' + event.state
   }
   if (event.category === 'usage') {
     const tokens =

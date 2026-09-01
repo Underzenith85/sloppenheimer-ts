@@ -10,7 +10,7 @@
 
 import type {
   ErrorSeverity,
-  FileChangeKind,
+  FileChange,
   MessageRole,
   QualityPhase,
   RateLimitWindow,
@@ -93,10 +93,8 @@ export type AgentTimelineEvent =
   | (AgentTimelineBase &
       Readonly<{
         category: 'file'
-        path: string
-        change: FileChangeKind
-        addedLines: number | null
-        deletedLines: number | null
+        state: ToolState
+        files: readonly FileChange[]
       }>)
   | (AgentTimelineBase &
       Readonly<{

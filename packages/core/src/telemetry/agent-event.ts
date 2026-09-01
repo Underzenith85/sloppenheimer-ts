@@ -11,7 +11,7 @@
 
 import { bound } from '../support/redaction.js'
 import { decodeRateLimits, foldTurnIdentity } from './events.js'
-import type { AgentEvent, AgentEventPayload } from './events.js'
+import type { AgentEvent, AgentEventPayload, FileChange } from './events.js'
 import {
   alignSession,
   closeSession,
@@ -168,28 +168,42 @@ const appendCommand = (
   })
 }
 
+/** What the inspector reports the agent is doing, for a patch that may touch more than one file. */
+const editingOperation = (files: readonly FileChange[]): string => {
+  const first = files[0]
+  if (first === undefined) {
+    return 'Editing the workspace'
+  }
+  return files.length === 1
+    ? `Editing ${first.path}`
+    : `Editing ${first.path} and ${String(files.length - 1)} more`
+}
+
 const appendFile = (
   record: AgentDetailRecord,
   base: EventBase,
   payload: PayloadOf<'file'>,
   at: Date,
 ): AgentDetailRecord => {
-  const changed = noteChangedPath(
-    record,
-    payload.path,
-    payload.addedLines,
-    payload.deletedLines,
-    at,
-  )
-  const next = setPhase(changed, 'editing', `Editing ${payload.path}`, at)
+  // A runner reports one file item twice — the patch it proposes, then the patch it applied — so
+  // only the terminal report reaches the ledger: counting the proposal as well would double every
+  // line count, and counting a failed or declined patch would report an edit the worktree never
+  // received. The event itself is retained either way, so the timeline still shows the attempt.
+  const changed =
+    payload.state === 'completed'
+      ? payload.files.reduce(
+          (carried, file) =>
+            noteChangedPath(carried, file.path, file.addedLines, file.deletedLines, at),
+          record,
+        )
+      : record
+  const next = setPhase(changed, 'editing', editingOperation(payload.files), at)
   return push(next, {
     ...base,
     operation: next.operation,
     category: 'file',
-    path: payload.path,
-    change: payload.change,
-    addedLines: payload.addedLines,
-    deletedLines: payload.deletedLines,
+    state: payload.state,
+    files: payload.files,
   })
 }
 

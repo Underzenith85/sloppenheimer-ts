@@ -1,0 +1,190 @@
+/**
+ * The files one App Server item reports changing.
+ *
+ * The protocol's `fileChange` item is `{id, changes, status}`, where `changes` *lists* every file
+ * the patch touches as `{path, kind, diff}`, and no entry carries a line count of its own. Both
+ * facts are load-bearing. Reading only the first entry loses every other file of a multi-file
+ * patch, and waiting for an `addedLines` field the protocol never sends leaves the workspace
+ * summary reporting no line changes at all, however much the agent wrote.
+ *
+ * The counts are therefore derived here, from the diff the change carries, and the diff itself is
+ * discarded in the same expression: a diff is file content, so only the two numbers it produces
+ * are ever retained. Fields a backend does report directly are still preferred over counting.
+ *
+ * The item stream is the only source the workspace ledger reads. The App Server also publishes a
+ * turn-level aggregate as `turn/diff/updated`, but that restates the same edits cumulatively after
+ * every patch, so folding it in as well would count each line again on every notification that
+ * carried it.
+ */
+
+import { Schema } from 'effect'
+
+import { pathKey, type Redactor } from '@sloppenheimer/core/support/redaction.js'
+import {
+  decodeOrNull,
+  finiteNumber,
+  nonEmptyString,
+  protocolStruct,
+  tolerant,
+  unknownRecord,
+} from '@sloppenheimer/core/support/schema.js'
+import {
+  changedPathLimit,
+  type FileChange,
+  type FileChangeKind,
+} from '@sloppenheimer/core/telemetry.js'
+
+/**
+ * One entry of a change list. `path`, `kind`, and `diff` are what the App Server sends; the rest
+ * are the spellings a backend reporting the same change under other names would use, read here so
+ * a count that was stated outright is never recomputed from a diff.
+ */
+const changeSource = protocolStruct({
+  path: tolerant(nonEmptyString),
+  file: tolerant(nonEmptyString),
+  filePath: tolerant(nonEmptyString),
+  kind: tolerant(nonEmptyString),
+  type: tolerant(nonEmptyString),
+  change: tolerant(nonEmptyString),
+  changeKind: tolerant(nonEmptyString),
+  addedLines: tolerant(finiteNumber),
+  additions: tolerant(finiteNumber),
+  deletedLines: tolerant(finiteNumber),
+  deletions: tolerant(finiteNumber),
+  diff: tolerant(nonEmptyString),
+  unifiedDiff: tolerant(nonEmptyString),
+  patch: tolerant(nonEmptyString),
+})
+
+/**
+ * The change list itself: the protocol's list, or a record keyed by the path each entry changed.
+ * The keyed form is not what the App Server sends, but it is what the same information looks like
+ * whenever a patch is reported as a map, and reading it costs one branch.
+ */
+const changeListSource = Schema.Union(Schema.Array(Schema.Unknown), unknownRecord)
+
+const decodeChange = decodeOrNull(changeSource)
+const decodeChangeList = decodeOrNull(changeListSource)
+
+type ChangeSource = NonNullable<ReturnType<typeof decodeChange>>
+
+const fileChangeKinds = new Map<string, FileChangeKind>([
+  ['add', 'add'],
+  ['added', 'add'],
+  ['create', 'add'],
+  ['created', 'add'],
+  ['delete', 'delete'],
+  ['deleted', 'delete'],
+  ['remove', 'delete'],
+  ['removed', 'delete'],
+  ['update', 'update'],
+  ['updated', 'update'],
+  ['modify', 'update'],
+  ['modified', 'update'],
+])
+
+const changeKind = (value: string | null): FileChangeKind =>
+  fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
+
+/**
+ * The lines one diff adds and removes. The `+++` and `---` headers name the file rather than
+ * changing it, so they are not counted; nothing else about the diff is read, and no part of it is
+ * returned.
+ */
+const diffCounts = (diff: string): Readonly<{ addedLines: number; deletedLines: number }> => {
+  let addedLines = 0
+  let deletedLines = 0
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue
+    }
+    if (line.startsWith('+')) {
+      addedLines += 1
+    } else if (line.startsWith('-')) {
+      deletedLines += 1
+    }
+  }
+  return { addedLines, deletedLines }
+}
+
+/**
+ * What one change did, in lines. A change that reports neither a count nor a diff reads as `null`
+ * rather than as zero: a patch whose size is unknown is not a patch that changed nothing.
+ */
+const countsOf = (
+  change: ChangeSource,
+): Readonly<{ addedLines: number | null; deletedLines: number | null }> => {
+  const addedLines = change.addedLines ?? change.additions
+  const deletedLines = change.deletedLines ?? change.deletions
+  if (addedLines !== null || deletedLines !== null) {
+    return { addedLines, deletedLines }
+  }
+  const diff = change.diff ?? change.unifiedDiff ?? change.patch
+  return diff === null ? { addedLines: null, deletedLines: null } : diffCounts(diff)
+}
+
+/**
+ * One change, read from its own record and — for a list keyed by path — from the key that named
+ * it. A change that names no file at all is dropped rather than retained as a nameless edit.
+ */
+const fileChangeOf = (
+  source: unknown,
+  key: string | null,
+  redactor: Redactor,
+): FileChange | null => {
+  const change = decodeChange(source)
+  const path = (change === null ? null : (change.path ?? change.file ?? change.filePath)) ?? key
+  if (path === null) {
+    return null
+  }
+  return Object.freeze({
+    path: pathKey(redactor(path)),
+    change: changeKind(
+      change === null ? null : (change.kind ?? change.type ?? change.change ?? change.changeKind),
+    ),
+    ...(change === null ? { addedLines: null, deletedLines: null } : countsOf(change)),
+  })
+}
+
+/** The change list as entries, carrying the key that named each change where there was one. */
+const changeEntries = (changes: unknown): readonly (readonly [string | null, unknown])[] => {
+  const decoded = decodeChangeList(changes)
+  if (decoded === null) {
+    return []
+  }
+  return Array.isArray(decoded)
+    ? decoded.map((change): readonly [string | null, unknown] => [null, change])
+    : Object.entries(decoded).map(([key, change]): readonly [string | null, unknown] => [
+        key,
+        change,
+      ])
+}
+
+/** The one change reported for an item that carries no list, so nothing is lost to shape alone. */
+const unnamedChange: FileChange = Object.freeze({
+  path: 'unknown',
+  change: 'unknown',
+  addedLines: null,
+  deletedLines: null,
+})
+
+/**
+ * Every file an item reported changing, in the order it listed them, bounded by the number of
+ * paths the record retains. An item that names its file on the item itself rather than in a list
+ * is read as the single change it is, and one that names no file at all still reports a change, so
+ * a patch is never dropped from the timeline for want of a name.
+ */
+export const fileChangesOf = (
+  changes: unknown,
+  item: unknown,
+  redactor: Redactor,
+): readonly FileChange[] => {
+  const listed = changeEntries(changes)
+    .slice(0, changedPathLimit)
+    .map(([key, change]) => fileChangeOf(change, key, redactor))
+    .filter((change): change is FileChange => change !== null)
+  if (listed.length > 0) {
+    return Object.freeze(listed)
+  }
+  return Object.freeze([fileChangeOf(item, null, redactor) ?? unnamedChange])
+}

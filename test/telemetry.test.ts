@@ -210,10 +210,8 @@ describe('protocol normalization', (): void => {
       }),
     ).toEqual({
       kind: 'file',
-      path: 'work/src/telemetry.ts',
-      change: 'update',
-      addedLines: 12,
-      deletedLines: 3,
+      state: 'completed',
+      files: [{ path: 'work/src/telemetry.ts', change: 'update', addedLines: 12, deletedLines: 3 }],
     })
     // Token totals and rate limits are extracted once, by the client, and arrive on the event
     // itself; the payload for such a method carries nothing that would compete with them.
@@ -261,10 +259,76 @@ describe('protocol normalization', (): void => {
       }),
     ).toEqual({
       kind: 'file',
-      path: 'work/src/telemetry.ts',
-      change: 'add',
-      addedLines: 4,
-      deletedLines: null,
+      state: 'completed',
+      files: [{ path: 'work/src/telemetry.ts', change: 'add', addedLines: 4, deletedLines: null }],
+    })
+  })
+
+  it('reads every file a patch item changed and counts its lines from the diff', (): void => {
+    // The App Server's `fileChange` item is `{id, changes, status}`, where `changes` lists every
+    // file the patch touched as `{path, kind, diff}` and no entry carries a line count at all.
+    // Reading only the first entry lost the rest of a multi-file patch, and waiting for a count
+    // the protocol never sends left the workspace summary reporting no lines however much the
+    // agent wrote.
+    const payload = normalizePayload('item/completed', {
+      item: {
+        id: 'item_3',
+        type: 'fileChange',
+        status: 'completed',
+        changes: [
+          {
+            path: '/home/agent/work/src/telemetry.ts',
+            kind: 'update',
+            diff: [
+              '--- a/src/telemetry.ts',
+              '+++ b/src/telemetry.ts',
+              '@@ -1,4 +1,5 @@',
+              ' const kept = 1',
+              '-const removed = 2',
+              '+const added = 2',
+              '+const alsoAdded = 3',
+            ].join('\n'),
+          },
+          {
+            path: '/home/agent/work/src/server.ts',
+            kind: 'add',
+            diff: ['+++ b/src/server.ts', '+export const serve = (): null => null'].join('\n'),
+          },
+          { path: '/home/agent/work/docs/README.md', kind: 'delete' },
+        ],
+      },
+    })
+
+    expect(payload).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [
+        { path: 'work/src/telemetry.ts', change: 'update', addedLines: 2, deletedLines: 1 },
+        { path: 'work/src/server.ts', change: 'add', addedLines: 1, deletedLines: 0 },
+        // A change carrying no diff reports no counts, which is a different reading from a change
+        // that touched no lines.
+        { path: 'work/docs/README.md', change: 'delete', addedLines: null, deletedLines: null },
+      ],
+    })
+    // A diff is file content: it is counted and dropped, never retained.
+    expect(JSON.stringify(payload)).not.toContain('alsoAdded')
+  })
+
+  it('reads a change list reported as a map keyed by the path it changed', (): void => {
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'patchApply',
+          status: 'completed',
+          changes: {
+            '/home/agent/work/src/server.ts': { kind: 'update', added_lines: 6, deleted_lines: 2 },
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/src/server.ts', change: 'update', addedLines: 6, deletedLines: 2 }],
     })
   })
 
@@ -384,16 +448,18 @@ describe('agent detail records', (): void => {
       record,
       event({
         kind: 'file',
-        path: 'src/telemetry.ts',
-        change: 'update',
-        addedLines: 10,
-        deletedLines: 2,
+        state: 'completed',
+        files: [{ path: 'src/telemetry.ts', change: 'update', addedLines: 10, deletedLines: 2 }],
       }),
     )
     record = recordAgentEvent(
       record,
       event(
-        { kind: 'file', path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 },
+        {
+          kind: 'file',
+          state: 'completed',
+          files: [{ path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 }],
+        },
         { timestamp: new Date('2026-08-30T10:00:07.000Z') },
       ),
     )
@@ -422,6 +488,91 @@ describe('agent detail records', (): void => {
       qualityCommandState: 'completed',
       pathsTruncated: false,
     })
+  })
+
+  it('counts a patch when it is applied, not when it is proposed or refused', (): void => {
+    // One file item is reported twice: once as the patch it proposes and once as the patch it
+    // applied. Counting both would double every line the agent wrote, and counting a declined or
+    // failed patch would credit the worktree with an edit it never received.
+    const changes = [
+      {
+        path: '/home/agent/work/src/telemetry.ts',
+        kind: 'update',
+        diff: '+one\n+two\n-three\n',
+      },
+    ]
+    const item = (status: string, listed: typeof changes): AgentEventPayload =>
+      normalizePayload(status === 'inProgress' ? 'item/started' : 'item/completed', {
+        item: { id: 'item_7', type: 'fileChange', status, changes: listed },
+      })
+    let record = makeRecord()
+    record = recordAgentEvent(record, event(item('inProgress', changes), { event: 'item/started' }))
+    const proposed = snapshotOf(record)
+    record = recordAgentEvent(record, event(item('completed', changes)))
+    const applied = snapshotOf(record)
+    record = recordAgentEvent(
+      record,
+      event(
+        item('declined', [
+          { path: '/home/agent/work/src/server.ts', kind: 'add', diff: '+refused\n' },
+        ]),
+      ),
+    )
+    const refused = snapshotOf(record)
+
+    expect(proposed.workspace).toMatchObject({
+      dirtyFileCount: 0,
+      addedLines: 0,
+      deletedLines: 0,
+    })
+    expect(applied.workspace).toMatchObject({
+      dirtyFileCount: 1,
+      addedLines: 2,
+      deletedLines: 1,
+    })
+    expect(refused.workspace).toMatchObject({
+      dirtyFileCount: 1,
+      addedLines: 2,
+      deletedLines: 1,
+    })
+    // Every report still reaches the timeline; what the ledger counts is what reached the
+    // worktree, and the state on each entry is what says which is which.
+    expect(refused.timeline.events.map((entry) => [entry.category, entry.event])).toEqual([
+      ['file', 'item/started'],
+      ['file', 'item/completed'],
+      ['file', 'item/completed'],
+    ])
+  })
+
+  it('records one patch as one timeline event covering every file it touched', (): void => {
+    let record = makeRecord()
+    record = recordAgentEvent(
+      record,
+      event({
+        kind: 'file',
+        state: 'completed',
+        files: [
+          { path: 'src/telemetry.ts', change: 'update', addedLines: 10, deletedLines: 2 },
+          { path: 'src/server.ts', change: 'add', addedLines: 5, deletedLines: 0 },
+          { path: 'docs/README.md', change: 'delete', addedLines: null, deletedLines: null },
+        ],
+      }),
+    )
+    const snapshot = snapshotOf(record)
+    const [entry] = snapshot.timeline.events
+
+    expect(snapshot.timeline.events).toHaveLength(1)
+    expect(entry?.category === 'file' ? entry.files.map((file) => file.path) : []).toEqual([
+      'src/telemetry.ts',
+      'src/server.ts',
+      'docs/README.md',
+    ])
+    expect(snapshot.workspace).toMatchObject({
+      dirtyFileCount: 3,
+      addedLines: 15,
+      deletedLines: 2,
+    })
+    expect(snapshot.phase.operation).toBe('Editing src/telemetry.ts and 2 more')
   })
 
   it('leaves the running phase when a tool or command finishes', (): void => {
@@ -742,10 +893,8 @@ describe('agent detail records', (): void => {
       event(
         {
           kind: 'file',
-          path: 'src/telemetry.ts',
-          change: 'update',
-          addedLines: 3,
-          deletedLines: 1,
+          state: 'completed',
+          files: [{ path: 'src/telemetry.ts', change: 'update', addedLines: 3, deletedLines: 1 }],
         },
         { timestamp: new Date('2026-08-30T10:00:06.000Z') },
       ),

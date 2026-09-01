@@ -474,6 +474,16 @@ knows, into actor-owned state; nothing re-derives what the client already report
 read an immutable index the actor publishes; no consumer touches a scheduler map, and a published
 snapshot is frozen.
 
+The workspace summary is folded from the file items alone, and one patch is counted exactly once.
+A file-change item names every file it touched — the App Server reports a multi-file patch as one
+item carrying a list — and it is reported twice, first as the patch the agent proposes and then as
+the patch it applied. Only the applied report reaches the ledger: counting the proposal as well
+would double every line, and a patch that failed or was declined never reached the worktree and is
+not counted at all. Both reports still appear on the timeline, each carrying its own state, so an
+attempt that was refused is visible rather than silently absent. The turn-level aggregate the App
+Server also publishes is deliberately not folded, since it restates the same edits cumulatively
+after every patch.
+
 Redaction happens at the parser, before anything is retained, not when a response is serialized: a
 credential a message carried is gone before the timeline, a log, or an HTTP response can hold it.
 One redactor serves both: the structural rules in `logging.ts` — secret-named keys in any quoting
@@ -483,8 +493,9 @@ ids, and JWTs, wherever they appear. The resolved values of the environment vari
 treats as secret — the tracker's own secret, plus `GITHUB_TOKEN`, `GH_TOKEN`, `OPENAI_API_KEY`, and
 `CODEX_ACCESS_TOKEN` — are removed literally. Private reasoning is
 never retained, not even truncated; tool input and output are reduced to byte counts; a command is
-reduced to its program name, an argument count, and an allowlisted quality-phase label; a file
-change is reduced to a workspace-relative path and its added and deleted line counts. Retention is
+reduced to its program name, an argument count, and an allowlisted quality-phase label; a patch is
+reduced to one workspace-relative path per file it touched, each with the added and deleted line
+counts its diff was counted for before that diff was discarded. Retention is
 bounded per issue — 200 timeline events, 50 changed paths, 10 errors, 20 attempts and sessions — and
 every retained string is cut to 240 characters. Truncation and dropped events are reported
 explicitly rather than being silent.
