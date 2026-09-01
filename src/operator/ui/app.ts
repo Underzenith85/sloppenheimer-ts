@@ -54,16 +54,14 @@ const renderBlockedSummary = (): void => {
     container.replaceChildren(text('p', 'empty', 'Nothing is waiting on a dependency.'))
     return
   }
+  const mostBlocking = blocked
+    .slice(0, 3)
+    .map((item) => item.identifier)
+    .join(', ')
   const heading = text(
     'p',
     'summary-line',
-    String(blocked.length) +
-      ' issues are waiting on a dependency. The most blocking are ' +
-      blocked
-        .slice(0, 3)
-        .map((item) => item.identifier)
-        .join(', ') +
-      '.',
+    `${blocked.length} issues are waiting on a dependency. The most blocking are ${mostBlocking}.`,
   )
   const open = text('button', 'link-button', 'Open dependency plan')
   open.type = 'button'
@@ -81,10 +79,10 @@ const renderSystemHealth = (): void => {
     return
   }
   const parts = [
-    String(model.capacity.running) + ' of ' + String(model.capacity.limit) + ' agents busy',
-    new Intl.NumberFormat().format(state.codex_totals.total_tokens) + ' tokens',
+    `${model.capacity.running} of ${model.capacity.limit} agents busy`,
+    `${new Intl.NumberFormat().format(state.codex_totals.total_tokens)} tokens`,
     formatDuration(state.codex_totals.seconds_running),
-    'updated ' + formatTime(state.generated_at),
+    `updated ${formatTime(state.generated_at)}`,
   ]
   summary.textContent = parts.join(' · ')
 }
@@ -103,8 +101,8 @@ const selectView = (view: WorkView, pin: boolean): void => {
     viewPinned = true
   }
   for (const candidate of views) {
-    const tab = element('#tab-' + candidate)
-    const panel = element('#view-' + candidate)
+    const tab = element(`#tab-${candidate}`)
+    const panel = element(`#view-${candidate}`)
     const selected = candidate === view
     tab.setAttribute('aria-selected', String(selected))
     tab.tabIndex = selected ? 0 : -1
@@ -129,9 +127,9 @@ const renderViews = (): void => {
   renderList(
     element('#finished-list'),
     model.finished,
-    'Nothing finished in the ' + finishedWindowLabel + '.',
+    `Nothing finished in the ${finishedWindowLabel}.`,
   )
-  element('#finished-scope').textContent = 'Scope: ' + finishedScopeLabel + '.'
+  element('#finished-scope').textContent = `Scope: ${finishedScopeLabel}.`
 }
 
 /**
@@ -148,9 +146,7 @@ const renderIdleState = (): void => {
     idle.textContent =
       state === null
         ? 'Waiting for the first runtime snapshot…'
-        : 'Nothing to do: no exceptions, no dispatchable work, no agents in flight, and nothing finished in the ' +
-          finishedWindowLabel +
-          '.'
+        : `Nothing to do: no exceptions, no dispatchable work, no agents in flight, and nothing finished in the ${finishedWindowLabel}.`
   }
 }
 
@@ -161,7 +157,7 @@ const matchesFilters = (item: WorkItem): boolean => {
   if (searchTerm.length === 0) {
     return true
   }
-  const haystack = (item.identifier + ' ' + item.title + ' ' + item.labels.join(' ')).toLowerCase()
+  const haystack = `${item.identifier} ${item.title} ${item.labels.join(' ')}`.toLowerCase()
   return haystack.includes(searchTerm)
 }
 
@@ -175,8 +171,7 @@ const allWork = (): readonly WorkItem[] => [
 
 const renderAllWork = (): void => {
   const matches = allWork().filter(matchesFilters)
-  element('#all-work-count').textContent =
-    String(matches.length) + ' of ' + String(allWork().length) + ' items'
+  element('#all-work-count').textContent = `${matches.length} of ${allWork().length} items`
   renderList(element('#all-work-list'), matches, 'No work matches the current filters.')
 }
 
@@ -192,13 +187,13 @@ const renderPlanList = (snapshot: BacklogSnapshot, focus: string): void => {
         'empty',
         focus === ''
           ? 'No dependency relationships are recorded.'
-          : focus + ' has no blockers and no dependents.',
+          : `${focus} has no blockers and no dependents.`,
       ),
     )
     return
   }
   list.replaceChildren(
-    ...relevant.map((edge) => text('li', '', edge.blocker + ' blocks ' + edge.dependent)),
+    ...relevant.map((edge) => text('li', '', `${edge.blocker} blocks ${edge.dependent}`)),
   )
 }
 
@@ -208,7 +203,7 @@ const renderPlanFocusOptions = (snapshot: BacklogSnapshot): void => {
   everyIssue.value = ''
   const options = [everyIssue]
   for (const node of snapshot.nodes) {
-    const option = text('option', '', node.identifier + ' — ' + node.title)
+    const option = text('option', '', `${node.identifier} — ${node.title}`)
     option.value = node.identifier
     options.push(option)
   }
@@ -302,7 +297,7 @@ const loadState = async (): Promise<void> => {
 const loadBacklog = async (): Promise<void> => {
   backlog = await request<BacklogSnapshot>('/api/v1/backlog')
   element('#label-note').textContent =
-    'Orchestration is controlled by the “' + backlog.controlLabel + '” label'
+    `Orchestration is controlled by the “${backlog.controlLabel}” label`
   applyModel()
 }
 
@@ -319,7 +314,7 @@ const refresh = async (): Promise<void> => {
 
 const installNavigation = (): void => {
   for (const view of views) {
-    const tab = element('#tab-' + view)
+    const tab = element(`#tab-${view}`)
     tab.addEventListener('click', () => selectView(view, true))
     tab.addEventListener('keydown', (event) => {
       const key = (event as KeyboardEvent).key
@@ -331,7 +326,7 @@ const installNavigation = (): void => {
       const next = views[(index + (key === 'ArrowRight' ? 1 : views.length - 1)) % views.length]
       if (next !== undefined) {
         selectView(next, true)
-        element('#tab-' + next).focus()
+        element(`#tab-${next}`).focus()
       }
     })
   }

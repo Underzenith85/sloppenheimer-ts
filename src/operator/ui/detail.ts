@@ -23,7 +23,7 @@ let announcedStatus = ''
 // asked for them: an older one finishing late must not walk the panel backwards.
 let detailRequest = 0
 
-const deepLink = (identifier: string): string => '#/agents/' + encodeURIComponent(identifier)
+const deepLink = (identifier: string): string => `#/agents/${encodeURIComponent(identifier)}`
 
 const identifierFromHash = (): string | null => {
   const raw = window.location.hash
@@ -50,9 +50,9 @@ const renderDetailStatus = (): void => {
   }
   const stalled = stalledNow(detail)
   const phase = stalled ? 'stalled' : detail.phase.phase
-  element('#detail-phase').textContent = telemetryLabel(phase) + ' · ' + detail.status
+  element('#detail-phase').textContent = `${telemetryLabel(phase)} · ${detail.status}`
   const elapsed = Date.now() - new Date(detail.activity.startedAt).getTime()
-  const message = waitingExplanation(detail) + ' Running for ' + formatClock(elapsed) + '.'
+  const message = `${waitingExplanation(detail)} Running for ${formatClock(elapsed)}.`
   // Only a changed message is written, so a screen reader is not told the same thing every second.
   if (message !== announcedStatus) {
     announcedStatus = message
@@ -88,9 +88,9 @@ const renderDetailSummary = (): void => {
   const header = document.createElement('div')
   header.className = 'detail-health'
   header.append(
-    chip('health-' + health.kind, health.label),
+    chip(`health-${health.kind}`, health.label),
     chip('phase', telemetryLabel(detail.phase.phase)),
-    chip('attempt', 'Attempt ' + String(detail.attempt.current)),
+    chip('attempt', `Attempt ${detail.attempt.current}`),
   )
   const list = document.createElement('dl')
   list.className = 'detail-facts'
@@ -106,22 +106,13 @@ const renderDetailSummary = (): void => {
   fact(
     list,
     'Workspace changes',
-    String(detail.workspace.dirtyFileCount) +
-      ' files (+' +
-      String(detail.workspace.addedLines) +
-      ' / −' +
-      String(detail.workspace.deletedLines) +
-      ')' +
+    `${detail.workspace.dirtyFileCount} files (+${detail.workspace.addedLines} / −${detail.workspace.deletedLines})` +
       (detail.workspace.pathsTruncated ? ' · list truncated' : ''),
   )
   fact(
     list,
     'Handoff progress',
-    detail.handoff.remoteBranch.status +
-      ' branch · pull request ' +
-      detail.handoff.pullRequest.status +
-      ' · ' +
-      detail.handoff.outcome.replaceAll('_', ' '),
+    `${detail.handoff.remoteBranch.status} branch · pull request ${detail.handoff.pullRequest.status} · ${detail.handoff.outcome.replaceAll('_', ' ')}`,
     detail.handoff.pullRequest.url,
   )
   fact(list, 'Issue', detail.identifier, detail.url)
@@ -140,32 +131,21 @@ const renderDetailDiagnostics = (): void => {
   list.className = 'detail-facts'
   fact(list, 'Session', identity.sessionId ?? 'not started')
   fact(list, 'Thread', identity.threadId ?? '—')
-  fact(list, 'Turn', (identity.turnId ?? '—') + ' · #' + String(identity.turnNumber))
+  fact(list, 'Turn', `${identity.turnId ?? '—'} · #${identity.turnNumber}`)
   fact(list, 'Process', identity.processId === null ? '—' : String(identity.processId))
   fact(list, 'Worker', identity.workerHost)
-  fact(
-    list,
-    'Attempts',
-    String(detail.attempt.current) + ' current · ' + String(detail.attempt.retries) + ' retries',
-  )
+  fact(list, 'Attempts', `${detail.attempt.current} current · ${detail.attempt.retries} retries`)
   fact(
     list,
     'Tokens',
-    new Intl.NumberFormat().format(detail.usage.totalTokens) +
-      ' (' +
-      String(detail.usage.inputTokens) +
-      ' in / ' +
-      String(detail.usage.outputTokens) +
-      ' out)',
+    `${new Intl.NumberFormat().format(detail.usage.totalTokens)} (${detail.usage.inputTokens} in / ${detail.usage.outputTokens} out)`,
   )
   fact(
     list,
     'Rate limits',
     detail.rateLimits.length === 0
       ? 'none reported'
-      : detail.rateLimits
-          .map((window) => window.name + ' ' + String(window.usedPercent ?? 0) + '%')
-          .join(' · '),
+      : detail.rateLimits.map((window) => `${window.name} ${window.usedPercent ?? 0}%`).join(' · '),
   )
   fact(list, 'Workspace', detail.workspace.pathKey)
   fact(
@@ -173,14 +153,14 @@ const renderDetailDiagnostics = (): void => {
     'Quality command',
     detail.workspace.qualityPhase === null
       ? 'not observed'
-      : detail.workspace.qualityPhase + ' · ' + (detail.workspace.qualityCommandState ?? 'unknown'),
+      : `${detail.workspace.qualityPhase} · ${detail.workspace.qualityCommandState ?? 'unknown'}`,
   )
   fact(list, 'Expected branch', detail.handoff.expectedBranch ?? '—')
   fact(
     list,
     'Remote branch',
     detail.handoff.remoteBranch.status +
-      (detail.handoff.remoteBranch.name === null ? '' : ' · ' + detail.handoff.remoteBranch.name),
+      (detail.handoff.remoteBranch.name === null ? '' : ` · ${detail.handoff.remoteBranch.name}`),
   )
   if (detail.handoff.pullRequest.url === null) {
     fact(list, 'Pull request', detail.handoff.pullRequest.status)
@@ -188,14 +168,14 @@ const renderDetailDiagnostics = (): void => {
     fact(
       list,
       'Pull request',
-      detail.handoff.pullRequest.status + ' · #' + String(detail.handoff.pullRequest.number),
+      `${detail.handoff.pullRequest.status} · #${detail.handoff.pullRequest.number}`,
       detail.handoff.pullRequest.url,
     )
   }
   fact(
     list,
     'Dispatch labels',
-    detail.handoff.dispatchLabels.labels.join(', ') + ' · ' + detail.handoff.dispatchLabels.status,
+    `${detail.handoff.dispatchLabels.labels.join(', ')} · ${detail.handoff.dispatchLabels.status}`,
   )
   fact(list, 'Handoff outcome', detail.handoff.outcome.replaceAll('_', ' '))
   detailDiagnostics.replaceChildren(list)
@@ -219,7 +199,7 @@ const loadDetail = async (): Promise<void> => {
   detailRequest += 1
   const generation = detailRequest
   try {
-    const result = await requestStatus('/api/v1/agents/' + encodeURIComponent(target))
+    const result = await requestStatus(`/api/v1/agents/${encodeURIComponent(target)}`)
     if (target !== detailIdentifier || generation !== detailRequest) {
       return
     }
@@ -229,7 +209,7 @@ const loadDetail = async (): Promise<void> => {
     } else {
       detail = null
       detailNotice =
-        result.payload?.error?.message ?? 'Detail request failed with HTTP ' + String(result.status)
+        result.payload?.error?.message ?? `Detail request failed with HTTP ${result.status}`
     }
   } catch {
     if (target !== detailIdentifier || generation !== detailRequest) {
@@ -315,7 +295,7 @@ const copyDetailLink = async (): Promise<void> => {
     await navigator.clipboard.writeText(link)
     setNotice('Deep link copied.')
   } catch {
-    setNotice('Copy the link from the address bar: ' + link)
+    setNotice(`Copy the link from the address bar: ${link}`)
   }
 }
 
