@@ -34,12 +34,6 @@ export type WorkspaceOwner = Readonly<{
    * own. `null` where the host cannot identify one, which is every host without `/proc`.
    */
   namespace: string | null
-  /**
-   * The boot the id belongs to, as the kernel names it — a value unique to one boot of one machine,
-   * so two hosts that agree on it are looking at the same process table. `null` where the host
-   * cannot read one.
-   */
-  boot: string | null
 }>
 
 /**
@@ -100,7 +94,6 @@ const leaseSchema = Schema.Struct({
     processId: Schema.Number.pipe(Schema.filter((value) => Number.isSafeInteger(value))),
     startMarker: Schema.NullOr(Schema.String),
     namespace: Schema.NullOr(Schema.String),
-    boot: Schema.NullOr(Schema.String),
   }),
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),
@@ -192,13 +185,29 @@ export const decodeLease = (
 }
 
 /**
- * Whether a lease is still the run's own to say again.
+ * Whether a lease record is the one this run published: still held, and naming this run on this
+ * host. A record that is another run's, or one already released, is not this run's to rewrite —
+ * which is what keeps a release from writing over a workspace someone else has since taken.
+ */
+export const leaseNamesRun = (
+  lease: WorkspaceLeaseRecord,
+  run: WorkspaceRun,
+  runKey: string,
+  hostId: string,
+): boolean =>
+  lease.status === 'held' &&
+  lease.runKey === runKey &&
+  lease.runId === run.runId &&
+  lease.identifier === run.identifier &&
+  lease.owner.hostId === hostId
+
+/**
+ * Whether a lease is still the run's own to say again: its own record, and still standing.
  *
- * A run renews the record it holds, never a name: the record has to be the one it published, still
- * held, and still standing. A record that is gone, released, replaced by another run's, or already
- * past its own expiry is one that another host may already be acting on — expiry is exactly what
- * lets it take an unobservable owner's workspace — so the run treats the lease as lost rather than
- * writing it back underneath whoever took it.
+ * A run renews the record it published, never a name. One that is gone, released, replaced by
+ * another run's, or already past its own expiry is one another host may be acting on — expiry is
+ * exactly what lets it take an unobservable owner's workspace — so the run treats the lease as lost
+ * rather than writing it back underneath whoever took it.
  */
 export const leaseIsOurs = (
   lease: WorkspaceLeaseRecord,
@@ -207,12 +216,7 @@ export const leaseIsOurs = (
   hostId: string,
   now: Date,
 ): boolean =>
-  lease.status === 'held' &&
-  lease.runKey === runKey &&
-  lease.runId === run.runId &&
-  lease.identifier === run.identifier &&
-  lease.owner.hostId === hostId &&
-  now.getTime() < Date.parse(lease.expiresAt)
+  leaseNamesRun(lease, run, runKey, hostId) && now.getTime() < Date.parse(lease.expiresAt)
 
 /**
  * Whether a lease still belongs to a live owner, and so whether the workspace it holds may be

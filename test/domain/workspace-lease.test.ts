@@ -26,7 +26,6 @@ const owner: WorkspaceOwner = {
   processId: 4242,
   startMarker: '918273',
   namespace: 'boot-1/pid:[4026531836]',
-  boot: 'boot-1',
 }
 /** While the run that took the lease could still plausibly be running. */
 const soonAfter = new Date('2026-08-31T10:30:00.000Z')

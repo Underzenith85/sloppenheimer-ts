@@ -16,6 +16,7 @@ import {
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
   heldLease,
+  leaseNamesRun,
   leaseRenewalIntervalMs,
   retainedLease,
   type WorkspaceOwner,
@@ -67,7 +68,7 @@ const prepareRunClaim = (
   run: WorkspaceRun,
   owner: WorkspaceOwner,
   staged: string,
-): Effect.Effect<void, WorkspaceError | PlatformError> =>
+): Effect.Effect<number, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     // The issue directory is only ever a container for run directories, so an existing one is
     // reused — once it has been confirmed to be a real directory rather than a substituted path.
@@ -75,7 +76,10 @@ const prepareRunClaim = (
       yield* fileSystem.makeDirectory(paths.issuePath, { recursive: true })
     }
     const acquiredAt = yield* currentInstant
-    yield* writeStagedLease(fileSystem, staged, heldLease(run, paths.runKey, owner, acquiredAt))
+    const lease = heldLease(run, paths.runKey, owner, acquiredAt)
+    yield* writeStagedLease(fileSystem, staged, lease)
+    // How long the claim itself stands for, which is what the renewal carries forward.
+    return Date.parse(lease.expiresAt)
   })
 
 /**
@@ -230,8 +234,16 @@ const retainLease = (
   Effect.gen(function* () {
     const releasedAt = yield* currentInstant
     const existing = yield* readLease(fileSystem, paths.leasePath)
-    const held = Option.getOrElse(existing, () => heldLease(run, paths.runKey, owner, releasedAt))
-    yield* writeLease(fileSystem, paths, retainedLease(held, reason, releasedAt))
+    const ours = Option.filter(existing, (lease) =>
+      leaseNamesRun(lease, run, paths.runKey, owner.hostId),
+    )
+    // A record that is gone or another run's is one cleanup took while this run was ending, and
+    // the directory it named may have gone with it. Publishing a lease here would leave a retained
+    // record for a workspace that is not there, so the run lets go of what it no longer holds.
+    yield* Option.match(ours, {
+      onNone: () => Effect.void,
+      onSome: (lease) => writeLease(fileSystem, paths, retainedLease(lease, reason, releasedAt)),
+    })
   })
 
 /** Why an acquisition that took the lease and then failed is keeping the workspace. */
@@ -385,7 +397,9 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       // Preparing the claim is ordinary filesystem work and stays interruptible; what is masked
       // is the link that publishes it, which is one step and cannot be left half done.
       const staged = stagedLeasePath(paths.stagingPath)
-      yield* restore(prepareRunClaim(fileSystem, paths, run, owner, staged)).pipe(
+      const standingUntil = yield* restore(
+        prepareRunClaim(fileSystem, paths, run, owner, staged),
+      ).pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit) ? Effect.void : discardStagedLease(fileSystem, staged),
         ),
@@ -400,7 +414,14 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       // neither may go on under a lease this run has stopped holding. Racing is what orders them:
       // the work ends and the renewal is interrupted, or the renewal fails and the work is
       // interrupted, and either way both have finished before the record is rewritten below.
-      const keepingLease = renewLease(fileSystem, paths, run, owner, renewal.intervalMs)
+      const keepingLease = renewLease(
+        fileSystem,
+        paths,
+        run,
+        owner,
+        renewal.intervalMs,
+        standingUntil,
+      )
       // From here the lease is this run's own. Provisioning that does not finish keeps the
       // workspace under the reason it failed for, rather than leaving a lease nobody holds.
       yield* restore(

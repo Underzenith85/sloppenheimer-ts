@@ -3,7 +3,7 @@ import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, readlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { Effect, Either, Option } from 'effect'
+import { Effect, Either, Option, Ref } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { isSymbolicLink, realDirectoryExists } from './filesystem.js'
@@ -70,20 +70,6 @@ const processNamespace = (): string | null => {
 }
 
 /**
- * The boot this host is running under, as the kernel names it: a value unique to one boot of one
- * machine, so two hosts that agree on it really are looking at one process table. It is that or
- * nothing — a hostname is not a machine, and two machines that share one would then read each
- * other's process ids as their own.
- */
-const machineBoot = (): string | null => {
-  try {
-    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
-  } catch {
-    return null
-  }
-}
-
-/**
  * This host process, for as long as it runs. A lease naming it is this process's own, whatever the
  * operating system later does with the process id — which is why the identity is generated here
  * rather than taken from the pid alone. It is a module constant, so a workflow reload that rebuilds
@@ -94,20 +80,20 @@ export const hostOwner: WorkspaceOwner = {
   processId: process.pid,
   startMarker: processStartMarker(process.pid),
   namespace: processNamespace(),
-  boot: machineBoot(),
 }
 
 /**
- * Whether an owner's process ids are this host's to read: the same process namespace, where both
- * sides can name one, and otherwise the same boot of the same machine, which is what the kernel's
- * boot identifier means. A host that can prove neither reads nobody else's process ids.
+ * Whether an owner's process ids are this host's to read: the same process namespace, named by both
+ * sides and the same.
+ *
+ * Nothing weaker will do. Two containers can share a kernel and a workspace root while each sees
+ * only its own process ids, and the kernel's boot identifier is common to both of them — so a host
+ * that fell back to it would probe its own namespace with the other's id and read a stranger's
+ * process as the owner, or as gone. A host that cannot name both namespaces reads nobody else's
+ * process ids, and leaves those owners to renewal.
  */
-const sharesProcessIds = (owner: WorkspaceOwner): boolean => {
-  if (owner.namespace !== null && hostOwner.namespace !== null) {
-    return owner.namespace === hostOwner.namespace
-  }
-  return owner.boot !== null && owner.boot === hostOwner.boot
-}
+const sharesProcessIds = (owner: WorkspaceOwner): boolean =>
+  owner.namespace !== null && owner.namespace === hostOwner.namespace
 
 /**
  * What this host can see of a lease's owner now.
@@ -402,35 +388,32 @@ export const returnLease = (
 ): Effect.Effect<void, PlatformError> => fileSystem.rename(taken.path, leasePath)
 
 /**
- * Says once that a lease still stands, and answers whether it is still the run's to say.
- *
- * A host that cannot observe this one's process has nothing else to go on: renewal is what tells it
- * the run is still there. A filesystem that would not answer is not a lease lost — the record it
- * could not write is still standing for the rest of its window, and the next renewal may well land.
+ * Says the lease again, answering with how long it now stands — or with nothing, when the record is
+ * no longer this run's to say.
  */
-const sayLeaseStands = (
+const saidAgain = (
   fileSystem: FileSystem.FileSystem,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
   owner: WorkspaceOwner,
-): Effect.Effect<boolean> =>
+  now: Date,
+): Effect.Effect<Option.Option<number>, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
-    const now = yield* currentInstant
     const existing = yield* readLease(fileSystem, paths.leasePath)
     const ours = Option.filter(existing, (lease) =>
       leaseIsOurs(lease, run, paths.runKey, owner.hostId, now),
     )
     if (Option.isNone(ours)) {
-      return false
+      return Option.none<number>()
     }
-    yield* writeLease(fileSystem, paths, renewedLease(ours.value, now))
-    // The record was still standing when it was read, but writing it took time of its own. A write
-    // that landed after the old record had expired is one cleanup may already have acted on, so it
-    // counts as a lease lost rather than a lease kept.
+    const renewed = renewedLease(ours.value, now)
+    yield* writeLease(fileSystem, paths, renewed)
+    // The record was standing when it was read, but writing it took time of its own: a write that
+    // landed after the record it renewed had expired is one cleanup may already have acted on.
     return (yield* currentInstant).getTime() < Date.parse(ours.value.expiresAt)
-    // A filesystem that failed to answer says nothing about who holds the lease; only a record that
-    // is gone, released, taken by another run, or expired does.
-  }).pipe(Effect.catchAll(() => Effect.succeed(true)))
+      ? Option.some(Date.parse(renewed.expiresAt))
+      : Option.none<number>()
+  })
 
 const leaseLost = (paths: RunWorkspacePaths): WorkspaceError =>
   new WorkspaceError({
@@ -439,11 +422,40 @@ const leaseLost = (paths: RunWorkspacePaths): WorkspaceError =>
   })
 
 /**
+ * Says once that a lease still stands, and answers with how long this run knows it stands for.
+ *
+ * A host that cannot observe this one's process has nothing else to go on: renewal is what tells it
+ * the run is still there. A filesystem that would not answer is not by itself a lease lost — the
+ * record it could not write is still standing for the rest of its window, and the next renewal may
+ * well land — but a run that has not managed to say its lease again by the time that window runs
+ * out has lost it all the same, because that is the moment another host is free to take it.
+ */
+const sayLeaseStands = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  owner: WorkspaceOwner,
+  standingUntil: number,
+): Effect.Effect<number, WorkspaceError> =>
+  Effect.gen(function* () {
+    const now = yield* currentInstant
+    const said = yield* Effect.either(saidAgain(fileSystem, paths, run, owner, now))
+    if (Either.isRight(said)) {
+      return yield* Option.match(said.right, {
+        onNone: () => Effect.fail(leaseLost(paths)),
+        onSome: (until) => Effect.succeed(until),
+      })
+    }
+    return now.getTime() < standingUntil ? standingUntil : yield* Effect.fail(leaseLost(paths))
+  })
+
+/**
  * Says a lease still stands, for as long as the run holds it — and fails when it no longer does.
  *
  * The failure is the point: a lease this run has lost is one another host may already be taking the
  * workspace back on, so the run that lost it stops rather than working on in a directory that is no
- * longer its own.
+ * longer its own. What it carries between renewals is how long it knows the lease stands for, so
+ * that renewals which never land are not mistaken for a lease that never expires.
  */
 export const renewLease = (
   fileSystem: FileSystem.FileSystem,
@@ -451,9 +463,15 @@ export const renewLease = (
   run: WorkspaceRun,
   owner: WorkspaceOwner,
   intervalMs: number,
+  standingUntil: number,
 ): Effect.Effect<never, WorkspaceError> =>
-  sayLeaseStands(fileSystem, paths, run, owner).pipe(
-    Effect.delay(intervalMs),
-    Effect.flatMap((stands) => (stands ? Effect.void : Effect.fail(leaseLost(paths)))),
-    Effect.forever,
-  )
+  Effect.gen(function* () {
+    const standing = yield* Ref.make(standingUntil)
+    return yield* Effect.forever(
+      Ref.get(standing).pipe(
+        Effect.flatMap((until) => sayLeaseStands(fileSystem, paths, run, owner, until)),
+        Effect.flatMap((until) => Ref.set(standing, until)),
+        Effect.delay(intervalMs),
+      ),
+    )
+  })

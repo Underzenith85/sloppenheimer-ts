@@ -13,6 +13,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { FileSystem } from '@effect/platform'
 import { it } from '@effect/vitest'
 import { Cause, Clock, Effect, Either, Exit, Fiber, Option } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
@@ -21,9 +22,10 @@ import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/doma
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.js'
-import { hostOwner } from '@sloppenheimer/adapter-node/workspace-lease.js'
+import { hostOwner, renewLease } from '@sloppenheimer/adapter-node/workspace-lease.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
+  containedRunWorkspacePath,
   containedWorkspacePath,
   workspaceKey,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
@@ -760,7 +762,6 @@ describe('run workspace allocation and leases', (): void => {
           processId: process.pid,
           startMarker: hostOwner.startMarker,
           namespace: hostOwner.namespace,
-          boot: hostOwner.boot,
         }),
       )
 
@@ -785,7 +786,6 @@ describe('run workspace allocation and leases', (): void => {
           processId: await exitedProcessId(),
           startMarker: 'a marker from another namespace',
           namespace: 'another kernel/pid:[4026531999]',
-          boot: 'another-boot-of-another-machine',
         }),
       )
 
@@ -915,9 +915,46 @@ describe('run workspace allocation and leases', (): void => {
         ? Cause.failureOption(outcome.cause)
         : Option.none<WorkspaceError>()
       expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
-      // The run stops, and what it had done is kept under the reason the release names.
-      expect((yield* host(() => leaseOf(taken))).status).toBe('retained')
+      // And it lets go of what it no longer holds: a run that publishes a record here would be
+      // naming a workspace whoever took the lease may already have removed.
+      expect(existsSync(`${taken}.lease`)).toBe(false)
     }),
+  )
+
+  it.live('stops saying a lease stands once the window it knew about has run out', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const fileSystem = yield* FileSystem.FileSystem
+      const paths = yield* containedRunWorkspacePath(
+        root,
+        issueIdentifier('GH-188'),
+        'run-1-a-host',
+      )
+      // A record that cannot be read or written at all: renewals fail rather than answering. A
+      // filesystem that is full, read-only, or unreachable is the case this stands in for.
+      yield* host(() => mkdir(paths.leasePath, { recursive: true }))
+      const run = { identifier: issueIdentifier('GH-188'), runId: 1 }
+
+      // While the run still knows its lease stands, a renewal it cannot make is not a lease lost.
+      const kept = yield* Effect.exit(
+        renewLease(fileSystem, paths, run, hostOwner, 10, Date.now() + 60_000).pipe(
+          Effect.timeout(200),
+        ),
+      )
+      const stillRenewing = Exit.isFailure(kept)
+        ? Cause.failureOption(kept.cause)
+        : Option.none<WorkspaceError>()
+      expect(Option.getOrThrow(stillRenewing)._tag).toBe('TimeoutException')
+
+      // Once that window has run out, another host is free to take the workspace, so the run stops.
+      const lost = yield* Effect.exit(
+        renewLease(fileSystem, paths, run, hostOwner, 10, Date.now() - 1),
+      )
+      const failure = Exit.isFailure(lost)
+        ? Cause.failureOption(lost.cause)
+        : Option.none<WorkspaceError>()
+      expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
+    }).pipe(Effect.provide(hostFileSystem)),
   )
 
   it.live('reclaims an unobservable lease once no run could still be holding it', () =>
@@ -934,7 +971,6 @@ describe('run workspace allocation and leases', (): void => {
             processId: process.pid,
             startMarker: 'a marker from another namespace',
             namespace: 'another kernel/pid:[4026531999]',
-            boot: 'another-boot-of-another-machine',
           },
           new Date(Date.now() - leaseValidityMs - 60_000),
         ),
@@ -959,7 +995,6 @@ describe('run workspace allocation and leases', (): void => {
           processId: process.pid,
           startMarker: hostOwner.startMarker,
           namespace: hostOwner.namespace,
-          boot: hostOwner.boot,
         }),
       )
 
@@ -991,7 +1026,6 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
           processId: await exitedProcessId(),
           startMarker: null,
           namespace: hostOwner.namespace,
-          boot: hostOwner.boot,
         }),
       )
 
@@ -1115,7 +1149,6 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
           processId: process.pid,
           startMarker: 'a process that is no longer here',
           namespace: hostOwner.namespace,
-          boot: hostOwner.boot,
         }),
       )
 

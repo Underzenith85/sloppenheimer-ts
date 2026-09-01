@@ -585,17 +585,18 @@ lifecycle. This section is the architecture record for it; do not create a separ
   the record is hard-linked into place, which is atomic and refuses an existing name — and the run
   directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
   elsewhere never finds a workspace without a lease. The record names the issue, the run, and the
-  host process that holds it, including when that process started, the process namespace its id
-  belongs to and the boot it ran under, so a host restarted into its predecessor's process id does
-  not keep its leases alive, and an owner this host cannot place — another container, another
-  kernel, or a platform that names neither — is never probed against whatever process carries its id
-  here. Those are reclaimed by renewal instead: a run says its lease still stands every few minutes
+  host process that holds it, including when that process started and the process namespace its id
+  belongs to, so a host restarted into its predecessor's process id does not keep its leases alive.
+  An owner is probed only when both sides name the same process namespace: two containers can share
+  a kernel and a root while each sees only its own ids, so anything weaker — the machine's boot
+  identifier included, which both of them share — would read a stranger's process as the owner. Those are reclaimed by renewal instead: a run says its lease still stands every few minutes
   for as long as it holds it, and one not said again in an hour belongs to a host that is gone. It
   starts renewing with the claim rather than with its own work, because an `after_create` hook is
   the caller's command and is not bounded either, and both provisioning and the run itself are
   raced against the renewal: a run that has lost its lease — the record gone, released, another
-  run's, or past its own expiry — stops rather than working on in a directory that is no longer its
-  own, and a run that ends stops the renewal before the record is rewritten. Cleanup takes the
+  run's, past its own expiry, or one it has not managed to say again by the time the window it knew
+  about ran out — stops rather than working on in a directory that is no longer its own, and lets go
+  of the record rather than publishing one for a workspace it no longer holds, and a run that ends stops the renewal before the record is rewritten. Cleanup takes the
   other side of that: it moves a record it has decided is free out of the way in one rename before
   anything destructive runs, so a `before_remove` hook never runs against a lease that could still
   be said again, and a record that turns out to still stand goes back where it was. Do not replace renewal with a lifetime computed from the workflow's limits: `turn_timeout_ms` and
