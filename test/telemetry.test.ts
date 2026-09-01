@@ -17,6 +17,7 @@ import {
   recordCancellation,
   recordHandoff,
   recordRetryScheduled,
+  changedPathLimit,
   retainedAttemptLimit,
   timelineEventLimit,
   type AgentDetailRecord,
@@ -314,6 +315,39 @@ describe('protocol normalization', (): void => {
     expect(JSON.stringify(payload)).not.toContain('alsoAdded')
   })
 
+  it('counts a content line that begins with the characters a file header does', (): void => {
+    // `+++counter` is an added line whose own text begins with `++`, not a header. Skipping every
+    // line with those three characters undercounts the patch by exactly the lines most likely to
+    // be diff-like themselves.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/src/counter.ts',
+              kind: 'update',
+              diff: [
+                'diff --git a/src/counter.ts b/src/counter.ts',
+                '--- a/src/counter.ts',
+                '+++ b/src/counter.ts',
+                '@@ -1,2 +1,2 @@',
+                '---counter',
+                '+++counter',
+                ' const kept = 1',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/src/counter.ts', change: 'update', addedLines: 1, deletedLines: 1 }],
+    })
+  })
+
   it('reads a change list reported as a map keyed by the path it changed', (): void => {
     expect(
       normalizePayload('item/completed', {
@@ -573,6 +607,35 @@ describe('agent detail records', (): void => {
       deletedLines: 2,
     })
     expect(snapshot.phase.operation).toBe('Editing src/telemetry.ts and 2 more')
+  })
+
+  it('counts every file of a patch larger than the retained path list', (): void => {
+    // The retained path list is bounded, and the totals are not: a patch touching more files than
+    // the record keeps paths for still contributes all of its lines, and says the list was cut.
+    const files = Array.from({ length: changedPathLimit + 5 }, (_unused, index) => ({
+      path: `src/module-${String(index)}.ts`,
+      change: 'update' as const,
+      addedLines: 2,
+      deletedLines: 1,
+    }))
+    const record = recordAgentEvent(
+      makeRecord(),
+      event({ kind: 'file', state: 'completed', files }),
+    )
+    const snapshot = snapshotOf(record)
+    const [entry] = snapshot.timeline.events
+
+    expect(snapshot.workspace).toMatchObject({
+      dirtyFileCount: changedPathLimit,
+      addedLines: (changedPathLimit + 5) * 2,
+      deletedLines: changedPathLimit + 5,
+      pathsTruncated: true,
+    })
+    // The entry names no more paths than the record retains, and reports the patch's true size
+    // rather than the size of the sample it kept.
+    expect(entry?.category === 'file' ? entry.files.length : 0).toBe(changedPathLimit)
+    expect(entry?.category === 'file' ? entry.fileCount : 0).toBe(changedPathLimit + 5)
+    expect(entry?.category === 'file' ? entry.addedLines : 0).toBe((changedPathLimit + 5) * 2)
   })
 
   it('leaves the running phase when a tool or command finishes', (): void => {

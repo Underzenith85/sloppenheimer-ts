@@ -22,6 +22,7 @@ import {
   setPhase,
 } from './folding.js'
 import type { AgentDetailRecord } from './record.js'
+import { changedPathLimit } from './snapshot.js'
 import type { AgentTimelineBase } from './snapshot.js'
 
 /**
@@ -179,6 +180,19 @@ const editingOperation = (files: readonly FileChange[]): string => {
     : `Editing ${first.path} and ${String(files.length - 1)} more`
 }
 
+/**
+ * What a patch did in total. A sum of nothing reported is `null` rather than zero: a patch whose
+ * every change carried no diff to count has an unknown size, not a size of none.
+ */
+const patchLines = (
+  files: readonly FileChange[],
+  read: (file: FileChange) => number | null,
+): number | null =>
+  files.reduce<number | null>(
+    (carried, file) => (read(file) === null ? carried : (carried ?? 0) + (read(file) ?? 0)),
+    null,
+  )
+
 const appendFile = (
   record: AgentDetailRecord,
   base: EventBase,
@@ -198,12 +212,17 @@ const appendFile = (
         )
       : record
   const next = setPhase(changed, 'editing', editingOperation(payload.files), at)
+  // Every file counts toward the totals above; the entry names as many as the record retains paths
+  // for, and carries the count of the rest so nothing reads as though the patch were that small.
   return push(next, {
     ...base,
     operation: next.operation,
     category: 'file',
     state: payload.state,
-    files: payload.files,
+    files: Object.freeze(payload.files.slice(0, changedPathLimit)),
+    fileCount: payload.files.length,
+    addedLines: patchLines(payload.files, (file) => file.addedLines),
+    deletedLines: patchLines(payload.files, (file) => file.deletedLines),
   })
 }
 

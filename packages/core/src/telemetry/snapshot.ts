@@ -94,7 +94,13 @@ export type AgentTimelineEvent =
       Readonly<{
         category: 'file'
         state: ToolState
+        /** The files the patch named, at most {@link changedPathLimit} of them. */
         files: readonly FileChange[]
+        /** How many files the patch touched, which is more than `files` names when it truncated. */
+        fileCount: number
+        /** What the whole patch did, across every file, not only those `files` names. */
+        addedLines: number | null
+        deletedLines: number | null
       }>)
   | (AgentTimelineBase &
       Readonly<{

@@ -28,11 +28,7 @@ import {
   tolerant,
   unknownRecord,
 } from '@sloppenheimer/core/support/schema.js'
-import {
-  changedPathLimit,
-  type FileChange,
-  type FileChangeKind,
-} from '@sloppenheimer/core/telemetry.js'
+import type { FileChange, FileChangeKind } from '@sloppenheimer/core/telemetry.js'
 
 /**
  * One entry of a change list. `path`, `kind`, and `diff` are what the App Server sends; the rest
@@ -86,16 +82,33 @@ const fileChangeKinds = new Map<string, FileChangeKind>([
 const changeKind = (value: string | null): FileChangeKind =>
   fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
 
+/** A file header: the three characters and the separator that follows the path they name. */
+const fileHeader = /^(?:\+\+\+|---)(?:[ \t]|$)/u
+
 /**
- * The lines one diff adds and removes. The `+++` and `---` headers name the file rather than
- * changing it, so they are not counted; nothing else about the diff is read, and no part of it is
+ * The lines one diff adds and removes.
+ *
+ * The three characters alone do not make a header. An added line whose own text begins with `++`
+ * arrives as `+++counter`, and skipping it would undercount the patch, so a header is recognized by
+ * the separator that follows it and only where headers appear: before the first hunk. Inside a
+ * hunk every `+` and `-` line is content. Nothing else about the diff is read, and no part of it is
  * returned.
  */
 const diffCounts = (diff: string): Readonly<{ addedLines: number; deletedLines: number }> => {
   let addedLines = 0
   let deletedLines = 0
+  let inHunk = false
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---')) {
+    if (line.startsWith('@@')) {
+      inHunk = true
+      continue
+    }
+    // A diff carrying more than one file opens a header section for each of them.
+    if (line.startsWith('diff --git ')) {
+      inHunk = false
+      continue
+    }
+    if (!inHunk && fileHeader.test(line)) {
       continue
     }
     if (line.startsWith('+')) {
@@ -169,10 +182,14 @@ const unnamedChange: FileChange = Object.freeze({
 })
 
 /**
- * Every file an item reported changing, in the order it listed them, bounded by the number of
- * paths the record retains. An item that names its file on the item itself rather than in a list
- * is read as the single change it is, and one that names no file at all still reports a change, so
- * a patch is never dropped from the timeline for want of a name.
+ * Every file an item reported changing, in the order it listed them. An item that names its file on
+ * the item itself rather than in a list is read as the single change it is, and one that names no
+ * file at all still reports a change, so a patch is never dropped from the timeline for want of a
+ * name.
+ *
+ * The list is not bounded here. A payload is built per message and dropped once folded; the bound
+ * belongs to the fold that retains, which counts every file into the totals while keeping only as
+ * many paths as the record holds — and knows, from the count it was handed, that it kept fewer.
  */
 export const fileChangesOf = (
   changes: unknown,
@@ -180,7 +197,6 @@ export const fileChangesOf = (
   redactor: Redactor,
 ): readonly FileChange[] => {
   const listed = changeEntries(changes)
-    .slice(0, changedPathLimit)
     .map(([key, change]) => fileChangeOf(change, key, redactor))
     .filter((change): change is FileChange => change !== null)
   if (listed.length > 0) {
