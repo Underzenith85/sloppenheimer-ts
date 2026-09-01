@@ -2,8 +2,9 @@ import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, readlinkSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
-import { Effect, Option } from 'effect'
+import { Effect, Either, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { isSymbolicLink, realDirectoryExists } from './filesystem.js'
@@ -66,6 +67,23 @@ const processNamespace = (): string | null => {
 }
 
 /**
+ * The machine, and the boot where the kernel names one.
+ *
+ * Every platform can answer this, which is what makes it the fallback where `/proc` is not there.
+ * The boot half is deliberately the kernel's own identifier or nothing: a marker derived from
+ * uptime would drift across the rounding boundary within one boot, and a host that concluded from
+ * that drift that its neighbour had rebooted would take a live run's workspace. Without it, a
+ * machine simply keeps probing process ids, which is what a host with no namespaces can do.
+ */
+const machineBoot = (): string => {
+  try {
+    return `${hostname()}/${readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()}`
+  } catch {
+    return hostname()
+  }
+}
+
+/**
  * This host process, for as long as it runs. A lease naming it is this process's own, whatever the
  * operating system later does with the process id — which is why the identity is generated here
  * rather than taken from the pid alone. It is a module constant, so a workflow reload that rebuilds
@@ -76,14 +94,26 @@ export const hostOwner: WorkspaceOwner = {
   processId: process.pid,
   startMarker: processStartMarker(process.pid),
   namespace: processNamespace(),
+  boot: machineBoot(),
 }
+
+/**
+ * Whether an owner's process ids are this host's to read: the same process namespace, where both
+ * sides can name one, and otherwise the same machine and boot, where process ids are not namespaced
+ * at all.
+ */
+const sharesProcessIds = (owner: WorkspaceOwner): boolean =>
+  owner.namespace === null || hostOwner.namespace === null
+    ? owner.boot === hostOwner.boot
+    : owner.namespace === hostOwner.namespace
 
 /**
  * What this host can see of a lease's owner now.
  *
- * An owner whose process ids are not this host's to read — another namespace, or one neither side
- * could identify — is unobservable, and is left alone rather than probed against whatever process
- * happens to carry its id here.
+ * An owner whose process ids are not this host's to read — another container's namespace, or
+ * another machine — is unobservable, and is left alone rather than probed against whatever process
+ * happens to carry its id here. An owner recorded under an earlier boot of this machine is the one
+ * case that needs no probe at all: nothing survives a reboot.
  *
  * Otherwise, signal 0 performs the permission and existence checks without delivering anything.
  * `EPERM` means the process exists and belongs to another user, which is still a running owner. Any
@@ -92,12 +122,11 @@ export const hostOwner: WorkspaceOwner = {
  * id the kernel handed to a successor is not mistaken for the process that recorded it.
  */
 export const observeOwner = (owner: WorkspaceOwner): OwnerObservation => {
-  if (
-    owner.namespace === null ||
-    hostOwner.namespace === null ||
-    owner.namespace !== hostOwner.namespace
-  ) {
-    return { _tag: 'Unobservable' }
+  if (!sharesProcessIds(owner)) {
+    return owner.boot.split('/')[0] === hostOwner.boot.split('/')[0] &&
+      owner.boot !== hostOwner.boot
+      ? { _tag: 'Gone' }
+      : { _tag: 'Unobservable' }
   }
   try {
     process.kill(owner.processId, 0)
@@ -192,22 +221,43 @@ const stagingIdentity = (
     })
   })
 
-/** Whether one staged entry is an abandoned record: a plain file, older than any live writer. */
+/** The shape this module gives a staged record: a UUID and the suffix, and nothing else. */
+const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.lease$/u
+
+/**
+ * Whether one entry is an abandoned staged record — and the last word on whether the sweep may
+ * unlink it.
+ *
+ * Node offers no `unlinkat`, so the removal that follows resolves a pathname the sweep cannot hold
+ * still. What it can do is refuse to remove anything that is not demonstrably its own: the name has
+ * this module's shape, the entry is a plain file rather than a link or a directory, the contents
+ * decode as a lease record, and it is older than any writer could be. A file reached through a
+ * substituted path is a file the sweep does not recognize, and leaves alone.
+ */
 const isAbandonedRecord = (
   fileSystem: FileSystem.FileSystem,
-  staged: string,
+  stagingPath: string,
+  entry: string,
   now: Date,
   lifetimeMs: number,
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
+    if (!stagedRecordName.test(entry)) {
+      return false
+    }
+    const staged = join(stagingPath, entry)
     if (yield* isSymbolicLink(fileSystem, staged)) {
       return false
     }
     const info = yield* fileSystem.stat(staged)
-    return (
+    const abandoned =
       info.type === 'File' &&
       Option.exists(info.mtime, (modified) => now.getTime() - modified.getTime() > lifetimeMs)
-    )
+    if (!abandoned) {
+      return false
+    }
+    const document = yield* fileSystem.readFileString(staged, 'utf8')
+    return Either.isRight(decodeLease(staged, document))
   })
 
 /**
@@ -217,12 +267,12 @@ const isAbandonedRecord = (
  * between writing it and publishing it. Nothing refers to such a file, but without this it would
  * stay under the staging directory for good, one per crash.
  *
- * The sweep deletes, so it does not trust the path it was given: it holds the directory open for
+ * The sweep deletes, so it does not trust the path it was given. It holds the directory open for
  * the whole pass, which pins the inode so a directory removed and recreated under that name cannot
- * be followed, and it re-confirms the device and inode before every removal, the way a verified
- * workspace is re-confirmed at each boundary. It removes only plain files, never a link or a
- * directory. Node offers no `unlinkat`, so the last instant between confirming the directory and
- * unlinking inside it cannot be closed; what can be is the window, and what it may ever remove.
+ * be followed, and re-confirms the device and inode before every removal, the way a verified
+ * workspace is re-confirmed at each boundary. Node offers no `unlinkat`, so that last instant
+ * cannot be closed by identity alone — which is why `isAbandonedRecord` has the final word, and
+ * unlinks nothing that is not a lease record this module wrote.
  */
 export const pruneStagedLeases = (
   fileSystem: FileSystem.FileSystem,
@@ -248,9 +298,8 @@ export const pruneStagedLeases = (
         if (!sameIdentity(verified, current)) {
           return
         }
-        const staged = join(stagingPath, entry)
-        if (yield* isAbandonedRecord(fileSystem, staged, now, lifetimeMs)) {
-          yield* discardStagedLease(fileSystem, staged)
+        if (yield* isAbandonedRecord(fileSystem, stagingPath, entry, now, lifetimeMs)) {
+          yield* discardStagedLease(fileSystem, join(stagingPath, entry))
         }
       }
     }),

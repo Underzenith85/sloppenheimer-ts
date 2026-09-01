@@ -31,9 +31,15 @@ export type WorkspaceOwner = Readonly<{
   /**
    * The process namespace the id belongs to. Process ids mean nothing across one — two containers
    * sharing a workspace root each see their own — so a host only probes an owner recorded in its
-   * own. `null` where the host cannot identify one.
+   * own. `null` where the host cannot identify one, which is every host without `/proc`.
    */
   namespace: string | null
+  /**
+   * The machine and the boot the id belongs to. Nothing survives a reboot, so an owner recorded
+   * under an earlier boot of this machine is gone whatever its process id now names — which is how
+   * a host with no namespace to compare still reclaims what a crash left behind.
+   */
+  boot: string
 }>
 
 /**
@@ -79,6 +85,7 @@ const leaseSchema = Schema.Struct({
     processId: Schema.Number.pipe(Schema.filter((value) => Number.isSafeInteger(value))),
     startMarker: Schema.NullOr(Schema.String),
     namespace: Schema.NullOr(Schema.String),
+    boot: Schema.String,
   }),
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),

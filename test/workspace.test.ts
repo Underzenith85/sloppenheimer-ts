@@ -555,20 +555,39 @@ describe('run workspace allocation and leases', (): void => {
       const root = makeRoot()
       const staging = join(root, '#lease-writes')
       yield* host(() => mkdir(staging, { recursive: true }))
-      const abandoned = join(staging, 'abandoned.lease')
-      const inFlight = join(staging, 'in-flight.lease')
-      yield* host(() => writeFile(abandoned, 'a record its host never published'))
-      yield* host(() => writeFile(inFlight, 'a record being written right now'))
+      const record = encodeLease(
+        heldLease(
+          { identifier: issueIdentifier('GH-183'), runId: 1 },
+          'run-1-hosta',
+          hostOwner,
+          new Date(),
+        ),
+      )
+      const abandoned = join(staging, `${crypto.randomUUID()}.lease`)
+      const inFlight = join(staging, `${crypto.randomUUID()}.lease`)
+      const somebodyElses = join(staging, `${crypto.randomUUID()}.lease`)
+      const notOurName = join(staging, 'notes.txt')
+      yield* host(() => writeFile(abandoned, record))
+      yield* host(() => writeFile(inFlight, record))
+      yield* host(() => writeFile(somebodyElses, 'a file that is not a lease record'))
+      yield* host(() => writeFile(notOurName, record))
       const longAgo = new Date(Date.now() - 4 * 60 * 60 * 1_000)
-      yield* host(() => utimes(abandoned, longAgo, longAgo))
+      yield* Effect.all(
+        [abandoned, somebodyElses, notOurName].map((path) =>
+          host(() => utimes(path, longAgo, longAgo)),
+        ),
+      )
 
       // Building a manager is what sweeps them: once at startup, and again on every reload.
       yield* workspaceManager(root, hooks())
 
-      // Staging is a single write, so anything old belongs to a host that was killed between
-      // writing a record and publishing it. Anything recent may still be on its way.
+      // Staging is a single write, so an old record belongs to a host that was killed between
+      // writing one and publishing it. Anything recent may still be on its way — and the sweep
+      // unlinks by pathname, so it removes only what it can show is a record it wrote itself.
       expect(existsSync(abandoned)).toBe(false)
       expect(existsSync(inFlight)).toBe(true)
+      expect(existsSync(somebodyElses)).toBe(true)
+      expect(existsSync(notOurName)).toBe(true)
     }),
   )
 
@@ -739,6 +758,7 @@ describe('run workspace allocation and leases', (): void => {
           processId: process.pid,
           startMarker: hostOwner.startMarker,
           namespace: hostOwner.namespace,
+          boot: hostOwner.boot,
         }),
       )
 
@@ -763,6 +783,7 @@ describe('run workspace allocation and leases', (): void => {
           processId: await exitedProcessId(),
           startMarker: 'a marker from another namespace',
           namespace: 'another kernel/pid:[4026531999]',
+          boot: 'another machine/another boot',
         }),
       )
 
@@ -783,6 +804,7 @@ describe('run workspace allocation and leases', (): void => {
           processId: process.pid,
           startMarker: hostOwner.startMarker,
           namespace: hostOwner.namespace,
+          boot: hostOwner.boot,
         }),
       )
 
@@ -814,6 +836,7 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
           processId: await exitedProcessId(),
           startMarker: null,
           namespace: hostOwner.namespace,
+          boot: hostOwner.boot,
         }),
       )
 
@@ -937,6 +960,7 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
           processId: process.pid,
           startMarker: 'a process that is no longer here',
           namespace: hostOwner.namespace,
+          boot: hostOwner.boot,
         }),
       )
 

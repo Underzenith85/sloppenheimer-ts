@@ -25,6 +25,7 @@ const owner: WorkspaceOwner = {
   processId: 4242,
   startMarker: '918273',
   namespace: 'boot-1/pid:[4026531836]',
+  boot: 'machine-a/boot-1',
 }
 const running = (startMarker: string | null): OwnerObservation => ({ _tag: 'Running', startMarker })
 const gone: OwnerObservation = { _tag: 'Gone' }
@@ -117,6 +118,12 @@ describe('who a lease belongs to', (): void => {
   it('is not claimed by a process that merely inherited the recorded id', (): void => {
     // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
     expect(leaseIsClaimed(lease, 'host-b', running('554433'))).toBe(false)
+  })
+
+  it('is not claimed by an owner from an earlier boot of this machine', (): void => {
+    // Nothing survives a reboot, so a host with no namespace to compare still reclaims what a
+    // crash left behind: the adapter reports that owner as gone without probing a process id.
+    expect(leaseIsClaimed(lease, 'host-b', gone)).toBe(false)
   })
 
   it('leaves an owner this host cannot observe alone', (): void => {
