@@ -1336,6 +1336,7 @@ describe('restored pull request handoffs', (): void => {
         })),
       )
       const harness = makeHarness(isolated, () => [failedIssue, healthyIssue])
+      const eligibilityBatches: (readonly IssueId[])[] = []
       const refreshedIds: IssueId[] = []
       const launchedIds: IssueId[] = []
       const ports: TestPorts = {
@@ -1345,9 +1346,10 @@ describe('restored pull request handoffs', (): void => {
           return {
             ...tracker,
             fetchIssuesByIds: (ids, options) => {
-              if (ids.length !== 1) {
+              if (options?.hydrateDependencies !== true) {
                 return tracker.fetchIssuesByIds(ids, options)
               }
+              eligibilityBatches.push(ids)
               refreshedIds.push(...ids)
               if (ids.includes(failedIssue.id)) {
                 return Effect.fail(
@@ -1382,7 +1384,17 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
 
-      expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+      expect(eligibilityBatches).toEqual([
+        [failedIssue.id, healthyIssue.id],
+        [failedIssue.id],
+        [healthyIssue.id],
+      ])
+      expect(refreshedIds).toEqual([
+        failedIssue.id,
+        healthyIssue.id,
+        failedIssue.id,
+        healthyIssue.id,
+      ])
       expect(launchedIds).toEqual([healthyIssue.id])
       expect(
         snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
@@ -3066,7 +3078,7 @@ describe('restored pull request handoffs', (): void => {
     }),
   )
 
-  it.scoped('does not dispatch repairs for an idle handoff whose issue is no longer eligible', () =>
+  it.scoped('preserves adapter eligibility when refreshing an idle repair handoff', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-ineligible-handoff-')
       const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
@@ -3075,13 +3087,31 @@ describe('restored pull request handoffs', (): void => {
         ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
       }
-      const currentIssue = { ...handedOffIssue, labels: ['sloppenheimer'] }
+      const currentIssue = handedOffIssue
       const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
       let launches = 0
+      const hydrationRequests: boolean[] = []
       yield* saveRepairHandoff(handoffStorePath, handedOffIssue, head)
       const harness = makeHarness(isolated, () => [currentIssue])
       const ports: TestPorts = {
         ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByStates: () => Effect.succeed([]),
+            fetchIssuesByIds: (ids, options) => {
+              const fetched = tracker.fetchIssuesByIds(ids, options)
+              if (options?.hydrateDependencies !== true) {
+                return fetched
+              }
+              hydrationRequests.push(options.hydrateDependencies)
+              return fetched.pipe(
+                Effect.map((issues) => issues.map((issue) => ({ ...issue, dispatchable: false }))),
+              )
+            },
+          }
+        },
         makeCodeReview: (provider) => ({
           ...requireCodeReview(harness.ports, provider),
           inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
@@ -3110,6 +3140,8 @@ describe('restored pull request handoffs', (): void => {
       )
 
       expect(launches).toBe(0)
+      expect(hydrationRequests).not.toEqual([])
+      expect(hydrationRequests.every((requested) => requested)).toBe(true)
       expect(snapshot.running).toEqual([])
       expect(snapshot.retrying).toEqual([])
       expect(snapshot.handoffs[0]).toMatchObject({
