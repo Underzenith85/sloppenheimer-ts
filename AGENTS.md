@@ -128,11 +128,13 @@ never rejecting a compliant one. Prefer flat layers.
 `test/import-boundaries.test.ts` lints a fixture tree with that same configuration, at both depths,
 and asserts the rule still fires.
 
-One module has not been placed in a layer yet: `packages/core/src/telemetry.ts`. `core/` and
-`ports/` reach it through migration allow-lists in `.oxlintrc.json`, where the entry names
-[#98](https://github.com/Underzenith85/sloppenheimer-ts/issues/98), which converts the telemetry
-record to pure reducers and removes it. `ports/` also reaches the workflow configuration types
-[#88](https://github.com/Underzenith85/sloppenheimer-ts/issues/88) declared it against, until
+One module has not been placed in a layer yet: telemetry. `packages/core/src/telemetry.ts` is its
+whole public surface and the only path anything imports; the parts it re-exports live beside it in
+`packages/core/src/telemetry/`, which is one module split for size rather than a layer of its own.
+`core/` and `ports/` reach it through migration allow-lists in `.oxlintrc.json`, where the entry
+names [#98](https://github.com/Underzenith85/sloppenheimer-ts/issues/98), which converts the
+telemetry record to pure reducers and removes it. `ports/` also reaches the workflow configuration
+types [#88](https://github.com/Underzenith85/sloppenheimer-ts/issues/88) declared it against, until
 [#105](https://github.com/Underzenith85/sloppenheimer-ts/issues/105) settles that type surface.
 
 Both `ports/` allow-list entries are `import type` only, enforced through the rule's `paths` option.
