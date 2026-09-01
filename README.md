@@ -29,17 +29,22 @@ and Oxfmt enforces no-semicolon formatting. Strict compiler options, `no-explici
 type-aware unsafe-operation rules, and mandatory braces are CI errors.
 
 The operator console's markup, styles, and browser script live as real source files under
-`src/operator/ui/`, so all three are linted, formatted, and typechecked. The script is four files —
-`model.ts` (the pure view model), `dom.ts` (browser primitives), `detail.ts` (the agent overlay) and
-`app.ts` (the shell) — written as classic scripts rather than modules: none of them imports or
+`src/operator/ui/`, so all three are linted, formatted, and typechecked. The script is nine files —
+`model.ts` (the view model's vocabulary, orderings and fold), `items.ts` (one snapshot row to one
+work item), `dom.ts` (browser primitives), `explain.ts` (an agent detail record in the operator's
+words), `timeline.ts` (the event timeline and its filters), `detail.ts` (the agent overlay),
+`cards.ts` (one work item, rendered, and the action on it), `graph.ts` (the dependency plan, drawn)
+and `app.ts` (the shell) — written as classic scripts rather than modules: none of them imports or
 exports, so `tsconfig.browser.json` typechecks them as one program and the server concatenates them,
-in that order, into the single classic script the page loads. `pnpm build` compiles them against a
-DOM-only `tsconfig.browser.json` and writes the served assets into `dist/operator/ui/`; running from
-source strips the same files' types in memory, so `pnpm dev` and the test suites need no build
-first. Because oxlint reads one file at a time it cannot see a declaration another of those files
-uses, so `no-unused-vars` is off for that directory alone; the compiler still catches real misuse.
-The console's timeline categories come from `packages/core/src/telemetry.ts` at load time rather than being
-restated in the browser script.
+in that order, into the single classic script the page loads. Splitting one of them is therefore
+splitting a script rather than adding an import: the parts become new entries in the ordered list in
+`src/operator/ui-assets.ts`, which is the only place that order is written down. `pnpm build`
+compiles them against a DOM-only `tsconfig.browser.json` and writes the served assets into
+`dist/operator/ui/`; running from source strips the same files' types in memory, so `pnpm dev` and
+the test suites need no build first. Because oxlint reads one file at a time it cannot see a
+declaration another of those files uses, so `no-unused-vars` is off for that directory alone; the
+compiler still catches real misuse. The console's timeline categories come from
+`packages/core/src/telemetry.ts` at load time rather than being restated in the browser script.
 
 The console's own regression suite is deterministic and runs inside `pnpm check`: `test/operator/`
 drives the exact published script under happy-dom, through the shared harness in

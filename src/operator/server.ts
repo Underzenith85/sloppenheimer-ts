@@ -7,6 +7,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import { Cause, Chunk, Effect, Option, type Scope } from 'effect'
 
+import type { AgentDetailLookup } from '@sloppenheimer/core'
 import { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import { logError } from '@sloppenheimer/core/support/logging.js'
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
@@ -120,42 +121,97 @@ const withCsrf = <Error, Requirements>(
   )
 
 /**
- * Exported so the reserved-identifier guard in `test/operator/server.test.ts` can read the
- * registrations themselves rather than the source that spells them. What shadows an issue
- * identifier is the path a route ends up registered at, however it was written, so the router value
- * is the only honest source for the set of names the namespace reserves.
+ * `POST /api/v1/issues/:issueNumber/start` and its `pause` twin. The two differ only in the
+ * eligibility they ask the backend for, so one factory serves both.
  */
-export const makeRouter = (
+const issueActionRoute = (
   backend: OperatorBackend,
   csrfToken: string,
-): HttpRouter.HttpRouter<never, never> => {
-  const issueAction = (
-    enabled: boolean,
-  ): Effect.Effect<
-    HttpServerResponse.HttpServerResponse,
-    never,
-    HttpRouter.RouteContext | HttpServerRequest.HttpServerRequest
-  > =>
-    Effect.flatMap(HttpRouter.params, (params) => {
-      const encodedIssueNumber = params['issueNumber'] ?? ''
-      if (!/^\d+$/u.test(encodedIssueNumber)) {
-        return notFound
-      }
-      const issueNumber = Number(encodedIssueNumber)
-      return withMethod(
-        'POST',
-        withCsrf(
-          csrfToken,
-          Effect.flatMap(runBackend(backend.setIssueEnabled(issueNumber, enabled)), (result) =>
-            HttpServerResponse.isServerResponse(result)
-              ? result
-              : json(202, { accepted: true, issueNumber, enabled }),
-          ),
+  enabled: boolean,
+): Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  never,
+  HttpRouter.RouteContext | HttpServerRequest.HttpServerRequest
+> =>
+  Effect.flatMap(HttpRouter.params, (params) => {
+    const encodedIssueNumber = params['issueNumber'] ?? ''
+    if (!/^\d+$/u.test(encodedIssueNumber)) {
+      return notFound
+    }
+    const issueNumber = Number(encodedIssueNumber)
+    return withMethod(
+      'POST',
+      withCsrf(
+        csrfToken,
+        Effect.flatMap(runBackend(backend.setIssueEnabled(issueNumber, enabled)), (result) =>
+          HttpServerResponse.isServerResponse(result)
+            ? result
+            : json(202, { accepted: true, issueNumber, enabled }),
         ),
-      )
-    })
+      ),
+    )
+  })
 
-  const fixedRoutes = HttpRouter.empty.pipe(
+/** The four outcomes the detail lookup distinguishes, as the responses they each deserve. */
+const agentDetailResponse = (lookup: AgentDetailLookup): HttpServerResponse.HttpServerResponse => {
+  switch (lookup._tag) {
+    case 'Found': {
+      return json(200, { version: 'v1', detail: lookup.detail })
+    }
+    case 'Completed': {
+      return errorResponse(
+        410,
+        'agent_session_completed',
+        'The agent session has completed and its detail is no longer retained',
+      )
+    }
+    case 'NoSession': {
+      return errorResponse(
+        409,
+        'agent_not_active',
+        'The issue has no active or retrying agent session',
+      )
+    }
+    case 'Unavailable': {
+      return errorResponse(503, 'agent_detail_unavailable', lookup.reason).pipe(
+        HttpServerResponse.setHeader('Retry-After', '1'),
+      )
+    }
+    case 'Unknown': {
+      return errorResponse(
+        404,
+        'agent_not_found',
+        'No agent has run for that identifier in this session',
+      )
+    }
+  }
+}
+
+const agentDetailRoute = (
+  backend: OperatorBackend,
+): Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  never,
+  HttpRouter.RouteContext | HttpServerRequest.HttpServerRequest
+> =>
+  withMethod(
+    'GET',
+    // As with the baseline resource, the identifier is not matched against a shape: this route is
+    // what a published `detail_url` points at, so a pattern here would make a tracker's own
+    // inspection resource unreachable for the identifiers it spells. The lookup distinguishes
+    // the four outcomes, and an identifier this session has never run is `404 agent_not_found`
+    // whether it is unknown or unspellable.
+    Effect.flatMap(HttpRouter.params, (params) =>
+      Effect.map(backend.agentDetail(params['identifier'] ?? ''), agentDetailResponse),
+    ),
+  )
+
+/** Everything served at a fixed path. The per-issue resource is the wildcard they sit in front of. */
+const fixedRoutes = (
+  backend: OperatorBackend,
+  csrfToken: string,
+): HttpRouter.HttpRouter<never, never> =>
+  HttpRouter.empty.pipe(
     HttpRouter.get(
       '/',
       HttpServerResponse.text(appTemplate.replace('__CSRF_TOKEN__', csrfToken), {
@@ -204,79 +260,80 @@ export const makeRouter = (
         ),
       ),
     ),
-    HttpRouter.all('/api/v1/issues/:issueNumber/start', issueAction(true)),
-    HttpRouter.all('/api/v1/issues/:issueNumber/pause', issueAction(false)),
-    // Everything above is a fixed path; the per-issue resource below is the wildcard they sit in
-    // front of.
+    HttpRouter.all('/api/v1/issues/:issueNumber/start', issueActionRoute(backend, csrfToken, true)),
     HttpRouter.all(
-      '/api/v1/agents/:identifier',
-      withMethod(
-        'GET',
-        // As with the baseline resource, the identifier is not matched against a shape: this route is
-        // what a published `detail_url` points at, so a pattern here would make a tracker's own
-        // inspection resource unreachable for the identifiers it spells. The lookup distinguishes
-        // the four outcomes, and an identifier this session has never run is `404 agent_not_found`
-        // whether it is unknown or unspellable.
-        Effect.flatMap(HttpRouter.params, (params) => {
-          const identifier = params['identifier'] ?? ''
-          return Effect.map(backend.agentDetail(identifier), (lookup) => {
-            switch (lookup._tag) {
-              case 'Found': {
-                return json(200, { version: 'v1', detail: lookup.detail })
-              }
-              case 'Completed': {
-                return errorResponse(
-                  410,
-                  'agent_session_completed',
-                  'The agent session has completed and its detail is no longer retained',
-                )
-              }
-              case 'NoSession': {
-                return errorResponse(
-                  409,
-                  'agent_not_active',
-                  'The issue has no active or retrying agent session',
-                )
-              }
-              case 'Unavailable': {
-                return errorResponse(503, 'agent_detail_unavailable', lookup.reason).pipe(
-                  HttpServerResponse.setHeader('Retry-After', '1'),
-                )
-              }
-              case 'Unknown': {
-                return errorResponse(
-                  404,
-                  'agent_not_found',
-                  'No agent has run for that identifier in this session',
-                )
-              }
-            }
-          })
-        }),
-      ),
+      '/api/v1/issues/:issueNumber/pause',
+      issueActionRoute(backend, csrfToken, false),
     ),
+    HttpRouter.all('/api/v1/agents/:identifier', agentDetailRoute(backend)),
   )
 
-  /**
-   * The methods a fixed path answers on its own, read from the registrations above rather than
-   * restated beside them. A route registered for one method leaves the other methods of its path to
-   * the per-issue resource below, so the two share a URI and a refusal there has to name both. A
-   * route registered for every method (`HttpRouter.all`) never falls through and contributes
-   * nothing.
-   */
-  const methodsBesideIssueResource = new Map<string, readonly string[]>()
-  for (const route of Chunk.toReadonlyArray(fixedRoutes.routes)) {
+/**
+ * The methods a fixed path answers on its own, read from the registrations themselves rather than
+ * restated beside them. A route registered for one method leaves the other methods of its path to
+ * the per-issue resource below, so the two share a URI and a refusal there has to name both. A
+ * route registered for every method (`HttpRouter.all`) never falls through and contributes nothing.
+ */
+const methodsBesideIssueResource = (
+  routes: HttpRouter.HttpRouter<never, never>,
+): ReadonlyMap<string, readonly string[]> => {
+  const methods = new Map<string, readonly string[]>()
+  for (const route of Chunk.toReadonlyArray(routes.routes)) {
     if (route.method === '*') {
       continue
     }
     const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
-    methodsBesideIssueResource.set(path, [
-      ...(methodsBesideIssueResource.get(path) ?? []),
-      route.method,
-    ])
+    methods.set(path, [...(methods.get(path) ?? []), route.method])
   }
+  return methods
+}
 
-  return fixedRoutes.pipe(
+/**
+ * The per-issue resource. The identifier is not matched against a shape. `IssueIdentifier` is an
+ * unconstrained branded string, and a tracker is free to spell one `GH-7`; a syntactic guard here
+ * would decide on GitHub's behalf which providers may reach a SPEC resource. Existence is the only
+ * question, and in-memory state is what answers it.
+ */
+const issueResourceRoute = (
+  backend: OperatorBackend,
+  methodsBeside: ReadonlyMap<string, readonly string[]>,
+): Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  never,
+  HttpRouter.RouteContext | HttpServerRequest.HttpServerRequest
+> =>
+  Effect.flatMap(HttpRouter.params, (params) => {
+    const identifier = params['identifier'] ?? ''
+    return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
+      if (request.method !== 'GET') {
+        // This resource answers GET, and a fixed route may answer another method at the same
+        // path — `POST /api/v1/refresh` does. Both belong in `Allow`.
+        return methodNotAllowed(['GET', ...(methodsBeside.get(`/api/v1/${identifier}`) ?? [])])
+      }
+      return Effect.flatMap(runBackend(backend.snapshot), (result) => {
+        if (HttpServerResponse.isServerResponse(result)) {
+          return result
+        }
+        return Effect.map(backend.agentDetail(identifier), (lookup) => {
+          const detail = publishIssueDetail(identifier, result, lookup)
+          return detail === null ? unknownIssue : json(200, detail)
+        })
+      })
+    })
+  })
+
+/**
+ * Exported so the reserved-identifier guard in `test/operator/server.test.ts` can read the
+ * registrations themselves rather than the source that spells them. What shadows an issue
+ * identifier is the path a route ends up registered at, however it was written, so the router value
+ * is the only honest source for the set of names the namespace reserves.
+ */
+export const makeRouter = (
+  backend: OperatorBackend,
+  csrfToken: string,
+): HttpRouter.HttpRouter<never, never> => {
+  const fixed = fixedRoutes(backend, csrfToken)
+  return fixed.pipe(
     // The wildcard sits below the fixed routes above it, so the two GET names they spell —
     // `state` and `backlog` — are unaddressable as issue identifiers: a GET of either path cannot
     // be told apart from a GET of the resource below. SPEC 13.7.2 puts both resources in one
@@ -287,32 +344,7 @@ export const makeRouter = (
     // both what they answer and that the set has not grown.
     HttpRouter.all(
       '/api/v1/:identifier',
-      // The identifier is not matched against a shape. `IssueIdentifier` is an unconstrained
-      // branded string, and a tracker is free to spell one `GH-7`; a syntactic guard here would
-      // decide on GitHub's behalf which providers may reach a SPEC resource. Existence is the only
-      // question, and in-memory state is what answers it.
-      Effect.flatMap(HttpRouter.params, (params) => {
-        const identifier = params['identifier'] ?? ''
-        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
-          if (request.method !== 'GET') {
-            // This resource answers GET, and a fixed route may answer another method at the same
-            // path — `POST /api/v1/refresh` does. Both belong in `Allow`.
-            return methodNotAllowed([
-              'GET',
-              ...(methodsBesideIssueResource.get(`/api/v1/${identifier}`) ?? []),
-            ])
-          }
-          return Effect.flatMap(runBackend(backend.snapshot), (result) => {
-            if (HttpServerResponse.isServerResponse(result)) {
-              return result
-            }
-            return Effect.map(backend.agentDetail(identifier), (lookup) => {
-              const detail = publishIssueDetail(identifier, result, lookup)
-              return detail === null ? unknownIssue : json(200, detail)
-            })
-          })
-        })
-      }),
+      issueResourceRoute(backend, methodsBesideIssueResource(fixed)),
     ),
   )
 }
