@@ -578,8 +578,11 @@ lifecycle. This section is the architecture record for it; do not create a separ
   `<root>/<issue key>/<run key>`, where the run key names the run number and the host that allocated
   it: the run number restarts with the process that counts it, so the host is what keeps two hosts —
   and a host and its own predecessor — from ever naming one directory.
-- Ownership is an exclusive lease, not orchestrator memory. Publishing the lease is the claim — the
-  record is hard-linked into place, which is atomic and refuses an existing name — and the run
+- Ownership is an exclusive lease, not orchestrator memory, and `WorkspaceManagerPort` hands a
+  workspace out only for the length of a use: `withLeasedWorkspace` is a bracket rather than an
+  acquire and a release a caller pairs up itself, because an interruption in the gap between them
+  would leave a lease that nobody holds and nobody will release. Publishing the lease is the claim —
+  the record is hard-linked into place, which is atomic and refuses an existing name — and the run
   directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
   elsewhere never finds a workspace without a lease. The record names the issue, the run, and the
   host process that holds it, including when that process started and the process namespace its id

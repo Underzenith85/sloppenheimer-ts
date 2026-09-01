@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, type Scope } from 'effect'
+import { Context, Effect, Layer, type Exit, type Scope } from 'effect'
 
 import type { HooksConfig } from '../config/workflow.js'
 import type { IssueIdentifier, Workspace } from '../domain/domain.js'
@@ -6,28 +6,31 @@ import type { WorkspaceError } from '../domain/errors.js'
 import type { WorkspaceRelease, WorkspaceRun } from '../domain/workspace-lease.js'
 import { makeAdapterCell, type AdapterCell } from './cell.js'
 
-/** A workspace and the run that holds its lease, which is what releasing it takes. */
-export type LeasedWorkspace = Readonly<{
-  run: WorkspaceRun
-  workspace: Workspace
-}>
-
 /**
  * The per-run working directory lifecycle, including the operator-configured hooks that run around
  * it.
  *
- * `acquire` allocates a workspace for exactly one dispatched run or repair attempt and leases it to
- * that run: a second acquisition of the same run identity fails, before anything is launched.
- * `release` ends that ownership — a run that published its work leaves nothing behind, and every
- * other ending leaves the directory as a named recovery artifact. Neither `release` nor `afterRun`
- * can fail: the run they follow already happened.
+ * `withLeasedWorkspace` allocates a workspace for exactly one dispatched run or repair attempt,
+ * leases it to that run for the whole of `use`, and releases it as `disposition` decides from how
+ * `use` ended: a run that published its work leaves nothing behind, and every other ending leaves
+ * the directory as a named recovery artifact. A second acquisition of the same run identity fails,
+ * before anything is launched.
+ *
+ * It is a bracket rather than an acquire and a release the caller pairs up itself, because
+ * ownership must not be able to escape between them: an interruption arriving in that gap would
+ * leave a lease that no one holds and no one will release, and a lease this host still holds is one
+ * cleanup must not touch. Releasing cannot fail, and neither can `afterRun`: the run they follow
+ * already happened.
  *
  * `exists` and `remove` are per-issue, because cleanup is: an issue that reached a terminal state
  * takes its retained workspaces with it, and never a workspace another run still holds.
  */
 export type WorkspaceManagerPort = Readonly<{
-  acquire: (run: WorkspaceRun) => Effect.Effect<LeasedWorkspace, WorkspaceError>
-  release: (leased: LeasedWorkspace, release: WorkspaceRelease) => Effect.Effect<void>
+  withLeasedWorkspace: <Value, Failure, Requirements>(
+    run: WorkspaceRun,
+    use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
+    disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
+  ) => Effect.Effect<Value, Failure | WorkspaceError, Requirements>
   exists: (identifier: IssueIdentifier) => Effect.Effect<boolean, WorkspaceError>
   beforeRun: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
   afterRun: (workspace: Workspace) => Effect.Effect<void>

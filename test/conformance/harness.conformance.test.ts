@@ -63,26 +63,36 @@ describe('Core Conformance typed harness boundaries', (): void => {
     () =>
       Effect.gen(function* () {
         const workspaces = new FakeWorkspaceProcess()
-        const first = yield* workspaces.acquire({ identifier: issue.identifier, runId: 1 })
-        const second = yield* workspaces.acquire({ identifier: issue.identifier, runId: 2 })
-        yield* workspaces.beforeRun(second.workspace)
-        yield* workspaces.afterRun(second.workspace)
-        yield* workspaces.release(first, { _tag: 'Completed' })
-        yield* workspaces.release(second, { _tag: 'Retained', reason: 'run failed' })
+        const published = yield* workspaces.withLeasedWorkspace(
+          { identifier: issue.identifier, runId: 1 },
+          (workspace) => Effect.succeed(workspace),
+          () => ({ _tag: 'Completed' }),
+        )
+        const failed = yield* workspaces.withLeasedWorkspace(
+          { identifier: issue.identifier, runId: 2 },
+          (workspace) =>
+            workspaces
+              .beforeRun(workspace)
+              .pipe(Effect.zipRight(workspaces.afterRun(workspace)), Effect.as(workspace)),
+          () => ({ _tag: 'Retained', reason: 'run failed' }),
+        )
         yield* workspaces.remove(issue.identifier)
 
-        // Two runs of one issue never share a directory, and only the run that published lets go of
-        // its own without leaving a recovery artifact behind.
-        expect(second.workspace.path).not.toBe(first.workspace.path)
+        // Two runs of one issue never share a directory, and only the run that published lets go
+        // of its own without leaving a recovery artifact behind.
+        expect(failed.path).not.toBe(published.path)
         expect(workspaces.operations.map((operation) => operation.operation)).toEqual([
           'acquire',
+          'release',
           'acquire',
           'beforeRun',
           'afterRun',
           'release',
-          'release',
           'remove',
         ])
+        expect(
+          workspaces.operations.filter((operation) => operation.release !== null),
+        ).toMatchObject([{ release: { _tag: 'Completed' } }, { release: { _tag: 'Retained' } }])
       }),
   )
 })

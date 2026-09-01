@@ -70,8 +70,8 @@ describe('workspace safety', (): void => {
         timeoutMs: 5_000,
       })
 
-      const first = yield* acquire(manager, 'GH-8', 1)
-      const second = yield* acquire(manager, 'GH-8', 2)
+      const first = yield* retained(manager, 'GH-8', 1)
+      const second = yield* retained(manager, 'GH-8', 2)
 
       expect(second.path).not.toBe(first.path)
       expect(yield* host(() => readFile(join(first.path, 'marker.txt'), 'utf8'))).toBe('created')
@@ -124,35 +124,44 @@ const hooks = (overrides: Partial<HooksConfig> = {}): HooksConfig => ({
 })
 
 /**
- * One run's workspace, as the manager allocates it. Every acquisition is a fresh directory leased
- * to that run, so a test that wants two of them asks for two run numbers rather than reusing one
- * path it computed for itself.
- */
-const acquire = (
-  manager: WorkspaceManagerPort,
-  identifier: string,
-  runId = 1,
-): Effect.Effect<Workspace, WorkspaceError> =>
-  Effect.map(
-    manager.acquire({ identifier: issueIdentifier(identifier), runId }),
-    (leased) => leased.workspace,
-  )
-
-/**
- * A workspace a run has finished with and left behind: on disk, named by its lease, and leased to
- * nobody — which is what cleanup is entitled to remove.
+ * One run's workspace, kept when the run ends: the port hands a workspace out only for the length
+ * of a use, so a test that wants a directory to look at afterwards asks for it to be retained. Two
+ * of them means two run numbers, never one path a test computed for itself.
  */
 const retained = (
   manager: WorkspaceManagerPort,
   identifier: string,
   runId = 1,
 ): Effect.Effect<Workspace, WorkspaceError> =>
-  Effect.flatMap(manager.acquire({ identifier: issueIdentifier(identifier), runId }), (leased) =>
-    Effect.as(
-      manager.release(leased, { _tag: 'Retained', reason: 'the run ended without publishing' }),
-      leased.workspace,
-    ),
+  manager.withLeasedWorkspace(
+    { identifier: issueIdentifier(identifier), runId },
+    (workspace) => Effect.succeed(workspace),
+    () => ({ _tag: 'Retained', reason: 'the run ended without publishing' }),
   )
+
+/** The same, released as a run that published its work releases: with nothing left behind. */
+const published = (
+  manager: WorkspaceManagerPort,
+  identifier: string,
+  runId = 1,
+): Effect.Effect<Workspace, WorkspaceError> =>
+  manager.withLeasedWorkspace(
+    { identifier: issueIdentifier(identifier), runId },
+    (workspace) => Effect.succeed(workspace),
+    () => ({ _tag: 'Completed' }),
+  )
+
+/** Runs `use` while the run still holds its lease, and keeps the workspace afterwards. */
+const whileLeased = <Value, Failure>(
+  manager: WorkspaceManagerPort,
+  identifier: string,
+  runId: number,
+  use: (workspace: Workspace) => Effect.Effect<Value, Failure>,
+): Effect.Effect<Value, Failure | WorkspaceError> =>
+  manager.withLeasedWorkspace({ identifier: issueIdentifier(identifier), runId }, use, () => ({
+    _tag: 'Retained',
+    reason: 'the run ended without publishing',
+  }))
 
 describe('hook process hardening', (): void => {
   it.live('drains a hook that writes far more than the capture limit', () =>
@@ -163,7 +172,7 @@ describe('hook process hardening', (): void => {
         hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'a'` }),
       )
 
-      const workspace = yield* acquire(manager, 'GH-100')
+      const workspace = yield* retained(manager, 'GH-100')
 
       expect(existsSync(workspace.path)).toBe(true)
     }),
@@ -177,7 +186,7 @@ describe('hook process hardening', (): void => {
         hooks({ afterCreate: `head -c 400000 /dev/zero | tr '\\0' 'b' >&2; exit 3` }),
       )
 
-      const error = yield* Effect.flip(acquire(manager, 'GH-101'))
+      const error = yield* Effect.flip(retained(manager, 'GH-101'))
 
       expect(error.category).toBe('hook_failed')
       expect(error.message).toContain('exited with 3')
@@ -189,7 +198,7 @@ describe('hook process hardening', (): void => {
   it.live('reports a nonzero exit with the hook phase', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-102')
+      const workspace = yield* retained(yield* workspaceManager(root, hooks()), 'GH-102')
       const manager = yield* workspaceManager(root, hooks({ beforeRun: 'echo "boom" >&2; exit 7' }))
 
       const error = yield* Effect.flip(manager.beforeRun(workspace))
@@ -203,7 +212,7 @@ describe('hook process hardening', (): void => {
   it.live('terminates the whole hook process tree on timeout', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-103')
+      const workspace = yield* retained(yield* workspaceManager(root, hooks()), 'GH-103')
       const manager = yield* workspaceManager(
         root,
         hooks({
@@ -230,7 +239,7 @@ describe('hook process hardening', (): void => {
     () =>
       Effect.gen(function* () {
         const root = makeRoot()
-        const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-109')
+        const workspace = yield* retained(yield* workspaceManager(root, hooks()), 'GH-109')
         const manager = yield* workspaceManager(
           root,
           hooks({
@@ -256,7 +265,7 @@ describe('hook process hardening', (): void => {
   it.live('terminates the hook process tree when the effect is interrupted', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-104')
+      const workspace = yield* retained(yield* workspaceManager(root, hooks()), 'GH-104')
       const manager = yield* workspaceManager(
         root,
         hooks({ beforeRun: 'sleep 120 & echo $! > grandchild.pid; wait' }),
@@ -281,7 +290,7 @@ describe('hook phase semantics', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
 
-      const error = yield* Effect.flip(acquire(manager, 'GH-105'))
+      const error = yield* Effect.flip(retained(manager, 'GH-105'))
 
       expect(error.category).toBe('hook_failed')
       expect(error.message).toContain('after_create')
@@ -291,7 +300,7 @@ describe('hook phase semantics', (): void => {
   it.live('treats after_run as best effort', () =>
     Effect.gen(function* () {
       const root = makeRoot()
-      const workspace = yield* acquire(yield* workspaceManager(root, hooks()), 'GH-106')
+      const workspace = yield* retained(yield* workspaceManager(root, hooks()), 'GH-106')
       const manager = yield* workspaceManager(root, hooks({ afterRun: 'exit 1' }))
 
       expect(yield* manager.afterRun(workspace)).toBeUndefined()
@@ -362,7 +371,7 @@ describe('workspace inspection and cleanup', (): void => {
       const identifier = issueIdentifier('GH-11')
 
       expect(yield* manager.exists(identifier)).toBe(false)
-      yield* acquire(manager, 'GH-11')
+      yield* retained(manager, 'GH-11')
       expect(yield* manager.exists(identifier)).toBe(true)
     }),
   )
@@ -478,24 +487,33 @@ describe('run workspace allocation and leases', (): void => {
       // Two attempts of one issue and two of another, all live at once: the rule is that no two
       // runs share a directory, not merely that no two issues do.
       const runs = [
-        { identifier: issueIdentifier('GH-166'), runId: 1 },
-        { identifier: issueIdentifier('GH-166'), runId: 2 },
-        { identifier: issueIdentifier('GH-167'), runId: 3 },
-        { identifier: issueIdentifier('GH-167'), runId: 4 },
+        { identifier: 'GH-166', runId: 1 },
+        { identifier: 'GH-166', runId: 2 },
+        { identifier: 'GH-167', runId: 3 },
+        { identifier: 'GH-167', runId: 4 },
       ]
+      let written = 0
 
-      const leased = yield* Effect.all(
-        runs.map((run) => manager.acquire(run)),
-        { concurrency: 'unbounded' },
-      )
-      yield* Effect.all(
-        leased.map((each, index) =>
-          host(() => writeFile(join(each.workspace.path, 'work.txt'), `run-${String(index)}`)),
+      const paths = yield* Effect.all(
+        runs.map((run, index) =>
+          whileLeased(manager, run.identifier, run.runId, (workspace) =>
+            Effect.gen(function* () {
+              yield* host(() => writeFile(join(workspace.path, 'work.txt'), `run-${String(index)}`))
+              written += 1
+              // Nobody looks until all four are holding their own workspace, so what each one then
+              // reads is what it holds while the other three hold theirs.
+              yield* waitFor(() => written === 4)
+              expect(yield* host(() => readdir(workspace.path))).toEqual(['work.txt'])
+              expect(yield* host(() => readFile(join(workspace.path, 'work.txt'), 'utf8'))).toBe(
+                `run-${String(index)}`,
+              )
+              return workspace.path
+            }),
+          ),
         ),
         { concurrency: 'unbounded' },
       )
 
-      const paths = leased.map((each) => each.workspace.path)
       const inodes = yield* host(() =>
         Promise.all(paths.map(async (path) => (await stat(path)).ino)),
       )
@@ -503,12 +521,8 @@ describe('run workspace allocation and leases', (): void => {
       // and it is the directory the agent's git metadata and worktree live in.
       expect(new Set(paths).size).toBe(4)
       expect(new Set(inodes).size).toBe(4)
-      for (const [index, path] of paths.entries()) {
+      for (const path of paths) {
         expect(path.startsWith(`${root}/`)).toBe(true)
-        expect(yield* host(() => readdir(path))).toEqual(['work.txt'])
-        expect(yield* host(() => readFile(join(path, 'work.txt'), 'utf8'))).toBe(
-          `run-${String(index)}`,
-        )
       }
     }),
   )
@@ -517,10 +531,10 @@ describe('run workspace allocation and leases', (): void => {
     Effect.gen(function* () {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
-      const run = { identifier: issueIdentifier('GH-168'), runId: 7 }
-      yield* manager.acquire(run)
 
-      const refused = yield* Effect.flip(manager.acquire(run))
+      const refused = yield* whileLeased(manager, 'GH-168', 7, () =>
+        Effect.flip(published(manager, 'GH-168', 7)),
+      )
 
       expect(refused.category).toBe('lease_conflict')
     }),
@@ -531,17 +545,16 @@ describe('run workspace allocation and leases', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks({ beforeRemove: 'exit 0' }))
       const identifier = issueIdentifier('GH-180')
-      const leased = yield* manager.acquire({ identifier, runId: 1 })
+      const workspace = yield* retained(manager, 'GH-180')
       // A record a host died before publishing. Cleanup reads an issue directory as run workspaces
       // and their leases, and would take a file like this for one of them.
       const abandonedWrite = join(root, '#lease-writes', 'abandoned.lease')
       yield* host(() => mkdir(dirname(abandonedWrite), { recursive: true }))
       yield* host(() => writeFile(abandonedWrite, 'half a record'))
 
-      yield* manager.release(leased, { _tag: 'Retained', reason: 'worker failed' })
       yield* manager.remove(identifier)
 
-      expect(existsSync(leased.workspace.path)).toBe(false)
+      expect(existsSync(workspace.path)).toBe(false)
       expect(yield* manager.exists(identifier)).toBe(false)
       expect(existsSync(abandonedWrite)).toBe(true)
     }),
@@ -551,20 +564,26 @@ describe('run workspace allocation and leases', (): void => {
     Effect.gen(function* () {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
-      const run = { identifier: issueIdentifier('GH-179'), runId: 7 }
-      const leased = yield* manager.acquire(run)
+      const identifier = issueIdentifier('GH-179')
 
-      const refused = yield* Effect.flip(manager.acquire(run))
+      const workspace = yield* whileLeased(manager, 'GH-179', 7, (held) =>
+        Effect.gen(function* () {
+          const refused = yield* Effect.flip(published(manager, 'GH-179', 7))
 
-      // The refusal is the second acquisition's own. The lease it could not take belongs to the run
-      // holding it, and rewriting it would let cleanup take that run's live workspace.
-      expect(refused.category).toBe('lease_conflict')
-      expect(yield* host(() => leaseOf(leased.workspace.path))).toMatchObject({
-        status: 'held',
-        reason: null,
-      })
-      yield* manager.remove(run.identifier)
-      expect(existsSync(leased.workspace.path)).toBe(true)
+          // The refusal is the second acquisition's own. The lease it could not take belongs to
+          // the run holding it, and rewriting it would let cleanup take that run's live workspace.
+          expect(refused.category).toBe('lease_conflict')
+          expect(yield* host(() => leaseOf(held.path))).toMatchObject({
+            status: 'held',
+            reason: null,
+          })
+          yield* manager.remove(identifier)
+          expect(existsSync(held.path)).toBe(true)
+          return held
+        }),
+      )
+
+      expect(existsSync(workspace.path)).toBe(true)
     }),
   )
 
@@ -573,18 +592,22 @@ describe('run workspace allocation and leases', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
       const identifier = issueIdentifier('GH-169')
-      const first = yield* manager.acquire({ identifier, runId: 1 })
-      yield* host(() => writeFile(join(first.workspace.path, 'unpublished.txt'), 'in progress\n'))
-
-      yield* manager.release(first, { _tag: 'Retained', reason: 'worker failed' })
-      const second = yield* manager.acquire({ identifier, runId: 2 })
+      const first = yield* manager.withLeasedWorkspace(
+        { identifier, runId: 1 },
+        (workspace) =>
+          host(() => writeFile(join(workspace.path, 'unpublished.txt'), 'in progress\n')).pipe(
+            Effect.as(workspace),
+          ),
+        () => ({ _tag: 'Retained', reason: 'worker failed' }),
+      )
+      const second = yield* retained(manager, 'GH-169', 2)
 
       // The retry inherits nothing, and what the failed attempt holds is explained by its lease
       // rather than left for a later run to find and adopt.
-      expect(second.workspace.path).not.toBe(first.workspace.path)
-      expect(yield* host(() => readdir(second.workspace.path))).toEqual([])
-      expect(yield* host(() => readdir(first.workspace.path))).toEqual(['unpublished.txt'])
-      expect(yield* host(() => leaseOf(first.workspace.path))).toMatchObject({
+      expect(second.path).not.toBe(first.path)
+      expect(yield* host(() => readdir(second.path))).toEqual([])
+      expect(yield* host(() => readdir(first.path))).toEqual(['unpublished.txt'])
+      expect(yield* host(() => leaseOf(first.path))).toMatchObject({
         identifier,
         runId: 1,
         status: 'retained',
@@ -598,12 +621,10 @@ describe('run workspace allocation and leases', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
       const identifier = issueIdentifier('GH-170')
-      const leased = yield* manager.acquire({ identifier, runId: 1 })
+      const workspace = yield* published(manager, 'GH-170')
 
-      yield* manager.release(leased, { _tag: 'Completed' })
-
-      expect(existsSync(leased.workspace.path)).toBe(false)
-      expect(existsSync(`${leased.workspace.path}.lease`)).toBe(false)
+      expect(existsSync(workspace.path)).toBe(false)
+      expect(existsSync(`${workspace.path}.lease`)).toBe(false)
       expect(yield* manager.exists(identifier)).toBe(false)
     }),
   )
@@ -613,15 +634,17 @@ describe('run workspace allocation and leases', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
       const identifier = issueIdentifier('GH-171')
-      const leased = yield* manager.acquire({ identifier, runId: 1 })
+      const workspace = yield* whileLeased(manager, 'GH-171', 1, (held) =>
+        Effect.gen(function* () {
+          yield* manager.remove(identifier)
+          expect(existsSync(held.path)).toBe(true)
+          return held
+        }),
+      )
 
       yield* manager.remove(identifier)
-      expect(existsSync(leased.workspace.path)).toBe(true)
 
-      yield* manager.release(leased, { _tag: 'Retained', reason: 'worker cancelled' })
-      yield* manager.remove(identifier)
-
-      expect(existsSync(leased.workspace.path)).toBe(false)
+      expect(existsSync(workspace.path)).toBe(false)
       expect(yield* manager.exists(identifier)).toBe(false)
     }),
   )
@@ -718,11 +741,15 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
       // The run number a restarted host counts from starts again at one, so the workspace name
       // carries the host as well: this acquisition cannot land on the abandoned directory even
       // when it reuses that host's run number.
-      const leased = yield* manager.acquire({ identifier: issueIdentifier(identifier), runId: 9 })
-      expect(leased.workspace.path).not.toBe(abandoned)
-      expect(yield* host(() => readdir(leased.workspace.path))).toEqual([])
+      const workspace = yield* published(
+        manager,
+        identifier,
+        // The run number a restarted host counts from starts again at one, so this acquisition
+        // deliberately reuses the departed host's own.
+        9,
+      )
+      expect(workspace.path).not.toBe(abandoned)
 
-      yield* manager.release(leased, { _tag: 'Completed' })
       yield* manager.remove(issueIdentifier(identifier))
 
       // With its owner gone, the artifact is cleanup's to take once the issue is finished with.
@@ -736,7 +763,7 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
       const manager = yield* workspaceManager(root, hooks({ afterCreate: 'exit 1' }))
       const identifier = issueIdentifier('GH-174')
 
-      const failed = yield* Effect.flip(manager.acquire({ identifier, runId: 1 }))
+      const failed = yield* Effect.flip(published(manager, 'GH-174'))
 
       // The lease was taken before the hook ran, and a failed acquisition returns nothing for the
       // run to release with: the workspace has to be retained here, or cleanup could never take it.
@@ -752,18 +779,17 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
       const identifier = issueIdentifier('GH-175')
-      const leased = yield* manager.acquire({ identifier, runId: 1 })
 
-      yield* manager.release(leased, { _tag: 'Retained', reason: 'worker failed' })
+      const workspace = yield* retained(manager, 'GH-175')
 
-      // The record is renamed into place rather than written over, so the only entries an issue
+      // The record is published from outside the issue directory, so the only entries that
       // directory holds are its run workspaces and their finished leases.
       expect((yield* host(() => readdir(join(root, workspaceKey(identifier))))).toSorted()).toEqual(
-        [leased.workspace.key, `${leased.workspace.key}.lease`].toSorted(),
+        [workspace.key, `${workspace.key}.lease`].toSorted(),
       )
-      expect(yield* host(() => leaseOf(leased.workspace.path))).toMatchObject({
+      expect(yield* host(() => leaseOf(workspace.path))).toMatchObject({
         status: 'retained',
-        reason: 'worker failed',
+        reason: 'the run ended without publishing',
       })
     }),
   )

@@ -35,6 +35,7 @@ import {
   type Issue,
   type IssueId,
   type JsonObject,
+  type Workspace,
 } from '@sloppenheimer/core/domain/domain.js'
 import {
   AgentError,
@@ -91,7 +92,6 @@ import {
   type SourceControlTarget,
   type PortsConfiguration,
   type TrackerPort,
-  type LeasedWorkspace,
   type WorkspaceManagerPort,
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
@@ -620,12 +620,20 @@ const makeHarness = (
     makeWorkspaces: (settings) => {
       workspaceSettings.push(settings)
       return {
-        acquire: (run) =>
-          Effect.succeed({
-            run,
-            workspace: { path: `/tmp/sloppenheimer-test/run-${String(run.runId)}`, key: 'test' },
-          }),
-        release: () => Effect.void,
+        // A real bracket, like the Node manager's: the release runs however the use ended, so a
+        // test can observe what a run's workspace was released as.
+        withLeasedWorkspace: (run, use, disposition) =>
+          Effect.acquireUseRelease(
+            Effect.succeed({
+              path: `/tmp/sloppenheimer-test/run-${String(run.runId)}`,
+              key: 'test',
+            }),
+            (workspace) => use(workspace),
+            (_workspace, exit) =>
+              Effect.sync(() => {
+                disposition(exit)
+              }),
+          ),
         exists: () => Effect.succeed(true),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
@@ -3039,11 +3047,10 @@ describe('restored pull request handoffs', (): void => {
         }),
         makeWorkspaces: (settings) => ({
           ...harness.ports.makeWorkspaces(settings),
-          acquire: (run) =>
+          withLeasedWorkspace: (_run, use) =>
             Effect.sync(() => {
               workspacesCreated += 1
-              return { run, workspace: { path: '/tmp/sloppenheimer-test', key: 'test' } }
-            }),
+            }).pipe(Effect.zipRight(use({ path: '/tmp/sloppenheimer-test', key: 'test' }))),
         }),
         // The repair pushes nothing and fails, so a retry is queued behind it.
         runAgent: () =>
@@ -5099,22 +5106,29 @@ describe('per-run workspace leases', (): void => {
   const recordingWorkspaces =
     (
       harness: TestHarness,
-      acquired: LeasedWorkspace[],
+      acquired: Workspace[],
       released: Readonly<{ path: string; release: WorkspaceRelease }>[],
     ): TestPorts['makeWorkspaces'] =>
     (settings) => {
       const base = harness.ports.makeWorkspaces(settings)
       return {
         ...base,
-        acquire: (run) =>
-          Effect.map(base.acquire(run), (leased) => {
-            acquired.push(leased)
-            return leased
-          }),
-        release: (leased, release) =>
-          Effect.sync(() => {
-            released.push({ path: leased.workspace.path, release })
-          }),
+        withLeasedWorkspace: (run, use, disposition) => {
+          let leasedPath = ''
+          return base.withLeasedWorkspace(
+            run,
+            (workspace) => {
+              leasedPath = workspace.path
+              acquired.push(workspace)
+              return use(workspace)
+            },
+            (exit) => {
+              const release = disposition(exit)
+              released.push({ path: leasedPath, release })
+              return release
+            },
+          )
+        },
       }
     }
 
@@ -5131,7 +5145,7 @@ describe('per-run workspace leases', (): void => {
         },
       }
       const harness = makeHarness(concurrent, () => issues)
-      const acquired: LeasedWorkspace[] = []
+      const acquired: Workspace[] = []
       const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
       const ports: TestPorts = {
         ...harness.ports,
@@ -5153,12 +5167,11 @@ describe('per-run workspace leases', (): void => {
       // Four sessions running at once are four run identities, and so four workspaces: nothing is
       // shared, and no lease is let go of while its run is still live.
       expect(running.counts.running).toBe(4)
-      expect(new Set(acquired.map((leased) => leased.run.runId)).size).toBe(4)
-      expect(new Set(acquired.map((leased) => leased.workspace.path)).size).toBe(4)
+      expect(new Set(acquired.map((workspace) => workspace.path)).size).toBe(4)
       expect(running.releasedWhileRunning).toEqual([])
       // Closing the host interrupts all four, and every one of them gives its lease back.
       expect(new Set(released.map((each) => each.path))).toEqual(
-        new Set(acquired.map((leased) => leased.workspace.path)),
+        new Set(acquired.map((workspace) => workspace.path)),
       )
     }),
   )
@@ -5167,7 +5180,7 @@ describe('per-run workspace leases', (): void => {
     Effect.gen(function* () {
       const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
-      const acquired: LeasedWorkspace[] = []
+      const acquired: Workspace[] = []
       const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
       const ports: TestPorts = {
         ...harness.ports,
@@ -5186,7 +5199,7 @@ describe('per-run workspace leases', (): void => {
       // workspace is kept, under the reason it is being kept for.
       expect(released).toEqual([
         {
-          path: acquired[0]?.workspace.path,
+          path: acquired[0]?.path,
           release: { _tag: 'Retained', reason: 'run cancelled before publication' },
         },
       ])
@@ -5201,7 +5214,7 @@ describe('per-run workspace leases', (): void => {
         config: { ...workflow.config, handoffEnabled: false },
       }
       const harness = makeHarness(unpublished, () => [issue])
-      const acquired: LeasedWorkspace[] = []
+      const acquired: Workspace[] = []
       const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
       // Composing no code-review services is what disables handoff, and this composition supplies
       // no source control either: the run reaches its end having published nothing, so what the
@@ -5226,7 +5239,7 @@ describe('per-run workspace leases', (): void => {
       )
 
       expect(released[0]).toMatchObject({
-        path: acquired[0]?.workspace.path,
+        path: acquired[0]?.path,
         release: { _tag: 'Retained', reason: 'run ended without publishing its work' },
       })
     }),
@@ -5236,7 +5249,7 @@ describe('per-run workspace leases', (): void => {
     Effect.gen(function* () {
       const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
-      const acquired: LeasedWorkspace[] = []
+      const acquired: Workspace[] = []
       const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
       let launches = 0
       const ports: TestPorts = {
@@ -5273,9 +5286,9 @@ describe('per-run workspace leases', (): void => {
       // The retry starts in a workspace of its own, and the attempt that failed keeps its own
       // rather than handing its leftovers to the run that follows it.
       expect(acquired).toHaveLength(2)
-      expect(acquired[1]?.workspace.path).not.toBe(acquired[0]?.workspace.path)
+      expect(acquired[1]?.path).not.toBe(acquired[0]?.path)
       expect(released[0]).toMatchObject({
-        path: acquired[0]?.workspace.path,
+        path: acquired[0]?.path,
         // The reason names what failed, not what it said: a failure message can carry an excerpt
         // of what an agent or hook wrote, and the lease record is a file rather than a log.
         release: {

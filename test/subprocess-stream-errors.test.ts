@@ -169,14 +169,18 @@ describe('a child output pipe that fails', (): void => {
         Effect.provide(hostFileSystem),
       ),
     )
-    const leased = await Effect.runPromise(
-      manager.acquire({ identifier: issueIdentifier('GH-200'), runId: 1 }),
+    // The hook runs inside the lease that hands the workspace out, which is the only way the port
+    // offers one.
+    const error = await Effect.runPromise(
+      manager.withLeasedWorkspace(
+        { identifier: issueIdentifier('GH-200'), runId: 1 },
+        (workspace) =>
+          Effect.sync(() => {
+            failPipeOnce({ matches: (command) => command === 'bash', pipe: 'stderr' })
+          }).pipe(Effect.zipRight(Effect.flip(manager.beforeRun(workspace)))),
+        () => ({ _tag: 'Retained', reason: 'before_run failed' }),
+      ),
     )
-    const workspace = leased.workspace
-
-    failPipeOnce({ matches: (command) => command === 'bash', pipe: 'stderr' })
-
-    const error = await Effect.runPromise(Effect.flip(manager.beforeRun(workspace)))
 
     // What a hook writes is diagnostic; its contract is the exit code. So the lost stderr does not
     // become the failure — the hook's own `exit 7` is still what is reported — but the diagnostic

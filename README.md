@@ -607,8 +607,10 @@ where the run key names the run number and the host that allocated it. Two attem
 therefore share no worktree, no index and no ref store, and two hosts pointed at one root can never
 name the same directory. The agent's cwd is the run directory; the host writes nothing inside it.
 
-Ownership is a lease file beside the run directory rather than orchestrator memory. Publishing that
-lease is the exclusive claim: the record is written whole and hard-linked into place, and the kernel
+Ownership is a lease file beside the run directory rather than orchestrator memory, held for exactly
+as long as the run it was allocated for: a workspace is handed out only inside the bracket that
+releases it, so no ending can leave a lease nobody holds. Publishing that lease is the exclusive
+claim: the record is written whole and hard-linked into place, and the kernel
 refuses a link whose name already exists, so a duplicate dispatch fails before any process is
 launched. The run directory is created only afterwards, so cleanup elsewhere never comes across a
 workspace that has no lease. The record names the issue, the run, the host, its process id and when

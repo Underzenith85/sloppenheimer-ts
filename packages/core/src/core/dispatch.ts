@@ -239,33 +239,34 @@ const workspaceRelease = (
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
-  return execution.workspaces.acquire({ identifier: issue.identifier, runId }).pipe(
-    Effect.flatMap((leased) =>
-      Effect.onExit(runWithSourceControl(launch, leased.workspace), (exit) =>
-        execution.workspaces.release(leased, workspaceRelease(exit)),
-      ),
-    ),
-    Effect.matchEffect({
-      onFailure: (error) =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'failed',
-          error: error.message,
-        }).pipe(Effect.asVoid),
-      onSuccess: () =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'normal',
-          error: null,
-        }).pipe(Effect.asVoid),
-    }),
-  )
+  return execution.workspaces
+    .withLeasedWorkspace(
+      { identifier: issue.identifier, runId },
+      (workspace) => runWithSourceControl(launch, workspace),
+      workspaceRelease,
+    )
+    .pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Queue.offer(context.mailbox, {
+            _tag: 'WorkerExited',
+            issueId: issue.id,
+            runId,
+            attempt,
+            outcome: 'failed',
+            error: error.message,
+          }).pipe(Effect.asVoid),
+        onSuccess: () =>
+          Queue.offer(context.mailbox, {
+            _tag: 'WorkerExited',
+            issueId: issue.id,
+            runId,
+            attempt,
+            outcome: 'normal',
+            error: null,
+          }).pipe(Effect.asVoid),
+      }),
+    )
 }
 
 /** What a started session is before it has reported anything: everything else arrives later. */

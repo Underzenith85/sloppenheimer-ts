@@ -21,7 +21,7 @@ import {
   type WorkspaceRun,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
-import type { LeasedWorkspace, WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
+import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { isSymbolicLink, removeDirectoryIfEmpty } from './filesystem.js'
@@ -183,6 +183,12 @@ const warnRelease = (path: string, error: WorkspaceError): Effect.Effect<void> =
     path,
     error: error.message,
   })
+
+/** A workspace and the run holding its lease, which is what releasing it takes. */
+type LeasedWorkspace = Readonly<{
+  run: WorkspaceRun
+  workspace: Workspace
+}>
 
 /** Rewrites a held lease as the retained recovery artifact the reason names. */
 const retainLease = (
@@ -347,9 +353,15 @@ export const makeWorkspaceManager = (
   owner: WorkspaceOwner = hostOwner,
 ): Effect.Effect<WorkspaceManagerPort, never, FileSystem.FileSystem> =>
   Effect.map(FileSystem.FileSystem, (fileSystem) => ({
-    acquire: (run) => acquireRunWorkspace(fileSystem, hooks, root, owner, run),
-    release: (leased, release) =>
-      releaseRunWorkspace(fileSystem, hooks, root, owner, leased, release),
+    // One bracket: the acquisition is uninterruptible and the release is installed with it, so a
+    // lease can never be published with nothing left to hand it back.
+    withLeasedWorkspace: (run, use, disposition) =>
+      Effect.acquireUseRelease(
+        acquireRunWorkspace(fileSystem, hooks, root, owner, run),
+        (leased) => use(leased.workspace),
+        (leased, exit) =>
+          releaseRunWorkspace(fileSystem, hooks, root, owner, leased, disposition(exit)),
+      ),
     exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),
     // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
     beforeRun: (workspace) =>

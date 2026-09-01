@@ -1,8 +1,8 @@
-import { Effect } from 'effect'
+import { Effect, Exit } from 'effect'
 
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
 import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
-import type { LeasedWorkspace, WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
+import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 
 export type WorkspaceOperation = Readonly<{
   operation: 'acquire' | 'release' | 'exists' | 'beforeRun' | 'afterRun' | 'remove'
@@ -15,9 +15,9 @@ export type WorkspaceOperation = Readonly<{
 /**
  * A typed workspace/process seam used without touching the host filesystem.
  *
- * It allocates the same way the Node manager does: one directory per issue, one directory per run
- * inside it, leased to that run until it is released. A second acquisition of a run identity that
- * is still leased fails here as it does there.
+ * It allocates the way the Node manager does: one directory per issue, one directory per run
+ * inside it, leased to that run for the whole of its use and released as the caller's disposition
+ * says. A second acquisition of a run identity that is still leased fails here as it does there.
  */
 export class FakeWorkspaceProcess implements WorkspaceManagerPort {
   readonly operations: WorkspaceOperation[] = []
@@ -50,25 +50,34 @@ export class FakeWorkspaceProcess implements WorkspaceManagerPort {
     return created
   }
 
-  acquire(run: WorkspaceRun): Effect.Effect<LeasedWorkspace> {
-    const key = `run-${String(run.runId)}`
-    const leased = this.#keys(this.#leased, run.identifier)
-    if (leased.has(key)) {
-      return Effect.die(`workspace ${run.identifier}/${key} is already leased`)
-    }
-    leased.add(key)
-    const workspace: Workspace = { path: `${this.#root}/${run.identifier}/${key}`, key }
-    this.#record('acquire', run.identifier, workspace)
-    return Effect.succeed({ run, workspace })
-  }
-
-  release(leased: LeasedWorkspace, release: WorkspaceRelease): Effect.Effect<void> {
-    this.#keys(this.#leased, leased.run.identifier).delete(leased.workspace.key)
-    if (release._tag === 'Retained') {
-      this.#keys(this.#retained, leased.run.identifier).add(leased.workspace.key)
-    }
-    this.#record('release', leased.run.identifier, leased.workspace, release)
-    return Effect.void
+  withLeasedWorkspace<Value, Failure, Requirements>(
+    run: WorkspaceRun,
+    use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
+    disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
+  ): Effect.Effect<Value, Failure, Requirements> {
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const key = `run-${String(run.runId)}`
+        const leased = this.#keys(this.#leased, run.identifier)
+        if (leased.has(key)) {
+          throw new Error(`workspace ${run.identifier}/${key} is already leased`)
+        }
+        leased.add(key)
+        const workspace: Workspace = { path: `${this.#root}/${run.identifier}/${key}`, key }
+        this.#record('acquire', run.identifier, workspace)
+        return workspace
+      }),
+      (workspace) => use(workspace),
+      (workspace, exit) =>
+        Effect.sync(() => {
+          const release = disposition(exit)
+          this.#keys(this.#leased, run.identifier).delete(workspace.key)
+          if (release._tag === 'Retained') {
+            this.#keys(this.#retained, run.identifier).add(workspace.key)
+          }
+          this.#record('release', run.identifier, workspace, release)
+        }),
+    )
   }
 
   exists(identifier: IssueIdentifier): Effect.Effect<boolean> {
