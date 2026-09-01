@@ -297,7 +297,53 @@ Rejected, for now: SSE or WebSocket from coordinator to browser, and any push pr
 to coordinator. Both are real improvements at a fleet size this design does not yet target, and both
 are much easier to add once the aggregate document is settled than to design around before it is.
 
-## Package layout
+### D12 — The UI is a workspace package under `packages/`, not an `apps/` tree
+
+Everything ships from this repository. `pnpm-workspace.yaml` keeps its single `packages/*` glob and
+the coordinator's frontend becomes `packages/coordinator-ui` beside the others.
+
+Rejected: an `apps/` root holding the deployables. It sounds tidier and it would lie about the layout,
+because the _instance_ application is the repository root — the CLI, the operator server and the
+workflow loader live in `src/`, and `AGENTS.md` names the root as the composition root. Adding `apps/`
+for the second deployable while the first stays at the root produces an asymmetry where neither
+location tells you what it holds. Moving the root application into `apps/` to fix that symmetry is a
+large migration bought with no functional gain.
+
+Rejected: folding the React app into `packages/coordinator/ui/` as a subdirectory, mirroring how
+`src/operator/ui/` sits inside the root application. The precedent does not transfer. The instance
+console is four dependency-free files with no build; the coordinator UI has a real dependency tree,
+and putting it in the coordinator's own manifest would let server code import React with nothing to
+stop it. This repository enforces boundaries mechanically wherever it can —
+`test/package-boundaries.test.ts`, `test/import-boundaries.test.ts`, `test/runner-neutrality.test.ts`
+— and a manifest boundary is the enforcement that fits here.
+
+Note the resulting edge is unusual and worth stating: `packages/coordinator` does **not** depend on
+`packages/coordinator-ui` as a module. It serves that package's built output as static assets, exactly
+as `scripts/copy-operator-ui.mjs` copies the instance console into `dist/`. There is a build-order
+dependency and no import edge, and `test/package-boundaries.test.ts` should assert the absence of the
+import edge rather than only the presence of the manifest ones.
+
+### D13 — Two build systems, explicitly ordered; the UI is not a project reference
+
+The workspace builds today as a TypeScript project graph: `tsc -b tsconfig.build.json` orders the four
+packages and then compiles the root. Vite does not participate in that graph, so `pnpm build` gains a
+second stage rather than a second opinion:
+
+1. `tsc -b tsconfig.build.json` — now with `packages/operator-model` and `packages/coordinator` added
+   to `references`.
+2. `vite build` in `packages/coordinator-ui`, emitting to its own `dist/`.
+3. The existing copy step, extended to place both browser bundles beside the servers that serve them.
+
+`packages/coordinator-ui` is deliberately **not** a `tsc -b` project reference. Vite owns its build and
+`tsc --noEmit` owns its typecheck, which is the same split `tsconfig.browser.json` already has — it is
+excluded from `tsconfig.build.json` and typechecked separately in the `typecheck` script. One more
+entry in that script is a smaller change than teaching the project graph about a bundler.
+
+Rejected: adopting Turborepo or Nx to orchestrate the two stages. The build is two ordered commands in
+one `package.json` script; a task runner would add a configuration surface and a cache to manage in
+exchange for ordering that `&&` already expresses.
+
+## Monorepo layout
 
 Three new units, all under `packages/` alongside the existing four:
 
@@ -309,21 +355,66 @@ Three new units, all under `packages/` alongside the existing four:
 - **`packages/coordinator-ui`** — the React + Vite + TanStack Query app, built to static assets that
   `packages/coordinator` serves.
 
-This is a departure from an accepted convention and should be recorded as one. `AGENTS.md` states
-that the packages "are not built or released separately" and that they share "one deployable Symphony
-executable". The coordinator is a second executable with its own lifecycle. That sentence needs
-amending as part of this work rather than being quietly falsified.
-
 The dependency direction extends cleanly:
 
 ```
 core  <-  adapter-node  <-  adapters  <-  root application
-operator-model  <-  coordinator  <-  coordinator-ui
-operator-model  <-  root application (instance console)
+operator-model  <-  coordinator          (coordinator-ui: build-order only, no import edge)
+operator-model  <-  root application     (instance console, inlined)
+operator-model  <-  coordinator-ui
 ```
 
-`packages/operator-model` depends on nothing in the workspace, which is what lets both surfaces have
-it. `test/package-boundaries.test.ts` should be extended to assert the new edges.
+`packages/operator-model` depends on nothing in the workspace, which is what lets all three surfaces
+have it.
+
+### The convention this changes
+
+`AGENTS.md` states that the packages "are not built or released separately" and that they share "one
+deployable Symphony executable". After this work the workspace produces two executables, and
+`packages/*` holds architectural units of both. That sentence needs amending as part of the work
+rather than being quietly falsified — and the amendment should say what decides where something goes,
+so the next addition is not a judgement call: **a workspace package is a unit of one or both
+deployables; the deployables themselves are the repository root (instance) and
+`packages/coordinator`.**
+
+### Toolchain touchpoints
+
+Every one of these is a small change, and the value of listing them is that none of them is
+discovered late.
+
+| Concern        | Today                                                    | Change                                                                    |
+| -------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Workspace glob | `packages/*`                                             | unchanged — the new units are packages (D12)                              |
+| `allowBuilds`  | `esbuild: true`                                          | unchanged — Vite's esbuild is already permitted                           |
+| Build          | `tsc -b` + browser `tsc` + copy script                   | add two references; add `vite build`; extend the copy step (D13)          |
+| Typecheck      | `tsc --noEmit` + `tsc -p tsconfig.browser.json --noEmit` | add `tsc -p packages/coordinator-ui --noEmit`                             |
+| Lint           | oxlint, `plugins: ["typescript"]`, type-aware            | add the `react`, `react-perf` and `jsx-a11y` plugins oxlint already ships |
+| Format         | oxfmt over the whole tree                                | confirm TSX coverage in phase 0; no configuration expected                |
+| Tests          | root `test/`, three configs selecting by path            | `test/coordinator/` and `test/coordinator-ui/`, on the existing happy-dom |
+| Source aliases | `@symphony/*` → sources in `vitest.shared.ts`            | unchanged — the existing regex already covers new packages                |
+| Boundaries     | `test/package-boundaries.test.ts`                        | assert the new edges, and the absent coordinator → UI import edge (D12)   |
+
+Two of these deserve a sentence more than the table gives them.
+
+**Lint rules.** The existing rule set is deliberately severe, and two of its rules land badly on React.
+`typescript/explicit-function-return-type` on every component and every hook is noise rather than
+safety, and it should be turned off for `packages/coordinator-ui` by a scoped override — the same
+mechanism `.oxlintrc.json` already uses for the import-direction layers, and the same kind of
+concession the instance console already has for `no-unused-vars`. The `no-unsafe-*` family stays on:
+that is where the value is when data arrives from HTTP.
+
+**Accessibility.** The instance console holds itself to an accessibility contract asserted structurally
+by `test/harness/accessibility.ts`. Enabling oxlint's `jsx-a11y` plugin means the React app gets much
+of that contract enforced at lint time instead, which is strictly better than a test that runs after
+the fact. The structural audit should still be pointed at the coordinator's rendered output, because
+lint rules see components and the audit sees the page.
+
+**Where UI tests live.** They go in the root `test/` tree with everything else, not colocated beside
+components as React convention would have it. `AGENTS.md` is explicit that the tests stay in one tree
+and run once from `pnpm check`, with the three Vitest configurations selecting by path; colocating one
+package's tests would mean either a fourth configuration or a glob that reaches into `packages/*/src`,
+and neither is worth the convention break. happy-dom is already a devDependency and already drives the
+instance console's suite.
 
 ## What changes inside the instance
 
@@ -393,6 +484,8 @@ where the design risk is; mutation is mostly plumbing once the view is trustwort
 3. **Whether the coordinator should retain rows across an instance restart.** An instance loses its
    completed list when it restarts; a coordinator that remembers would be more useful and would need to
    decide what to do when the restarted instance disagrees with what it remembers.
-4. **Whether `packages/coordinator-ui` belongs under `packages/`** at all, given it is an application
-   rather than an architectural unit of the existing executable. An `apps/` root may be the more honest
-   structure once there are two deployables.
+4. **How the two deployables are versioned and released.** D12 settles where the code lives; it does
+   not settle whether a coordinator change and an instance change ship as one version. One lockfile and
+   one CI pipeline are already decided; a single version number across two executables that can be
+   deployed independently is not obviously right, and the answer interacts with the version-skew
+   question above.
