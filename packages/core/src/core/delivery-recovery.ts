@@ -19,7 +19,7 @@
 
 import { Effect, Option, Ref, type Scope } from 'effect'
 
-import type { Issue, IssueId } from '../domain/domain.js'
+import type { Issue } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
@@ -189,44 +189,68 @@ const recoverIssue = (
   })
 
 /**
- * Looks through the active issues once, for work a previous process left behind.
+ * Looks at every candidate whose workspace this process has not examined yet, for work a previous
+ * one left behind.
  *
- * Placed after startup handoff recovery — which is what tells it whether a retained worktree is a
- * repair of an existing pull request or normal work on the issue's own branch — and before either
- * a repair or a dispatch can put an agent on the issue. That order is the point: publishing what
- * is already there costs a push, while letting a repair start first costs a whole turn and one of
- * the repair budget an operator's intervention threshold is measured against.
+ * Per issue rather than once for the host: an issue that is inactive when the host starts, or that
+ * the tracker has not reported yet, becomes a candidate later and arrives with whatever its
+ * workspace holds — and a scan that had declared itself finished would hand that workspace straight
+ * to an agent. The dispatch pass calls this with the candidates it already fetched, so covering
+ * them costs no tracker call of its own, and after the first pass there is normally nothing left to
+ * look at.
  *
- * It fetches the active issues itself rather than reading the dispatch pass's fetch, because it
- * has to run before the stage that would dispatch them. That is one extra tracker call in the
- * lifetime of a process.
- *
- * Answers whether it looked, so the pass reports the stage it actually performed.
+ * Answers whether it looked at anything.
  */
-export const recoverRetainedDeliveries = (
+export const examineWorkspaces = (
+  context: OrchestratorContext,
+  candidates: readonly Issue[],
+): Effect.Effect<boolean, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const opening = yield* Ref.get(context.state)
+    // Deliberately not filtered by dispatch eligibility. A change that already exists is owed a
+    // publication whether or not the issue would be dispatched again: a routing label removed
+    // between the failed publication and a restart says nothing about the diff on disk.
+    const outstanding = candidates.filter((issue) => !opening.examinedWorkspaces.has(issue.id))
+    if (outstanding.length === 0) {
+      return false
+    }
+    for (const issue of outstanding) {
+      const examined =
+        opening.lastKnownGood.sourceControl === null ? true : yield* recoverIssue(context, issue)
+      yield* Ref.update(context.state, (current) =>
+        Transitions.noteWorkspaceExamined(current, issue.id, examined),
+      )
+    }
+    return true
+  })
+
+/**
+ * The one sweep that runs before the first reconciliation.
+ *
+ * It exists for the ordering: a restored handoff's repair is dispatched by the reconciliation pass,
+ * which runs before any candidate fetch, so without this a repair could be the first thing to enter
+ * a workspace nobody had looked at — costing a whole turn and one of the repair budget to
+ * rediscover work a push would have delivered. It fetches the active issues itself, which is one
+ * extra tracker call in the lifetime of a process; everything after it rides on the dispatch pass's
+ * own fetch through {@link examineWorkspaces}.
+ */
+export const sweepRetainedDeliveries = (
   context: OrchestratorContext,
 ): Effect.Effect<boolean, never, Scope.Scope> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(context.state)
-    const outstanding = opening.deliveryRecoveryFinished && opening.unexaminedWorkspaces.size === 0
-    if (outstanding || !opening.startupRecoveryFinished) {
+    if (opening.startupSweepFinished || !opening.startupRecoveryFinished) {
       return false
     }
     const effective = opening.lastKnownGood
-    if (effective.sourceControl === null) {
-      yield* Ref.update(context.state, (current) =>
-        Transitions.finishDeliveryRecovery(current, new Set()),
-      )
-      return true
-    }
     const candidates = yield* effective.tracker
       .fetchIssuesByStates(effective.workflow.config.tracker.activeStates, null, {
         hydrateDependencies: false,
       })
       .pipe(asSettled)
     if (candidates._tag === 'Failed') {
-      // Nothing is concluded from a tracker that could not be reached: the flag stays down and the
-      // next pass looks again, because work left in a workspace does not expire.
+      // Nothing is concluded from a tracker that could not be reached: the sweep stays unfinished
+      // and the next pass runs it, because work left in a workspace does not expire.
       yield* logWarning('delivery recovery issue fetch failed; retrying on the next pass', {
         action: 'delivery_recovery',
         outcome: 'failed',
@@ -234,20 +258,7 @@ export const recoverRetainedDeliveries = (
       })
       return false
     }
-    // Deliberately not filtered by dispatch eligibility. A change that already exists is owed a
-    // publication whether or not the issue would be dispatched again: a routing label removed
-    // between the failed publication and this restart says nothing about the diff on disk.
-    const unexamined = new Set<IssueId>()
-    for (const issue of candidates.value) {
-      if (!(yield* recoverIssue(context, issue))) {
-        unexamined.add(issue.id)
-      }
-    }
-    // The scan has run either way. What it could not read is carried as the set dispatch refuses,
-    // so one unreadable workspace holds back its own issue rather than every issue — and the next
-    // pass looks at it again.
-    yield* Ref.update(context.state, (current) =>
-      Transitions.finishDeliveryRecovery(current, unexamined),
-    )
+    yield* examineWorkspaces(context, candidates.value)
+    yield* Ref.update(context.state, Transitions.finishStartupSweep)
     return true
   })

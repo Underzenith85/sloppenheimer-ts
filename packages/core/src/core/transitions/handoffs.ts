@@ -2,7 +2,7 @@ import { Option } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
-import { withEntry, withoutEntry, withMember } from '../../support/collections.js'
+import { withEntry, withoutEntry, withMember, withoutMember } from '../../support/collections.js'
 import type { CompletedEntry, HandoffEntry, HandoffRecoveryCounts, RuntimeState } from '../state.js'
 import { claimIssue, completeIssue } from './claims.js'
 
@@ -98,22 +98,31 @@ export const finishStartupRecovery = (state: RuntimeState): RuntimeState => ({
   startupRecoveryFinished: true,
 })
 
-/**
- * This process has run its scan for work a previous one left unpublished, and these are the
- * workspaces it could not read or was not allowed to act on.
- *
- * The flag and the set answer different questions: the flag says the scan has happened at all, and
- * the set says which issues are still owed one. Dispatch consults the set, so a workspace nobody
- * has looked at never receives an agent, and a later pass clears it by looking again.
- */
-export const finishDeliveryRecovery = (
-  state: RuntimeState,
-  unexamined: ReadonlySet<IssueId>,
-): RuntimeState => ({
+/** The sweep that precedes the first reconciliation has run. */
+export const finishStartupSweep = (state: RuntimeState): RuntimeState => ({
   ...state,
-  deliveryRecoveryFinished: true,
-  unexaminedWorkspaces: unexamined,
+  startupSweepFinished: true,
 })
+
+/**
+ * Records what looking at one issue's workspace for unpublished work established.
+ *
+ * `examined` moves the issue out of what dispatch refuses and into what the scan will not repeat;
+ * anything else leaves it owed a look, which is what dispatch consults. Stated per issue because
+ * the set of candidates is not fixed: an issue that becomes active later arrives owed one.
+ */
+export const noteWorkspaceExamined = (
+  state: RuntimeState,
+  id: IssueId,
+  examined: boolean,
+): RuntimeState =>
+  examined
+    ? {
+        ...state,
+        examinedWorkspaces: withMember(state.examinedWorkspaces, id),
+        unexaminedWorkspaces: withoutMember(state.unexaminedWorkspaces, id),
+      }
+    : { ...state, unexaminedWorkspaces: withMember(state.unexaminedWorkspaces, id) }
 
 export const setHandoffStoreError = (
   state: RuntimeState,

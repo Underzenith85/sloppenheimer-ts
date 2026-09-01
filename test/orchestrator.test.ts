@@ -431,21 +431,25 @@ const layerTestPorts = (
   ports: TestPorts,
 ): Layer.Layer<OrchestratorServices, TrackerError | SourceControlError> => {
   /**
-   * Whether any agent has run yet, which is what the stub source control reads the worktree as.
+   * The issues an agent has run for, which is what the stub source control reads their worktrees
+   * as.
    *
-   * A workspace is clean until an agent edits it. Saying so matters: the host publishes only what
-   * it can see, and startup delivery recovery reads a prepared workspace that inspects as changed
-   * as work a previous process never published. A stub that always read as changed would have
-   * every test's first pass republishing a workspace no agent had touched.
+   * A workspace is clean until an agent edits it, and only that issue's own. Saying so matters: the
+   * host publishes only what it can see, and workspace examination reads a prepared workspace that
+   * inspects as changed as work a previous process never published. A stub that read every
+   * workspace as changed once any agent had run would have each pass republishing workspaces no
+   * agent had touched.
    */
-  let anyAgentLaunched = false
+  const launched = new Set<string>()
   const tracked: TestPorts = {
     ...ports,
     runAgent: (launch) => {
-      anyAgentLaunched = true
+      launched.add(launch.issue.id)
       return ports.runAgent(launch)
     },
   }
+  const editedByAnAgent = (branchName: string): boolean =>
+    [...launched].some((id) => branchName === `sloppenheimer/issue-${id}`)
   // The orchestrator reads and writes the handoff store through `FileSystem`; the harness binds the
   // host's, so a test drives real files exactly as the composition root does.
   const base = Layer.mergeAll(
@@ -468,7 +472,11 @@ const layerTestPorts = (
           target._tag === 'Repair' ? Option.some(target.expectedHeadSha) : Option.none(),
       }),
     inspect: (prepared) =>
-      Effect.succeed(anyAgentLaunched ? changedWorktree : cleanWorktree(prepared.baselineSha)),
+      Effect.succeed(
+        editedByAnAgent(prepared.target.branchName)
+          ? changedWorktree
+          : cleanWorktree(prepared.baselineSha),
+      ),
     publish: (_issue, prepared) =>
       Effect.succeed({
         _tag: 'Published',
@@ -1463,6 +1471,7 @@ describe('agent turn completion separated from work publication', (): void => {
       const publications: string[] = []
       let inspections = 0
       let launched = 0
+      let readable = false
       const ports: TestPorts = {
         ...harness.ports,
         makeSourceControl: () => ({
@@ -1478,12 +1487,13 @@ describe('agent turn completion separated from work publication', (): void => {
               })
             },
           ),
-          // Unreadable on the first pass, which is what leaves this workspace unexamined and gives
-          // an operator a pause to land before the scan looks again.
+          // Unreadable until the test says otherwise, which is what leaves this workspace
+          // unexamined and gives an operator's pause somewhere to land before it is looked at.
           inspect: () => {
             inspections += 1
-            return inspections === 1
-              ? Effect.fail(
+            return readable
+              ? Effect.succeed(changedWorktree)
+              : Effect.fail(
                   new SourceControlError({
                     category: 'invalid_repository',
                     message: 'the worktree could not be read',
@@ -1491,7 +1501,6 @@ describe('agent turn completion separated from work publication', (): void => {
                     worktreePreserved: true,
                   }),
                 )
-              : Effect.succeed(changedWorktree)
           },
         }),
         runAgent: () => {
@@ -1508,6 +1517,7 @@ describe('agent turn completion separated from work publication', (): void => {
           }
 
           yield* control.setIssuePaused(167, true)
+          readable = true
           yield* control.refresh
           yield* control.refresh
 
@@ -1655,6 +1665,67 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(snapshot.retrying[0]?.error).toContain('delivery failed')
         }),
       )
+    }),
+  )
+
+  it.scoped('examines the workspace of an issue that becomes a candidate after startup', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-late-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      // Not active when the host starts — the startup sweep never sees it — and a candidate later,
+      // arriving with whatever a previous process left in its workspace.
+      let candidates: readonly Issue[] = []
+      const harness = makeHarness(isolated, () => candidates)
+      let launched = 0
+      const publications: Readonly<{ branchName: string; launchedFirst: boolean }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push({
+                branchName: prepared.target.branchName,
+                launchedFirst: launched > 0,
+              })
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          expect(publications).toEqual([])
+
+          candidates = [issue]
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+        }),
+      )
+
+      // Published by the examination the dispatch pass performs, before that same pass could put an
+      // agent into the workspace holding it.
+      expect(publications[0]).toEqual({
+        branchName: 'sloppenheimer/issue-167',
+        launchedFirst: false,
+      })
     }),
   )
 })

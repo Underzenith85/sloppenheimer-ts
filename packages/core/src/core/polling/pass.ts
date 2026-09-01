@@ -5,7 +5,7 @@ import type { Workflow } from '../../config/workflow.js'
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
-import { recoverRetainedDeliveries } from '../delivery-recovery.js'
+import { examineWorkspaces, sweepRetainedDeliveries } from '../delivery-recovery.js'
 import { dispatch } from '../dispatch.js'
 import { reconcileHandoffs } from '../handoff-reconciliation.js'
 import { dispatchAdmission, sortIssues } from '../policy.js'
@@ -140,6 +140,9 @@ const dispatchCandidates = (
           ),
         ),
       )
+    // Every candidate this pass could dispatch is looked at first, which is what covers an issue
+    // that became active after the startup sweep: it arrives with whatever its workspace holds.
+    yield* examineWorkspaces(context, candidates)
     for (const issue of sortIssues(candidates)) {
       // Read afresh: a dispatch earlier in this pass may have taken the slot this one wanted.
       const current = yield* Ref.get(context.state)
@@ -171,7 +174,7 @@ export const poll = (
     // never published is published from here, rather than being handed to a repair that would
     // spend a turn and one of the repair budget rediscovering it. A workspace it could not read is
     // recorded, and dispatch refuses that issue until a later pass manages to look.
-    if (yield* recoverRetainedDeliveries(context)) {
+    if (yield* sweepRetainedDeliveries(context)) {
       performed.push('delivery_recovery')
     }
     dispatchValidationFailed = (yield* reloadWorkflow(context)) || dispatchValidationFailed

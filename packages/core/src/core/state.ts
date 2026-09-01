@@ -121,13 +121,22 @@ export type RuntimeState = Readonly<{
 
   startupRecoveryFinished: boolean
   /**
-   * Whether this process has run its scan for work a previous one left unpublished. It runs once,
-   * after handoff recovery, because it needs the restored pull requests to know which branch a
-   * retained worktree belongs to.
+   * Whether the sweep that runs before the first reconciliation has happened. It exists so a
+   * restored handoff's repair cannot be dispatched into a workspace nobody has looked at; every
+   * issue that becomes a candidate later is examined by the dispatch pass instead, which already
+   * holds the candidate list and so costs no further tracker call.
    */
-  deliveryRecoveryFinished: boolean
+  startupSweepFinished: boolean
   /**
-   * Issues whose workspace that scan could not read, or was not allowed to act on. Dispatch is
+   * Issues whose workspace this process has looked at for work a previous one left unpublished.
+   *
+   * Per issue rather than one flag for the whole scan: an issue that is not a candidate at startup
+   * — inactive then, or not yet reported — becomes one later, and a scan that had declared itself
+   * finished would never look at the workspace it arrives with.
+   */
+  examinedWorkspaces: ReadonlySet<IssueId>
+  /**
+   * Issues whose workspace the scan could not read, or was not allowed to act on. Dispatch is
    * refused for them: putting an agent into a workspace nobody has looked at is how work a previous
    * process left there gets attributed to the run that happened to find it. The next pass tries
    * them again.
@@ -453,7 +462,8 @@ export const initialState = (
   lastKnownGood,
   workflowReloadError: null,
   startupRecoveryFinished: false,
-  deliveryRecoveryFinished: false,
+  startupSweepFinished: false,
+  examinedWorkspaces: new Set(),
   unexaminedWorkspaces: new Set(),
   storeReadFailed: restored.storeReadFailed,
   handoffStoreError: restored.storeError,

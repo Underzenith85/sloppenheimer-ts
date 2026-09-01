@@ -181,7 +181,10 @@ const prepareRepository = (
     )
     const observedRemoteHead = yield* remoteHead(settings, 'prepare', workspace, target.branchName)
     const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
-    if (Option.isSome(repairHead)) {
+    // Fetched whenever the remote has this branch, not only for a repair that starts from it: the
+    // inspection decides whether a retained commit is genuinely unpublished by asking whether the
+    // remote head already contains it, and it cannot ask about a commit it does not have.
+    if (Option.isSome(observedRemoteHead)) {
       yield* runGit(settings, 'prepare', workspace.path, [
         'fetch',
         '--no-tags',
@@ -211,6 +214,30 @@ const prepareRepository = (
   })
 
 /**
+ * Whether `candidate` is already contained in `reference`, so it carries nothing that one lacks.
+ *
+ * A failure is read as "not contained": the caller acts on that by treating the commit as work,
+ * and a commit that cannot be compared is safer inspected than assumed delivered.
+ */
+const containedIn = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+  candidate: string,
+  reference: string,
+): Effect.Effect<boolean> =>
+  Effect.map(
+    Effect.either(
+      runGit(settings, 'publish', prepared.workspace.path, [
+        'merge-base',
+        '--is-ancestor',
+        candidate,
+        reference,
+      ]),
+    ),
+    (outcome) => outcome._tag === 'Right',
+  )
+
+/**
  * Reads the worktree against what the preparation recorded, without changing anything.
  *
  * Both halves of "there is work here" are asked separately, because they fail differently: an
@@ -218,10 +245,10 @@ const prepareRepository = (
  * a publication that failed after committing left behind, and the second must not read as an empty
  * worktree just because the first is now clean.
  *
- * The commit is measured against the branch's remote head, falling back to the baseline where the
- * preparation found no remote branch. Against the baseline alone, a workspace whose work has
- * already been published would read as work to publish for the rest of its life — which is exactly
- * what startup delivery recovery would then act on.
+ * The commit is measured by containment rather than by equality: a workspace left behind by a host
+ * that was down while the branch advanced holds a commit the remote already has and has since
+ * built on, and reading that as unpublished work would republish it under a lease that matches —
+ * overwriting whatever arrived in the meantime. Ahead means the remote does not contain it.
  */
 const inspectRepository = (
   settings: GitSourceControlSettings,
@@ -232,7 +259,8 @@ const inspectRepository = (
     const dirtyFileCount = porcelain.split('\n').filter((line) => line.trim().length > 0).length
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
     const delivered = Option.getOrElse(prepared.expectedRemoteHead, () => prepared.baselineSha)
-    const committedAhead = headSha !== delivered
+    const committedAhead =
+      headSha !== delivered && !(yield* containedIn(settings, prepared, headSha, delivered))
     return dirtyFileCount === 0 && !committedAhead
       ? { _tag: 'Clean', headSha }
       : { _tag: 'Changed', headSha, dirtyFileCount, committedAhead }

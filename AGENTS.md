@@ -574,13 +574,19 @@ repair agent that had achieved nothing.
 - Restart recovery reads the workspace, not a persisted queue. The host's preparation preserves a
   worktree that is on the expected branch and carries uncommitted edits or a commit the remote does
   not have, so a prepared workspace that inspects as changed is work a previous process never
-  published. `core/delivery-recovery.ts` publishes it once, before anything can put an agent on the
-  issue, and it is never counted as a repair attempt. It is not filtered by dispatch eligibility: a
-  routing label removed between the failed publication and the restart says nothing about the diff
-  on disk. A workspace it could not read — or was not allowed to act on, because the issue is
-  paused — is recorded in `unexaminedWorkspaces`, and `dispatchAdmission` refuses that issue until a
-  later pass manages to look: an agent dispatched into an unread workspace would carry whatever a
-  previous process left there as its own work.
+  published — and unpublished means the remote does not contain it, not merely that the shas differ:
+  a workspace the branch has moved past holds a commit the remote already has, and republishing it
+  under a matching lease would overwrite whatever arrived in the meantime.
+  `core/delivery-recovery.ts` publishes what it finds before anything can put an agent on the issue,
+  and it is never counted as a repair attempt. It is not filtered by dispatch eligibility: a routing
+  label removed between the failed publication and the restart says nothing about the diff on disk.
+  A workspace it could not read — or was not allowed to act on, because the issue is paused — is
+  recorded in `unexaminedWorkspaces`, and `dispatchAdmission` refuses that issue until a later pass
+  manages to look: an agent dispatched into an unread workspace would carry whatever a previous
+  process left there as its own work. Examination is per issue rather than one sweep, because an
+  issue that is inactive at startup becomes a candidate later and arrives with a workspace of its
+  own; the dispatch pass examines its own candidates, so only the one sweep that has to precede the
+  first reconciliation costs a tracker call.
 
 ### Cancellation and shutdown policy for unpublished work
 

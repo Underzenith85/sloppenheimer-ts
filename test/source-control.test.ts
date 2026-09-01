@@ -135,6 +135,41 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live('reads a workspace the branch has moved past as clean, not as work to deliver', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      const first = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+      yield* sourceControl.publish(issue, first)
+
+      // The host is down while the branch advances: somebody else pushes on top of what it
+      // delivered, and its workspace is left holding the older commit.
+      yield* host(() => git(fixture.seed, ['fetch', 'origin', 'sloppenheimer/issue-165']))
+      yield* host(() =>
+        git(fixture.seed, ['checkout', '-B', 'sloppenheimer/issue-165', 'FETCH_HEAD']),
+      )
+      yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+
+      // Reading that as unpublished work would republish it under a lease that matches the newer
+      // remote head, and the intervening commit would be gone.
+      const second = yield* sourceControl.prepare(issue, workspace, target)
+
+      expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
+      expect(
+        yield* host(() =>
+          git(fixture.remote, ['log', '-1', '--pretty=%s', 'sloppenheimer/issue-165']),
+        ),
+      ).toBe('somebody else')
+    }),
+  )
+
   it.live('reports an empty diff without creating a remote branch', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
