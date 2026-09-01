@@ -119,7 +119,7 @@ This matrix targets the upstream Symphony SPEC Sections 17 and 18 as retrieved o
 | Sink failures do not crash       | Effect logger isolation exercised throughout orchestrator tests                                          | `packages/core/src/support/logging.ts`                                                    |
 | Token/rate-limit aggregation     | Session telemetry accounting tests plus the Core Codex usage telemetry test                              | `packages/core/src/core/transitions.ts`, `packages/adapter-codex/src/connection-state.ts` |
 | Human-readable status surface    | `Extension Conformance: HTTP status surface > binds loopback and serves state owned by the orchestrator` | `src/operator/server.ts`, `src/operator/api.ts`, `src/operator/ui-assets.ts`              |
-| Humanized summaries              | Not shipped as a separate event transformation; UI displays immutable orchestrator snapshot fields.      | `src/operator/ui/app.ts`, `src/operator/ui/detail.ts`, `src/operator/ui/dom.ts`           |
+| Humanized summaries              | Not shipped as a separate event transformation; UI displays immutable orchestrator snapshot fields.      | `src/operator/ui/app.ts`, `src/operator/ui/explain.ts`, `src/operator/ui/dom.ts`          |
 
 ## 13.7.2 HTTP API publication
 
