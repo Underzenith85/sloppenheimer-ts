@@ -62,19 +62,24 @@ describe('operational observability', (): void => {
   )
 
   it.effect('contains metric and tracing sink defects', () => {
+    let evaluations = 0
     const throwingTracer = Tracer.make({
       span: () => {
         throw new Error('exporter unavailable')
       },
-      context: (evaluate) => evaluate(),
+      context: (evaluate) => {
+        const value = evaluate()
+        throw new Error(`context export failed after ${String(value)}`)
+      },
     })
     return Effect.gen(function* () {
       yield* safelyRecord(Effect.die('metric exporter unavailable'))
-      const value = yield* Effect.succeed(42).pipe(
+      const value = yield* Effect.sync(() => ++evaluations).pipe(
         withOperationalSpan('test.operation'),
         Effect.withTracer(protectTracer(throwingTracer)),
       )
-      expect(value).toBe(42)
+      expect(value).toBe(1)
+      expect(evaluations).toBe(1)
     })
   })
 

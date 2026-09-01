@@ -95,9 +95,13 @@ Authorization=[REDACTED]`,
   it.effect('redacts and bounds propagated operation annotations', () =>
     Effect.gen(function* () {
       const entries: unknown[] = []
+      const annotationKeys: string[] = []
       const collectingLogger = Logger.replace(
         Logger.defaultLogger,
-        Logger.make((entry) => entries.push(entry)),
+        Logger.make((entry) => {
+          entries.push(entry)
+          annotationKeys.push(...[...entry.annotations].map(([key]) => key))
+        }),
       )
       yield* logInfo('inside operation').pipe(
         withLogAnnotations({ token: 'secret', issue_id: 'x'.repeat(2_000) }),
@@ -108,6 +112,10 @@ Authorization=[REDACTED]`,
       expect(serialized).not.toContain('secret')
       expect(serialized).toContain('[REDACTED]')
       expect(serialized).not.toContain('x'.repeat(1_025))
+      expect(annotationKeys).toContain('issue_id')
+      expect(annotationKeys).not.toContain('action')
+      expect(annotationKeys).not.toContain('outcome')
+      expect(annotationKeys).not.toContain('error')
     }),
   )
 })

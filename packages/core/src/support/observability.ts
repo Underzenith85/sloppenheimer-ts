@@ -144,6 +144,32 @@ const protectedSpan = (span: Tracer.Span): Tracer.Span => ({
   },
 })
 
+/** Runs an exporter context exactly once even when its restoration path throws. */
+const protectedContext = <Value>(
+  tracer: Tracer.Tracer,
+  evaluate: () => Value,
+  fiber: Parameters<Tracer.Tracer['context']>[1],
+): Value => {
+  let invoked = false
+  let completed: Option.Option<Value> = Option.none()
+  try {
+    return tracer.context(() => {
+      invoked = true
+      const value = evaluate()
+      completed = Option.some(value)
+      return value
+    }, fiber)
+  } catch (cause: unknown) {
+    if (Option.isSome(completed)) {
+      return completed.value
+    }
+    if (invoked) {
+      throw cause
+    }
+    return evaluate()
+  }
+}
+
 /** Shields orchestration from a tracer/exporter that throws synchronously. */
 export const protectTracer = (tracer: Tracer.Tracer): Tracer.Tracer =>
   Tracer.make({
@@ -154,13 +180,7 @@ export const protectTracer = (tracer: Tracer.Tracer): Tracer.Tracer =>
         return fallbackSpan(name, parent, context, links, startTime, kind)
       }
     },
-    context: (evaluate, fiber) => {
-      try {
-        return tracer.context(evaluate, fiber)
-      } catch {
-        return evaluate()
-      }
-    },
+    context: (evaluate, fiber) => protectedContext(tracer, evaluate, fiber),
   })
 
 /** Composition-root guard for whichever tracer/exporter layer an operator installs. */

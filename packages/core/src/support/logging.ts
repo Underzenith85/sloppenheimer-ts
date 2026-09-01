@@ -29,12 +29,16 @@ const sanitize = (value: unknown, depth = 0): unknown => {
   )
 }
 
-export const sanitizeLogFields = (fields: LogFields): LogFields =>
+const sanitizeEntries = (fields: LogFields): LogFields =>
   Object.fromEntries(
-    Object.entries({ action: 'unspecified', outcome: 'unknown', error: null, ...fields }).map(
-      ([key, value]) => [key, isSecretKey(key) ? '[REDACTED]' : sanitize(value)],
-    ),
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      isSecretKey(key) ? '[REDACTED]' : sanitize(value),
+    ]),
   )
+
+export const sanitizeLogFields = (fields: LogFields): LogFields =>
+  sanitizeEntries({ action: 'unspecified', outcome: 'unknown', error: null, ...fields })
 
 const fallbackWarning = (level: string, message: string): Effect.Effect<void> =>
   Effect.sync(() => {
@@ -66,4 +70,4 @@ export const logError = (message: string, fields: LogFields = {}): Effect.Effect
 export const withLogAnnotations =
   (fields: LogFields) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-    effect.pipe(Effect.annotateLogs(sanitizeLogFields(fields)))
+    effect.pipe(Effect.annotateLogs(sanitizeEntries(fields)))
