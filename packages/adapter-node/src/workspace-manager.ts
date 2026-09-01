@@ -39,7 +39,8 @@ import {
 import {
   issueHoldsWorkspace,
   removeIssueWorkspaces,
-  removeRunWorkspace,
+  removeRunWorkspaceFiles,
+  runBeforeRemove,
 } from './workspace-cleanup.js'
 import { runHook } from './workspace-hooks.js'
 
@@ -171,7 +172,6 @@ const provisionRunWorkspace = (
 /** Discards a released workspace, or keeps it as the recovery artifact its lease names. */
 const disposeOfWorkspace = (
   fileSystem: FileSystem.FileSystem,
-  hooks: HooksConfig,
   owner: WorkspaceOwner,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
@@ -179,7 +179,9 @@ const disposeOfWorkspace = (
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     if (reason === null) {
-      yield* removeRunWorkspace(fileSystem, hooks, paths.runPath)
+      // Without the hook: a release ran it while its lease was still being renewed, because an
+      // operator's command is not bounded and a workspace must not go unsaid for while it runs.
+      yield* removeRunWorkspaceFiles(fileSystem, paths.runPath)
       // The issue directory itself stays. It is an empty container once its last run has gone, and
       // removing it here would race an acquisition that has just created its own run directory
       // inside it; cleanup takes it when the issue is finished with.
@@ -191,7 +193,6 @@ const disposeOfWorkspace = (
 /** Releasing reports to nobody: the run it followed has already ended, so a failure is logged. */
 const releaseRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
-  hooks: HooksConfig,
   root: string,
   owner: WorkspaceOwner,
   leased: LeasedWorkspace,
@@ -201,7 +202,6 @@ const releaseRunWorkspace = (
     Effect.flatMap((paths) =>
       disposeOfWorkspace(
         fileSystem,
-        hooks,
         owner,
         paths,
         leased.run,
@@ -283,16 +283,24 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
               ),
         ),
       )
-      return yield* restore(Effect.raceFirst(use(workspace), keepingLease)).pipe(
-        Effect.onExit((exit) =>
-          releaseRunWorkspace(
-            fileSystem,
-            hooks,
-            root,
-            owner,
-            { run, workspace },
-            disposition(exit),
+      // The `before_remove` hook runs inside the race, where the renewal still is: it is the
+      // operator's own command and nothing bounds it either, and a workspace whose lease went
+      // unsaid while it ran could be taken by another host from under the hook. Everything that
+      // rewrites or removes the record runs after, where the renewal has stopped.
+      return yield* restore(
+        Effect.raceFirst(
+          use(workspace).pipe(
+            Effect.onExit((exit) =>
+              disposition(exit)._tag === 'Completed'
+                ? Effect.ignore(runBeforeRemove(fileSystem, hooks, workspace.path))
+                : Effect.void,
+            ),
           ),
+          keepingLease,
+        ),
+      ).pipe(
+        Effect.onExit((exit) =>
+          releaseRunWorkspace(fileSystem, root, owner, { run, workspace }, disposition(exit)),
         ),
       )
     }),

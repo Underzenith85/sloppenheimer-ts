@@ -48,8 +48,14 @@ const runKeysIn = (entries: readonly string[]): readonly string[] => [
   ),
 ]
 
-/** Removes one run's directory and the lease record beside it, hooks first. */
-export const removeRunWorkspace = (
+/**
+ * The operator's last look at a workspace before it goes. It is their own command, so nothing
+ * bounds it, and its failures are logged rather than raised: the removal happens either way.
+ *
+ * A release runs this while its lease is still being renewed, which is why it is a step of its own:
+ * a hook that outlasts the window its run's lease stands for must not leave that lease unsaid.
+ */
+export const runBeforeRemove = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   runPath: string,
@@ -60,9 +66,28 @@ export const removeRunWorkspace = (
         Effect.catchAll(() => Effect.void),
       )
     }
+  })
+
+/** Takes away one run's directory and the lease record beside it, and nothing else. */
+export const removeRunWorkspaceFiles = (
+  fileSystem: FileSystem.FileSystem,
+  runPath: string,
+): Effect.Effect<void, PlatformError> =>
+  Effect.gen(function* () {
     yield* fileSystem.remove(runPath, { force: true, recursive: true })
     yield* fileSystem.remove(leasePathFor(runPath), { force: true })
   })
+
+/** Removes one run's directory and the lease record beside it, hook first. */
+export const removeRunWorkspace = (
+  fileSystem: FileSystem.FileSystem,
+  hooks: HooksConfig,
+  runPath: string,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.zipRight(
+    runBeforeRemove(fileSystem, hooks, runPath),
+    removeRunWorkspaceFiles(fileSystem, runPath),
+  )
 
 /**
  * Removes one run workspace that no live owner holds, unless taking its record shows otherwise.

@@ -1026,6 +1026,35 @@ describe('run workspace allocation and leases', (): void => {
     }).pipe(Effect.provide(hostFileSystem)),
   )
 
+  it.live('keeps saying a lease while the hook that empties its workspace runs', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const seen = join(root, 'lease-at-before-remove')
+      // The hook copies the record beside the workspace it is being run against, after long enough
+      // for several renewals. `before_remove` is the operator's own command and nothing bounds it.
+      const manager = yield* makeWorkspaceManager(
+        root,
+        hooks({
+          beforeRemove: `sleep 0.4; cp "../$(basename "$PWD").lease" ${JSON.stringify(seen)}`,
+        }),
+        hostOwner,
+        { intervalMs: 50 },
+      ).pipe(Effect.provide(hostFileSystem))
+
+      const workspace = yield* published(manager, 'GH-192')
+
+      const said = JSON.parse(readFileSync(seen, 'utf8')) as WorkspaceLeaseRecord
+      // Said well past the window the claim bought, so the run was still holding its lease while
+      // the hook worked in the directory — which is what keeps another host from taking it away.
+      expect(Date.parse(said.expiresAt)).toBeGreaterThan(
+        Date.parse(said.acquiredAt) + leaseValidityMs + 200,
+      )
+      // And the workspace is gone once the release finishes, hook and all.
+      expect(existsSync(workspace.path)).toBe(false)
+      expect(existsSync(`${workspace.path}.lease`)).toBe(false)
+    }),
+  )
+
   it.live('never says a lease again once it has expired', () =>
     Effect.gen(function* () {
       const root = makeRoot()
