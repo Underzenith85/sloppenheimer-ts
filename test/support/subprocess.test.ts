@@ -86,6 +86,10 @@ describe('process group liveness', (): void => {
 
     // The killed descendants may linger as unreaped `Z` entries on a host whose PID 1 does not reap
     // orphans, so the group keeps answering `process.kill(-pid, 0)`; none of them can run again.
+    // The verdict needs two passes that agree on the same membership, so a descendant the host
+    // reaps between them moves the set and reads as unknown, which every caller takes as alive.
+    // Settle first, exactly as the churn case below does, then hold the probe to `false`.
+    await waitFor(() => !processGroupIsAlive(pid))
     expect(processGroupIsAlive(pid)).toBe(false)
   })
 
