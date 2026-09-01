@@ -4869,6 +4869,45 @@ describe('per-run workspace leases', (): void => {
     }),
   )
 
+  it.effect('keeps the workspace of a run that had no source control to publish through', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const acquired: LeasedWorkspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      // Composing no code-review services is what disables handoff, and this composition supplies
+      // no source control either: the run reaches its end having published nothing, so what the
+      // agent wrote is still only in the workspace.
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (released.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      expect(released[0]).toMatchObject({
+        path: acquired[0]?.workspace.path,
+        release: { _tag: 'Retained', reason: 'run ended without publishing its work' },
+      })
+    }),
+  )
+
   it.effect('leases a retry its own workspace and keeps the failed attempt', () =>
     Effect.gen(function* () {
       const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])

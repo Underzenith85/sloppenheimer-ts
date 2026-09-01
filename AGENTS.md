@@ -58,13 +58,16 @@ lifecycle. This section is the architecture record for it; do not create a separ
   record is hard-linked into place, which is atomic and refuses an existing name — and the run
   directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
   elsewhere never finds a workspace without a lease. The record names the issue, the run, and the
-  host process that holds it, including when that process started, so a host restarted into its
-  predecessor's process id does not keep its leases alive. It is released on success, failure,
+  host process that holds it, including when that process started and the process namespace its id
+  belongs to, so a host restarted into its predecessor's process id does not keep its leases alive,
+  and an owner in another namespace — two containers sharing a root — is never probed against
+  whatever process carries its id here. It is released on success, failure,
   cancellation and shutdown alike, and it outlives the host that wrote it, so a restart and a second
   host reading the same root both see who owns what.
 - **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves
-  nothing behind; every other ending keeps its workspace as a retained recovery artifact naming why,
-  which no later run adopts. `SourceControlPort.prepare` agrees with that and no longer preserves a
+  nothing behind; every other ending — including a composition with no `SourceControlPort` to
+  publish through — keeps its workspace as a retained recovery artifact naming why, which no later
+  run adopts. `SourceControlPort.prepare` agrees with that and no longer preserves a
   dirty worktree: a normal run starts from its branch's published head when the branch exists, and
   from the protected base when it does not, so an attempt that ran out of turns is continued by what
   it published rather than by what a shared directory happened to hold. A repair still starts from

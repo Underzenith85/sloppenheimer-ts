@@ -11,7 +11,7 @@ import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/doma
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.js'
-import { processStartMarker } from '@sloppenheimer/adapter-node/workspace-lease.js'
+import { hostOwner } from '@sloppenheimer/adapter-node/workspace-lease.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
   containedWorkspacePath,
@@ -526,6 +526,27 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('leaves the winner of a refused claim holding its own lease', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const run = { identifier: issueIdentifier('GH-179'), runId: 7 }
+      const leased = yield* manager.acquire(run)
+
+      const refused = yield* Effect.flip(manager.acquire(run))
+
+      // The refusal is the second acquisition's own. The lease it could not take belongs to the run
+      // holding it, and rewriting it would let cleanup take that run's live workspace.
+      expect(refused.category).toBe('lease_conflict')
+      expect(yield* host(() => leaseOf(leased.workspace.path))).toMatchObject({
+        status: 'held',
+        reason: null,
+      })
+      yield* manager.remove(run.identifier)
+      expect(existsSync(leased.workspace.path)).toBe(true)
+    }),
+  )
+
   it.live('keeps a failed attempt as a named artifact and starts its retry clean', () =>
     Effect.gen(function* () {
       const root = makeRoot()
@@ -584,6 +605,81 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('leaves alone a lease published before its own directory exists', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-177'
+      const acquiring = yield* host(() =>
+        foreignLease(root, identifier, {
+          hostId: 'a host acquiring right now',
+          processId: process.pid,
+          startMarker: hostOwner.startMarker,
+          namespace: hostOwner.namespace,
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // An acquisition publishes its lease before it creates its directory, so cleanup that runs in
+      // between finds the lease rather than a workspace it would read as belonging to nobody.
+      expect(existsSync(`${acquiring}.lease`)).toBe(true)
+    }),
+  )
+
+  it.live('leaves alone a lease whose owner belongs to another process namespace', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-178'
+      // Two containers sharing a workspace root each see their own process ids: an id from the
+      // other one names nothing here, and an owner it names is never concluded to be gone.
+      const held = yield* host(async () =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'a host in another container',
+          processId: await exitedProcessId(),
+          startMarker: 'a marker from another namespace',
+          namespace: 'another kernel/pid:[4026531999]',
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      expect(existsSync(held)).toBe(true)
+    }),
+  )
+
+  it.live('leaves a workspace a second live host still holds', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-173'
+      const held = yield* host(() =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'another live host',
+          processId: process.pid,
+          startMarker: hostOwner.startMarker,
+          namespace: hostOwner.namespace,
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      expect(existsSync(held)).toBe(true)
+      expect(existsSync(`${held}.lease`)).toBe(true)
+    }),
+  )
+})
+
+/**
+ * The two cases below turn on what this host can observe of another owner's process: the namespace
+ * its ids belong to, and when the process behind one started. Both are read from `/proc`, so a host
+ * that reports neither cannot run them, and they are reported as skipped rather than as a silent
+ * pass. The rules they exercise are covered without a host in `test/domain/workspace-lease.test.ts`.
+ */
+const ownersAreObservable = hostOwner.namespace !== null && hostOwner.startMarker !== null
+
+describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe', (): void => {
   it.live('never enters a workspace a departed host left, and cleans it up afterwards', () =>
     Effect.gen(function* () {
       const root = makeRoot()
@@ -594,6 +690,7 @@ describe('run workspace allocation and leases', (): void => {
           hostId: 'a host that is gone',
           processId: await exitedProcessId(),
           startMarker: null,
+          namespace: hostOwner.namespace,
         }),
       )
 
@@ -679,53 +776,13 @@ describe('run workspace allocation and leases', (): void => {
           hostId: 'a host that restarted into this id',
           processId: process.pid,
           startMarker: 'a process that is no longer here',
+          namespace: hostOwner.namespace,
         }),
       )
 
       yield* manager.remove(issueIdentifier(identifier))
 
       expect(existsSync(abandoned)).toBe(false)
-    }),
-  )
-
-  it.live('leaves alone a lease published before its own directory exists', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const manager = yield* workspaceManager(root, hooks())
-      const identifier = 'GH-177'
-      const acquiring = yield* host(() =>
-        foreignLease(root, identifier, {
-          hostId: 'a host acquiring right now',
-          processId: process.pid,
-          startMarker: processStartMarker(process.pid),
-        }),
-      )
-
-      yield* manager.remove(issueIdentifier(identifier))
-
-      // An acquisition publishes its lease before it creates its directory, so cleanup that runs in
-      // between finds the lease rather than a workspace it would read as belonging to nobody.
-      expect(existsSync(`${acquiring}.lease`)).toBe(true)
-    }),
-  )
-
-  it.live('leaves a workspace a second live host still holds', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const manager = yield* workspaceManager(root, hooks())
-      const identifier = 'GH-173'
-      const held = yield* host(() =>
-        foreignWorkspace(root, identifier, {
-          hostId: 'another live host',
-          processId: process.pid,
-          startMarker: processStartMarker(process.pid),
-        }),
-      )
-
-      yield* manager.remove(issueIdentifier(identifier))
-
-      expect(existsSync(held)).toBe(true)
-      expect(existsSync(`${held}.lease`)).toBe(true)
     }),
   )
 })

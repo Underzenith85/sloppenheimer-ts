@@ -1,7 +1,7 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readlinkSync } from 'node:fs'
 import { Effect, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
@@ -40,6 +40,24 @@ export const processStartMarker = (processId: number): string | null => {
 }
 
 /**
+ * The process namespace this host's process ids belong to, identified so that another host reading
+ * the same workspace root can tell whether its own ids mean the same thing.
+ *
+ * The namespace inode alone repeats across machines, so it is paired with the kernel's boot
+ * identifier: together they name one namespace on one running kernel. Both are Linux's, and a host
+ * without them reports nothing rather than a value another host could not compare against.
+ */
+const processNamespace = (): string | null => {
+  try {
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+    const namespace = readlinkSync('/proc/self/ns/pid')
+    return `${bootId}/${namespace}`
+  } catch {
+    return null
+  }
+}
+
+/**
  * This host process, for as long as it runs. A lease naming it is this process's own, whatever the
  * operating system later does with the process id — which is why the identity is generated here
  * rather than taken from the pid alone. It is a module constant, so a workflow reload that rebuilds
@@ -49,18 +67,30 @@ export const hostOwner: WorkspaceOwner = {
   hostId: randomUUID(),
   processId: process.pid,
   startMarker: processStartMarker(process.pid),
+  namespace: processNamespace(),
 }
 
 /**
  * What this host can see of a lease's owner now.
  *
- * Signal 0 performs the permission and existence checks without delivering anything. `EPERM` means
- * the process exists and belongs to another user, which is still a running owner. Any other refusal
- * is reported as running too: a cleanup that cannot establish an owner is gone must not remove its
- * workspace. A process that is running is reported with its own start marker, so a process id the
- * kernel handed to a successor is not mistaken for the process that recorded it.
+ * An owner whose process ids are not this host's to read — another namespace, or one neither side
+ * could identify — is unobservable, and is left alone rather than probed against whatever process
+ * happens to carry its id here.
+ *
+ * Otherwise, signal 0 performs the permission and existence checks without delivering anything.
+ * `EPERM` means the process exists and belongs to another user, which is still a running owner. Any
+ * other refusal is reported as running too: a cleanup that cannot establish an owner is gone must
+ * not remove its workspace. A running process is reported with its own start marker, so a process
+ * id the kernel handed to a successor is not mistaken for the process that recorded it.
  */
 export const observeOwner = (owner: WorkspaceOwner): OwnerObservation => {
+  if (
+    owner.namespace === null ||
+    hostOwner.namespace === null ||
+    owner.namespace !== hostOwner.namespace
+  ) {
+    return { _tag: 'Unobservable' }
+  }
   try {
     process.kill(owner.processId, 0)
   } catch (error) {

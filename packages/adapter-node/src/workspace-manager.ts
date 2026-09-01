@@ -75,14 +75,15 @@ const workspaceDirectoryExists = (
   )
 
 /**
- * Claims one run's workspace: the lease first, then the directory the agent works in.
+ * Claims one run's workspace by publishing its lease.
  *
  * The lease is the claim. Hard-linking it into place is atomic and refuses a name that already
  * exists, so a second dispatch of one run identity fails here rather than entering a live
- * workspace — and because the record is complete and in place before the directory exists, cleanup
- * running elsewhere never comes across a workspace with no lease and takes it for one nobody owns.
+ * workspace — and because the record is complete and in place before the run directory exists,
+ * cleanup running elsewhere never comes across a workspace with no lease and takes it for one
+ * nobody owns.
  */
-const claimRunWorkspace = (
+const claimRunLease = (
   fileSystem: FileSystem.FileSystem,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
@@ -112,7 +113,6 @@ const claimRunWorkspace = (
           ),
       ),
     )
-    yield* fileSystem.makeDirectory(paths.runPath)
   })
 
 /**
@@ -228,25 +228,24 @@ const acquireRunWorkspace = (
       run.identifier,
       runWorkspaceKey(run.runId, owner.hostId),
     )
-    yield* claimRunWorkspace(fileSystem, paths, run, owner).pipe(
+    yield* claimRunLease(fileSystem, paths, run, owner).pipe(
       reportedAs('create_failed', 'failed to create workspace'),
-      // The lease is taken before the directory: an acquisition that fails after it hands the
-      // caller nothing to release with, so the workspace is retained here instead.
+    )
+    const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
+    // Only from here is the lease this acquisition's own. Everything after it can fail and hand
+    // the caller nothing to release with, so it retains the workspace itself — but a claim that
+    // was refused belongs to the run that won it, and must never be rewritten from here.
+    yield* Effect.gen(function* () {
+      yield* fileSystem.makeDirectory(paths.runPath)
+      if (hooks.afterCreate !== null) {
+        yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
+      }
+    }).pipe(
+      reportedAs('create_failed', 'failed to create workspace'),
       Effect.onError((cause) =>
         Effect.ignore(retainLease(fileSystem, owner, paths, run, provisioningReason(cause))),
       ),
     )
-    const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
-    if (hooks.afterCreate !== null) {
-      yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs).pipe(
-        // The lease was taken before the hook ran, and an acquisition that fails hands the caller
-        // nothing to release with: the workspace is retained here instead, so cleanup can take it
-        // rather than being held off by a lease this host will never let go of.
-        Effect.onError((cause) =>
-          Effect.ignore(retainLease(fileSystem, owner, paths, run, provisioningReason(cause))),
-        ),
-      )
-    }
     const leased: LeasedWorkspace = { run, workspace }
     return leased
   })

@@ -159,15 +159,21 @@ const runSession = (
   )
 }
 
+/**
+ * Whether the host put what the run produced into the repository. A run the host owns no repository
+ * for reaches the end having published nothing, so what it made is still only in its workspace.
+ */
+type RunPublication = 'published' | 'not_published'
+
 /** The publication-bracketed body of one run, inside the workspace the run leases. */
 const runWithSourceControl = (
   launch: SessionLaunch,
   workspace: Workspace,
-): Effect.Effect<void, AgentError | WorkspaceError | SourceControlError> => {
+): Effect.Effect<RunPublication, AgentError | WorkspaceError | SourceControlError> => {
   const { issue, sessionPorts, target } = launch
   const sourceControl = MutableRef.get(sessionPorts).sourceControl
   if (sourceControl === null) {
-    return runSession(launch, workspace)
+    return runSession(launch, workspace).pipe(Effect.as<RunPublication>('not_published'))
   }
   return sourceControl.prepare(issue, workspace, target).pipe(
     Effect.flatMap((prepared) =>
@@ -186,23 +192,29 @@ const runWithSourceControl = (
             branch: outcome.branchName,
           }),
         ),
-        Effect.asVoid,
+        // Both outcomes are a publication: the host read the whole worktree and put everything it
+        // found into the repository, which for `NoChanges` was nothing.
+        Effect.as<RunPublication>('published'),
       ),
     ),
   )
 }
 
 /**
- * What becomes of the run's workspace once the run has ended. A run that reached the end of
- * publication has nothing left in the directory that is not in the repository; every other ending —
- * a failure, a cancellation, an interrupted shutdown — leaves work that only the directory holds,
- * so the workspace stays as a recovery artifact under the reason it is being kept for.
+ * What becomes of the run's workspace once the run has ended. A run whose work reached the
+ * repository has nothing left in the directory that is not in it; every other ending — a failure, a
+ * cancellation, an interrupted shutdown, or a composition with no source control to publish through
+ * at all — leaves work that only the directory holds, so the workspace stays as a recovery artifact
+ * under the reason it is being kept for.
  */
 const workspaceRelease = (
-  exit: Exit.Exit<void, AgentError | WorkspaceError | SourceControlError>,
+  exit: Exit.Exit<RunPublication, AgentError | WorkspaceError | SourceControlError>,
 ): WorkspaceRelease =>
   Exit.match(exit, {
-    onSuccess: (): WorkspaceRelease => ({ _tag: 'Completed' }),
+    onSuccess: (publication): WorkspaceRelease =>
+      publication === 'published'
+        ? { _tag: 'Completed' }
+        : { _tag: 'Retained', reason: 'run ended without publishing its work' },
     onFailure: (cause): WorkspaceRelease => ({
       _tag: 'Retained',
       reason: Option.match(Cause.failureOption(cause), {

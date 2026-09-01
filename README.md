@@ -615,13 +615,16 @@ workspace that has no lease. The record names the issue, the run, the host, its 
 that process started, and a run releases its lease on success, failure, cancellation and shutdown
 alike.
 
-A run that published its work leaves nothing behind. Every other ending keeps the workspace and
-rewrites its lease as a retained recovery artifact naming why it was kept, which is never adopted by
-a later run: retained workspaces go when the issue reaches a terminal state, and cleanup skips any
+A run that published its work leaves nothing behind. Every other ending — a failure, a cancellation,
+or a composition with no source control to publish through at all — keeps the workspace and rewrites
+its lease as a retained recovery artifact naming why it was kept, which is never adopted by a later
+run: retained workspaces go when the issue reaches a terminal state, and cleanup skips any
 workspace whose lease is still held by a running owner — this host, or a second one. A lease left by
 a host that is gone stops holding anything back, because its process is no longer there — nor does one
 whose process id the kernel has since handed to a successor, which is why the record carries the
-owner's start as well as its id.
+owner's start as well as its id. A process id means nothing outside the namespace that issued it, so
+an owner recorded in another one — two containers sharing a workspace root — is left alone rather
+than probed against whatever process carries that id here.
 
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the

@@ -20,9 +20,15 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
  * running is the adapter's question; every use the answer is put to is decided below.
  */
 
-const owner: WorkspaceOwner = { hostId: 'host-a', processId: 4242, startMarker: '918273' }
+const owner: WorkspaceOwner = {
+  hostId: 'host-a',
+  processId: 4242,
+  startMarker: '918273',
+  namespace: 'boot-1/pid:[4026531836]',
+}
 const running = (startMarker: string | null): OwnerObservation => ({ _tag: 'Running', startMarker })
 const gone: OwnerObservation = { _tag: 'Gone' }
+const unobservable: OwnerObservation = { _tag: 'Unobservable' }
 const acquiredAt = new Date('2026-08-31T10:00:00.000Z')
 const releasedAt = new Date('2026-08-31T10:05:00.000Z')
 
@@ -111,6 +117,15 @@ describe('who a lease belongs to', (): void => {
   it('is not claimed by a process that merely inherited the recorded id', (): void => {
     // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
     expect(leaseIsClaimed(lease, 'host-b', running('554433'))).toBe(false)
+  })
+
+  it('leaves an owner this host cannot observe alone', (): void => {
+    // Two containers sharing a workspace root read their own process ids, not each other's, so an
+    // owner in another namespace is never concluded to be gone.
+    expect(leaseIsClaimed(lease, 'host-b', unobservable)).toBe(true)
+    expect(
+      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-b', unobservable),
+    ).toBe(false)
   })
 
   it('takes a running owner at face value when either marker is missing', (): void => {

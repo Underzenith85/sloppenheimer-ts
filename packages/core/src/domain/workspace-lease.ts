@@ -28,13 +28,24 @@ export type WorkspaceOwner = Readonly<{
    * kernel gave the same id is not mistaken for it. `null` where the host cannot observe one.
    */
   startMarker: string | null
+  /**
+   * The process namespace the id belongs to. Process ids mean nothing across one — two containers
+   * sharing a workspace root each see their own — so a host only probes an owner recorded in its
+   * own. `null` where the host cannot identify one.
+   */
+  namespace: string | null
 }>
 
 /**
- * What a host can see of a recorded owner now. `Running` carries the observed start marker, which
- * is `null` where the host cannot read one — a process that is running is then taken at face value.
+ * What a host can see of a recorded owner now.
+ *
+ * `Unobservable` is the answer whenever the owner's process ids are not this host's to read —
+ * another process namespace, or one neither side could identify. `Running` carries the observed
+ * start marker, which is `null` where the host cannot read one; a process that is running is then
+ * taken at face value.
  */
 export type OwnerObservation =
+  | Readonly<{ _tag: 'Unobservable' }>
   | Readonly<{ _tag: 'Gone' }>
   | Readonly<{ _tag: 'Running'; startMarker: string | null }>
 
@@ -67,6 +78,7 @@ const leaseSchema = Schema.Struct({
     hostId: Schema.String,
     processId: Schema.Number.pipe(Schema.filter((value) => Number.isSafeInteger(value))),
     startMarker: Schema.NullOr(Schema.String),
+    namespace: Schema.NullOr(Schema.String),
   }),
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),
@@ -154,12 +166,15 @@ export const decodeLease = (
  * which is how a second host pointed at the same root is respected and how a crashed one stops
  * blocking cleanup.
  *
- * A process id alone does not identify a process: a host restarted into the same id — the ordinary
- * case for a container's PID 1 — would otherwise keep its predecessor's leases alive for as long as
- * it runs. So a running process whose start marker is not the recorded one is a different process,
- * and the lease it left is not claimed. Where either marker is missing the observation cannot tell
- * them apart, and the owner is taken to be running, because refusing to remove a workspace is the
- * safe error.
+ * Only an owner this host can actually observe is ever concluded to be gone. A process id means
+ * nothing outside the namespace that issued it, so an owner recorded in another one — two
+ * containers sharing a workspace root — stays claimed rather than being probed against whatever
+ * process happens to carry that id here. Within one namespace, a process id alone still does not
+ * identify a process: a host restarted into the same id, the ordinary case for a container's PID 1,
+ * would otherwise keep its predecessor's leases alive for as long as it ran. So a running process
+ * whose start marker is not the recorded one is a different process, and the lease it left is not
+ * claimed. Where either marker is missing the observation cannot tell them apart, and the owner is
+ * taken to be running, because refusing to remove a workspace is the safe error.
  */
 export const leaseIsClaimed = (
   lease: WorkspaceLeaseRecord,
@@ -170,6 +185,9 @@ export const leaseIsClaimed = (
     return false
   }
   if (lease.owner.hostId === hostId) {
+    return true
+  }
+  if (observation._tag === 'Unobservable') {
     return true
   }
   if (observation._tag === 'Gone') {
