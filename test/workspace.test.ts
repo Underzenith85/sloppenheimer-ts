@@ -15,7 +15,7 @@ import {
 import { dirname, join } from 'node:path'
 import { FileSystem } from '@effect/platform'
 import { it } from '@effect/vitest'
-import { Cause, Clock, Effect, Either, Exit, Fiber, Option } from 'effect'
+import { Cause, Clock, Effect, Either, Exit, Fiber, Option, Ref } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -940,9 +940,14 @@ describe('run workspace allocation and leases', (): void => {
 
       // While the run still knows its lease stands, a renewal it cannot make is not a lease lost.
       const kept = yield* Effect.exit(
-        renewLease(fileSystem, paths, run, hostOwner, 10, Date.now() + 60_000).pipe(
-          Effect.timeout(200),
-        ),
+        renewLease(
+          fileSystem,
+          paths,
+          run,
+          hostOwner,
+          10,
+          yield* Ref.make(Date.now() + 60_000),
+        ).pipe(Effect.timeout(200)),
       )
       const stillRenewing = Exit.isFailure(kept)
         ? Cause.failureOption(kept.cause)
@@ -951,7 +956,7 @@ describe('run workspace allocation and leases', (): void => {
 
       // Once that window has run out, another host is free to take the workspace, so the run stops.
       const lost = yield* Effect.exit(
-        renewLease(fileSystem, paths, run, hostOwner, 10, Date.now() - 1),
+        renewLease(fileSystem, paths, run, hostOwner, 10, yield* Ref.make(Date.now() - 1)),
       )
       const failure = Exit.isFailure(lost)
         ? Cause.failureOption(lost.cause)
@@ -976,7 +981,7 @@ describe('run workspace allocation and leases', (): void => {
       yield* host(() => writeFile(paths.leasePath, expired))
 
       const lost = yield* Effect.exit(
-        renewLease(fileSystem, paths, run, hostOwner, 10, Date.now() + 60_000),
+        renewLease(fileSystem, paths, run, hostOwner, 10, yield* Ref.make(Date.now() + 60_000)),
       )
 
       const failure = Exit.isFailure(lost)

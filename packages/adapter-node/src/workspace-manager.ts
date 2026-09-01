@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Cause, Effect, Exit, Option } from 'effect'
+import { Cause, Effect, Exit, Option, Ref } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -15,6 +15,7 @@ import {
   leaseNamesRun,
   leaseRenewalIntervalMs,
   retainedLease,
+  type WorkspaceLeaseRecord,
   type WorkspaceOwner,
   type WorkspaceRelease,
   type WorkspaceRun,
@@ -31,6 +32,7 @@ import {
   pruneStagedLeases,
   readLease,
   stagedLeasePath,
+  withdrawLease,
   writeLease,
   writeStagedLease,
 } from './workspace-lease-store.js'
@@ -65,7 +67,7 @@ const prepareRunClaim = (
   run: WorkspaceRun,
   owner: WorkspaceOwner,
   staged: string,
-): Effect.Effect<number, WorkspaceError | PlatformError> =>
+): Effect.Effect<WorkspaceLeaseRecord, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     // The issue directory is only ever a container for run directories, so an existing one is
     // reused — once it has been confirmed to be a real directory rather than a substituted path.
@@ -75,8 +77,34 @@ const prepareRunClaim = (
     const acquiredAt = yield* currentInstant
     const lease = heldLease(run, paths.runKey, owner, acquiredAt)
     yield* writeStagedLease(fileSystem, staged, lease)
-    // How long the claim itself stands for, which is what the renewal carries forward.
-    return Date.parse(lease.expiresAt)
+    return lease
+  })
+
+/**
+ * The claim, once published, still standing — and taken back where it is not.
+ *
+ * A record is written before it is linked into place, and a host stopped between the two for longer
+ * than a lease stands would publish one that had already expired: cleanup elsewhere could take it
+ * before this run had even made its directory, and the run would provision under a lease it no
+ * longer held. So the claim is read against the clock that wrote it, and one that no longer stands
+ * is withdrawn rather than built on.
+ */
+const claimStillStands = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  claim: WorkspaceLeaseRecord,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if ((yield* currentInstant).getTime() < Date.parse(claim.expiresAt)) {
+      return
+    }
+    yield* Effect.ignore(withdrawLease(fileSystem, paths, claim))
+    return yield* Effect.fail(
+      new WorkspaceError({
+        category: 'lease_conflict',
+        message: `workspace claim expired before it was published: ${paths.leasePath}`,
+      }),
+    )
   })
 
 /**
@@ -241,31 +269,26 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       // Preparing the claim is ordinary filesystem work and stays interruptible; what is masked
       // is the link that publishes it, which is one step and cannot be left half done.
       const staged = stagedLeasePath(paths.stagingPath)
-      const standingUntil = yield* restore(
-        prepareRunClaim(fileSystem, paths, run, owner, staged),
-      ).pipe(
+      const claim = yield* restore(prepareRunClaim(fileSystem, paths, run, owner, staged)).pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit) ? Effect.void : discardStagedLease(fileSystem, staged),
         ),
         reportedAs('create_failed', 'failed to create workspace'),
       )
       yield* publishRunClaim(fileSystem, paths, staged).pipe(
+        Effect.zipRight(claimStillStands(fileSystem, paths, claim)),
         reportedAs('create_failed', 'failed to create workspace'),
       )
+      // What the run knows its lease stands for, carried across both of the races below: the
+      // renewal is stopped and started again between them, and the window it had bought stands.
+      const standing = yield* Ref.make(Date.parse(claim.expiresAt))
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
       // Both of the steps that follow run against the renewal rather than after it: provisioning is
       // no more bounded than the run is — an `after_create` hook is the caller's own command — and
       // neither may go on under a lease this run has stopped holding. Racing is what orders them:
       // the work ends and the renewal is interrupted, or the renewal fails and the work is
       // interrupted, and either way both have finished before the record is rewritten below.
-      const keepingLease = renewLease(
-        fileSystem,
-        paths,
-        run,
-        owner,
-        renewal.intervalMs,
-        standingUntil,
-      )
+      const keepingLease = renewLease(fileSystem, paths, run, owner, renewal.intervalMs, standing)
       // From here the lease is this run's own. Provisioning that does not finish keeps the
       // workspace under the reason it failed for, rather than leaving a lease nobody holds.
       yield* restore(

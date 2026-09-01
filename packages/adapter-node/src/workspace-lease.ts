@@ -9,7 +9,6 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { realDirectoryExists } from './filesystem.js'
 import type { RunWorkspacePaths } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
-  encodeLease,
   leaseIsClaimed,
   leaseIsOurs,
   renewedLease,
@@ -22,8 +21,7 @@ import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import {
   discardStagedLease,
   readLease,
-  returnLease,
-  takeLease,
+  withdrawLease,
   writeLease,
 } from './workspace-lease-store.js'
 
@@ -204,14 +202,7 @@ const saidAgain = (
     // a name cleanup may have emptied on its way to removing the workspace. So it is taken away
     // again — and only when it is still exactly what this write left, so that a claim published in
     // the meantime is put back rather than removed.
-    const late = yield* takeLease(fileSystem, paths.leasePath, paths.stagingPath)
-    yield* Option.match(late, {
-      onNone: () => Effect.void,
-      onSome: (record) =>
-        encodeLease(record.lease) === encodeLease(renewed)
-          ? discardStagedLease(fileSystem, record.path)
-          : returnLease(fileSystem, record, paths.leasePath),
-    })
+    yield* withdrawLease(fileSystem, paths, renewed)
     return Option.none<number>()
   })
 
@@ -255,7 +246,9 @@ const sayLeaseStands = (
  * The failure is the point: a lease this run has lost is one another host may already be taking the
  * workspace back on, so the run that lost it stops rather than working on in a directory that is no
  * longer its own. What it carries between renewals is how long it knows the lease stands for, so
- * that renewals which never land are not mistaken for a lease that never expires.
+ * that renewals which never land are not mistaken for a lease that never expires — and the caller
+ * holds that, not this loop, because one run's renewal is stopped and started again as the run
+ * moves from provisioning to its own work, and what the earlier renewals bought is still bought.
  */
 export const renewLease = (
   fileSystem: FileSystem.FileSystem,
@@ -263,15 +256,12 @@ export const renewLease = (
   run: WorkspaceRun,
   owner: WorkspaceOwner,
   intervalMs: number,
-  standingUntil: number,
+  standing: Ref.Ref<number>,
 ): Effect.Effect<never, WorkspaceError> =>
-  Effect.gen(function* () {
-    const standing = yield* Ref.make(standingUntil)
-    return yield* Effect.forever(
-      Ref.get(standing).pipe(
-        Effect.flatMap((until) => sayLeaseStands(fileSystem, paths, run, owner, until)),
-        Effect.flatMap((until) => Ref.set(standing, until)),
-        Effect.delay(intervalMs),
-      ),
-    )
-  })
+  Effect.forever(
+    Ref.get(standing).pipe(
+      Effect.flatMap((until) => sayLeaseStands(fileSystem, paths, run, owner, until)),
+      Effect.flatMap((until) => Ref.set(standing, until)),
+      Effect.delay(intervalMs),
+    ),
+  )

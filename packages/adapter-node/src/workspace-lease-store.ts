@@ -293,3 +293,26 @@ export const returnLease = (
   taken: TakenLease,
   leasePath: string,
 ): Effect.Effect<void, PlatformError> => fileSystem.rename(taken.path, leasePath)
+
+/**
+ * Takes back a record this host wrote, when writing it turned out to be a mistake — a renewal that
+ * crossed the expiry it was renewing, or a claim published after it had already stopped standing.
+ *
+ * It is taken with the same atomic rename cleanup uses, and given up only when what came back is
+ * still exactly what that write left. Anything else — a claim published in the meantime — goes back
+ * where it was.
+ */
+export const withdrawLease = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  written: WorkspaceLeaseRecord,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  Effect.flatMap(takeLease(fileSystem, paths.leasePath, paths.stagingPath), (taken) =>
+    Option.match(taken, {
+      onNone: () => Effect.void,
+      onSome: (record) =>
+        encodeLease(record.lease) === encodeLease(written)
+          ? discardStagedLease(fileSystem, record.path)
+          : returnLease(fileSystem, record, paths.leasePath),
+    }),
+  )
