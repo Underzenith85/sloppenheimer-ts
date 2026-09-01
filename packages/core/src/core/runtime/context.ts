@@ -15,7 +15,7 @@ import {
   openDetailRecord,
 } from './runs.js'
 import { requestTick, scheduleNextTick, scheduleRetry } from './scheduling.js'
-import { persistHandoffs } from './store.js'
+import { persistCompletions, persistHandoffs } from './store.js'
 import type { OrchestratorContext, RuntimeCells } from './types.js'
 
 /** Publishes operator detail and derives saturation gauges from the same authoritative state. */
@@ -70,6 +70,7 @@ export const orchestratorContext = (
     cancelRunning(cells, id, cleanupWorkspace, reason),
   noteHandoffOutcome: (id, handoff, outcome) => noteHandoffOutcome(cells, id, handoff, outcome),
   persistHandoffs: persistHandoffs(cells),
+  persistCompletions: persistCompletions(cells),
   recoverMissingHandoffs: recoverMissingHandoffs(cells),
   reconcile: (retryDispatchAllowed) => reconcile(cells, retryDispatchAllowed),
   hydrateRestoredHandoffs: hydrateRestoredHandoffs(cells),
