@@ -5276,7 +5276,12 @@ describe('per-run workspace leases', (): void => {
       expect(acquired[1]?.workspace.path).not.toBe(acquired[0]?.workspace.path)
       expect(released[0]).toMatchObject({
         path: acquired[0]?.workspace.path,
-        release: { _tag: 'Retained', reason: 'run failed before publication: worker failed' },
+        // The reason names what failed, not what it said: a failure message can carry an excerpt
+        // of what an agent or hook wrote, and the lease record is a file rather than a log.
+        release: {
+          _tag: 'Retained',
+          reason: 'run failed before publication: AgentError process_exited',
+        },
       })
     }),
   )

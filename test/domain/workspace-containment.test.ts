@@ -144,7 +144,11 @@ describe('run workspace paths', (): void => {
       runKey: 'run-2-hostx',
       runPath: `${root}/GH-7/run-2-hostx`,
       leasePath: `${root}/GH-7/run-2-hostx.lease`,
+      stagingPath: `${root}/#lease-writes`,
     })
+    // A record is staged outside the issue directories, under a name the key sanitizer can never
+    // produce, so cleanup reading an issue directory never comes across one.
+    expect(workspaceKey(issueIdentifier('#lease-writes'))).not.toBe('#lease-writes')
     // The lease is a sibling of the worktree, never a file inside it: the agent's own directory is
     // what publication commits.
     expect(isStrictDescendant(paths.issuePath, paths.runPath)).toBe(true)

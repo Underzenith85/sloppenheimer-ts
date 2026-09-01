@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Cause, Effect, Option } from 'effect'
+import { Cause, Effect, Exit, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -96,11 +96,7 @@ const claimRunLease = (
       yield* fileSystem.makeDirectory(paths.issuePath, { recursive: true })
     }
     const acquiredAt = yield* currentInstant
-    yield* claimLease(
-      fileSystem,
-      paths.leasePath,
-      heldLease(run, paths.runKey, owner, acquiredAt),
-    ).pipe(
+    yield* claimLease(fileSystem, paths, heldLease(run, paths.runKey, owner, acquiredAt)).pipe(
       Effect.catchIf(
         (error) => error._tag === 'SystemError' && error.reason === 'AlreadyExists',
         (error) =>
@@ -200,14 +196,16 @@ const retainLease = (
     const releasedAt = yield* currentInstant
     const existing = yield* readLease(fileSystem, paths.leasePath)
     const held = Option.getOrElse(existing, () => heldLease(run, paths.runKey, owner, releasedAt))
-    yield* writeLease(fileSystem, paths.leasePath, retainedLease(held, reason, releasedAt))
+    yield* writeLease(fileSystem, paths, retainedLease(held, reason, releasedAt))
   })
 
 /** Why an acquisition that took the lease and then failed is keeping the workspace. */
 const provisioningReason = (cause: Cause.Cause<WorkspaceError>): string =>
   Option.match(Cause.failureOption(cause), {
     onNone: () => 'workspace provisioning was interrupted',
-    onSome: (error) => `workspace provisioning failed: ${error.message}`,
+    // The category, never the message: a hook's failure carries an excerpt of what it wrote, and
+    // the lease record is a file on disk rather than a log the redaction rules pass over.
+    onSome: (error) => `workspace provisioning failed: ${error.category}`,
   })
 
 /**
@@ -228,23 +226,28 @@ const acquireRunWorkspace = (
       run.identifier,
       runWorkspaceKey(run.runId, owner.hostId),
     )
-    yield* claimRunLease(fileSystem, paths, run, owner).pipe(
-      reportedAs('create_failed', 'failed to create workspace'),
-    )
     const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
-    // Only from here is the lease this acquisition's own. Everything after it can fail and hand
-    // the caller nothing to release with, so it retains the workspace itself — but a claim that
-    // was refused belongs to the run that won it, and must never be rewritten from here.
-    yield* Effect.gen(function* () {
-      yield* fileSystem.makeDirectory(paths.runPath)
-      if (hooks.afterCreate !== null) {
-        yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
-      }
-    }).pipe(
-      reportedAs('create_failed', 'failed to create workspace'),
-      Effect.onError((cause) =>
-        Effect.ignore(retainLease(fileSystem, owner, paths, run, provisioningReason(cause))),
+    // Claiming the lease and installing what hands it back are one step. `acquireUseRelease` takes
+    // the claim uninterruptibly and only then runs the rest, so an interruption between the two
+    // cannot leave a published lease with nothing to release it — and a claim that was refused
+    // belongs to the run that won it, and is never rewritten from here.
+    yield* Effect.acquireUseRelease(
+      claimRunLease(fileSystem, paths, run, owner).pipe(
+        reportedAs('create_failed', 'failed to create workspace'),
       ),
+      () =>
+        Effect.gen(function* () {
+          yield* fileSystem.makeDirectory(paths.runPath)
+          if (hooks.afterCreate !== null) {
+            yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
+          }
+        }).pipe(reportedAs('create_failed', 'failed to create workspace')),
+      (_claimed, exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : Effect.ignore(
+              retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
+            ),
     )
     const leased: LeasedWorkspace = { run, workspace }
     return leased

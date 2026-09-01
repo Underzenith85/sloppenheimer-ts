@@ -526,6 +526,27 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('stages lease records outside the issue directory cleanup reads', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks({ beforeRemove: 'exit 0' }))
+      const identifier = issueIdentifier('GH-180')
+      const leased = yield* manager.acquire({ identifier, runId: 1 })
+      // A record a host died before publishing. Cleanup reads an issue directory as run workspaces
+      // and their leases, and would take a file like this for one of them.
+      const abandonedWrite = join(root, '#lease-writes', 'abandoned.lease')
+      yield* host(() => mkdir(dirname(abandonedWrite), { recursive: true }))
+      yield* host(() => writeFile(abandonedWrite, 'half a record'))
+
+      yield* manager.release(leased, { _tag: 'Retained', reason: 'worker failed' })
+      yield* manager.remove(identifier)
+
+      expect(existsSync(leased.workspace.path)).toBe(false)
+      expect(yield* manager.exists(identifier)).toBe(false)
+      expect(existsSync(abandonedWrite)).toBe(true)
+    }),
+  )
+
   it.live('leaves the winner of a refused claim holding its own lease', () =>
     Effect.gen(function* () {
       const root = makeRoot()

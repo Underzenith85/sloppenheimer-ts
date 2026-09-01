@@ -222,7 +222,10 @@ const workspaceRelease = (
           Cause.isInterrupted(cause)
             ? 'run cancelled before publication'
             : 'run ended abnormally before publication',
-        onSome: (error) => `run failed before publication: ${error.message}`,
+        // What failed, never what the failure said: an agent or hook failure carries an excerpt of
+        // what the process wrote, and a lease record is a file on disk rather than a log the
+        // redaction rules pass over.
+        onSome: (error) => `run failed before publication: ${error._tag} ${error.category}`,
       }),
     }),
   })

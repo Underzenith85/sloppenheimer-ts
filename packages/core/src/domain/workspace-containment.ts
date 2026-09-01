@@ -71,7 +71,19 @@ export type RunWorkspacePaths = Readonly<{
   runPath: string
   /** The lease record, a sibling of the run directory so it is never inside the worktree. */
   leasePath: string
+  /** Where a lease record is written before it is published. */
+  stagingPath: string
 }>
+
+/**
+ * The directory a lease record is written in before it is linked or renamed into place.
+ *
+ * It sits beside the issue directories rather than inside one, because cleanup reads an issue
+ * directory as workspaces and their leases: a half-written record left there by a host that died
+ * would be taken for one or the other. The `#` is what keeps the name out of that space for good —
+ * the key sanitizer replaces it, so no issue identifier can ever produce this name.
+ */
+export const leaseStagingPath = (root: string): string => resolve(root, '#lease-writes')
 
 /**
  * Places one run's workspace under the configured root: an issue directory contained by the root,
@@ -95,6 +107,7 @@ export const containedRunWorkspacePath = (
       runKey,
       runPath,
       leasePath: `${runPath}.lease`,
+      stagingPath: leaseStagingPath(root),
     })),
   )
 }
