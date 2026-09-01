@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { Clock, Effect } from 'effect'
 
@@ -89,6 +89,52 @@ type HookOutcome = Readonly<{
   durationMs: number
 }>
 
+const hookTimeout = (timeoutMs: number): Effect.Effect<never, WorkspaceError> =>
+  Effect.fail(
+    new WorkspaceError({
+      category: 'hook_timeout',
+      message: `hook timed out after ${String(timeoutMs)}ms`,
+    }),
+  )
+
+/** Reports a hook that ran to completion, reading the clock once for its duration. */
+const hookCompletion = (
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  stdout: StreamCapture,
+  stderr: StreamCapture,
+  startedAt: number,
+): Effect.Effect<HookOutcome> =>
+  Effect.map(Clock.currentTimeMillis, (finishedAt) => ({
+    code,
+    signal,
+    stdout: captureText(stdout),
+    stderr: captureText(stderr),
+    stdoutBytes: stdout.totalBytes,
+    stderrBytes: stderr.totalBytes,
+    durationMs: finishedAt - startedAt,
+  }))
+
+/**
+ * Terminates a hook's whole process tree: politely first, forcefully after a bounded grace.
+ *
+ * The escalation timer is returned so the settlement path can drop it, and is unreferenced so a
+ * hook nobody is waiting on any more cannot hold the host open until the grace expires.
+ */
+const terminateHookTree = (child: ChildProcess, onEscalated: () => void): NodeJS.Timeout => {
+  signalChildGroup(child, 'SIGTERM')
+  const graceTimer = setTimeout(() => {
+    // Re-checked at fire time as well, so an escalation retained at `close` is dropped if the
+    // group emptied during the grace period.
+    if (childProcessGroupIsAlive(child)) {
+      signalChildGroup(child, 'SIGKILL')
+    }
+    onEscalated()
+  }, hookTerminationGraceMs)
+  graceTimer.unref()
+  return graceTimer
+}
+
 /**
  * Runs one hook script as its own process group.
  *
@@ -140,14 +186,6 @@ const runHookProcess = (
         detachChildProcess(child)
       })
 
-      const timeoutFailure = (): Effect.Effect<HookOutcome, WorkspaceError> =>
-        Effect.fail(
-          new WorkspaceError({
-            category: 'hook_timeout',
-            message: `hook timed out after ${String(timeoutMs)}ms`,
-          }),
-        )
-
       captureStream(child.stdout, stdout)
       captureStream(child.stderr, stderr)
 
@@ -161,49 +199,26 @@ const runHookProcess = (
 
       // `close` rather than `exit`: both pipes are fully drained by then.
       child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
-        if (timedOut) {
-          settle(timeoutFailure())
-          return
-        }
         settle(
-          Effect.map(Clock.currentTimeMillis, (finishedAt) => ({
-            code,
-            signal,
-            stdout: captureText(stdout),
-            stderr: captureText(stderr),
-            stdoutBytes: stdout.totalBytes,
-            stderrBytes: stderr.totalBytes,
-            durationMs: finishedAt - startedAt,
-          })),
+          timedOut
+            ? hookTimeout(timeoutMs)
+            : hookCompletion(code, signal, stdout, stderr, startedAt),
         )
       })
 
       timeoutTimer = setTimeout(() => {
         timedOut = true
-        signalChildGroup(child, 'SIGTERM')
-        graceTimer = setTimeout(() => {
-          // Re-checked at fire time as well, so an escalation retained at `close` is dropped if the
-          // group emptied during the grace period.
-          if (childProcessGroupIsAlive(child)) {
-            signalChildGroup(child, 'SIGKILL')
-          }
-          settle(timeoutFailure())
-        }, hookTerminationGraceMs)
-        graceTimer.unref()
+        graceTimer = terminateHookTree(child, () => {
+          settle(hookTimeout(timeoutMs))
+        })
       }, timeoutMs)
 
       // Interruption: a hook nobody is waiting on any more must not keep running in a workspace
       // that is about to be removed, but one that already settled has nothing left to terminate.
       return Effect.sync(() => {
-        if (!claim()) {
-          return
+        if (claim()) {
+          terminateHookTree(child, () => {})
         }
-        signalChildGroup(child, 'SIGTERM')
-        setTimeout(() => {
-          if (childProcessGroupIsAlive(child)) {
-            signalChildGroup(child, 'SIGKILL')
-          }
-        }, hookTerminationGraceMs).unref()
       })
     }),
   )
