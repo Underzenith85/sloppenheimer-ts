@@ -145,6 +145,10 @@ export const noteWorkspaceExamined = (
 export const forgetWorkspaceExaminations = (state: RuntimeState): RuntimeState => ({
   ...state,
   examinedWorkspaces: new Set(),
+  // The sweep is owed again for the same reason it is owed at startup: reconciliation dispatches a
+  // repair before any candidate fetch happens, so without one a repair would be the first thing
+  // into a workspace under the new root that nothing has read.
+  startupSweepFinished: false,
 })
 
 /**

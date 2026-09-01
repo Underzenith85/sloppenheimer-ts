@@ -611,11 +611,17 @@ repair agent that had achieved nothing.
   workspace to an agent as though it were empty. A queued retry takes the workspace back, because
   it resolves the same unknown just as well and differently: the same session is going back into
   the same workspace, so what is in there is its own work in progress rather than something a later
-  run would adopt. The examination is for the case where nothing is coming back — an operator pause,
+  run would adopt. That is stated where it is true and nowhere else — a queued retry answers for
+  the workspace it is continuing in, and cannot answer for one nobody has read at all, because
+  after a root move the directory it is about to enter is a different one. The examination is for the case where nothing is coming back — an operator pause,
   which drops the queued retry, or a cancellation with no continuation behind it.
 - An examination is an answer about a directory, so none of them survive a reload that moves the
   workspace root. A root switched back to one an earlier process used holds that process's retained
   work, and an issue still recorded examined would have the dispatch pass walk straight past it.
+  The move re-arms the sweep with them, for the reason the sweep exists at all: the reload happens
+  after it in a pass and reconciliation happens after the reload, so a repair — which does not go
+  through dispatch admission — would otherwise be the next thing into a workspace under the new
+  root that nothing has read.
 - When a rediscovered publication cannot be delivered as it stands and the work goes back to the
   coding agent, a repair the recovery restored is put back in flight with it. A restored repair
   carries no attempt behind it, and that is exactly what the queued retry consults to decide whether

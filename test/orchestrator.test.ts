@@ -1295,6 +1295,71 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('sweeps for retained work again when a reload moves the workspace root', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-reload-root-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-reload-other-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: reloadedRoot },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(
+        initial,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => false,
+            () => Effect.never,
+          ),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          // The sweep runs once and stays finished, so a settled pass costs one issue fetch.
+          const settled = harness.stateFetches()
+          yield* control.refresh
+          const perPass = harness.stateFetches() - settled
+          expect(perPass).toBeGreaterThan(0)
+
+          // The reload lands after the sweep in its own pass, so what that sweep established is
+          // about the root being left behind. Reconciliation is the next thing that can put an
+          // agent into a workspace, and it does not go through dispatch admission — so the sweep
+          // is owed again before it runs.
+          const beforeReload = harness.stateFetches()
+          harness.setWorkflow(reloaded)
+          yield* control.refresh
+          const snapshot = yield* control.snapshot
+          expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
+
+          yield* control.refresh
+          expect(harness.stateFetches() - beforeReload).toBeGreaterThan(perPass * 2)
+        }),
+      )
+    }),
+  )
+
   it.scoped('keeps the issue claimed while a delivery waits, so no agent joins it', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-claim-')

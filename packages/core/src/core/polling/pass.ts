@@ -182,7 +182,12 @@ export const poll = (
     performed.push('workflow_reload')
     // A sweep that could not look at anything refuses repair dispatch as well: a repair is an agent
     // put into a workspace, and this pass cannot say which workspaces hold work nobody published.
-    yield* reconcileHandoffs(context, !dispatchValidationFailed && sweep !== 'failed')
+    //
+    // Read after the reload rather than from the sweep's own answer: a reload that moved the
+    // workspace root has just invalidated everything the sweep above established and re-armed it,
+    // and reconciliation is the next thing that can put an agent into a workspace.
+    const swept = (yield* Ref.get(context.state)).startupSweepFinished
+    yield* reconcileHandoffs(context, !dispatchValidationFailed && sweep !== 'failed' && swept)
     performed.push('handoff_reconciliation')
     yield* context.reconcile(!dispatchValidationFailed)
     performed.push('issue_reconciliation')

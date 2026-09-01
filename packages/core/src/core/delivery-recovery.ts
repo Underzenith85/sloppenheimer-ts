@@ -52,12 +52,18 @@ const targetFor = (issue: Issue, handoff: HandoffEntry | undefined): SourceContr
  * Whether something is already acting on this issue, and so this scan has nothing left to examine.
  *
  * Deliberately not the claim: an issue with an open handoff is claimed for as long as its pull
- * request lives, and that pull request is exactly what unpublished work is owed. A running worker,
- * a queued retry and a retained delivery each end in a postflight of their own, which is what makes
- * them an answer rather than a gap.
+ * request lives, and that pull request is exactly what unpublished work is owed. A running worker
+ * is already in the workspace, and a retained delivery publishes from it without an agent; each
+ * ends in a postflight of its own, which is what makes it an answer rather than a gap.
+ *
+ * A queued retry is not on that list, because what it ends in is an agent placed into a workspace.
+ * It answers for the workspace it is continuing in — and that is stated where it is true, by the
+ * retry taking that workspace back when a cancellation had recorded it unread. It cannot answer for
+ * a workspace nobody has read at all: after a reload moves the workspace root, the directory the
+ * retry is about to enter is a different one, and may hold another process's retained work.
  */
 const alreadyHandled = (state: RuntimeState, issue: Issue): boolean =>
-  state.running.has(issue.id) || state.retries.has(issue.id) || state.deliveries.has(issue.id)
+  state.running.has(issue.id) || state.deliveries.has(issue.id)
 
 /**
  * Whether an operator has stopped this issue. A paused workspace is left unexamined rather than
