@@ -24,7 +24,7 @@ import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.j
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { realDirectoryExists, reportedAs } from './filesystem.js'
-import { hostOwner } from './workspace-lease.js'
+import { dropLease, holdLease, hostOwner } from './workspace-lease.js'
 import {
   discardStagedLease,
   publishClaimedLease,
@@ -204,7 +204,13 @@ const releaseRunWorkspace = (
         paths,
         leased.run,
         release._tag === 'Completed' ? null : release.reason,
-      ).pipe(reportedAs('remove_failed', 'failed to release workspace')),
+      ).pipe(
+        reportedAs('remove_failed', 'failed to release workspace'),
+        // Let go whatever the disposal managed to write. A release that failed leaves a record this
+        // host wrote and no longer holds, which cleanup is then free to take; holding on to it
+        // instead would keep the workspace for the life of the process.
+        Effect.ensuring(Effect.sync(() => dropLease(paths.leasePath))),
+      ),
     ),
     Effect.catchAll((error) => warnRelease(leased.workspace.path, error)),
   )
@@ -250,6 +256,10 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       yield* publishRunClaim(fileSystem, paths, staged).pipe(
         reportedAs('create_failed', 'failed to create workspace'),
       )
+      // From here this process has the lease, which is something it knows rather than something it
+      // reads back: a release whose write does not land must not leave a record every later reading
+      // in this process takes for a live run.
+      holdLease(paths.leasePath)
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
       // From here the lease is this run's own. Provisioning that does not finish keeps the
       // workspace under the reason it failed for, rather than leaving a lease nobody holds.

@@ -6,7 +6,7 @@ import { Effect, Either, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { isSymbolicLink, realDirectoryExists } from './filesystem.js'
-import { leaseIsLive } from './workspace-lease.js'
+import { stagedLeaseIsLive } from './workspace-lease.js'
 import {
   rejectWorkspace,
   sameIdentity,
@@ -135,7 +135,7 @@ const isAbandonedRecord = (
     const document = yield* fileSystem.readFileString(staged, 'utf8')
     return Either.match(decodeLease(staged, document), {
       onLeft: () => false,
-      onRight: (record) => !leaseIsLive(record),
+      onRight: (record) => !stagedLeaseIsLive(record),
     })
   })
 

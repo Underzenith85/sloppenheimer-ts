@@ -590,7 +590,10 @@ lifecycle. This section is the architecture record for it; do not create a separ
 - **A lease is given up or observed to be free — never waited out.** The record names the host
   process that holds it, when that process started, and the process namespace its id belongs to, and
   those are the only things that can take one back: the owner released it, or its process is gone in
-  a namespace this host shares. A host restarted into its predecessor's process id — the ordinary
+  a namespace this host shares. A record naming _this_ process is claimed while this process still
+  has it, which it knows rather than reads: a release rewrites the record, and a release whose write
+  did not land would otherwise leave `held` beside a live id for a run that ended, and nothing in
+  the process could ever take it back. A host restarted into its predecessor's process id — the ordinary
   case for a container's PID 1 — is caught by the start marker rather than by any clock. An owner
   probed at all only where both sides name the same namespace: two containers can share a kernel and
   a root while each sees only its own ids, so anything weaker, the machine's boot identifier

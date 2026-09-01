@@ -104,6 +104,41 @@ export const observeOwner = (owner: WorkspaceOwner): OwnerObservation => {
   return { _tag: 'Running', startMarker: processStartMarker(owner.processId) }
 }
 
-/** Whether a lease record still belongs to a running owner, as this host sees it now. */
-export const leaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
-  leaseIsClaimed(lease, hostOwner.hostId, observeOwner(lease.owner))
+/**
+ * The lease records this process still has, by the path they were published under.
+ *
+ * A record cannot answer this for itself. Releasing rewrites it, and a release whose write does not
+ * land — a full disk, a filesystem that went away — would leave `held` beside this host's own id
+ * for a run that ended, which every later reading in this process would take for a live run. What
+ * this process holds is something it knows rather than something it reads, so it is kept here: one
+ * set per process, not per manager, because a workflow reload builds a second manager while the
+ * runs of the first are still going, and their leases are the same process's either way.
+ */
+const heldHere = new Set<string>()
+
+export const holdLease = (leasePath: string): void => {
+  heldHere.add(leasePath)
+}
+
+export const dropLease = (leasePath: string): void => {
+  heldHere.delete(leasePath)
+}
+
+/**
+ * Whether a published lease record still belongs to a running owner, as this host sees it now: its
+ * own leases are the ones it still has, and another host's are the ones whose process is still
+ * there.
+ */
+export const leaseIsLive = (lease: WorkspaceLeaseRecord, leasePath: string): boolean =>
+  leaseIsClaimed(
+    lease,
+    { hostId: hostOwner.hostId, stillHeld: heldHere.has(leasePath) },
+    observeOwner(lease.owner),
+  )
+
+/**
+ * The same question of a record that has been staged but not yet published. One this process wrote
+ * is on its way to a name of its own, and is never swept out from under its own writer.
+ */
+export const stagedLeaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
+  leaseIsClaimed(lease, { hostId: hostOwner.hostId, stillHeld: true }, observeOwner(lease.owner))

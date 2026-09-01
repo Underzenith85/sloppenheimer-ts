@@ -98,7 +98,7 @@ const removeFreeRunWorkspace = (
     const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
     // What was decided on and what was taken are two reads of one name, so the decision is made
     // again on the record actually in hand.
-    if (Option.exists(taken, (record) => leaseIsLive(record.lease))) {
+    if (Option.exists(taken, (record) => leaseIsLive(record.lease, leasePath))) {
       const restored = yield* Option.match(taken, {
         onNone: () => Effect.succeed(true),
         onSome: (record) => returnLease(fileSystem, record, leasePath),
@@ -142,7 +142,7 @@ const removeFreeRunWorkspaces = (
       const runPath = yield* containedWorkspacePath(issuePath, key)
       const lease = yield* readLease(fileSystem, leasePathFor(runPath))
       // A lease that is plainly still held is left where it is rather than taken and put back.
-      if (Option.exists(lease, leaseIsLive)) {
+      if (Option.exists(lease, (record) => leaseIsLive(record, leasePathFor(runPath)))) {
         held.push(key)
         continue
       }

@@ -634,7 +634,8 @@ run: retained workspaces go when the issue reaches a terminal state, and cleanup
 whose lease is still held by a running owner — this host, or a second one.
 
 A lease is given up by the run that holds it, or taken from a host that can be seen to be gone. It is
-never waited out. A lease left by a departed host stops holding anything back, because its process is
+never waited out. What this host holds is something it knows rather than something it reads back, so
+a release whose write fails does not leave a workspace held for the life of the process. A lease left by a departed host stops holding anything back, because its process is
 no longer there; so does one whose process id the kernel has since handed to a successor, which is
 why the record carries the owner's start as well as its id. A process id means nothing outside the
 namespace that issued it, so an owner is probed only when both sides name the same one — two

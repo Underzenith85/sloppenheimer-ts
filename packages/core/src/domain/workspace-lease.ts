@@ -37,6 +37,13 @@ export type WorkspaceOwner = Readonly<{
 }>
 
 /**
+ * What the reading host says about a record that names the reading host: whether it is one this
+ * process still has. A published record is held while the run holding it has not let go; a record
+ * still being staged is held because it is on its way to being published.
+ */
+export type OwnHostLease = Readonly<{ hostId: string; stillHeld: boolean }>
+
+/**
  * What a host can see of a recorded owner now.
  *
  * `Unobservable` is the answer whenever the owner's process ids are not this host's to read —
@@ -178,10 +185,12 @@ export const leaseNamesRun = (
  * Whether a lease still belongs to a live owner, and so whether the workspace it holds may be
  * entered or removed by anyone else.
  *
- * A record this host wrote is claimed while it says so: within one process the release is what
- * clears it. A record another host wrote is claimed while that host's process is still running,
- * which is how a second host pointed at the same root is respected and how a crashed one stops
- * blocking cleanup.
+ * A record this host wrote is claimed while this host still has it — which is the caller's to say,
+ * not the record's. Releasing rewrites the record, and a release whose write does not land would
+ * otherwise leave a record naming a live process for a run that has ended, which nothing in this
+ * process could ever take back. A record another host wrote is claimed while that host's process is
+ * still running, which is how a second host pointed at the same root is respected and how a crashed
+ * one stops blocking cleanup.
  *
  * Nothing here is decided by time. A lease is given up by the run that holds it, or taken from a
  * host that can be seen to be gone — never waited out. A host restarted into its predecessor's
@@ -200,14 +209,14 @@ export const leaseNamesRun = (
  */
 export const leaseIsClaimed = (
   lease: WorkspaceLeaseRecord,
-  hostId: string,
+  ownHost: OwnHostLease,
   observation: OwnerObservation,
 ): boolean => {
   if (lease.status !== 'held') {
     return false
   }
-  if (lease.owner.hostId === hostId) {
-    return true
+  if (lease.owner.hostId === ownHost.hostId) {
+    return ownHost.stillHeld
   }
   if (observation._tag === 'Unobservable') {
     return true

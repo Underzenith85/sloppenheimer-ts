@@ -816,6 +816,25 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('takes a workspace whose record this host wrote but no longer holds', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-194'
+      // A record naming this very process, for a run it is not holding: what a release leaves when
+      // the write that should have retired the record could not land. The process is running and
+      // the id matches, so nothing observable about the owner says the run has ended.
+      const stranded = yield* host(() => foreignWorkspace(root, identifier, hostOwner))
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // What this host holds is what it knows it holds, so the workspace is not kept for the life
+      // of the process on the strength of a record its own release failed to rewrite.
+      expect(existsSync(stranded)).toBe(false)
+      expect(existsSync(`${stranded}.lease`)).toBe(false)
+    }),
+  )
+
   it.live('leaves a claim that appeared while cleanup held the record aside', () =>
     Effect.gen(function* () {
       const root = makeRoot()

@@ -105,21 +105,35 @@ describe('workspace lease records', (): void => {
 })
 
 describe('who a lease belongs to', (): void => {
+  it('is claimed while the host that wrote it still has it, and no longer once it does not', () => {
+    // A release rewrites the record, and a release whose write did not land leaves one that still
+    // says `held` beside this host's own id. What this process holds is its own to say.
+    expect(leaseIsClaimed(lease, { hostId: 'host-a', stillHeld: false }, gone)).toBe(false)
+  })
+
   it('is claimed while the host that wrote it says so', (): void => {
-    expect(leaseIsClaimed(lease, 'host-a', gone)).toBe(true)
+    expect(leaseIsClaimed(lease, { hostId: 'host-a', stillHeld: true }, gone)).toBe(true)
     expect(
-      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-a', running('918273')),
+      leaseIsClaimed(
+        retainedLease(lease, 'released', releasedAt),
+        { hostId: 'host-a', stillHeld: true },
+        running('918273'),
+      ),
     ).toBe(false)
   })
 
   it('is claimed by another host only while that host is running', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running('918273'))).toBe(true)
-    expect(leaseIsClaimed(lease, 'host-b', gone)).toBe(false)
+    expect(leaseIsClaimed(lease, { hostId: 'host-b', stillHeld: true }, running('918273'))).toBe(
+      true,
+    )
+    expect(leaseIsClaimed(lease, { hostId: 'host-b', stillHeld: true }, gone)).toBe(false)
   })
 
   it('is not claimed by a process that merely inherited the recorded id', (): void => {
     // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
-    expect(leaseIsClaimed(lease, 'host-b', running('554433'))).toBe(false)
+    expect(leaseIsClaimed(lease, { hostId: 'host-b', stillHeld: true }, running('554433'))).toBe(
+      false,
+    )
   })
 
   it('leaves an owner this host cannot observe alone, and goes on leaving it', (): void => {
@@ -127,19 +141,23 @@ describe('who a lease belongs to', (): void => {
     // owner in another namespace is never concluded to be gone — and never will be. That is the
     // deliberate limit of this rule: there is no honest way to tell a peer that has crashed from
     // one that is working, so its workspace stays a retained artifact rather than being waited out.
-    expect(leaseIsClaimed(lease, 'host-b', unobservable)).toBe(true)
+    expect(leaseIsClaimed(lease, { hostId: 'host-b', stillHeld: true }, unobservable)).toBe(true)
     // A lease its owner released is another matter: the record says so itself.
     expect(
-      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-b', unobservable),
+      leaseIsClaimed(
+        retainedLease(lease, 'released', releasedAt),
+        { hostId: 'host-b', stillHeld: true },
+        unobservable,
+      ),
     ).toBe(false)
   })
 
   it('takes a running owner at face value when either marker is missing', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running(null))).toBe(true)
+    expect(leaseIsClaimed(lease, { hostId: 'host-b', stillHeld: true }, running(null))).toBe(true)
     expect(
       leaseIsClaimed(
         { ...lease, owner: { ...owner, startMarker: null } },
-        'host-b',
+        { hostId: 'host-b', stillHeld: true },
         running('554433'),
       ),
     ).toBe(true)
