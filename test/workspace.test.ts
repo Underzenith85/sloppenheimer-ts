@@ -1,7 +1,17 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, readdirSync } from 'node:fs'
-import { access, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { it } from '@effect/vitest'
 import { Clock, Effect, Either, Fiber } from 'effect'
@@ -537,6 +547,28 @@ describe('run workspace allocation and leases', (): void => {
       )
 
       expect(refused.category).toBe('lease_conflict')
+    }),
+  )
+
+  it.live('takes away staged records no writer can still be holding', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const staging = join(root, '#lease-writes')
+      yield* host(() => mkdir(staging, { recursive: true }))
+      const abandoned = join(staging, 'abandoned.lease')
+      const inFlight = join(staging, 'in-flight.lease')
+      yield* host(() => writeFile(abandoned, 'a record its host never published'))
+      yield* host(() => writeFile(inFlight, 'a record being written right now'))
+      const longAgo = new Date(Date.now() - 4 * 60 * 60 * 1_000)
+      yield* host(() => utimes(abandoned, longAgo, longAgo))
+
+      // Building a manager is what sweeps them: once at startup, and again on every reload.
+      yield* workspaceManager(root, hooks())
+
+      // Staging is a single write, so anything old belongs to a host that was killed between
+      // writing a record and publishing it. Anything recent may still be on its way.
+      expect(existsSync(abandoned)).toBe(false)
+      expect(existsSync(inFlight)).toBe(true)
     }),
   )
 

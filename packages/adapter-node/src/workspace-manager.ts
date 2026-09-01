@@ -9,6 +9,7 @@ import {
   containedWorkspacePath,
   isLeaseEntry,
   leasePathFor,
+  leaseStagingPath,
   runWorkspaceKey,
   workspaceKey,
   type RunWorkspacePaths,
@@ -25,7 +26,17 @@ import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.j
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { isSymbolicLink, removeDirectoryIfEmpty } from './filesystem.js'
-import { claimLease, hostOwner, leaseIsLive, readLease, writeLease } from './workspace-lease.js'
+import {
+  discardStagedLease,
+  hostOwner,
+  leaseIsLive,
+  publishClaimedLease,
+  pruneStagedLeases,
+  readLease,
+  stagedLeasePath,
+  writeLease,
+  writeStagedLease,
+} from './workspace-lease.js'
 import { runHook } from './workspace-hooks.js'
 
 /**
@@ -75,19 +86,18 @@ const workspaceDirectoryExists = (
   )
 
 /**
- * Claims one run's workspace by publishing its lease.
+ * Everything a claim needs in place before it can be published: the issue directory that will hold
+ * the run, and the record itself, written where nothing yet refers to it.
  *
- * The lease is the claim. Hard-linking it into place is atomic and refuses a name that already
- * exists, so a second dispatch of one run identity fails here rather than entering a live
- * workspace — and because the record is complete and in place before the run directory exists,
- * cleanup running elsewhere never comes across a workspace with no lease and takes it for one
- * nobody owns.
+ * All of it is ordinary filesystem work a cancellation may interrupt — the file it leaves behind is
+ * named by the caller, which takes it away again.
  */
-const claimRunLease = (
+const prepareRunClaim = (
   fileSystem: FileSystem.FileSystem,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
   owner: WorkspaceOwner,
+  staged: string,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     // The issue directory is only ever a container for run directories, so an existing one is
@@ -96,20 +106,31 @@ const claimRunLease = (
       yield* fileSystem.makeDirectory(paths.issuePath, { recursive: true })
     }
     const acquiredAt = yield* currentInstant
-    yield* claimLease(fileSystem, paths, heldLease(run, paths.runKey, owner, acquiredAt)).pipe(
-      Effect.catchIf(
-        (error) => error._tag === 'SystemError' && error.reason === 'AlreadyExists',
-        (error) =>
-          Effect.fail(
-            new WorkspaceError({
-              category: 'lease_conflict',
-              message: `workspace is already allocated to another run: ${paths.runPath}`,
-              cause: error,
-            }),
-          ),
-      ),
-    )
+    yield* writeStagedLease(fileSystem, staged, heldLease(run, paths.runKey, owner, acquiredAt))
   })
+
+/**
+ * Publishes the prepared claim: one atomic link, which is what makes the lease exist and what a
+ * second dispatch of the same run identity loses to.
+ */
+const publishRunClaim = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  staged: string,
+): Effect.Effect<void, WorkspaceError | PlatformError> =>
+  publishClaimedLease(fileSystem, staged, paths.leasePath).pipe(
+    Effect.catchIf(
+      (error) => error._tag === 'SystemError' && error.reason === 'AlreadyExists',
+      (error) =>
+        Effect.fail(
+          new WorkspaceError({
+            category: 'lease_conflict',
+            message: `workspace is already allocated to another run: ${paths.runPath}`,
+            cause: error,
+          }),
+        ),
+    ),
+  )
 
 /**
  * The one shape every operation reports through: a containment or lease rejection is already the
@@ -346,7 +367,16 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
         run.identifier,
         runWorkspaceKey(run.runId, owner.hostId),
       )
-      yield* claimRunLease(fileSystem, paths, run, owner).pipe(
+      // Preparing the claim is ordinary filesystem work and stays interruptible; what is masked
+      // is the link that publishes it, which is one step and cannot be left half done.
+      const staged = stagedLeasePath(paths.stagingPath)
+      yield* restore(prepareRunClaim(fileSystem, paths, run, owner, staged)).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit) ? Effect.void : discardStagedLease(fileSystem, staged),
+        ),
+        reportedAs('create_failed', 'failed to create workspace'),
+      )
+      yield* publishRunClaim(fileSystem, paths, staged).pipe(
         reportedAs('create_failed', 'failed to create workspace'),
       )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
@@ -376,26 +406,42 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
     }),
   )
 
+/**
+ * How long a staged lease record can be in flight before it can only be an abandoned one. Staging
+ * is a single write, so an hour is far past any writer and far short of leaving orphans on disk for
+ * the life of the root.
+ */
+const stagedLeaseLifetimeMs = 60 * 60 * 1_000
+
 export const makeWorkspaceManager = (
   root: string,
   hooks: HooksConfig,
   owner: WorkspaceOwner = hostOwner,
 ): Effect.Effect<WorkspaceManagerPort, never, FileSystem.FileSystem> =>
-  Effect.map(FileSystem.FileSystem, (fileSystem) => ({
-    withLeasedWorkspace: (run, use, disposition) =>
-      leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
-    exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),
-    // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
-    beforeRun: (workspace) =>
-      hooks.beforeRun === null
-        ? Effect.void
-        : runHook('before_run', hooks.beforeRun, workspace.path, hooks.timeoutMs),
-    // `after_run` is best effort: the turn already happened.
-    afterRun: (workspace) =>
-      hooks.afterRun === null
-        ? Effect.void
-        : runHook('after_run', hooks.afterRun, workspace.path, hooks.timeoutMs).pipe(
-            Effect.catchAll(() => Effect.void),
-          ),
-    remove: (identifier) => removeIssueWorkspaces(fileSystem, hooks, root, identifier),
-  }))
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
+    // A host killed between staging a record and publishing it leaves the staged file behind, and
+    // nothing else ever reads that directory. Sweeping it here takes those away once per manager —
+    // at startup, and again whenever a reload rebuilds one — and can never reach a record a live
+    // writer is still holding, because such a record is seconds old.
+    const now = yield* currentInstant
+    yield* pruneStagedLeases(fileSystem, leaseStagingPath(root), now, stagedLeaseLifetimeMs)
+    return {
+      withLeasedWorkspace: (run, use, disposition) =>
+        leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
+      exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),
+      // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
+      beforeRun: (workspace) =>
+        hooks.beforeRun === null
+          ? Effect.void
+          : runHook('before_run', hooks.beforeRun, workspace.path, hooks.timeoutMs),
+      // `after_run` is best effort: the turn already happened.
+      afterRun: (workspace) =>
+        hooks.afterRun === null
+          ? Effect.void
+          : runHook('after_run', hooks.afterRun, workspace.path, hooks.timeoutMs).pipe(
+              Effect.catchAll(() => Effect.void),
+            ),
+      remove: (identifier) => removeIssueWorkspaces(fileSystem, hooks, root, identifier),
+    }
+  })

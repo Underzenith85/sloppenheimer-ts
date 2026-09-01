@@ -2,7 +2,7 @@ import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, readlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Effect, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
@@ -115,59 +115,94 @@ export const leaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
  * because cleanup reads that directory as run workspaces and their leases and would take a
  * half-written record for one of them.
  */
-const stageLease = (
-  fileSystem: FileSystem.FileSystem,
-  stagingPath: string,
-  lease: WorkspaceLeaseRecord,
-): Effect.Effect<string, PlatformError> =>
-  Effect.suspend(() => {
-    const staged = join(stagingPath, `${randomUUID()}.lease`)
-    return fileSystem
-      .makeDirectory(stagingPath, { recursive: true })
-      .pipe(
-        Effect.zipRight(fileSystem.writeFileString(staged, encodeLease(lease), { mode: 0o600 })),
-        Effect.as(staged),
-      )
-  })
+/**
+ * Writes a record where nothing yet refers to it, and hands back the path it went to.
+ *
+ * The name is this write's alone, so two writes to one lease path — a duplicate dispatch of one run
+ * identity — cannot truncate each other's record. It is staged outside the issue directory, because
+ * cleanup reads that directory as run workspaces and their leases and would take a half-written
+ * record for one of them. The caller names the file first so that an interruption mid-write leaves
+ * a path it can still take away.
+ */
+export const stagedLeasePath = (stagingPath: string): string =>
+  join(stagingPath, `${randomUUID()}.lease`)
 
-/** Publishes a staged record under `path`, and takes the staged copy away either way. */
-const publishStaged = (
+export const writeStagedLease = (
   fileSystem: FileSystem.FileSystem,
   staged: string,
-  publish: (staged: string) => Effect.Effect<void, PlatformError>,
-): Effect.Effect<void, PlatformError> =>
-  publish(staged).pipe(Effect.ensuring(Effect.ignore(fileSystem.remove(staged, { force: true }))))
-
-/**
- * Publishes a lease under a name that must not already exist, which is what claims a run's
- * workspace.
- *
- * The record is written to a sibling temporary file and hard-linked into place: `link` is atomic
- * and refuses a name that already exists, so the claim and the whole record appear in one step. The
- * run directory is created only afterwards, so cleanup elsewhere can never come across a workspace
- * that has no lease and take it for one nobody owns.
- */
-export const claimLease = (
-  fileSystem: FileSystem.FileSystem,
-  paths: Pick<RunWorkspacePaths, 'leasePath' | 'stagingPath'>,
   lease: WorkspaceLeaseRecord,
 ): Effect.Effect<void, PlatformError> =>
-  stageLease(fileSystem, paths.stagingPath, lease).pipe(
-    Effect.flatMap((staged) =>
-      publishStaged(fileSystem, staged, (from) => fileSystem.link(from, paths.leasePath)),
-    ),
-  )
+  fileSystem
+    .makeDirectory(dirname(staged), { recursive: true })
+    .pipe(Effect.zipRight(fileSystem.writeFileString(staged, encodeLease(lease), { mode: 0o600 })))
 
+/** Takes a staged record away, whether it was published or abandoned. */
+export const discardStagedLease = (
+  fileSystem: FileSystem.FileSystem,
+  staged: string,
+): Effect.Effect<void> => Effect.ignore(fileSystem.remove(staged, { force: true }))
+
+/**
+ * Publishes a staged record under a name that must not already exist, which is what claims a run's
+ * workspace.
+ *
+ * `link` is atomic and refuses a name that already exists, so the claim and the whole record appear
+ * in one step — which is why this, and not the writing that precedes it, is the part a caller masks
+ * against interruption. The run directory is created only afterwards, so cleanup elsewhere can
+ * never come across a workspace that has no lease and take it for one nobody owns.
+ */
+export const publishClaimedLease = (
+  fileSystem: FileSystem.FileSystem,
+  staged: string,
+  leasePath: string,
+): Effect.Effect<void, PlatformError> =>
+  fileSystem.link(staged, leasePath).pipe(Effect.ensuring(discardStagedLease(fileSystem, staged)))
+
+/**
+ * Takes away staged records no writer can still be holding.
+ *
+ * Staging is one write, so a record older than this belongs to a host that was killed between
+ * writing it and publishing it. Nothing refers to such a file, but without this it would stay under
+ * the staging directory for good, one per crash.
+ */
+export const pruneStagedLeases = (
+  fileSystem: FileSystem.FileSystem,
+  stagingPath: string,
+  now: Date,
+  lifetimeMs: number,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const entries = yield* fileSystem.readDirectory(stagingPath)
+    for (const entry of entries) {
+      const staged = join(stagingPath, entry)
+      const info = yield* fileSystem.stat(staged)
+      const abandoned = Option.exists(
+        info.mtime,
+        (modified) => now.getTime() - modified.getTime() > lifetimeMs,
+      )
+      if (abandoned) {
+        yield* discardStagedLease(fileSystem, staged)
+      }
+    }
+  }).pipe(Effect.ignore)
+
+/**
+ * Replaces a record this run already owns. Staged and renamed over the lease, the way the handoff
+ * store writes: a host terminated mid-write would otherwise leave an empty or half-written lease,
+ * and a lease that cannot be read is deliberately not treated as a workspace nobody owns.
+ */
 export const writeLease = (
   fileSystem: FileSystem.FileSystem,
   paths: Pick<RunWorkspacePaths, 'leasePath' | 'stagingPath'>,
   lease: WorkspaceLeaseRecord,
 ): Effect.Effect<void, PlatformError> =>
-  stageLease(fileSystem, paths.stagingPath, lease).pipe(
-    Effect.flatMap((staged) =>
-      publishStaged(fileSystem, staged, (from) => fileSystem.rename(from, paths.leasePath)),
-    ),
-  )
+  Effect.suspend(() => {
+    const staged = stagedLeasePath(paths.stagingPath)
+    return writeStagedLease(fileSystem, staged, lease).pipe(
+      Effect.zipRight(fileSystem.rename(staged, paths.leasePath)),
+      Effect.ensuring(discardStagedLease(fileSystem, staged)),
+    )
+  })
 
 /**
  * Reads the lease beside a run workspace. A lease that is not there is `none` — a run directory
