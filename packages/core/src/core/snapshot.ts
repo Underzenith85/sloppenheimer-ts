@@ -11,7 +11,7 @@ import {
   type RunningSnapshot,
 } from './runtime.js'
 import type { RetryEntry, RunningEntry, RuntimeState } from './state.js'
-import { completionSnapshots, handoffSnapshots, publishedCompletions } from './transitions.js'
+import { handoffSnapshots, publishedCompletions } from './transitions.js'
 
 /**
  * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
@@ -103,6 +103,7 @@ export const createSnapshot = (
     (total, entry) => total + (now - entry.startedAt.getTime()) / 1_000,
     0,
   )
+  const completed = publishedCompletions(state)
   const activeTokens = running.reduce(
     (totals, entry) => ({
       inputTokens: totals.inputTokens + entry.tokens.inputTokens,
@@ -149,15 +150,15 @@ export const createSnapshot = (
     counts: {
       running: state.running.size,
       retrying: state.retries.size,
-      // What the host can report as finished, restored history included, so the count never
-      // disagrees with the list beside it.
-      completed: completionSnapshots(state).length,
+      // What this snapshot publishes, restored history included: each count states the length of
+      // the list beside it, and `completed` is the one of the three that is bounded.
+      completed: completed.length,
     },
     pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
     handoffs: handoffSnapshots(state),
     running: running.map(runningSnapshot),
     retrying: [...state.retries.values()].map(retrySnapshot),
-    completed: publishedCompletions(state),
+    completed,
     saturatedStates: saturatedStatesOf(state),
     inspectableAgents: inspectableAgentsOf(state),
     totals: {
