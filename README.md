@@ -637,8 +637,10 @@ whose process id the kernel has since handed to a successor, which is why the re
 owner's start as well as its id. A process id means nothing outside the namespace that issued it and
 nothing at all on another machine, so an owner this host cannot place — another container, another
 kernel, or a platform that names neither — is left alone rather than probed against whatever process
-carries that id here. What reclaims those is age: a run is bounded by timeouts measured in minutes,
-so a lease still held a week later belongs to a host that is not coming back.
+carries that id here. What reclaims those is the lease's own expiry: it states how long the run that
+took it could still be running, from that run's own turn, stall and timeout limits, so a host which
+cannot observe the owner waits out the run the owner was configured for rather than one it guessed
+at.
 
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the

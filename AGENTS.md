@@ -589,8 +589,9 @@ lifecycle. This section is the architecture record for it; do not create a separ
   belongs to and the boot it ran under, so a host restarted into its predecessor's process id does
   not keep its leases alive, and an owner this host cannot place — another container, another
   kernel, or a platform that names neither — is never probed against whatever process carries its id
-  here. Those are reclaimed by age instead: a run is bounded by timeouts measured in minutes, so a
-  lease still held a week later is no longer treated as one. A lease is released on success, failure, cancellation and
+  here. Those are reclaimed by the lease's own expiry instead: a record states how long the run that
+  took it could still be running, derived from that run's own turn, stall and timeout limits, so a
+  host that cannot observe the owner waits out the run the owner was configured for. A lease is released on success, failure, cancellation and
   shutdown alike, and it outlives the host that wrote it, so a restart and a second host reading the
   same root both see who owns what.
 - **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves

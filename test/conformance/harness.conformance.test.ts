@@ -6,6 +6,7 @@ import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain
 import { FakeTracker } from '../harness/fake-tracker.js'
 import { FakeWorkspaceProcess } from '../harness/fake-workspace-process.js'
 import { anIssue } from '../harness/fixtures.js'
+import { leaseLifetimeFloorMs } from '@sloppenheimer/core/domain/workspace-lease.js'
 
 const issue: Issue = anIssue({
   id: issueId('opaque-1'),
@@ -64,12 +65,12 @@ describe('Core Conformance typed harness boundaries', (): void => {
       Effect.gen(function* () {
         const workspaces = new FakeWorkspaceProcess()
         const published = yield* workspaces.withLeasedWorkspace(
-          { identifier: issue.identifier, runId: 1 },
+          { identifier: issue.identifier, runId: 1, lifetimeMs: leaseLifetimeFloorMs },
           (workspace) => Effect.succeed(workspace),
           () => ({ _tag: 'Completed' }),
         )
         const failed = yield* workspaces.withLeasedWorkspace(
-          { identifier: issue.identifier, runId: 2 },
+          { identifier: issue.identifier, runId: 2, lifetimeMs: leaseLifetimeFloorMs },
           (workspace) =>
             workspaces
               .beforeRun(workspace)

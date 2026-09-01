@@ -8,7 +8,7 @@ import {
   heldLease,
   leaseIsClaimed,
   retainedLease,
-  unobservableLeaseLifetimeMs,
+  leaseLifetimeFloorMs,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
@@ -37,7 +37,11 @@ const acquiredAt = new Date('2026-08-31T10:00:00.000Z')
 const releasedAt = new Date('2026-08-31T10:05:00.000Z')
 
 const lease = heldLease(
-  { identifier: issueIdentifier('owner/repository#166'), runId: 7 },
+  {
+    identifier: issueIdentifier('owner/repository#166'),
+    runId: 7,
+    lifetimeMs: leaseLifetimeFloorMs,
+  },
   'run-7-hosta',
   owner,
   acquiredAt,
@@ -68,6 +72,9 @@ describe('workspace lease records', (): void => {
       status: 'held',
       reason: null,
       acquiredAt: '2026-08-31T10:00:00.000Z',
+      // A lease states when the run that took it can no longer be running, by its own workflow's
+      // limits, so a host that cannot observe the owner waits out that run rather than guessing.
+      expiresAt: new Date(acquiredAt.getTime() + leaseLifetimeFloorMs).toISOString(),
       releasedAt: null,
     })
   })
@@ -144,8 +151,8 @@ describe('who a lease belongs to', (): void => {
 
   it('stops claiming an unobservable owner once no run could still be holding it', (): void => {
     // The one rule that reclaims a crashed host's workspaces where the kernel names nothing to
-    // compare: a run is bounded by timeouts measured in minutes, so a week is far past any of them.
-    const muchLater = new Date(Date.parse(lease.acquiredAt) + unobservableLeaseLifetimeMs + 1_000)
+    // compare — and it waits out the run the owner was configured for, which the lease states.
+    const muchLater = new Date(Date.parse(lease.expiresAt) + 1_000)
 
     expect(leaseIsClaimed(lease, 'host-b', unobservable, muchLater)).toBe(false)
     expect(leaseIsClaimed(lease, 'host-b', running('918273'), muchLater)).toBe(true)

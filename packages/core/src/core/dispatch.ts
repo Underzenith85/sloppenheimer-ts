@@ -4,7 +4,7 @@ import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
 import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
-import type { WorkspaceRelease } from '../domain/workspace-lease.js'
+import { runLeaseLifetimeMs, type WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo } from '../support/logging.js'
@@ -241,7 +241,17 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
   return execution.workspaces
     .withLeasedWorkspace(
-      { identifier: issue.identifier, runId },
+      {
+        identifier: issue.identifier,
+        runId,
+        // The lease says how long this run's own workflow allows it to be running, so a host that
+        // cannot observe this one waits out the run it was configured for.
+        lifetimeMs: runLeaseLifetimeMs({
+          maxTurns: execution.maxTurns,
+          turnTimeoutMs: execution.agentRunner.turnTimeoutMs,
+          stallTimeoutMs: execution.stallTimeoutMs,
+        }),
+      },
       (workspace) => runWithSourceControl(launch, workspace),
       workspaceRelease,
     )

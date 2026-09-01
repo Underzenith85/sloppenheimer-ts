@@ -10,6 +10,7 @@ import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain
 import { hostFileSystem } from './harness/filesystem.js'
 import { makeGitRepository } from './harness/git-repository.js'
 import { anIssue, sourceControlFor } from './harness/fixtures.js'
+import { leaseLifetimeFloorMs } from '@sloppenheimer/core/domain/workspace-lease.js'
 
 /**
  * Which spawned child to fail an output pipe on, and which pipe.
@@ -173,7 +174,7 @@ describe('a child output pipe that fails', (): void => {
     // offers one.
     const error = await Effect.runPromise(
       manager.withLeasedWorkspace(
-        { identifier: issueIdentifier('GH-200'), runId: 1 },
+        { identifier: issueIdentifier('GH-200'), runId: 1, lifetimeMs: leaseLifetimeFloorMs },
         (workspace) =>
           Effect.sync(() => {
             failPipeOnce({ matches: (command) => command === 'bash', pipe: 'stderr' })

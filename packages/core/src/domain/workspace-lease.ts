@@ -55,11 +55,32 @@ export type OwnerObservation =
   | Readonly<{ _tag: 'Gone' }>
   | Readonly<{ _tag: 'Running'; startMarker: string | null }>
 
-/** The run a lease belongs to. */
+/** The run a lease belongs to, and the longest its own workflow allows it to be running. */
 export type WorkspaceRun = Readonly<{
   identifier: IssueIdentifier
   runId: number
+  /**
+   * What this run's own limits allow it: the turns it may take, the time each may take, and the
+   * silence it may fall into. A lease says so, so that a host which cannot observe the owner waits
+   * out the run the owner was configured for rather than one this reader would have allowed.
+   */
+  lifetimeMs: number
 }>
+
+/**
+ * What a workflow's limits allow one run before nothing it does can still be that run.
+ *
+ * Turns are the whole of an agent session, and a stall is the longest silence the orchestrator will
+ * sit through, so together they bound the session. The floor covers what no limit names: the host's
+ * own repository work at either end, and the hooks that bracket the run.
+ */
+export const runLeaseLifetimeMs = (
+  limits: Readonly<{ maxTurns: number; turnTimeoutMs: number; stallTimeoutMs: number }>,
+): number =>
+  Math.max(limits.maxTurns * limits.turnTimeoutMs + limits.stallTimeoutMs, leaseLifetimeFloorMs)
+
+/** The shortest a lease is ever written for, whatever a workflow's own limits are. */
+export const leaseLifetimeFloorMs = 24 * 60 * 60 * 1_000
 
 /**
  * Why a released workspace was kept. A run that published its work needs nothing from the
@@ -90,6 +111,11 @@ const leaseSchema = Schema.Struct({
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),
   acquiredAt: timestamp,
+  /**
+   * When the run that took this lease can no longer be running, by its own workflow's limits. It is
+   * what a host that cannot observe the owner waits for rather than guessing at.
+   */
+  expiresAt: timestamp,
   releasedAt: Schema.NullOr(timestamp),
 }).annotations({ message: () => 'workspace lease record is malformed' })
 
@@ -113,6 +139,7 @@ export const heldLease = (
   status: 'held',
   reason: null,
   acquiredAt: acquiredAt.toISOString(),
+  expiresAt: new Date(acquiredAt.getTime() + run.lifetimeMs).toISOString(),
   releasedAt: null,
 })
 
@@ -165,17 +192,6 @@ export const decodeLease = (
 }
 
 /**
- * How long a held lease whose owner this host cannot observe is still treated as claimed.
- *
- * A run is bounded by turn, stall and retry timeouts measured in minutes, so a lease still held a
- * week later belongs to a host that is not coming back — whatever platform it ran on, and whether
- * or not this host could ever have observed its process. It is the one rule that reclaims a crashed
- * host's workspaces where the kernel offers no identity to compare, and it is set far past any run
- * so that it can never take a live one.
- */
-export const unobservableLeaseLifetimeMs = 7 * 24 * 60 * 60 * 1_000
-
-/**
  * Whether a lease still belongs to a live owner, and so whether the workspace it holds may be
  * entered or removed by anyone else.
  *
@@ -188,8 +204,8 @@ export const unobservableLeaseLifetimeMs = 7 * 24 * 60 * 60 * 1_000
  * A process id means nothing outside the namespace that issued it, and nothing at all on another
  * machine, so an owner the host cannot place — another container, another kernel, or a platform
  * that names neither — stays claimed rather than being probed against whatever process happens to
- * carry that id here. What reclaims those is age: past `unobservableLeaseLifetimeMs`, a held lease
- * no one can observe is no longer treated as one.
+ * carry that id here. What reclaims those is the lease's own expiry: the run said how long its
+ * workflow allowed it to be running, and past that, whatever holds the lease is not that run.
  *
  * Within one namespace, a process id alone still does not identify a process: a host restarted into
  * the same id, the ordinary case for a container's PID 1, would otherwise keep its predecessor's
@@ -211,7 +227,7 @@ export const leaseIsClaimed = (
     return true
   }
   if (observation._tag === 'Unobservable') {
-    return now.getTime() - Date.parse(lease.acquiredAt) < unobservableLeaseLifetimeMs
+    return now.getTime() < Date.parse(lease.expiresAt)
   }
   if (observation._tag === 'Gone') {
     return false
