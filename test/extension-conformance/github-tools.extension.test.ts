@@ -11,26 +11,26 @@ import {
   type AgentEvent,
   type AgentLaunch,
   type AgentResult,
-} from '@symphony/adapter-codex/codex.js'
-import type { AgentError } from '@symphony/core/domain/errors.js'
-import { makeHostToolSession } from '@symphony/core/core/dispatch.js'
+} from '@sloppenheimer/adapter-codex/codex.js'
+import type { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import { makeHostToolSession } from '@sloppenheimer/core/core/dispatch.js'
 import {
   issueId,
   issueIdentifier,
   type Issue,
   type JsonValue,
-} from '@symphony/core/domain/domain.js'
+} from '@sloppenheimer/core/domain/domain.js'
 import type {
   HostToolContext,
   HostToolResult,
   HostToolSession,
   HostToolSpec,
-} from '@symphony/core/domain/host-tools.js'
-import { makeGitHubCodeReview } from '@symphony/adapter-github/code-review.js'
-import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
-import type { TrackerPort } from '@symphony/core/ports/tracker.js'
-import type { GitHubProviderConfig } from '@symphony/adapter-github'
-import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
+} from '@sloppenheimer/core/domain/host-tools.js'
+import { makeGitHubCodeReview } from '@sloppenheimer/adapter-github/code-review.js'
+import { makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'
+import type { TrackerPort } from '@sloppenheimer/core/ports/tracker.js'
+import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
+import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
@@ -46,8 +46,8 @@ const fakeAppServer = resolve(
 
 const issue: Issue = {
   id: issueId('20'),
-  nativeRef: { node_id: 'I_20', issue_number: 20, owner: 'example', repository: 'symphony' },
-  identifier: issueIdentifier('example/symphony#20'),
+  nativeRef: { node_id: 'I_20', issue_number: 20, owner: 'example', repository: 'sloppenheimer' },
+  identifier: issueIdentifier('example/sloppenheimer#20'),
   title: 'Host tools',
   description: null,
   priority: null,
@@ -55,7 +55,7 @@ const issue: Issue = {
   branchName: null,
   url: null,
   assigneeId: null,
-  labels: ['symphony'],
+  labels: ['sloppenheimer'],
   blockedBy: [],
   dispatchable: true,
   createdAt: null,
@@ -75,9 +75,9 @@ const spec: HostToolSpec = {
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
-  repository: 'symphony',
+  repository: 'sloppenheimer',
   token: Redacted.make('host-token'),
-  tokenEnvironmentName: 'SYMPHONY_HOST_TOOL_TOKEN',
+  tokenEnvironmentName: 'SLOPPENHEIMER_HOST_TOOL_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
 }
@@ -280,7 +280,7 @@ describe('GitHub provider-native tool extension', (): void => {
         yield* executed(() =>
           hostTools.execute(
             'github_handoff_issue',
-            { state: 'closed', add_labels: ['done'], remove_labels: ['symphony'] },
+            { state: 'closed', add_labels: ['done'], remove_labels: ['sloppenheimer'] },
             toolContext,
           ),
         ),
@@ -295,12 +295,12 @@ describe('GitHub provider-native tool extension', (): void => {
       })
 
       expect(requests.map(({ method, url }) => `${method} ${url}`)).toEqual([
-        'POST https://api.example.test/repos/example/symphony/issues/20/comments',
-        'PATCH https://api.example.test/repos/example/symphony/issues/20',
-        'POST https://api.example.test/repos/example/symphony/issues/20/labels',
-        'DELETE https://api.example.test/repos/example/symphony/issues/20/labels/symphony',
-        'GET https://api.example.test/repos/example/symphony/pulls/7',
-        'POST https://api.example.test/repos/example/symphony/issues/20/comments',
+        'POST https://api.example.test/repos/example/sloppenheimer/issues/20/comments',
+        'PATCH https://api.example.test/repos/example/sloppenheimer/issues/20',
+        'POST https://api.example.test/repos/example/sloppenheimer/issues/20/labels',
+        'DELETE https://api.example.test/repos/example/sloppenheimer/issues/20/labels/sloppenheimer',
+        'GET https://api.example.test/repos/example/sloppenheimer/pulls/7',
+        'POST https://api.example.test/repos/example/sloppenheimer/issues/20/comments',
       ])
       expect(requests.every((request) => request.auth === 'Bearer host-token')).toBe(true)
       expect(JSON.stringify(requests.map((request) => request.body))).not.toContain('host-token')
@@ -319,7 +319,7 @@ describe('GitHub provider-native tool extension', (): void => {
     () =>
       Effect.gen(function* () {
         const workspaceRoot = yield* Effect.promise(() =>
-          mkdtemp(join(tmpdir(), 'symphony-github-tools-')),
+          mkdtemp(join(tmpdir(), 'sloppenheimer-github-tools-')),
         )
         const workspacePath = join(workspaceRoot, 'issue-20')
         yield* Effect.promise(() => mkdir(workspacePath))
@@ -340,8 +340,8 @@ describe('GitHub provider-native tool extension', (): void => {
         })
         const dynamicTools: readonly JsonValue[] = [{ type: 'function', ...spec }]
         const events: AgentEvent[] = []
-        const previous = process.env['SYMPHONY_HOST_TOOL_TOKEN']
-        process.env['SYMPHONY_HOST_TOOL_TOKEN'] = 'host-only-secret-value'
+        const previous = process.env['SLOPPENHEIMER_HOST_TOOL_TOKEN']
+        process.env['SLOPPENHEIMER_HOST_TOOL_TOKEN'] = 'host-only-secret-value'
 
         const result = yield* runAgentOnHost({
           issue,
@@ -350,7 +350,7 @@ describe('GitHub provider-native tool extension', (): void => {
           config: configFor('host-tool', dynamicTools),
           prompt: 'exercise host tool',
           maxTurns: 1,
-          secretEnvironmentNames: ['SYMPHONY_HOST_TOOL_TOKEN'],
+          secretEnvironmentNames: ['SLOPPENHEIMER_HOST_TOOL_TOKEN'],
           hostTools,
           refreshIssue: () => Effect.succeed(null),
           isRoutable: () => false,
@@ -361,9 +361,9 @@ describe('GitHub provider-native tool extension', (): void => {
           Effect.ensuring(
             Effect.promise(async () => {
               if (previous === undefined) {
-                delete process.env['SYMPHONY_HOST_TOOL_TOKEN']
+                delete process.env['SLOPPENHEIMER_HOST_TOOL_TOKEN']
               } else {
-                process.env['SYMPHONY_HOST_TOOL_TOKEN'] = previous
+                process.env['SLOPPENHEIMER_HOST_TOOL_TOKEN'] = previous
               }
               await rm(workspaceRoot, { force: true, recursive: true })
             }),
@@ -387,7 +387,7 @@ describe('GitHub provider-native tool extension', (): void => {
     () =>
       Effect.gen(function* () {
         const workspaceRoot = yield* Effect.promise(() =>
-          mkdtemp(join(tmpdir(), 'symphony-github-tools-')),
+          mkdtemp(join(tmpdir(), 'sloppenheimer-github-tools-')),
         )
         const workspacePath = join(workspaceRoot, 'issue-20')
         yield* Effect.promise(() => mkdir(workspacePath))

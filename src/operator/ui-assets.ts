@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
 
-import { timelineCategories } from '@symphony/core/telemetry.js'
+import { timelineCategories } from '@sloppenheimer/core/telemetry.js'
 
 const read = (name: string): string =>
   readFileSync(new URL(`./ui/${name}`, import.meta.url), 'utf8')

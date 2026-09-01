@@ -1,5 +1,5 @@
-import type { CodexSettings } from '@symphony/adapter-codex'
-import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
+import type { CodexSettings } from '@sloppenheimer/adapter-codex'
+import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.js'
 
 /**
  * A Codex launch configuration, in the shape the neutral port now carries.

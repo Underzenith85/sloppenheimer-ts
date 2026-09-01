@@ -2,13 +2,13 @@ import { it } from '@effect/vitest'
 import { Chunk, Effect, Option, Schedule } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import {
   agentRetryDelay,
   agentRetrySchedule,
   trackerRetryDelay,
   trackerRetrySchedule,
-} from '@symphony/core/core/retry.js'
+} from '@sloppenheimer/core/core/retry.js'
 
 const trackerError = (retryable = true, retryAfterMs?: number): TrackerError =>
   new TrackerError({

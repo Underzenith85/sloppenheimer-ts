@@ -1,4 +1,4 @@
-// The published shape of the operator API. SPEC 13.7.2 names the baseline document a Symphony host
+// The published shape of the operator API. SPEC 13.7.2 names the baseline document a Sloppenheimer host
 // serves from `/api/v1/state`, and it is not the runtime's internal record: it is snake_case, it
 // calls a running row's issue `issue_id`, `issue_identifier` and `issue_url`, and it publishes the
 // aggregate token counters as `codex_totals`.
@@ -8,14 +8,14 @@
 // fields to match the wire would push a published vocabulary back into the scheduler. One function
 // converts, once, and everything the server sends goes through it.
 //
-// Symphony publishes a superset of the baseline — handoffs, workflow reload state, handoff
+// Sloppenheimer publishes a superset of the baseline — handoffs, workflow reload state, handoff
 // recovery, retained completions, saturated states — and those extension fields follow the same
 // snake_case convention, so a reader never has to know which half of the document they are in.
 //
 // The per-issue resource 13.7.2 documents beside `/api/v1/state` is mapped here too, from the same
 // snapshot and from the agent detail record the runtime publishes for that issue.
 
-import type { AgentDetailLookup, OrchestratorSnapshot, RefreshOutcome } from '@symphony/core'
+import type { AgentDetailLookup, OrchestratorSnapshot, RefreshOutcome } from '@sloppenheimer/core'
 import {
   agentDetailPath,
   timelineEventLimit,
@@ -23,7 +23,7 @@ import {
   type AgentErrorSummary,
   type AgentTimelineCategory,
   type AgentTimelineEvent,
-} from '@symphony/core/telemetry.js'
+} from '@sloppenheimer/core/telemetry.js'
 
 type Snapshot = OrchestratorSnapshot
 type RunningRow = Snapshot['running'][number]
@@ -134,7 +134,7 @@ export type PublishedState = Readonly<{
 }>
 
 /**
- * The acknowledgement `POST /api/v1/refresh` returns. Symphony answers once the pass the request
+ * The acknowledgement `POST /api/v1/refresh` returns. Sloppenheimer answers once the pass the request
  * joined has finished, so a caller that reads `/api/v1/state` next sees the refreshed state.
  */
 export type PublishedRefresh = Readonly<{
@@ -360,7 +360,7 @@ export type PublishedIssueDetail = Readonly<{
   running: PublishedIssueRun | null
   retry: PublishedIssueRetry | null
   /**
-   * Timeline retention accounting. Symphony retains a bounded, redacted event timeline rather than
+   * Timeline retention accounting. Sloppenheimer retains a bounded, redacted event timeline rather than
    * raw agent logs, so this reports what is retained, what was dropped against the bound, and how
    * much of it {@link PublishedIssueDetail.recent_events} carries.
    */

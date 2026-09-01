@@ -3,13 +3,13 @@ import { FileSystem } from '@effect/platform'
 import { NodeFileSystem } from '@effect/platform-node'
 import { Cause, ConfigProvider, Effect, Exit, Layer } from 'effect'
 
-import { githubHttpClientLayer } from '@symphony/adapter-github'
+import { githubHttpClientLayer } from '@sloppenheimer/adapter-github'
 import { parseCliArguments, type CliOptions } from './config/cli-options.js'
 import { applicationPorts } from './composition.js'
 import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
-import { startOrchestrator, WorkflowLoader } from '@symphony/core'
-import { logInfo } from '@symphony/core/support/logging.js'
+import { startOrchestrator, WorkflowLoader } from '@sloppenheimer/core'
+import { logInfo } from '@sloppenheimer/core/support/logging.js'
 
 /**
  * The CLI's last-resort bound. Cleanup is not allowed to depend on it: the host closes its scope
@@ -34,7 +34,7 @@ const messageFrom = (cause: unknown): string => {
 }
 
 const reportFailure = (cause: unknown): void => {
-  process.stderr.write(`symphony: ${messageFrom(cause)}\n`)
+  process.stderr.write(`sloppenheimer: ${messageFrom(cause)}\n`)
 }
 
 const main = async (): Promise<number> => {
@@ -77,7 +77,7 @@ const main = async (): Promise<number> => {
     Effect.parallelFinalizers(
       Effect.gen(function* () {
         const orchestrator = yield* startOrchestrator(options.workflowPath)
-        yield* logInfo('symphony host started', { workflow_path: options.workflowPath })
+        yield* logInfo('sloppenheimer host started', { workflow_path: options.workflowPath })
         const loader = yield* WorkflowLoader
         const workflow = yield* loader.load(options.workflowPath)
         const port = options.port ?? workflow.config.serverPort

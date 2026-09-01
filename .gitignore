@@ -3,6 +3,6 @@ dist/
 *.tsbuildinfo
 coverage/
 .env
-.symphony/
+.sloppenheimer/
 *.log
 .DS_Store

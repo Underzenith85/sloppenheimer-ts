@@ -1,14 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Effect, Option, type Fiber } from 'effect'
 
-import type { JsonObject } from '@symphony/core/domain/domain.js'
-import { AgentError } from '@symphony/core/domain/errors.js'
-import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
-import type { HostToolSession } from '@symphony/core/domain/host-tools.js'
-import { currentInstant } from '@symphony/core/support/clock.js'
-import { isJsonObject } from '@symphony/core/support/json.js'
-import { makeRedactor } from '@symphony/core/support/redaction.js'
-import type { AgentEvent } from '@symphony/core/telemetry.js'
+import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.js'
+import type { HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
+import { currentInstant } from '@sloppenheimer/core/support/clock.js'
+import { isJsonObject } from '@sloppenheimer/core/support/json.js'
+import { makeRedactor } from '@sloppenheimer/core/support/redaction.js'
+import type { AgentEvent } from '@sloppenheimer/core/telemetry.js'
 import {
   adoptRateLimitSnapshot,
   adoptThreadId,
@@ -127,7 +127,7 @@ export const initializeSession = (
 ): Effect.Effect<string, AgentError> =>
   Effect.gen(function* () {
     yield* sendRequest(session, 'initialize', {
-      clientInfo: { name: 'symphony_ts', title: 'Symphony TypeScript', version: '0.1.0' },
+      clientInfo: { name: 'sloppenheimer_ts', title: 'Sloppenheimer TypeScript', version: '0.1.0' },
       capabilities: { experimentalApi: true },
     })
     yield* notifySession(session, 'initialized', {})
@@ -164,7 +164,7 @@ export const initializeSession = (
       cwd,
       approvalPolicy: settings.approvalPolicy,
       sandbox: settings.threadSandbox,
-      serviceName: 'symphony_ts',
+      serviceName: 'sloppenheimer_ts',
     }
     const dynamicTools =
       session.hostTools?.specs.map((spec) => ({ type: 'function', ...spec })) ?? []

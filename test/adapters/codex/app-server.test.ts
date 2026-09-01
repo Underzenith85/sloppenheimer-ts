@@ -14,10 +14,10 @@ import {
   type AgentEvent,
   type AgentLaunch,
   type AgentResult,
-} from '@symphony/adapter-codex/codex.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import type { AgentError } from '@symphony/core/domain/errors.js'
-import type { AgentRunnerConfig } from '@symphony/core/ports/agent-runner.js'
+} from '@sloppenheimer/adapter-codex/codex.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import type { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.js'
 import { processIsAlive } from '../../harness/processes.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
@@ -43,7 +43,7 @@ afterEach(async (): Promise<void> => {
 
 const makeWorkspace = (): Effect.Effect<Readonly<{ root: string; path: string }>> =>
   Effect.promise(async () => {
-    const root = await mkdtemp(join(tmpdir(), 'symphony-app-server-'))
+    const root = await mkdtemp(join(tmpdir(), 'sloppenheimer-app-server-'))
     roots.push(root)
     const path = join(root, 'issue-14')
     await mkdir(path)
@@ -52,7 +52,7 @@ const makeWorkspace = (): Effect.Effect<Readonly<{ root: string; path: string }>
 
 const issue: Issue = anIssue({
   id: issueId('14'),
-  identifier: issueIdentifier('example/symphony#14'),
+  identifier: issueIdentifier('example/sloppenheimer#14'),
   title: 'Protocol conformance',
   url: 'https://example.test/issues/14',
 })

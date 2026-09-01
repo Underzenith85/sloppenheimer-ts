@@ -1,12 +1,12 @@
 import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
 import type {
   PullRequestCheck,
   PullRequestObservation,
   PullRequestReviewThread,
-} from '@symphony/core/domain/handoff.js'
+} from '@sloppenheimer/core/domain/handoff.js'
 import {
   afterMerge,
   afterRepairDispatched,
@@ -15,8 +15,12 @@ import {
   afterThreadsResolved,
   observeHandoff,
   repairLimit,
-} from '@symphony/core/core/handoff-decision.js'
-import type { ExecutionSnapshot, HandoffEntry, RepairEntry } from '@symphony/core/core/state.js'
+} from '@sloppenheimer/core/core/handoff-decision.js'
+import type {
+  ExecutionSnapshot,
+  HandoffEntry,
+  RepairEntry,
+} from '@sloppenheimer/core/core/state.js'
 import { anIssue } from '../harness/fixtures.js'
 
 /**
@@ -28,9 +32,9 @@ import { anIssue } from '../harness/fixtures.js'
 const observedAt = new Date('2026-02-01T00:00:00.000Z')
 
 const issue: Issue = anIssue({
-  id: issueId('example/symphony#1'),
-  identifier: issueIdentifier('example/symphony#1'),
-  title: 'example/symphony#1',
+  id: issueId('example/sloppenheimer#1'),
+  identifier: issueIdentifier('example/sloppenheimer#1'),
+  title: 'example/sloppenheimer#1',
   description: 'the original description',
 })
 
@@ -53,7 +57,7 @@ const handoff = (overrides: Partial<HandoffEntry> = {}): HandoffEntry => ({
   execution,
   pullRequestNumber: 7,
   pullRequestUrl: 'https://example.test/pulls/7',
-  branchName: 'symphony/issue-1',
+  branchName: 'sloppenheimer/issue-1',
   state: 'awaiting_checks',
   headSha: null,
   reason: null,

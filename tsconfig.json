@@ -6,21 +6,21 @@
     /*
      * Resolve the workspace packages to their sources.
      *
-     * Their `exports` send the runtime entry to `dist/`, which is what the installed `symphony`
+     * Their `exports` send the runtime entry to `dist/`, which is what the installed `sloppenheimer`
      * executable loads, and that is also what `tsx` resolves when it runs `src/cli.ts` for
      * `pnpm dev` and for the tests that spawn the CLI. Without these mappings both would need a
      * build first, and would then run yesterday's build. The compiler already resolved types this
      * way through each package's `exports`; naming it here makes `tsx` agree.
      */
     "paths": {
-      "@symphony/core": ["./packages/core/src/index.ts"],
-      "@symphony/core/*.js": ["./packages/core/src/*.ts"],
-      "@symphony/adapter-node": ["./packages/adapter-node/src/index.ts"],
-      "@symphony/adapter-node/*.js": ["./packages/adapter-node/src/*.ts"],
-      "@symphony/adapter-github": ["./packages/adapter-github/src/index.ts"],
-      "@symphony/adapter-github/*.js": ["./packages/adapter-github/src/*.ts"],
-      "@symphony/adapter-codex": ["./packages/adapter-codex/src/index.ts"],
-      "@symphony/adapter-codex/*.js": ["./packages/adapter-codex/src/*.ts"]
+      "@sloppenheimer/core": ["./packages/core/src/index.ts"],
+      "@sloppenheimer/core/*.js": ["./packages/core/src/*.ts"],
+      "@sloppenheimer/adapter-node": ["./packages/adapter-node/src/index.ts"],
+      "@sloppenheimer/adapter-node/*.js": ["./packages/adapter-node/src/*.ts"],
+      "@sloppenheimer/adapter-github": ["./packages/adapter-github/src/index.ts"],
+      "@sloppenheimer/adapter-github/*.js": ["./packages/adapter-github/src/*.ts"],
+      "@sloppenheimer/adapter-codex": ["./packages/adapter-codex/src/index.ts"],
+      "@sloppenheimer/adapter-codex/*.js": ["./packages/adapter-codex/src/*.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts", "vitest*.ts"],

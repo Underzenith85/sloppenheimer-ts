@@ -5,12 +5,12 @@ import { join } from 'node:path'
 import type { Readable } from 'node:stream'
 import { Effect, Option, Redacted, type Scope } from 'effect'
 
-import { SourceControlError } from '@symphony/core/domain/errors.js'
+import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
 import {
   detachChildProcess,
   resumeOnce,
   terminateChildProcess,
-} from '@symphony/core/support/subprocess.js'
+} from '@sloppenheimer/core/support/subprocess.js'
 
 /**
  * How one git invocation runs, and how the way it failed is read.
@@ -48,15 +48,15 @@ const outputLimit = 1024 * 1024
 /** How long a git process group has to exit politely before it is killed. */
 const gitTerminationGraceMs = 5_000
 export const gitIdentity: NodeJS.ProcessEnv = {
-  GIT_AUTHOR_NAME: 'Symphony',
-  GIT_AUTHOR_EMAIL: 'symphony@localhost',
-  GIT_COMMITTER_NAME: 'Symphony',
-  GIT_COMMITTER_EMAIL: 'symphony@localhost',
+  GIT_AUTHOR_NAME: 'Sloppenheimer',
+  GIT_AUTHOR_EMAIL: 'sloppenheimer@localhost',
+  GIT_COMMITTER_NAME: 'Sloppenheimer',
+  GIT_COMMITTER_EMAIL: 'sloppenheimer@localhost',
 }
 const askPassScript = `#!/bin/sh
 case "$1" in
-  *sername*) printf '%s\\n' "$SYMPHONY_GIT_USERNAME" ;;
-  *) printf '%s\\n' "$SYMPHONY_GIT_PASSWORD" ;;
+  *sername*) printf '%s\\n' "$SLOPPENHEIMER_GIT_USERNAME" ;;
+  *) printf '%s\\n' "$SLOPPENHEIMER_GIT_PASSWORD" ;;
 esac
 `
 
@@ -233,7 +233,7 @@ const askPassScriptPath = (
 ): Effect.Effect<string, SourceControlError, Scope.Scope> =>
   Effect.acquireRelease(
     Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), 'symphony-git-askpass-')),
+      try: () => mkdtemp(join(tmpdir(), 'sloppenheimer-git-askpass-')),
       catch: (cause: unknown) => askPassFailure(operation, cause),
     }),
     (directory) =>
@@ -273,8 +273,8 @@ export const runGit = (
             ...extraEnvironment,
             GIT_ASKPASS: askPass,
             GIT_TERMINAL_PROMPT: '0',
-            SYMPHONY_GIT_USERNAME: credential.username,
-            SYMPHONY_GIT_PASSWORD: Redacted.value(credential.password),
+            SLOPPENHEIMER_GIT_USERNAME: credential.username,
+            SLOPPENHEIMER_GIT_PASSWORD: Redacted.value(credential.password),
           }),
         ),
       ),

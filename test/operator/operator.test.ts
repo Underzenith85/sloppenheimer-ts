@@ -5,29 +5,32 @@ import { it } from '@effect/vitest'
 import { Effect, Layer, Redacted } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import type { WorkflowError } from '@symphony/core/domain/errors.js'
+import type { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import {
   issueId,
   issueIdentifier,
   type BlockerRef,
   type Issue,
   type JsonObject,
-} from '@symphony/core/domain/domain.js'
+} from '@sloppenheimer/core/domain/domain.js'
 import { buildBacklogSnapshot, makeOperatorBackend } from '../../src/operator/operator.js'
-import { layerGitHubIssueControl, makeGitHubIssueControl } from '@symphony/adapter-github/issues.js'
+import {
+  layerGitHubIssueControl,
+  makeGitHubIssueControl,
+} from '@sloppenheimer/adapter-github/issues.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { OrchestratorControl, OrchestratorSnapshot } from '@symphony/core'
+import type { OrchestratorControl, OrchestratorSnapshot } from '@sloppenheimer/core'
 import {
   CurrentIssueControl,
   layerCurrentIssueControl,
   layerIssueControlFactory,
   layerWorkflowLoader,
   type IssueControlPort,
-} from '@symphony/core'
+} from '@sloppenheimer/core'
 import { loadWorkflow, preflightWorkflow } from '../../src/config/workflow.js'
 import { trackerProviders } from '../../src/tracker-adapters.js'
 import { hostFileSystem } from '../harness/filesystem.js'
-import { githubProviderOf, type GitHubProviderConfig } from '@symphony/adapter-github'
+import { githubProviderOf, type GitHubProviderConfig } from '@sloppenheimer/adapter-github'
 import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
 import { anIssue } from '../harness/fixtures.js'
 
@@ -35,7 +38,7 @@ const temporaryDirectories: string[] = []
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
-  repository: 'symphony',
+  repository: 'sloppenheimer',
   token: Redacted.make('secret'),
   tokenEnvironmentName: 'TEST_OPERATOR_GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
@@ -57,7 +60,9 @@ const githubIssue = (number: number): JsonObject => ({
 
 const githubPullRequest = (number: number): JsonObject => ({
   ...githubIssue(number),
-  pull_request: { url: `https://api.example.test/repos/example/symphony/pulls/${String(number)}` },
+  pull_request: {
+    url: `https://api.example.test/repos/example/sloppenheimer/pulls/${String(number)}`,
+  },
 })
 
 afterEach(async (): Promise<void> => {
@@ -68,18 +73,18 @@ afterEach(async (): Promise<void> => {
 
 const blocker = (number: number, state = 'open'): BlockerRef => ({
   id: String(10_000 + number),
-  identifier: issueIdentifier(`example/symphony#${String(number)}`),
+  identifier: issueIdentifier(`example/sloppenheimer#${String(number)}`),
   title: `Issue ${String(number)}`,
   state,
-  url: `https://github.com/example/symphony/issues/${String(number)}`,
+  url: `https://github.com/example/sloppenheimer/issues/${String(number)}`,
 })
 
 const issue = (number: number, blockers: readonly BlockerRef[] = []): Issue =>
   anIssue({
     id: issueId(String(number)),
-    identifier: issueIdentifier(`example/symphony#${String(number)}`),
+    identifier: issueIdentifier(`example/sloppenheimer#${String(number)}`),
     title: `Issue ${String(number)}`,
-    url: `https://github.com/example/symphony/issues/${String(number)}`,
+    url: `https://github.com/example/sloppenheimer/issues/${String(number)}`,
     labels: [],
     blockedBy: blockers,
   })
@@ -176,7 +181,7 @@ const openIssueResponse = async (input: string | URL | Request): Promise<Respons
       state: 'open',
       html_url: 'https://example.test/issues/1',
       assignee: null,
-      labels: ['symphony'],
+      labels: ['sloppenheimer'],
       created_at: '2026-01-01T00:00:00.000Z',
       updated_at: '2026-01-02T00:00:00.000Z',
     },
@@ -185,7 +190,7 @@ const openIssueResponse = async (input: string | URL | Request): Promise<Respons
 
 const temporaryWorkflow = (): Effect.Effect<string> =>
   Effect.promise(async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'symphony-operator-test-'))
+    const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-operator-test-'))
     temporaryDirectories.push(directory)
     const workflowPath = join(directory, 'WORKFLOW.md')
     await writeFile(
@@ -195,10 +200,10 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_OPERATOR_GITHUB_TOKEN
     api_base_url: https://api.example.test
-  required_labels: [symphony]
+  required_labels: [sloppenheimer]
 ---
 Do the work
 `,
@@ -233,22 +238,22 @@ describe('operator dependency graph', (): void => {
         issue(4, [blocker(2), blocker(3)]),
         issue(5),
       ],
-      'symphony',
+      'sloppenheimer',
       ['closed'],
     )
 
     expect(snapshot.nodes.map((node) => node.identifier)).toEqual([
-      'example/symphony#1',
-      'example/symphony#2',
-      'example/symphony#3',
-      'example/symphony#4',
-      'example/symphony#5',
+      'example/sloppenheimer#1',
+      'example/sloppenheimer#2',
+      'example/sloppenheimer#3',
+      'example/sloppenheimer#4',
+      'example/sloppenheimer#5',
     ])
     expect(snapshot.edges).toEqual([
-      { blocker: 'example/symphony#1', dependent: 'example/symphony#2' },
-      { blocker: 'example/symphony#1', dependent: 'example/symphony#3' },
-      { blocker: 'example/symphony#2', dependent: 'example/symphony#4' },
-      { blocker: 'example/symphony#3', dependent: 'example/symphony#4' },
+      { blocker: 'example/sloppenheimer#1', dependent: 'example/sloppenheimer#2' },
+      { blocker: 'example/sloppenheimer#1', dependent: 'example/sloppenheimer#3' },
+      { blocker: 'example/sloppenheimer#2', dependent: 'example/sloppenheimer#4' },
+      { blocker: 'example/sloppenheimer#3', dependent: 'example/sloppenheimer#4' },
     ])
     expect(snapshot.issues.map(({ number, readiness }) => [number, readiness])).toEqual([
       [1, 'ready'],
@@ -268,7 +273,7 @@ describe('operator dependency graph', (): void => {
         issue(4, [blocker(2), blocker(3)]),
         issue(5),
       ],
-      'symphony',
+      'sloppenheimer',
       ['closed'],
     )
 
@@ -286,7 +291,7 @@ describe('operator dependency graph', (): void => {
     const snapshot = buildBacklogSnapshot(
       // #12 is blocked by #10 and by #11; #13 waits on #12.
       [issue(10), issue(11), issue(12, [blocker(10), blocker(11)]), issue(13, [blocker(12)])],
-      'symphony',
+      'sloppenheimer',
       ['closed'],
     )
 
@@ -300,7 +305,7 @@ describe('operator dependency graph', (): void => {
     const snapshot = buildBacklogSnapshot(
       // #21 is closed, so it is not holding #22 back and #20 alone frees it.
       [issue(20), issue(22, [blocker(20), blocker(21, 'closed')])],
-      'symphony',
+      'sloppenheimer',
       ['closed'],
     )
 
@@ -310,7 +315,7 @@ describe('operator dependency graph', (): void => {
   it('counts downstream work without diverging on a dependency cycle', (): void => {
     const snapshot = buildBacklogSnapshot(
       [issue(6, [blocker(7)]), issue(7, [blocker(6)]), issue(8, [blocker(6)])],
-      'symphony',
+      'sloppenheimer',
       ['closed'],
     )
 
@@ -323,7 +328,7 @@ describe('operator dependency graph', (): void => {
   it('exposes cycle diagnostics and completed external blockers', (): void => {
     const snapshot = buildBacklogSnapshot(
       [issue(6, [blocker(7)]), issue(7, [blocker(6)]), issue(8, [blocker(9, 'closed')])],
-      'symphony',
+      'sloppenheimer',
       ['closed'],
     )
 
@@ -336,8 +341,8 @@ describe('operator dependency graph', (): void => {
       'completed',
     )
     expect(snapshot.edges).toContainEqual({
-      blocker: 'example/symphony#9',
-      dependent: 'example/symphony#8',
+      blocker: 'example/sloppenheimer#9',
+      dependent: 'example/sloppenheimer#8',
     })
   })
 
@@ -426,7 +431,7 @@ describe('operator dependency graph', (): void => {
       vi.stubEnv('TEST_OPERATOR_GITHUB_TOKEN', 'secret')
       const addLabel = vi.fn((issueNumber: number, label: string) => [issueNumber, label])
       const control: IssueControlPort = {
-        listOpenIssues: () => Effect.succeed([{ ...issue(1), labels: ['symphony'] }]),
+        listOpenIssues: () => Effect.succeed([{ ...issue(1), labels: ['sloppenheimer'] }]),
         addLabel: (issueNumber, label) => {
           addLabel(issueNumber, label)
           return Effect.void
@@ -449,7 +454,7 @@ describe('operator dependency graph', (): void => {
         ),
       )
 
-      expect(addLabel).toHaveBeenCalledWith(1, 'symphony')
+      expect(addLabel).toHaveBeenCalledWith(1, 'sloppenheimer')
       expect(snapshot.issues.map(({ number, enabled }) => [number, enabled])).toEqual([[1, true]])
     }),
   )

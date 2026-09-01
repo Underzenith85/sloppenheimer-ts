@@ -1,14 +1,14 @@
 import { Effect } from 'effect'
 
-import type { JsonObject } from '@symphony/core/domain/domain.js'
-import type { HostToolResult, HostToolSession } from '@symphony/core/domain/host-tools.js'
-import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
+import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import type { HostToolResult, HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
+import { unsupportedHostTool } from '@sloppenheimer/core/domain/host-tools.js'
 import { hostToolCallFrom } from './protocol.js'
 
 /**
- * What the App Server asks of Symphony, and how each kind of request is answered.
+ * What the App Server asks of Sloppenheimer, and how each kind of request is answered.
  *
- * Symphony is a client with no operator at a keyboard, so every request has a standing answer:
+ * Sloppenheimer is a client with no operator at a keyboard, so every request has a standing answer:
  * approvals are granted, a widened sandbox is withheld, interactive input fails the turn rather
  * than stalling it, and a host tool runs. Recognizing which is which is the whole of this module.
  */
@@ -21,7 +21,7 @@ export const isPermissionsApproval = (method: string): boolean =>
   method.endsWith('/permissions/requestApproval')
 
 /**
- * What Symphony grants when Codex asks to widen its sandbox mid-turn: nothing, answered in the
+ * What Sloppenheimer grants when Codex asks to widen its sandbox mid-turn: nothing, answered in the
  * shape the server can decode.
  *
  * The request asks for additional filesystem paths or network access beyond the sandbox the thread

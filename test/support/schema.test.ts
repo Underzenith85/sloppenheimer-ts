@@ -9,7 +9,7 @@ import {
   protocolRecord,
   protocolStruct,
   tolerant,
-} from '@symphony/core/support/schema.js'
+} from '@sloppenheimer/core/support/schema.js'
 
 const window = protocolStruct({
   usedPercent: tolerant(finiteNumber),
@@ -47,7 +47,7 @@ describe('protocol schemas', (): void => {
     // An empty string is the protocol's other way of saying nothing.
     expect(decodeWindow({ label: '' })?.label).toBeNull()
     expect(decodeWindow({ usedPercent: Number.NaN })?.usedPercent).toBeNull()
-    // A field the protocol adds later cannot fail a message Symphony already understands.
+    // A field the protocol adds later cannot fail a message Sloppenheimer already understands.
     expect(decodeWindow({ usedPercent: 7, somethingNewer: { nested: true } })?.usedPercent).toBe(7)
   })
 

@@ -1,10 +1,10 @@
 import { Deferred, Effect, Option, Ref } from 'effect'
 
-import type { JsonObject } from '@symphony/core/domain/domain.js'
-import { AgentError } from '@symphony/core/domain/errors.js'
-import { currentInstant } from '@symphony/core/support/clock.js'
-import { isJsonObject, isJsonValue } from '@symphony/core/support/json.js'
-import type { AgentLifecycle, TokenCounts } from '@symphony/core/telemetry.js'
+import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import { currentInstant } from '@sloppenheimer/core/support/clock.js'
+import { isJsonObject, isJsonValue } from '@sloppenheimer/core/support/json.js'
+import type { AgentLifecycle, TokenCounts } from '@sloppenheimer/core/telemetry.js'
 import {
   accumulateUsage,
   admitRateLimits,
@@ -37,7 +37,7 @@ import { emitEvent, processIdOf, writeMessage, type SessionRuntime } from './ses
 import { completeTurn, ensureTurnStarted, failCurrentTurn, turnStateOf } from './turns.js'
 
 /**
- * Everything the App Server sends: a response to something Symphony asked, a request Symphony must
+ * Everything the App Server sends: a response to something Sloppenheimer asked, a request Sloppenheimer must
  * answer, or a notification about the thread or a turn.
  *
  * The dispatch is `receiveLine`, and every handler below is reached from it.
@@ -94,7 +94,7 @@ export const settleResponse = (
     claimResponse(session.state, id).pipe(
       Effect.flatMap((request) => {
         if (request === undefined) {
-          // Response-shaped, but it answers nothing Symphony sent. It is not progress, so it must not
+          // Response-shaped, but it answers nothing Sloppenheimer sent. It is not progress, so it must not
           // re-arm the turn: a stuck server could otherwise hold a turn open with unmatched ids.
           return emitEvent(
             session,
@@ -199,7 +199,7 @@ export const handleServerRequest = (
       Effect.zipRight(
         writeMessage(session, {
           id,
-          error: { code: -32000, message: 'Symphony does not support interactive input' },
+          error: { code: -32000, message: 'Sloppenheimer does not support interactive input' },
         }),
       ),
       Effect.zipRight(

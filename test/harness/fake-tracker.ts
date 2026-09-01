@@ -1,14 +1,14 @@
 import { Effect } from 'effect'
 
-import type { Issue, IssueId, JsonValue } from '@symphony/core/domain/domain.js'
-import type { PullRequestObservation } from '@symphony/core/domain/handoff.js'
+import type { Issue, IssueId, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import type { PullRequestObservation } from '@sloppenheimer/core/domain/handoff.js'
 import type {
   HostToolContext,
   HostToolResult,
   HostToolSpec,
-} from '@symphony/core/domain/host-tools.js'
-import type { CodeReviewPort, HandoffResult } from '@symphony/core/ports/code-review.js'
-import type { IssueFetchOptions, TrackerPort } from '@symphony/core/ports/tracker.js'
+} from '@sloppenheimer/core/domain/host-tools.js'
+import type { CodeReviewPort, HandoffResult } from '@sloppenheimer/core/ports/code-review.js'
+import type { IssueFetchOptions, TrackerPort } from '@sloppenheimer/core/ports/tracker.js'
 
 export type TrackerCall =
   | Readonly<{

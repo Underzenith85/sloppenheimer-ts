@@ -1,16 +1,16 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Redacted } from 'effect'
 
-import type { JsonObject, JsonValue } from '@symphony/core/domain/domain.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
+import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import type { GitHubProviderConfig } from './provider.js'
 import type {
   HostToolContext,
   HostToolFailureCode,
   HostToolResult,
   HostToolSpec,
-} from '@symphony/core/domain/host-tools.js'
-import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
+} from '@sloppenheimer/core/domain/host-tools.js'
+import { unsupportedHostTool } from '@sloppenheimer/core/domain/host-tools.js'
 import { isJsonRecord, trackerResponseError, withBoundHttpClient } from './client.js'
 
 /*

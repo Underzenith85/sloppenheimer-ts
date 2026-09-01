@@ -6,22 +6,22 @@ import { it } from '@effect/vitest'
 import { Clock, Effect, Fiber, Layer, Redacted, TestClock } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
-import { githubJson, type GitHubHttpResult } from '@symphony/adapter-github/client.js'
-import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'
-import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
-import type { GitHubProviderConfig } from '@symphony/adapter-github'
-import type { TrackerError } from '@symphony/core/domain/errors.js'
+import { githubJson, type GitHubHttpResult } from '@sloppenheimer/adapter-github/client.js'
+import { makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
+import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
+import type { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 
 const provider: GitHubProviderConfig = {
   owner: 'example',
-  repository: 'symphony',
+  repository: 'sloppenheimer',
   token: Redacted.make('secret'),
   tokenEnvironmentName: 'GITHUB_TOKEN',
   apiBaseUrl: 'https://api.example.test',
   baseBranch: 'main',
 }
 
-const issuesUrl = 'https://api.example.test/repos/example/symphony/issues'
+const issuesUrl = 'https://api.example.test/repos/example/sloppenheimer/issues'
 
 /** A client bound through a layer: the adapter never reaches for global `fetch`. */
 const clientLayer = (
@@ -92,7 +92,7 @@ describe('GitHub transport client injection', (): void => {
       expect(observed[0]?.headers).toMatchObject({
         accept: 'application/vnd.github+json',
         authorization: 'Bearer secret',
-        'user-agent': 'symphony-ts/0.1',
+        'user-agent': 'sloppenheimer-ts/0.1',
         'x-github-api-version': '2026-03-10',
       })
       expect(observed[0]?.headers['content-type']).toBeUndefined()
@@ -286,8 +286,8 @@ describe('GitHub adapter client binding', (): void => {
           { body: 'hello' },
           {
             issueId: issueId('7'),
-            issueIdentifier: issueIdentifier('example/symphony#7'),
-            nativeRef: { owner: 'example', repository: 'symphony', issue_number: 7 },
+            issueIdentifier: issueIdentifier('example/sloppenheimer#7'),
+            nativeRef: { owner: 'example', repository: 'sloppenheimer', issue_number: 7 },
           },
         ),
       )
@@ -298,7 +298,7 @@ describe('GitHub adapter client binding', (): void => {
         data: { issue_number: 7, comment_url: 'https://example.test/comment/1' },
       })
       expect(requests[0]?.url).toBe(
-        'https://api.example.test/repos/example/symphony/issues/7/comments',
+        'https://api.example.test/repos/example/sloppenheimer/issues/7/comments',
       )
     }),
   )

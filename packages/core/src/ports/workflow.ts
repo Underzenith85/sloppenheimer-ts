@@ -31,7 +31,7 @@ export type WorkflowLoaderPort = Readonly<{
   preflight: (workflow: Workflow) => Effect.Effect<PreflightResult, WorkflowError>
 }>
 
-export class WorkflowLoader extends Context.Tag('symphony/WorkflowLoader')<
+export class WorkflowLoader extends Context.Tag('sloppenheimer/WorkflowLoader')<
   WorkflowLoader,
   WorkflowLoaderPort
 >() {}
@@ -55,7 +55,7 @@ export type WorkflowWatcherPort = Readonly<{
   changes: (path: string) => Effect.Effect<Stream.Stream<void>, never, Scope.Scope>
 }>
 
-export class WorkflowWatcher extends Context.Tag('symphony/WorkflowWatcher')<
+export class WorkflowWatcher extends Context.Tag('sloppenheimer/WorkflowWatcher')<
   WorkflowWatcher,
   WorkflowWatcherPort
 >() {}

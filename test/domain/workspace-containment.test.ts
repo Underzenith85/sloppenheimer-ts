@@ -1,7 +1,7 @@
 import { Either, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { issueIdentifier, type Workspace } from '@symphony/core/domain/domain.js'
+import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
 import {
   containedWorkspacePath,
   declaredWorkspacePath,
@@ -13,8 +13,8 @@ import {
   verifiedRootRejection,
   workspaceKey,
   type VerifiedWorkspace,
-} from '@symphony/core/domain/workspace-containment.js'
-import { WorkspaceError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/workspace-containment.js'
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 
 /**
  * The containment rules are what stop an issue identifier escaping the configured workspace root,
@@ -23,7 +23,7 @@ import { WorkspaceError } from '@symphony/core/domain/errors.js'
  * workspace and Codex suites.
  */
 
-const root = '/srv/symphony/workspaces'
+const root = '/srv/sloppenheimer/workspaces'
 
 const workspaceAt = (path: string): Workspace => ({ path, key: 'key', createdNow: false })
 
@@ -101,9 +101,9 @@ describe('workspace keys', (): void => {
 describe('workspace path containment', (): void => {
   it('accepts a key that resolves to a directory inside the root', (): void => {
     expect(accepted(containedWorkspacePath(root, 'GH-7'))).toBe(`${root}/GH-7`)
-    expect(accepted(containedWorkspacePath('/srv/symphony/../symphony/workspaces', 'GH-7'))).toBe(
-      `${root}/GH-7`,
-    )
+    expect(
+      accepted(containedWorkspacePath('/srv/sloppenheimer/../sloppenheimer/workspaces', 'GH-7')),
+    ).toBe(`${root}/GH-7`)
   })
 
   it('rejects a key that escapes or equals the root', (): void => {
@@ -121,8 +121,8 @@ describe('workspace path containment', (): void => {
 describe('strict descendancy', (): void => {
   it('is false for the root itself, a parent, and a sibling', (): void => {
     expect(isStrictDescendant(root, root)).toBe(false)
-    expect(isStrictDescendant(root, '/srv/symphony')).toBe(false)
-    expect(isStrictDescendant(root, '/srv/symphony/other')).toBe(false)
+    expect(isStrictDescendant(root, '/srv/sloppenheimer')).toBe(false)
+    expect(isStrictDescendant(root, '/srv/sloppenheimer/other')).toBe(false)
     expect(isStrictDescendant(root, `${root}-suffix`)).toBe(false)
   })
 
@@ -136,13 +136,16 @@ describe('launch verification path reasoning', (): void => {
   it('normalizes the root and the declared path before any probe', (): void => {
     expect(
       accepted(
-        declaredWorkspacePath('/srv/symphony/../symphony/workspaces', workspaceAt(`${root}/GH-7`)),
+        declaredWorkspacePath(
+          '/srv/sloppenheimer/../sloppenheimer/workspaces',
+          workspaceAt(`${root}/GH-7`),
+        ),
       ),
     ).toEqual({ normalizedRoot: root, declaredPath: `${root}/GH-7` })
   })
 
   it('rejects a declared path that is not a strict descendant of the root', (): void => {
-    for (const path of [root, '/srv/symphony', '/elsewhere/GH-7', `${root}/../escape`]) {
+    for (const path of [root, '/srv/sloppenheimer', '/elsewhere/GH-7', `${root}/../escape`]) {
       const error = pathRejection(declaredWorkspacePath(root, workspaceAt(path)))
       expect(error.message).toMatch(
         /^workspace path is not a strict descendant of the configured root: /u,
@@ -165,7 +168,7 @@ describe('identity rebinding rules', (): void => {
   })
 
   it('rejects a root that canonically resolves elsewhere now', (): void => {
-    const error = rejection(verifiedRootRejection(verified, '/srv/symphony/moved'))
+    const error = rejection(verifiedRootRejection(verified, '/srv/sloppenheimer/moved'))
     expect(error.message).toBe(`configured workspace root changed since verification: ${root}`)
   })
 

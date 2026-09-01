@@ -4,17 +4,17 @@ import {
   type BlockerRef,
   type Issue,
   type JsonValue,
-} from '@symphony/core/domain/domain.js'
+} from '@sloppenheimer/core/domain/domain.js'
 import { Either, Schema } from 'effect'
 
-import { TrackerError } from '@symphony/core/domain/errors.js'
-import { isJsonValue } from '@symphony/core/support/json.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
+import { isJsonValue } from '@sloppenheimer/core/support/json.js'
 import {
   nonEmptyString,
   positiveInteger,
   safeInteger,
   unknownRecord,
-} from '@symphony/core/support/schema.js'
+} from '@sloppenheimer/core/support/schema.js'
 import type { GitHubProviderConfig } from './provider.js'
 import { decodeTrackerOrThrow, trackerCause } from './client.js'
 

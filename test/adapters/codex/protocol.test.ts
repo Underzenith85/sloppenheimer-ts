@@ -8,7 +8,7 @@ import {
   responseIdentity,
   telemetryFrom,
   turnFrom,
-} from '@symphony/adapter-codex/protocol.js'
+} from '@sloppenheimer/adapter-codex/protocol.js'
 
 describe('Codex protocol decoding', (): void => {
   it('reports no usage at all rather than a partial reading', (): void => {
@@ -100,12 +100,14 @@ describe('Codex protocol decoding', (): void => {
   })
 
   it('reports a host tool request against its tool even when the request is unusable', (): void => {
-    expect(hostToolCallFrom({ params: { tool: 'symphony_status', arguments: { a: 1 } } })).toEqual({
-      tool: 'symphony_status',
+    expect(
+      hostToolCallFrom({ params: { tool: 'sloppenheimer_status', arguments: { a: 1 } } }),
+    ).toEqual({
+      tool: 'sloppenheimer_status',
       arguments: { a: 1 },
     })
-    expect(hostToolCallFrom({ params: { tool: 'symphony_status' } })).toEqual({
-      tool: 'symphony_status',
+    expect(hostToolCallFrom({ params: { tool: 'sloppenheimer_status' } })).toEqual({
+      tool: 'sloppenheimer_status',
       arguments: undefined,
     })
     expect(hostToolCallFrom({ params: {} })).toEqual({ tool: null, arguments: undefined })

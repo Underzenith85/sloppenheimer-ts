@@ -14,7 +14,7 @@ const tsxImport = import.meta.resolve('tsx')
 /*
  * The CLI is spawned with a temporary directory as its working directory, so `tsx` would look
  * for a `tsconfig.json` there and find none. Naming the repository's own is what maps
- * `@symphony/*` onto the workspace sources: without it the child resolves each package's
+ * `@sloppenheimer/*` onto the workspace sources: without it the child resolves each package's
  * `exports` to `dist/`, and these tests would need a build first and would then exercise it
  * rather than the tree under test.
  */
@@ -89,7 +89,7 @@ const reserveOperatorPort = async (): Promise<number> => {
 }
 
 const makeDirectory = async (): Promise<string> => {
-  const directory = await mkdtemp(join(tmpdir(), 'symphony-cli-'))
+  const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-cli-'))
   temporaryDirectories.push(directory)
   return directory
 }
@@ -104,8 +104,8 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
-    token: $SYMPHONY_CLI_TEST_TOKEN
+    repository: sloppenheimer
+    token: $SLOPPENHEIMER_CLI_TEST_TOKEN
     api_base_url: http://127.0.0.1:${String(trackerPort)}
 polling:
   interval_ms: 60000
@@ -125,7 +125,7 @@ const spawnCli = (cwd: string, arguments_: readonly string[], detached = false):
     env: {
       ...process.env,
       GIT_CONFIG_GLOBAL: join(cwd, '.gitconfig'),
-      SYMPHONY_CLI_TEST_TOKEN: 'test-token',
+      SLOPPENHEIMER_CLI_TEST_TOKEN: 'test-token',
       TSX_TSCONFIG_PATH: tsxConfigPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -236,7 +236,7 @@ const writeStubbornWorkflow = async (directory: string, concurrency: number): Pr
   await git(seed, ['push', '-u', 'origin', 'main'])
   await writeFile(
     join(directory, '.gitconfig'),
-    `[url "file://${remote}"]\n  insteadOf = https://github.com/example/symphony.git\n`,
+    `[url "file://${remote}"]\n  insteadOf = https://github.com/example/sloppenheimer.git\n`,
   )
   const trackerPort = await makeIssueTrackerServer(concurrency)
   const path = join(directory, 'WORKFLOW.md')
@@ -247,8 +247,8 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
-    token: $SYMPHONY_CLI_TEST_TOKEN
+    repository: sloppenheimer
+    token: $SLOPPENHEIMER_CLI_TEST_TOKEN
     api_base_url: http://127.0.0.1:${String(trackerPort)}
   required_labels: [ready]
   active_states: [open]
@@ -411,9 +411,9 @@ describe('CLI host lifecycle', (): void => {
     const extraOutcome = await waitForExit(extra.child)
 
     expect(invalidOutcome.code).toBe(1)
-    expect(invalid.stderr()).toBe('symphony: unknown option: --unknown\n')
+    expect(invalid.stderr()).toBe('sloppenheimer: unknown option: --unknown\n')
     expect(extraOutcome.code).toBe(1)
-    expect(extra.stderr()).toBe('symphony: only one workflow path may be provided\n')
+    expect(extra.stderr()).toBe('sloppenheimer: only one workflow path may be provided\n')
   }, 30_000)
 
   it('rejects missing explicit and default workflow paths concisely', async (): Promise<void> => {
@@ -425,10 +425,10 @@ describe('CLI host lifecycle', (): void => {
     const defaultOutcome = await waitForExit(default_.child)
 
     expect(explicitOutcome.code).toBe(1)
-    expect(explicit.stderr()).toBe(`symphony: cannot read workflow file: ${explicitPath}\n`)
+    expect(explicit.stderr()).toBe(`sloppenheimer: cannot read workflow file: ${explicitPath}\n`)
     expect(defaultOutcome.code).toBe(1)
     expect(default_.stderr()).toBe(
-      `symphony: cannot read workflow file: ${join(directory, 'WORKFLOW.md')}\n`,
+      `sloppenheimer: cannot read workflow file: ${join(directory, 'WORKFLOW.md')}\n`,
     )
   }, 30_000)
 
@@ -478,7 +478,7 @@ describe('CLI host lifecycle', (): void => {
     const outcome = await waitForExit(process_.child)
 
     expect(outcome.code).toBe(1)
-    expect(process_.stderr()).toBe('symphony: operator server failed\n')
+    expect(process_.stderr()).toBe('sloppenheimer: operator server failed\n')
     expect(process_.stdout()).not.toContain('operator console listening')
   })
 })

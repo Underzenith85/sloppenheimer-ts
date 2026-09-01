@@ -5,10 +5,10 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { issueIdentifier } from '@symphony/core/domain/domain.js'
-import type { HooksConfig } from '@symphony/core/config/workflow.js'
-import { makeWorkspaceManager } from '@symphony/adapter-node/workspace-manager.js'
-import type { WorkspaceManagerPort } from '@symphony/core/ports/workspace.js'
+import { issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
+import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
+import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
+import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 
 /**
@@ -21,7 +21,7 @@ const workspaceManager = (root: string, hooks: HooksConfig): Effect.Effect<Works
 
 const directories: string[] = []
 const makeRoot = async (): Promise<string> => {
-  const directory = await mkdtemp(join(tmpdir(), 'symphony-hooks-conformance-'))
+  const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-hooks-conformance-'))
   directories.push(directory)
   return directory
 }

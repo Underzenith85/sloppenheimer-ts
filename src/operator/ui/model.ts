@@ -48,7 +48,7 @@ type PipelinePhase =
   | 'cyclic'
 
 /**
- * Whether Symphony may select this issue, independent of whether anything is running for it.
+ * Whether Sloppenheimer may select this issue, independent of whether anything is running for it.
  * `paused` is an operator decision that can be undone here; `not_eligible` means the issue simply
  * does not carry the orchestration label yet. Collapsing the two would make the console unable to
  * say which of them it is about to change.
@@ -57,7 +57,7 @@ type Eligibility = 'eligible' | 'paused' | 'not_eligible'
 
 /**
  * What the primary control on a row does. The names match the backend contract rather than the
- * orchestral metaphor: enabling an issue makes it eligible and asks Symphony to reselect, which is
+ * orchestral metaphor: enabling an issue makes it eligible and asks Sloppenheimer to reselect, which is
  * an immediate start only when there is spare capacity.
  */
 type ActionKind = 'start' | 'queue' | 'pause' | 'blockers' | 'none'
@@ -493,11 +493,11 @@ const bindingLimit = (
   if (!capacity.known) {
     // Absent the runtime snapshot the host may be full, or this issue's state may be saturated.
     // Promising an immediate start would be a guess, and the honest answer is that it is queued.
-    return 'Symphony’s runtime state has not loaded, so a free dispatch slot cannot be confirmed'
+    return 'Sloppenheimer’s runtime state has not loaded, so a free dispatch slot cannot be confirmed'
   }
   if (capacity.full) {
     return (
-      'Symphony is at capacity (' +
+      'Sloppenheimer is at capacity (' +
       String(capacity.running) +
       ' of ' +
       String(capacity.limit) +

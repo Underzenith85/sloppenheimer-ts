@@ -6,8 +6,8 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { loadHandoffs, saveHandoffs } from '@symphony/core/core/handoff-store.js'
-import type { HandoffSnapshot } from '@symphony/core/domain/handoff.js'
+import { loadHandoffs, saveHandoffs } from '@sloppenheimer/core/core/handoff-store.js'
+import type { HandoffSnapshot } from '@sloppenheimer/core/domain/handoff.js'
 import { hostFileSystem } from './harness/filesystem.js'
 
 /** The store reads and writes through `FileSystem`; these tests exercise it against real files. */
@@ -20,7 +20,7 @@ const directories: string[] = []
 /** A fresh store directory, registered for cleanup, as an effect the tests can sequence. */
 const makeDirectory = (): Effect.Effect<string> =>
   Effect.promise(async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-'))
+    const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-handoff-'))
     directories.push(directory)
     return directory
   })
@@ -36,9 +36,9 @@ describe('handoff persistence', (): void => {
       const path = join(directory, 'state', 'handoffs.json')
       const snapshot: HandoffSnapshot = {
         issueId: '41',
-        identifier: 'example/symphony#41',
-        pullRequestUrl: 'https://github.com/example/symphony/pull/42',
-        branchName: 'symphony/issue-41',
+        identifier: 'example/sloppenheimer#41',
+        pullRequestUrl: 'https://github.com/example/sloppenheimer/pull/42',
+        branchName: 'sloppenheimer/issue-41',
         state: 'awaiting_checks',
         headSha: 'abc',
         reason: null,
@@ -86,7 +86,7 @@ describe('handoff persistence', (): void => {
     ['a malformed entry', '{"version":1,"handoffs":[null]}'],
     [
       'an invalid observation date',
-      '{"version":1,"handoffs":[{"issueId":"41","identifier":"example/symphony#41","pullRequestUrl":"https://github.com/example/symphony/pull/42","branchName":"symphony/issue-41","state":"awaiting_checks","headSha":null,"reason":null,"repairAttempts":0,"observedAt":"not-a-date"}]}',
+      '{"version":1,"handoffs":[{"issueId":"41","identifier":"example/sloppenheimer#41","pullRequestUrl":"https://github.com/example/sloppenheimer/pull/42","branchName":"sloppenheimer/issue-41","state":"awaiting_checks","headSha":null,"reason":null,"repairAttempts":0,"observedAt":"not-a-date"}]}',
     ],
   ] as const)('surfaces %s as a decode failure', ([, contents]) =>
     Effect.gen(function* () {

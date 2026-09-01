@@ -1,8 +1,8 @@
 import { Option } from 'effect'
 
-import type { JsonObject } from '@symphony/core/domain/domain.js'
-import { AgentError } from '@symphony/core/domain/errors.js'
-import type { TokenCounts } from '@symphony/core/telemetry.js'
+import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
+import type { TokenCounts } from '@sloppenheimer/core/telemetry.js'
 import type { TurnSettlement } from './connection-state.js'
 import { notificationIdentity, telemetryFrom, turnFrom, type ProtocolTurn } from './protocol.js'
 import { isCancelledTurnStatus } from './session.js'

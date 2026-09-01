@@ -1,15 +1,15 @@
 import { Effect, Layer, Option } from 'effect'
 import { FileSystem } from '@effect/platform'
 
-import { codexAgentRunner, codexAgentRunnerProvider } from '@symphony/adapter-codex'
+import { codexAgentRunner, codexAgentRunnerProvider } from '@sloppenheimer/adapter-codex'
 import {
   makeAgentRunnerRegistry,
   type AgentRunnerRegistry,
   type RegisteredAgentRunner,
   type ValidatedAgentRunner,
-} from '@symphony/core/domain/agent-runner-provider.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
-import { AgentRunner, type AgentRunnerPort } from '@symphony/core/ports/agent-runner.js'
+} from '@sloppenheimer/core/domain/agent-runner-provider.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
+import { AgentRunner, type AgentRunnerPort } from '@sloppenheimer/core/ports/agent-runner.js'
 
 /**
  * The registered runner, with the factory that builds it. The factory is an ordinary effect with

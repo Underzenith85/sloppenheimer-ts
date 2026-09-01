@@ -49,7 +49,7 @@ export type RuntimeState = Readonly<{
   /** Issues this orchestrator has taken responsibility for, in any phase. */
   claimed: ReadonlySet<IssueId>
   retries: ReadonlyMap<IssueId, RetryEntry>
-  /** Finished work, keyed by issue: enough of each to say what Symphony merged, and when. */
+  /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
   pausedIssueNumbers: ReadonlySet<number>
   handoffs: ReadonlyMap<IssueId, HandoffEntry>
@@ -156,7 +156,7 @@ export type RunningEntry = Readonly<{
 
 /**
  * One piece of finished work, as the console shows it. The runtime already had to know which
- * issues had completed; it keeps enough of each to answer "what did Symphony finish, and when"
+ * issues had completed; it keeps enough of each to answer "what did Sloppenheimer finish, and when"
  * without the console inventing a session history of its own.
  */
 export type CompletedEntry = Readonly<{

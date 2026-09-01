@@ -14,16 +14,16 @@ importers:
       '@effect/platform-node':
         specifier: 0.108.1
         version: 0.108.1(@effect/cluster@0.60.2(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
-      '@symphony/adapter-codex':
+      '@sloppenheimer/adapter-codex':
         specifier: workspace:*
         version: link:packages/adapter-codex
-      '@symphony/adapter-github':
+      '@sloppenheimer/adapter-github':
         specifier: workspace:*
         version: link:packages/adapter-github
-      '@symphony/adapter-node':
+      '@sloppenheimer/adapter-node':
         specifier: workspace:*
         version: link:packages/adapter-node
-      '@symphony/core':
+      '@sloppenheimer/core':
         specifier: workspace:*
         version: link:packages/core
       chokidar:
@@ -75,10 +75,10 @@ importers:
       '@effect/platform-node':
         specifier: 0.108.1
         version: 0.108.1(@effect/cluster@0.60.2(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
-      '@symphony/adapter-node':
+      '@sloppenheimer/adapter-node':
         specifier: workspace:*
         version: link:../adapter-node
-      '@symphony/core':
+      '@sloppenheimer/core':
         specifier: workspace:*
         version: link:../core
       effect:
@@ -94,10 +94,10 @@ importers:
       '@effect/platform':
         specifier: 0.97.1
         version: 0.97.1(effect@3.22.1)
-      '@symphony/adapter-node':
+      '@sloppenheimer/adapter-node':
         specifier: workspace:*
         version: link:../adapter-node
-      '@symphony/core':
+      '@sloppenheimer/core':
         specifier: workspace:*
         version: link:../core
       effect:
@@ -113,7 +113,7 @@ importers:
       '@effect/platform':
         specifier: 0.97.1
         version: 0.97.1(effect@3.22.1)
-      '@symphony/core':
+      '@sloppenheimer/core':
         specifier: workspace:*
         version: link:../core
       effect:

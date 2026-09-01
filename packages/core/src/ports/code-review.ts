@@ -67,7 +67,7 @@ export type CodeReviewFactoryPort = Readonly<{
   ) => Effect.Effect<CodeReviewPort | null, TrackerError, Scope.Scope>
 }>
 
-export class CodeReviewFactory extends Context.Tag('symphony/CodeReviewFactory')<
+export class CodeReviewFactory extends Context.Tag('sloppenheimer/CodeReviewFactory')<
   CodeReviewFactory,
   CodeReviewFactoryPort
 >() {}
@@ -95,7 +95,7 @@ export type CodeReviewCell = AdapterCell<
  * The code-review capability in force now. It is rebuilt alongside the tracker, because on GitHub
  * both are constructed from the same validated provider and both go stale on a credential rotation.
  */
-export class CurrentCodeReview extends Context.Tag('symphony/CurrentCodeReview')<
+export class CurrentCodeReview extends Context.Tag('sloppenheimer/CurrentCodeReview')<
   CurrentCodeReview,
   CodeReviewCell
 >() {}

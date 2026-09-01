@@ -7,22 +7,22 @@ import * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import type * as HttpMethod from '@effect/platform/HttpMethod'
 import { Clock, Effect, Either, Layer, Option, Redacted, Schema } from 'effect'
 
-import type { JsonValue } from '@symphony/core/domain/domain.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
-import { isJsonValue } from '@symphony/core/support/json.js'
+import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
+import { isJsonValue } from '@sloppenheimer/core/support/json.js'
 import type { GitHubProviderConfig } from './provider.js'
 
 export const githubApiVersion = '2026-03-10'
 export const githubRequestTimeoutMs = 30_000
-export const githubUserAgent = 'symphony-ts/0.1'
+export const githubUserAgent = 'sloppenheimer-ts/0.1'
 /** GitHub's maximum page size for list endpoints. */
 export const githubPageSize = 100
 /** Bounded pagination: a scoped list that never terminates is a pagination integrity failure. */
 export const githubMaxPages = 100
 
 /** GitHub-boundary aliases retained for readability in issue and pull-request parsing. */
-export type { JsonObject as JsonRecord } from '@symphony/core/domain/domain.js'
-export { isJsonObject as isJsonRecord } from '@symphony/core/support/json.js'
+export type { JsonObject as JsonRecord } from '@sloppenheimer/core/domain/domain.js'
+export { isJsonObject as isJsonRecord } from '@sloppenheimer/core/support/json.js'
 
 export const trackerResponseError = (message: string, cause?: unknown): TrackerError =>
   new TrackerError({
@@ -49,7 +49,7 @@ export const trackerPaginationError = (message: string, cause?: unknown): Tracke
  * caller could. Re-wrapping that last one would bury the message the reader wants, so it passes
  * through and only an unrecognized cause is described by the caller's `message`.
  *
- * `wrap` names which failure this is: a payload Symphony could not read, or a page sequence it
+ * `wrap` names which failure this is: a payload Sloppenheimer could not read, or a page sequence it
  * could not follow.
  */
 export const trackerCause =

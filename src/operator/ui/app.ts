@@ -61,8 +61,8 @@ const actionLabels: Readonly<Record<ActionKind, string>> = {
  * attribute. These are the descriptions the row's action is labelled by.
  */
 const actionDescriptions: Readonly<Record<ActionKind, string>> = {
-  start: 'Makes the issue eligible and asks Symphony to reselect; a free slot starts it now.',
-  queue: 'Makes the issue eligible. Symphony starts it as soon as a dispatch slot is free.',
+  start: 'Makes the issue eligible and asks Sloppenheimer to reselect; a free slot starts it now.',
+  queue: 'Makes the issue eligible. Sloppenheimer starts it as soon as a dispatch slot is free.',
   pause:
     'Removes the issue from orchestration, cancels its running agent, and drops queued retries.',
   blockers: 'Lists the unresolved dependencies that are holding this issue back.',
@@ -168,9 +168,9 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
       tone: 'success',
       message: enable
         ? item.queueReason === null
-          ? 'Eligible. Symphony is selecting work and will start it shortly.'
+          ? 'Eligible. Sloppenheimer is selecting work and will start it shortly.'
           : 'Queued: ' + item.queueReason + '. It starts when a slot frees.'
-        : 'Paused. Symphony will not select this issue.',
+        : 'Paused. Sloppenheimer will not select this issue.',
       retry: null,
     })
   } catch (error) {
@@ -406,7 +406,7 @@ const renderViews = (): void => {
   renderList(
     element('#attention-list'),
     model.attention,
-    'Nothing needs attention. Symphony is running unattended.',
+    'Nothing needs attention. Sloppenheimer is running unattended.',
   )
   renderList(
     element('#ready-list'),
@@ -596,7 +596,7 @@ const loadBacklog = async (): Promise<void> => {
 }
 
 const refresh = async (): Promise<void> => {
-  setNotice('Refreshing Symphony…')
+  setNotice('Refreshing Sloppenheimer…')
   try {
     await post('/api/v1/refresh')
     await Promise.all([loadState(), loadBacklog()])

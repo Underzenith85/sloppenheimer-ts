@@ -2,14 +2,14 @@ import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { Effect } from 'effect'
 
-import type { HooksConfig } from '@symphony/core/config/workflow.js'
-import type { IssueIdentifier, Workspace } from '@symphony/core/domain/domain.js'
+import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
+import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
 import {
   containedWorkspacePath,
   workspaceKey,
-} from '@symphony/core/domain/workspace-containment.js'
-import { WorkspaceError } from '@symphony/core/domain/errors.js'
-import type { WorkspaceManagerPort } from '@symphony/core/ports/workspace.js'
+} from '@sloppenheimer/core/domain/workspace-containment.js'
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { isSymbolicLink } from './filesystem.js'
 import { runHook } from './workspace-hooks.js'
 

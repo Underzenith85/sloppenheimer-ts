@@ -5,13 +5,16 @@ import { it } from '@effect/vitest'
 import { Effect, Option } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { classifyPullRequest, type PullRequestObservation } from '@symphony/core/domain/handoff.js'
+import {
+  classifyPullRequest,
+  type PullRequestObservation,
+} from '@sloppenheimer/core/domain/handoff.js'
 import {
   CurrentCodeReview,
   CurrentSourceControl,
   CurrentTracker,
   type CodeReviewPort,
-} from '@symphony/core'
+} from '@sloppenheimer/core'
 import { applicationPorts } from '../../src/composition.js'
 import { withEnvironment } from '../harness/environment.js'
 import { hostFileSystem } from '../harness/filesystem.js'
@@ -19,7 +22,7 @@ import { hostFileSystem } from '../harness/filesystem.js'
 const observation: PullRequestObservation = {
   number: 19,
   state: 'open',
-  url: 'https://github.com/Underzenith85/symphony-ts/pull/19',
+  url: 'https://github.com/Underzenith85/sloppenheimer-ts/pull/19',
   headSha: 'isolated-head',
   merged: false,
   mergeCommitSha: null,
@@ -44,7 +47,7 @@ afterEach(async (): Promise<void> => {
  */
 const writeWorkflow = (handoffSection: string): Effect.Effect<string> =>
   Effect.promise(async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'symphony-handoff-gate-'))
+    const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-handoff-gate-'))
     temporaryDirectories.push(directory)
     const path = join(directory, 'WORKFLOW.md')
     await writeFile(
@@ -54,7 +57,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TEST_TRACKER_TOKEN
 workspace:
   root: .workspaces

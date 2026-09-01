@@ -8,7 +8,7 @@ The following port boundary was accepted in the 2026-08-30 architecture review:
 - Pull-request handoff is an optional application capability exposed through `CodeReviewPort`. It owns completed-work handoff and discovery of an existing handoff, inspection of a proposed change, protected merge, and review-thread resolution. The port may use honest pull-request and code-review vocabulary.
 - Repository preparation and publication are a tracker-neutral application capability exposed through `SourceControlPort`. The host owns Git metadata and credentials, prepares normal work from the protected base and repairs from an exact pull-request head, commits agent file changes, rebases under policy, and pushes with an expected-head lease. Agents edit only worktree files. Source control must not be folded into `TrackerPort`, and pull-request inspection and merge remain in `CodeReviewPort`.
 - GitHub supplies both `TrackerPort` and `CodeReviewPort`; other tracker providers are not required to simulate code-review concepts that they do not support.
-- When handoff is enabled, a provider that does not supply `CodeReviewPort` is an operator-visible configuration error. When handoff is disabled, no `CodeReviewPort` is required and the application follows the core continuation lifecycle. The workflow key that selects between the two is `handoff.enabled`, read once by the composition root at startup ([#73](https://github.com/Underzenith85/symphony-ts/issues/73)).
+- When handoff is enabled, a provider that does not supply `CodeReviewPort` is an operator-visible configuration error. When handoff is disabled, no `CodeReviewPort` is required and the application follows the core continuation lifecycle. The workflow key that selects between the two is `handoff.enabled`, read once by the composition root at startup ([#73](https://github.com/Underzenith85/sloppenheimer-ts/issues/73)).
 - `HandoffResult` belongs with `CodeReviewPort`, because its pull-request variant is a code-review concept rather than an issue-tracker concept.
 - The composition root states that gate structurally: composing no code-review services at all is handoff disabled, and composing them is handoff enabled. The orchestrator therefore asks for `CurrentCodeReview` as an optional service, and reports the configuration error only when that service is present and the provider's factory supplies nothing.
 - During implementation of this boundary, remove the unused `dispatchLabels` parameter from `handoffCompletedWork`; do not preserve it in either port.
@@ -17,7 +17,7 @@ This convention is the architecture record for the boundary. Do not create a sep
 
 ## Agent runners
 
-The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/symphony-ts/issues/214),
+The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/sloppenheimer-ts/issues/214),
 against the design in `docs/agent-runner-claude-code.md`. This section is the architecture record for
 it; do not create a separate ADR.
 
@@ -47,21 +47,21 @@ it; do not create a separate ADR.
 
 ## Repository structure
 
-Symphony is a private pnpm workspace. `pnpm-workspace.yaml` declares `packages/*` beside the
+Sloppenheimer is a private pnpm workspace. `pnpm-workspace.yaml` declares `packages/*` beside the
 `allowBuilds` policy that gates postinstall scripts.
 
-- `packages/core` (`@symphony/core`) contains domain types, ports, and orchestration policy. It
+- `packages/core` (`@sloppenheimer/core`) contains domain types, ports, and orchestration policy. It
   depends on no adapter package.
-- `packages/adapter-node` (`@symphony/adapter-node`) contains the host-platform adapters: the
+- `packages/adapter-node` (`@sloppenheimer/adapter-node`) contains the host-platform adapters: the
   filesystem questions `FileSystem` does not answer, Git source control, workspace hooks, and the
   workspace manager. Both provider adapters build on it, which is why it is a package of its own
   rather than a directory inside either of them.
-- `packages/adapter-github` (`@symphony/adapter-github`) contains the GitHub tracker, issue-control,
-  code-review, and source-control implementations.
-- `packages/adapter-codex` (`@symphony/adapter-codex`) contains the Codex agent-runner
+- `packages/adapter-github` (`@sloppenheimer/adapter-github`) contains the GitHub tracker,
+  issue-control, code-review, and source-control implementations.
+- `packages/adapter-codex` (`@sloppenheimer/adapter-codex`) contains the Codex agent-runner
   implementation.
 - The repository root is the composition root: the CLI, the operator server, the workflow-definition
-  loader, and the single `symphony` executable. It is the only package that names a concrete
+  loader, and the single `sloppenheimer` executable. It is the only package that names a concrete
   adapter.
 
 The dependency direction is:
@@ -77,16 +77,16 @@ Node's directory walk reaches them from inside every package: the manifests are 
 boundary, and `.oxlintrc.json` denies the import by name beside them.
 
 These packages are architectural units, not independently published products. They stay private and
-share one lockfile, one CI pipeline, one versioning policy, and one deployable Symphony executable.
-They are not built or released separately.
+share one lockfile, one CI pipeline, one versioning policy, and one deployable Sloppenheimer
+executable. They are not built or released separately.
 
 The build is a TypeScript project graph. Each package emits `dist/` from its own `tsconfig.json`,
 and `tsconfig.build.json` at the root references all four, so `pnpm build` is a single `tsc -b` that
-orders them and then compiles the composition root into the `dist/` the `symphony` bin points at. A
-package's `exports` resolves types to its TypeScript sources and the runtime entry to its built
-JavaScript, which is why `pnpm lint`, `pnpm typecheck`, and `pnpm test` need no prior build. The
-Vitest configurations alias `@symphony/*` back to source through `vitest.shared.ts` for the same
-reason.
+orders them and then compiles the composition root into the `dist/` the `sloppenheimer` bin points
+at. A package's `exports` resolves types to its TypeScript sources and the runtime entry to its
+built JavaScript, which is why `pnpm lint`, `pnpm typecheck`, and `pnpm test` need no prior build.
+The Vitest configurations alias `@sloppenheimer/*` back to source through `vitest.shared.ts` for the
+same reason.
 
 The tests stay in the root `test/` tree and run once, against the whole workspace, from the root
 `pnpm check`. The three Vitest configurations select by test path, so a package split does not
@@ -116,7 +116,7 @@ therefore `pnpm check` — fails on a violation. The groups match the import spe
 rather than its resolved target, so each layer takes two overrides:
 
 - Every file in the layer, at any depth, is denied the sibling layers by name, and every layer is
-  denied `@symphony/**`.
+  denied `@sloppenheimer/**`.
 - Files directly in the layer are denied everything that leaves the layer, with the layers below
   re-admitted by negation. A directory added later is therefore forbidden until the rule names it.
 
@@ -130,10 +130,10 @@ and asserts the rule still fires.
 
 One module has not been placed in a layer yet: `packages/core/src/telemetry.ts`. `core/` and
 `ports/` reach it through migration allow-lists in `.oxlintrc.json`, where the entry names
-[#98](https://github.com/Underzenith85/symphony-ts/issues/98), which converts the telemetry record
-to pure reducers and removes it. `ports/` also reaches the workflow configuration types
-[#88](https://github.com/Underzenith85/symphony-ts/issues/88) declared it against, until
-[#105](https://github.com/Underzenith85/symphony-ts/issues/105) settles that type surface.
+[#98](https://github.com/Underzenith85/sloppenheimer-ts/issues/98), which converts the telemetry
+record to pure reducers and removes it. `ports/` also reaches the workflow configuration types
+[#88](https://github.com/Underzenith85/sloppenheimer-ts/issues/88) declared it against, until
+[#105](https://github.com/Underzenith85/sloppenheimer-ts/issues/105) settles that type surface.
 
 Both `ports/` allow-list entries are `import type` only, enforced through the rule's `paths` option.
 An exemption that also admitted runtime values would let a port acquire a real dependency on

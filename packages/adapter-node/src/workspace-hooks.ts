@@ -2,13 +2,13 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { Clock, Effect } from 'effect'
 
-import { WorkspaceError } from '@symphony/core/domain/errors.js'
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import {
   childProcessGroupIsAlive,
   detachChildProcess,
   resumeOnce,
   signalChildGroup,
-} from '@symphony/core/support/subprocess.js'
+} from '@sloppenheimer/core/support/subprocess.js'
 
 /**
  * Operator-configured hook execution: child processes, bounded stream capture, timeouts, and the

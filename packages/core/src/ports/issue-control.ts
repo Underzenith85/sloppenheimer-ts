@@ -32,7 +32,7 @@ export type IssueControlFactoryPort = Readonly<{
   serves: (built: ValidatedTrackerProvider, requested: ValidatedTrackerProvider) => boolean
 }>
 
-export class IssueControlFactory extends Context.Tag('symphony/IssueControlFactory')<
+export class IssueControlFactory extends Context.Tag('sloppenheimer/IssueControlFactory')<
   IssueControlFactory,
   IssueControlFactoryPort
 >() {}
@@ -50,7 +50,7 @@ export type IssueControlCell = Readonly<{
   forProvider: (provider: ValidatedTrackerProvider) => Effect.Effect<IssueControlPort, TrackerError>
 }>
 
-export class CurrentIssueControl extends Context.Tag('symphony/CurrentIssueControl')<
+export class CurrentIssueControl extends Context.Tag('sloppenheimer/CurrentIssueControl')<
   CurrentIssueControl,
   IssueControlCell
 >() {}

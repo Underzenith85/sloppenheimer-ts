@@ -8,10 +8,10 @@ import { trackerProviders } from '../../src/tracker-adapters.js'
 import { withEnvironment } from '../harness/environment.js'
 import { afterEach, describe, expect } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
-import { renderPrompt, type Workflow } from '@symphony/core/config/workflow.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
+import { renderPrompt, type Workflow } from '@sloppenheimer/core/config/workflow.js'
 import { loadWorkflow } from '../../src/config/workflow.js'
-import type { WorkflowError } from '@symphony/core/domain/errors.js'
+import type { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { workflowAdaptersFor } from '../harness/workflow-adapters.js'
 import { anIssue } from '../harness/fixtures.js'
@@ -22,7 +22,7 @@ const loadHostWorkflow = (path: string): Effect.Effect<Workflow, WorkflowError> 
 
 const directories: string[] = []
 const writeWorkflow = async (source: string): Promise<string> => {
-  const directory = await mkdtemp(join(tmpdir(), 'symphony-workflow-conformance-'))
+  const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-workflow-conformance-'))
   directories.push(directory)
   const path = join(directory, 'WORKFLOW.md')
   await writeFile(path, source, 'utf8')
@@ -64,7 +64,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TRACKER_TOKEN
 agent:
   max_concurrent_agents_by_state:
@@ -92,7 +92,7 @@ tracker:
   kind: github
   provider:
     owner: example
-    repository: symphony
+    repository: sloppenheimer
     token: $TRACKER_TOKEN
 ---
 {{ unknown.value }}

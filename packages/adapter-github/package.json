@@ -1,5 +1,5 @@
 {
-  "name": "@symphony/adapter-github",
+  "name": "@sloppenheimer/adapter-github",
   "version": "0.1.0",
   "private": true,
   "description": "GitHub tracker, issue-control, code-review, and source-control implementations.",
@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@effect/platform": "0.97.1",
-    "@symphony/adapter-node": "workspace:*",
-    "@symphony/core": "workspace:*",
+    "@sloppenheimer/adapter-node": "workspace:*",
+    "@sloppenheimer/core": "workspace:*",
     "effect": "3.22.1"
   },
   "devDependencies": {

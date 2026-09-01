@@ -2,10 +2,10 @@ import { it } from '@effect/vitest'
 import { Effect, Layer, Option, Stream } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { HooksConfig, ValidatedTrackerProvider } from '@symphony/core/config/workflow.js'
-import { issueId, issueIdentifier } from '@symphony/core/domain/domain.js'
+import type { HooksConfig, ValidatedTrackerProvider } from '@sloppenheimer/core/config/workflow.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import {
   AgentRunner,
   codeReview,
@@ -25,7 +25,7 @@ import {
   WorkflowWatcher,
   WorkspaceManagerFactory,
   type AdapterServices,
-} from '@symphony/core'
+} from '@sloppenheimer/core'
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
 import { anIssue } from '../harness/fixtures.js'
@@ -85,11 +85,13 @@ describe('port layer composition', (): void => {
         const runner = yield* AgentRunner
         const loader = yield* WorkflowLoader
         const watcher = yield* WorkflowWatcher
-        const workspace = yield* currentWorkspaces.create(issueIdentifier('example/symphony#1'))
+        const workspace = yield* currentWorkspaces.create(
+          issueIdentifier('example/sloppenheimer#1'),
+        )
         const result = yield* runner.run({
           issue: anIssue({
             id: issueId('1'),
-            identifier: issueIdentifier('example/symphony#1'),
+            identifier: issueIdentifier('example/sloppenheimer#1'),
             title: 'title',
             labels: [],
           }),
@@ -208,9 +210,15 @@ describe('port layer composition', (): void => {
                   },
                 }),
                 handoffCompletedWork: () =>
-                  Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
+                  Effect.succeed({
+                    _tag: 'NoBranch',
+                    branchName: 'sloppenheimer/issue-1',
+                  } as const),
                 findExistingHandoff: () =>
-                  Effect.succeed({ _tag: 'NoBranch', branchName: 'symphony/issue-1' } as const),
+                  Effect.succeed({
+                    _tag: 'NoBranch',
+                    branchName: 'sloppenheimer/issue-1',
+                  } as const),
                 inspectPullRequest: () => Effect.die('unused'),
                 mergePullRequest: () => Effect.die('unused'),
                 requestPullRequestReview: () => Effect.void,

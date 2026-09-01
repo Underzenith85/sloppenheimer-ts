@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { Effect, Fiber, Option, Redacted } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { SourceControlError } from '@symphony/core/domain/errors.js'
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
 import { commitFile, git, makeGitRepository } from './harness/git-repository.js'
 import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
@@ -23,7 +23,7 @@ afterEach(async (): Promise<void> => {
 
 const issue: Issue = anIssue({
   id: issueId('185'),
-  identifier: issueIdentifier('example/symphony#185'),
+  identifier: issueIdentifier('example/sloppenheimer#185'),
   title: 'Interruptible publication',
   priority: 1,
 })
@@ -51,7 +51,7 @@ const waitFor = async (condition: () => Promise<boolean>): Promise<void> => {
 
 const askPassDirectories = async (root: string): Promise<readonly string[]> => {
   const entries = await readdir(root)
-  return entries.filter((entry) => entry.startsWith('symphony-git-askpass-'))
+  return entries.filter((entry) => entry.startsWith('sloppenheimer-git-askpass-'))
 }
 
 describe('host Git source control interruption', (): void => {
@@ -60,7 +60,7 @@ describe('host Git source control interruption', (): void => {
     roots.push(fixture.root)
     // A private TMPDIR so the assertion sees only this test's askpass directories. `os.tmpdir()`
     // reads the environment on each call, so the adapter picks this up without being told.
-    const temporary = await mkdtemp(join(tmpdir(), 'symphony-askpass-observation-'))
+    const temporary = await mkdtemp(join(tmpdir(), 'sloppenheimer-askpass-observation-'))
     roots.push(temporary)
     process.env['TMPDIR'] = temporary
 
@@ -83,7 +83,7 @@ describe('host Git source control interruption', (): void => {
     const prepared = await Effect.runPromise(
       sourceControl.prepare(issue, workspace, {
         _tag: 'Normal',
-        branchName: 'symphony/issue-185',
+        branchName: 'sloppenheimer/issue-185',
       }),
     )
     await writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n')
@@ -112,7 +112,7 @@ describe('host Git source control interruption', (): void => {
       sourceControl.prepare(
         issue,
         { path: fixture.workspace, key: 'issue-185', createdNow: true },
-        { _tag: 'Normal', branchName: 'symphony/issue-185' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-185' },
       ),
     )
     await writeFile(join(fixture.workspace, 'conflict.ts'), 'local\n')
@@ -149,10 +149,10 @@ describe('host Git source control interruption', (): void => {
     // start on it, wedging a workspace that is meant to be retried.
     expect(await readdir(join(fixture.workspace, '.git'))).not.toContain('rebase-merge')
     expect(await git(fixture.workspace, ['symbolic-ref', '--short', 'HEAD'])).toBe(
-      'symphony/issue-185',
+      'sloppenheimer/issue-185',
     )
     expect(await git(fixture.workspace, ['log', '-1', '--pretty=%s'])).toBe(
-      'symphony: example/symphony#185 Interruptible publication',
+      'sloppenheimer: example/sloppenheimer#185 Interruptible publication',
     )
   }, 30_000)
 
@@ -168,7 +168,7 @@ describe('host Git source control interruption', (): void => {
         sourceControl.prepare(
           issue,
           { path: fixture.workspace, key: 'issue-185', createdNow: true },
-          { _tag: 'Normal', branchName: 'symphony/issue-185' },
+          { _tag: 'Normal', branchName: 'sloppenheimer/issue-185' },
         ),
       ),
     )

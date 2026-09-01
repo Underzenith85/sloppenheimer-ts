@@ -1,7 +1,7 @@
 /**
- * Schema tooling for the wire formats Symphony reads but does not define.
+ * Schema tooling for the wire formats Sloppenheimer reads but does not define.
  *
- * A protocol payload is not configuration. It arrives from another program, at a version Symphony
+ * A protocol payload is not configuration. It arrives from another program, at a version Sloppenheimer
  * does not pin, and a field reported in an unexpected shape must degrade to absence rather than
  * fail the turn that carried it. These combinators keep that tolerance in the schema layer, stated
  * once, rather than repeated as a defensive test at every field read.
@@ -74,7 +74,7 @@ export const tolerant = <A, I>(
 /**
  * One record of a protocol payload: casing normalized once, then read as a struct whose fields are
  * each individually tolerant. Unknown keys are ignored, so a field the protocol adds later cannot
- * fail a message Symphony already understands.
+ * fail a message Sloppenheimer already understands.
  */
 export const protocolStruct = <Fields extends Schema.Struct.Fields>(
   fields: Fields,

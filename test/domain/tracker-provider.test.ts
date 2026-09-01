@@ -4,14 +4,14 @@ import { describe, expect } from 'vitest'
 
 import { withEnvironment } from '../harness/environment.js'
 
-import { githubTrackerProvider } from '@symphony/adapter-github'
+import { githubTrackerProvider } from '@sloppenheimer/adapter-github'
 import {
   makeTrackerProviderRegistry,
   sameTrackerProvider,
   trackerProviderOf,
   type ValidatedTrackerProvider,
-} from '@symphony/core/domain/tracker-provider.js'
-import { WorkflowError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/tracker-provider.js'
+import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import {
   stubProvider,
   stubProviderToken,
@@ -20,7 +20,7 @@ import {
   stubTrackerProviders,
 } from '../harness/stub-tracker-provider.js'
 
-const authored = { owner: 'example', repository: 'symphony', token: '$TRACKER_TOKEN' }
+const authored = { owner: 'example', repository: 'sloppenheimer', token: '$TRACKER_TOKEN' }
 
 const github = (token: string): Effect.Effect<ValidatedTrackerProvider, WorkflowError> =>
   withEnvironment(githubTrackerProvider.validate(authored), { TRACKER_TOKEN: token })

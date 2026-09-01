@@ -2,10 +2,10 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { issueId } from '@symphony/core/domain/domain.js'
+import { issueId } from '@sloppenheimer/core/domain/domain.js'
 import { parseCliArguments } from '../../src/config/cli-options.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
-import type { OrchestratorSnapshot } from '@symphony/core'
+import type { OrchestratorSnapshot } from '@sloppenheimer/core'
 import { startOperatorServer } from '../../src/operator/server.js'
 
 const tokens = { inputTokens: 12, outputTokens: 8, totalTokens: 20 } as const
@@ -33,9 +33,9 @@ const snapshot: OrchestratorSnapshot = {
   handoffs: [
     {
       issueId: '31',
-      identifier: 'example/symphony#31',
+      identifier: 'example/sloppenheimer#31',
       pullRequestUrl: 'https://example.test/pull/62',
-      branchName: 'symphony/issue-31',
+      branchName: 'sloppenheimer/issue-31',
       state: 'awaiting_checks',
       headSha: null,
       reason: null,
@@ -46,7 +46,7 @@ const snapshot: OrchestratorSnapshot = {
   running: [
     {
       issueId: issueId('17'),
-      identifier: 'example/symphony#17',
+      identifier: 'example/sloppenheimer#17',
       title: 'Operator console',
       url: 'https://example.test/issues/17',
       state: 'in_progress',
@@ -64,20 +64,20 @@ const snapshot: OrchestratorSnapshot = {
       lastReportedTokens: tokens,
       workerHost: 'local',
       stallDeadline: '2026-08-29T00:05:00.000Z',
-      detailUrl: '/api/v1/agents/example%2Fsymphony%2317',
+      detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2317',
     },
   ],
   retrying: [
     {
       issueId: issueId('18'),
-      identifier: 'example/symphony#18',
+      identifier: 'example/sloppenheimer#18',
       title: 'Flaky dependency',
       url: 'https://example.test/issues/18',
       attempt: 2,
       dueAt: '2026-08-29T00:00:20.000Z',
       error: 'turn failed',
       workerHost: 'local',
-      detailUrl: '/api/v1/agents/example%2Fsymphony%2318',
+      detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2318',
     },
   ],
   totals: { ...tokens, secondsRunning: 60 },
@@ -93,7 +93,7 @@ const backend: OperatorBackend = {
   }),
   agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
   backlog: Effect.succeed({
-    controlLabel: 'symphony',
+    controlLabel: 'sloppenheimer',
     issues: [],
     nodes: [],
     edges: [],
@@ -136,18 +136,18 @@ describe('Extension Conformance: HTTP status surface', (): void => {
         running: [
           {
             issue_id: '17',
-            issue_identifier: 'example/symphony#17',
+            issue_identifier: 'example/sloppenheimer#17',
             issue_url: 'https://example.test/issues/17',
             state: 'in_progress',
             session_id: 'thread-1-turn-1',
             worker_host: 'local',
             tokens: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
-            detail_url: '/api/v1/agents/example%2Fsymphony%2317',
+            detail_url: '/api/v1/agents/example%2Fsloppenheimer%2317',
           },
         ],
         retrying: [
           {
-            issue_identifier: 'example/symphony#18',
+            issue_identifier: 'example/sloppenheimer#18',
             attempt: 2,
             due_at: '2026-08-29T00:00:20.000Z',
             error: 'turn failed',
@@ -175,11 +175,11 @@ describe('Extension Conformance: HTTP status surface', (): void => {
         fetch(`${server.url}/api/v1/${encodeURIComponent(identifier)}`)
 
       // Handed-off work has no agent session behind it, and is still known to this host.
-      const handedOff = yield* Effect.promise(() => detailFor('example/symphony#31'))
+      const handedOff = yield* Effect.promise(() => detailFor('example/sloppenheimer#31'))
       expect(handedOff.status).toBe(200)
       expect(yield* Effect.promise(() => handedOff.json())).toMatchObject({
-        self: '/api/v1/example%2Fsymphony%2331',
-        issue_identifier: 'example/symphony#31',
+        self: '/api/v1/example%2Fsloppenheimer%2331',
+        issue_identifier: 'example/sloppenheimer#31',
         issue_id: '31',
         status: 'handoff',
         tracked: true,
@@ -190,18 +190,18 @@ describe('Extension Conformance: HTTP status surface', (): void => {
         logs: { retained: 0, dropped: 0, limit: 200, published: 0 },
         recent_events: [],
         last_error: null,
-        detail_url: '/api/v1/agents/example%2Fsymphony%2331',
+        detail_url: '/api/v1/agents/example%2Fsloppenheimer%2331',
       })
 
       // The running row stands in where the actor has published no detail record.
-      const running = yield* Effect.promise(() => detailFor('example/symphony#17'))
+      const running = yield* Effect.promise(() => detailFor('example/sloppenheimer#17'))
       expect(yield* Effect.promise(() => running.json())).toMatchObject({
         status: 'running',
         tracked: true,
         running: { session_id: 'thread-1-turn-1', tokens: { total_tokens: 20 } },
       })
 
-      const unknown = yield* Effect.promise(() => detailFor('example/symphony#404'))
+      const unknown = yield* Effect.promise(() => detailFor('example/sloppenheimer#404'))
       expect(unknown.status).toBe(404)
       expect(yield* Effect.promise(() => unknown.json())).toMatchObject({
         version: 'v1',
@@ -218,7 +218,7 @@ describe('Extension Conformance: HTTP status surface', (): void => {
       const response = yield* Effect.promise(() =>
         fetch(`${server.url}/api/v1/refresh`, {
           method: 'POST',
-          headers: { 'X-Symphony-CSRF': token },
+          headers: { 'X-Sloppenheimer-CSRF': token },
         }),
       )
       const payload = yield* Effect.promise(() => response.json())

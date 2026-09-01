@@ -1,13 +1,13 @@
 import { Effect, Option } from 'effect'
 
-import type { Issue, Workspace } from '@symphony/core/domain/domain.js'
-import { SourceControlError } from '@symphony/core/domain/errors.js'
+import type { Issue, Workspace } from '@sloppenheimer/core/domain/domain.js'
+import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
 import type {
   PreparedRepository,
   PublicationOutcome,
   SourceControlPort,
   SourceControlTarget,
-} from '@symphony/core/ports/source-control.js'
+} from '@sloppenheimer/core/ports/source-control.js'
 import {
   gitIdentity,
   runGit,
@@ -304,7 +304,7 @@ const publishRepository = (
         settings,
         'publish',
         prepared.workspace.path,
-        ['commit', '-m', `symphony: ${issue.identifier} ${issue.title}`],
+        ['commit', '-m', `sloppenheimer: ${issue.identifier} ${issue.title}`],
         {
           ...gitIdentity,
           GIT_AUTHOR_DATE: commitDate.trim(),

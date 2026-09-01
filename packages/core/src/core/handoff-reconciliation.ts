@@ -44,7 +44,7 @@ const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boole
 
 /**
  * What a merged handoff leaves behind. The runtime already recorded that the issue completed; this
- * keeps the title, link and instant alongside it so the console can answer what Symphony finished
+ * keeps the title, link and instant alongside it so the console can answer what Sloppenheimer finished
  * and when, instead of publishing a bare count.
  *
  * A reported merge time wins over the observation's own: dating a restored handoff now would put

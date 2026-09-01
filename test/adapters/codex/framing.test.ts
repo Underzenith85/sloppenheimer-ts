@@ -6,8 +6,8 @@ import {
   diagnosticLines,
   diagnosticRecords,
   protocolLines,
-} from '@symphony/adapter-codex/framing.js'
-import type { AgentError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/adapter-codex/framing.js'
+import type { AgentError } from '@sloppenheimer/core/domain/errors.js'
 
 const bytes = (...chunks: readonly string[]): Stream.Stream<Uint8Array> =>
   Stream.fromIterable(chunks.map((chunk) => Buffer.from(chunk)))

@@ -1,21 +1,24 @@
 import type * as HttpClient from '@effect/platform/HttpClient'
 import { Clock, Effect, HashMap, Option, Ref, type Layer } from 'effect'
 
-import type { BlockerRef, Issue, IssueId, JsonValue } from '@symphony/core/domain/domain.js'
-import { cyclicIssueIdentifiers, unresolvedBlockers } from '@symphony/core/domain/dependencies.js'
-import { TrackerError } from '@symphony/core/domain/errors.js'
-import { isJsonArray } from '@symphony/core/support/json.js'
-import { logWarning } from '@symphony/core/support/logging.js'
-import { sameTrackerProvider } from '@symphony/core/domain/tracker-provider.js'
-import type { HostToolSpec } from '@symphony/core/domain/host-tools.js'
-import { unsupportedHostTool } from '@symphony/core/domain/host-tools.js'
+import type { BlockerRef, Issue, IssueId, JsonValue } from '@sloppenheimer/core/domain/domain.js'
+import {
+  cyclicIssueIdentifiers,
+  unresolvedBlockers,
+} from '@sloppenheimer/core/domain/dependencies.js'
+import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
+import { isJsonArray } from '@sloppenheimer/core/support/json.js'
+import { logWarning } from '@sloppenheimer/core/support/logging.js'
+import { sameTrackerProvider } from '@sloppenheimer/core/domain/tracker-provider.js'
+import type { HostToolSpec } from '@sloppenheimer/core/domain/host-tools.js'
+import { unsupportedHostTool } from '@sloppenheimer/core/domain/host-tools.js'
 import {
   IssueControlFactory,
   layerIssueControlFactory,
   type IssueControlFactoryPort,
   type IssueControlPort,
-} from '@symphony/core/ports/issue-control.js'
-import type { TrackerPort } from '@symphony/core/ports/tracker.js'
+} from '@sloppenheimer/core/ports/issue-control.js'
+import type { TrackerPort } from '@sloppenheimer/core/ports/tracker.js'
 import {
   githubJson,
   githubPageSize,

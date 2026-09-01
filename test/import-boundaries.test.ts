@@ -18,7 +18,7 @@ const fixtures: Readonly<Record<string, string>> = {
   'packages/core/src/support/violates-domain.ts': "import '../domain/domain.js'\n",
   'packages/core/src/support/violates-package-root.ts': "import '../telemetry.js'\n",
   'packages/core/src/support/violates-adapter-package.ts':
-    "import '@symphony/adapter-github/issues.js'\n",
+    "import '@sloppenheimer/adapter-github/issues.js'\n",
   'packages/core/src/support/permitted.ts': "import 'node:path'\nimport './json.js'\n",
 
   // domain/ may use support/ and nothing else.
@@ -27,7 +27,7 @@ const fixtures: Readonly<Record<string, string>> = {
   'packages/core/src/domain/violates-config.ts': "import '../config/workflow.js'\n",
   'packages/core/src/domain/violates-package-root.ts': "import '../telemetry.js'\n",
   'packages/core/src/domain/violates-adapter-package.ts':
-    "import '@symphony/adapter-codex/codex.js'\n",
+    "import '@sloppenheimer/adapter-codex/codex.js'\n",
   'packages/core/src/domain/permitted.ts': "import '../support/json.js'\nimport './errors.js'\n",
   // #109 retired the error vocabulary's entry by moving it into domain/, where the containment
   // rules #91 put here reach it as a sibling rather than through an exemption.
@@ -38,7 +38,7 @@ const fixtures: Readonly<Record<string, string>> = {
   'packages/core/src/ports/violates-config.ts': "import '../config/env-reference.js'\n",
   'packages/core/src/ports/violates-core.ts': "import '../core/runtime.js'\n",
   'packages/core/src/ports/violates-adapter-package.ts':
-    "import '@symphony/adapter-github/issues.js'\n",
+    "import '@sloppenheimer/adapter-github/issues.js'\n",
   'packages/core/src/ports/permitted.ts':
     "import '../domain/domain.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps the vocabulary #88 declared the ports against reachable, but
@@ -63,11 +63,11 @@ const fixtures: Readonly<Record<string, string>> = {
   // stop: the orchestration policy importing `makeGitHubTracker` by name.  The adapter package is
   // also absent from `packages/core/package.json`, so this does not resolve either.
   'packages/core/src/core/violates-adapter-package.ts':
-    "import { makeGitHubTracker } from '@symphony/adapter-github/issues.js'\n\nexport const bound = makeGitHubTracker\n",
+    "import { makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'\n\nexport const bound = makeGitHubTracker\n",
   'packages/core/src/core/violates-adapter-package-reexport.ts':
-    "export * from '@symphony/adapter-github/issues.js'\n",
+    "export * from '@sloppenheimer/adapter-github/issues.js'\n",
   'packages/core/src/core/violates-adapter-package-dynamic.ts':
-    "export const load = async (): Promise<unknown> => import('@symphony/adapter-codex/codex.js')\n",
+    "export const load = async (): Promise<unknown> => import('@sloppenheimer/adapter-codex/codex.js')\n",
   'packages/core/src/core/permitted.ts':
     "import '../config/workflow.js'\nimport '../domain/domain.js'\nimport '../domain/errors.js'\nimport '../ports/tracker.js'\nimport '../support/json.js'\n",
   // The migration allow-list keeps telemetry, the one module still at the core package root,
@@ -92,8 +92,9 @@ const fixtures: Readonly<Record<string, string>> = {
   // The adapter packages are restricted as an import target, never as a source, and the root
   // application is the composition root that deliberately binds them.
   'packages/adapter-github/src/permitted.ts':
-    "import '@symphony/core'\nimport '@symphony/core/ports/tracker.js'\n",
-  'src/composition-root.ts': "import '@symphony/adapter-github'\nimport '@symphony/core'\n",
+    "import '@sloppenheimer/core'\nimport '@sloppenheimer/core/ports/tracker.js'\n",
+  'src/composition-root.ts':
+    "import '@sloppenheimer/adapter-github'\nimport '@sloppenheimer/core'\n",
 
   /*
    * Nested modules.  The layers are flat today, but a rule that rejects a compliant directory
@@ -105,7 +106,7 @@ const fixtures: Readonly<Record<string, string>> = {
   'packages/core/src/support/nested/permitted.ts': "import '../json.js'\n",
   'packages/core/src/domain/nested/violates-core.ts': "import '../../core/runtime.js'\n",
   'packages/core/src/domain/nested/violates-adapter-package.ts':
-    "import '@symphony/adapter-github/issues.js'\n",
+    "import '@sloppenheimer/adapter-github/issues.js'\n",
   'packages/core/src/domain/nested/permitted.ts':
     "import '../domain.js'\nimport '../../support/json.js'\n",
   'packages/core/src/ports/nested/violates-config.ts': "import '../../config/env-reference.js'\n",
@@ -114,7 +115,7 @@ const fixtures: Readonly<Record<string, string>> = {
   'packages/core/src/ports/nested/permitted.ts':
     "import '../../domain/domain.js'\nimport '../../support/json.js'\n",
   'packages/core/src/core/nested/violates-adapter-package.ts':
-    "import '@symphony/adapter-github/issues.js'\n",
+    "import '@sloppenheimer/adapter-github/issues.js'\n",
   'packages/core/src/core/nested/permitted.ts':
     "import '../runtime.js'\nimport '../../domain/domain.js'\nimport '../../support/json.js'\n",
 }
@@ -176,7 +177,7 @@ let output = ''
 let reported: readonly string[] = []
 
 beforeAll(() => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'symphony-import-boundaries-'))
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'sloppenheimer-import-boundaries-'))
 
   for (const [path, contents] of Object.entries(fixtures)) {
     const target = join(fixtureRoot, path)

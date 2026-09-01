@@ -1,9 +1,9 @@
-import { codexAgentRunnerProvider } from '@symphony/adapter-codex'
+import { codexAgentRunnerProvider } from '@sloppenheimer/adapter-codex'
 import {
   makeAgentRunnerRegistry,
   type AgentRunnerRegistry,
-} from '@symphony/core/domain/agent-runner-provider.js'
-import type { TrackerProviderRegistry } from '@symphony/core/domain/tracker-provider.js'
+} from '@sloppenheimer/core/domain/agent-runner-provider.js'
+import type { TrackerProviderRegistry } from '@sloppenheimer/core/domain/tracker-provider.js'
 import type { WorkflowAdapters } from '../../src/config/workflow.js'
 import { auroraRunnerEntry } from './alien-agent-runner.js'
 

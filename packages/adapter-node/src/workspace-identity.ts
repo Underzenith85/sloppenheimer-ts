@@ -2,7 +2,7 @@ import { FileSystem } from '@effect/platform'
 import { resolve } from 'node:path'
 import { Effect, Option, type Scope } from 'effect'
 
-import type { Workspace } from '@symphony/core/domain/domain.js'
+import type { Workspace } from '@sloppenheimer/core/domain/domain.js'
 import {
   declaredWorkspacePath,
   rejectWorkspace,
@@ -12,8 +12,8 @@ import {
   verifiedRootRejection,
   type DirectoryIdentity,
   type VerifiedWorkspace,
-} from '@symphony/core/domain/workspace-containment.js'
-import { WorkspaceError } from '@symphony/core/domain/errors.js'
+} from '@sloppenheimer/core/domain/workspace-containment.js'
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { isSymbolicLink } from './filesystem.js'
 
 /**

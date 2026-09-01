@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as NodeStream from '@effect/platform-node/NodeStream'
 import { Effect, Stream } from 'effect'
 
-import { AgentError } from '@symphony/core/domain/errors.js'
+import { AgentError } from '@sloppenheimer/core/domain/errors.js'
 import { diagnosticLines, diagnosticRecords, protocolLines } from './framing.js'
 import { codexMaxLineBytes } from './session.js'
 

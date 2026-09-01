@@ -17,7 +17,7 @@ const runCli = async (
 ): Promise<ProcessResult> => {
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...arguments_], {
     cwd: process.cwd(),
-    env: { ...process.env, SYMPHONY_CONFORMANCE_TOKEN: 'not-a-real-token' },
+    env: { ...process.env, SLOPPENHEIMER_CONFORMANCE_TOKEN: 'not-a-real-token' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const stdout: Buffer[] = []
@@ -40,12 +40,12 @@ const runCli = async (
     while (
       child.exitCode === null &&
       child.signalCode === null &&
-      !Buffer.concat(stdout).toString('utf8').includes('symphony host started') &&
+      !Buffer.concat(stdout).toString('utf8').includes('sloppenheimer host started') &&
       Date.now() < deadline
     ) {
       await delay(25)
     }
-    if (!Buffer.concat(stdout).toString('utf8').includes('symphony host started')) {
+    if (!Buffer.concat(stdout).toString('utf8').includes('sloppenheimer host started')) {
       child.kill('SIGKILL')
       throw new Error('CLI did not become ready within ten seconds')
     }
@@ -62,7 +62,7 @@ describe('Core Conformance CLI and host lifecycle', (): void => {
   })
 
   it('starts with an isolated workflow and exits successfully on SIGTERM', async (): Promise<void> => {
-    const directory = await mkdtemp(join(tmpdir(), 'symphony-cli-conformance-'))
+    const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-cli-conformance-'))
     const workflowPath = join(directory, 'WORKFLOW.md')
     await writeFile(
       workflowPath,
@@ -72,7 +72,7 @@ tracker:
   provider:
     owner: conformance
     repository: isolated
-    token: $SYMPHONY_CONFORMANCE_TOKEN
+    token: $SLOPPENHEIMER_CONFORMANCE_TOKEN
   active_states: []
   terminal_states: []
 workspace:

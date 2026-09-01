@@ -77,7 +77,7 @@ export type AgentRunnerPort = Readonly<{
   run: (launch: AgentLaunch) => Effect.Effect<AgentResult, AgentError>
 }>
 
-export class AgentRunner extends Context.Tag('symphony/AgentRunner')<
+export class AgentRunner extends Context.Tag('sloppenheimer/AgentRunner')<
   AgentRunner,
   AgentRunnerPort
 >() {}

@@ -4,7 +4,7 @@ import { it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
-import { issueId, issueIdentifier, type Issue } from '@symphony/core/domain/domain.js'
+import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
 import { makeGitRepository, git } from './harness/git-repository.js'
 import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
@@ -16,7 +16,7 @@ afterEach(async (): Promise<void> => {
 
 const issue: Issue = anIssue({
   id: issueId('165'),
-  identifier: issueIdentifier('example/symphony#165'),
+  identifier: issueIdentifier('example/sloppenheimer#165'),
   title: 'Host-owned publication',
   priority: 1,
 })
@@ -34,7 +34,7 @@ describe('host Git source control', (): void => {
       const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
       const prepared = yield* sourceControl.prepare(issue, workspace, {
         _tag: 'Normal',
-        branchName: 'symphony/issue-165',
+        branchName: 'sloppenheimer/issue-165',
       })
 
       expect(yield* host(() => readFile(join(fixture.workspace, 'README.md'), 'utf8'))).toBe(
@@ -47,14 +47,14 @@ describe('host Git source control', (): void => {
 
       expect(published).toMatchObject({
         _tag: 'Published',
-        branchName: 'symphony/issue-165',
+        branchName: 'sloppenheimer/issue-165',
         commitCreated: true,
       })
       expect(
-        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/symphony/issue-165'])),
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
       ).toBe(published._tag === 'Published' ? published.headSha : '')
       expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
-        'symphony: example/symphony#165 Host-owned publication',
+        'sloppenheimer: example/sloppenheimer#165 Host-owned publication',
       )
     }),
   )
@@ -67,17 +67,17 @@ describe('host Git source control', (): void => {
       const prepared = yield* sourceControl.prepare(
         issue,
         { path: fixture.workspace, key: 'issue-165', createdNow: true },
-        { _tag: 'Normal', branchName: 'symphony/issue-165' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
 
       expect(yield* sourceControl.publish(issue, prepared)).toEqual({
         _tag: 'NoChanges',
-        branchName: 'symphony/issue-165',
+        branchName: 'sloppenheimer/issue-165',
         baselineSha: prepared.baseSha,
       })
       yield* Effect.promise(() =>
         expect(
-          git(fixture.remote, ['rev-parse', '--verify', 'refs/heads/symphony/issue-165']),
+          git(fixture.remote, ['rev-parse', '--verify', 'refs/heads/sloppenheimer/issue-165']),
         ).rejects.toThrow(),
       )
     }),

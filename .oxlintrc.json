@@ -27,7 +27,7 @@
   //
   // The layers live in `packages/core/src`.  The adapter packages and the root application sit
   // above the whole of it, and #109 made that a resolution boundary: `packages/core/package.json`
-  // depends on no adapter package, so `@symphony/adapter-*` does not resolve from inside core at
+  // depends on no adapter package, so `@sloppenheimer/adapter-*` does not resolve from inside core at
   // all.  The groups below still name them, because a rule that reports the boundary by name is a
   // better error than a module-not-found, and because an adapter package added to the manifest by
   // mistake would otherwise pass silently.
@@ -94,7 +94,7 @@
             "patterns": [
               {
                 "group": [
-                  "@symphony/**",
+                  "@sloppenheimer/**",
                   "**/config/**",
                   "**/core/**",
                   "**/domain/**",
@@ -115,7 +115,7 @@
           {
             "patterns": [
               {
-                "group": ["../**", "@symphony/**"],
+                "group": ["../**", "@sloppenheimer/**"],
                 "message": "support/ is the bottom layer: it may import only from support/ itself and from third-party or Node packages."
               }
             ]
@@ -131,7 +131,7 @@
           {
             "patterns": [
               {
-                "group": ["@symphony/**", "**/config/**", "**/core/**", "**/ports/**"],
+                "group": ["@sloppenheimer/**", "**/config/**", "**/core/**", "**/ports/**"],
                 "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, an adapter package, or the composition root."
               }
             ]
@@ -147,7 +147,7 @@
           {
             "patterns": [
               {
-                "group": ["../**", "!../support/**", "@symphony/**"],
+                "group": ["../**", "!../support/**", "@sloppenheimer/**"],
                 "message": "domain/ may import only from domain/ and support/, never from core/, ports/, config/, an adapter package, or the composition root."
               }
             ]
@@ -163,7 +163,7 @@
           {
             "patterns": [
               {
-                "group": ["@symphony/**", "**/config/**", "**/core/**"],
+                "group": ["@sloppenheimer/**", "**/config/**", "**/core/**"],
                 "message": "ports/ may import only from domain/ and support/. The migration allow-list covers the flat port modules that exist today; a nested port has no exemption."
               }
             ]
@@ -206,7 +206,7 @@
                   "!../support/**",
                   "!../config/workflow.js",
                   "!../telemetry.js",
-                  "@symphony/**"
+                  "@sloppenheimer/**"
                 ],
                 "message": "ports/ may import only from domain/ and support/."
               }
@@ -223,7 +223,7 @@
           {
             "patterns": [
               {
-                "group": ["@symphony/**"],
+                "group": ["@sloppenheimer/**"],
                 "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
               }
             ]
@@ -253,7 +253,7 @@
                   // these may be replaced by an import of an adapter package, which stays denied
                   // above.
                   "!../telemetry.js",
-                  "@symphony/**"
+                  "@sloppenheimer/**"
                 ],
                 "message": "core/ holds orchestration policy: it may not import a concrete adapter. Depend on a port from ports/ and let the composition root in src/ bind the implementation."
               }

@@ -7,8 +7,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import { Cause, Chunk, Effect, Option, type Scope } from 'effect'
 
-import { ServerError } from '@symphony/core/domain/errors.js'
-import { logError } from '@symphony/core/support/logging.js'
+import { ServerError } from '@sloppenheimer/core/domain/errors.js'
+import { logError } from '@sloppenheimer/core/support/logging.js'
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
@@ -114,7 +114,7 @@ const withCsrf = <Error, Requirements>(
   handler: HttpApp.Default<Error, Requirements>,
 ): HttpApp.Default<Error, Requirements> =>
   Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
-    tokenMatches(request.headers['x-symphony-csrf'], csrfToken)
+    tokenMatches(request.headers['x-sloppenheimer-csrf'], csrfToken)
       ? handler
       : errorResponse(403, 'invalid_csrf_token', 'The request token is missing or invalid'),
   )
