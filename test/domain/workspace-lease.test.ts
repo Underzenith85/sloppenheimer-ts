@@ -8,6 +8,7 @@ import {
   heldLease,
   leaseIsClaimed,
   retainedLease,
+  type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
@@ -19,7 +20,9 @@ import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
  * running is the adapter's question; every use the answer is put to is decided below.
  */
 
-const owner: WorkspaceOwner = { hostId: 'host-a', processId: 4242 }
+const owner: WorkspaceOwner = { hostId: 'host-a', processId: 4242, startMarker: '918273' }
+const running = (startMarker: string | null): OwnerObservation => ({ _tag: 'Running', startMarker })
+const gone: OwnerObservation = { _tag: 'Gone' }
 const acquiredAt = new Date('2026-08-31T10:00:00.000Z')
 const releasedAt = new Date('2026-08-31T10:05:00.000Z')
 
@@ -94,12 +97,30 @@ describe('workspace lease records', (): void => {
 
 describe('who a lease belongs to', (): void => {
   it('is claimed while the host that wrote it says so', (): void => {
-    expect(leaseIsClaimed(lease, 'host-a', false)).toBe(true)
-    expect(leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-a', true)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-a', gone)).toBe(true)
+    expect(
+      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-a', running('918273')),
+    ).toBe(false)
   })
 
   it('is claimed by another host only while that host is running', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', true)).toBe(true)
-    expect(leaseIsClaimed(lease, 'host-b', false)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('918273'))).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', gone)).toBe(false)
+  })
+
+  it('is not claimed by a process that merely inherited the recorded id', (): void => {
+    // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
+    expect(leaseIsClaimed(lease, 'host-b', running('554433'))).toBe(false)
+  })
+
+  it('takes a running owner at face value when either marker is missing', (): void => {
+    expect(leaseIsClaimed(lease, 'host-b', running(null))).toBe(true)
+    expect(
+      leaseIsClaimed(
+        { ...lease, owner: { ...owner, startMarker: null } },
+        'host-b',
+        running('554433'),
+      ),
+    ).toBe(true)
   })
 })

@@ -1,6 +1,7 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { Effect, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
@@ -8,6 +9,7 @@ import {
   decodeLease,
   encodeLease,
   leaseIsClaimed,
+  type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
@@ -19,6 +21,25 @@ import {
  */
 
 /**
+ * When a process id's own process started, as the kernel reports it — the field that tells a
+ * restarted host apart from the one whose id it inherited.
+ *
+ * `/proc/<pid>/stat` is Linux's, and the only portable-enough source there is; a host without it
+ * reports nothing rather than a value another host could not compare against. The command field can
+ * hold spaces and parentheses, so the fields are read after its closing one, where `starttime` is
+ * the twentieth.
+ */
+export const processStartMarker = (processId: number): string | null => {
+  try {
+    const stat = readFileSync(`/proc/${String(processId)}/stat`, 'utf8')
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return fields[19] ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
  * This host process, for as long as it runs. A lease naming it is this process's own, whatever the
  * operating system later does with the process id — which is why the identity is generated here
  * rather than taken from the pid alone. It is a module constant, so a workflow reload that rebuilds
@@ -27,35 +48,54 @@ import {
 export const hostOwner: WorkspaceOwner = {
   hostId: randomUUID(),
   processId: process.pid,
+  startMarker: processStartMarker(process.pid),
 }
 
 /**
- * Whether the process that wrote a foreign lease is still running.
+ * What this host can see of a lease's owner now.
  *
  * Signal 0 performs the permission and existence checks without delivering anything. `EPERM` means
- * the process exists and belongs to another user, which is still a live owner. Any other refusal is
- * reported as live too: cleanup that cannot establish an owner is gone must not remove its
- * workspace.
+ * the process exists and belongs to another user, which is still a running owner. Any other refusal
+ * is reported as running too: a cleanup that cannot establish an owner is gone must not remove its
+ * workspace. A process that is running is reported with its own start marker, so a process id the
+ * kernel handed to a successor is not mistaken for the process that recorded it.
  */
-export const ownerIsRunning = (owner: WorkspaceOwner): boolean => {
+export const observeOwner = (owner: WorkspaceOwner): OwnerObservation => {
   try {
     process.kill(owner.processId, 0)
-    return true
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+      return { _tag: 'Gone' }
+    }
   }
+  return { _tag: 'Running', startMarker: processStartMarker(owner.processId) }
 }
 
 /** Whether a lease record still belongs to a running owner, as this host sees it. */
 export const leaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
-  leaseIsClaimed(lease, hostOwner.hostId, ownerIsRunning(lease.owner))
+  leaseIsClaimed(lease, hostOwner.hostId, observeOwner(lease.owner))
 
 /**
- * Written to a sibling temporary file and renamed over the record, the way the handoff store is.
- * A host terminated mid-write would otherwise leave an empty or half-written lease, and a lease
- * that cannot be read is deliberately not treated as a workspace nobody owns: cleanup would then
- * refuse that issue's workspaces for good rather than recovering them.
+ * Publishes a lease under a name that must not already exist, which is what claims a run's
+ * workspace.
+ *
+ * The record is written to a sibling temporary file and hard-linked into place: `link` is atomic
+ * and refuses a name that already exists, so the claim and the whole record appear in one step. The
+ * run directory is created only afterwards, so cleanup elsewhere can never come across a workspace
+ * that has no lease and take it for one nobody owns.
  */
+export const claimLease = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+  lease: WorkspaceLeaseRecord,
+): Effect.Effect<void, PlatformError> =>
+  fileSystem
+    .writeFileString(`${path}.tmp`, encodeLease(lease), { mode: 0o600 })
+    .pipe(
+      Effect.zipRight(fileSystem.link(`${path}.tmp`, path)),
+      Effect.ensuring(Effect.ignore(fileSystem.remove(`${path}.tmp`, { force: true }))),
+    )
+
 export const writeLease = (
   fileSystem: FileSystem.FileSystem,
   path: string,

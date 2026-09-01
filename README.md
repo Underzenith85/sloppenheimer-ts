@@ -607,17 +607,21 @@ where the run key names the run number and the host that allocated it. Two attem
 therefore share no worktree, no index and no ref store, and two hosts pointed at one root can never
 name the same directory. The agent's cwd is the run directory; the host writes nothing inside it.
 
-Ownership is a lease file beside the run directory rather than orchestrator memory. Creating the
-run directory is the exclusive claim — the kernel refuses the second creation of a name that exists,
-so a duplicate dispatch fails before any process is launched — and the lease record written next to
-it names the issue, the run, the host and its process id. A run releases its lease on success,
-failure, cancellation and shutdown alike.
+Ownership is a lease file beside the run directory rather than orchestrator memory. Publishing that
+lease is the exclusive claim: the record is written whole and hard-linked into place, and the kernel
+refuses a link whose name already exists, so a duplicate dispatch fails before any process is
+launched. The run directory is created only afterwards, so cleanup elsewhere never comes across a
+workspace that has no lease. The record names the issue, the run, the host, its process id and when
+that process started, and a run releases its lease on success, failure, cancellation and shutdown
+alike.
 
 A run that published its work leaves nothing behind. Every other ending keeps the workspace and
 rewrites its lease as a retained recovery artifact naming why it was kept, which is never adopted by
 a later run: retained workspaces go when the issue reaches a terminal state, and cleanup skips any
 workspace whose lease is still held by a running owner — this host, or a second one. A lease left by
-a host that is gone stops holding anything back, because its process is no longer there.
+a host that is gone stops holding anything back, because its process is no longer there — nor does one
+whose process id the kernel has since handed to a successor, which is why the record carries the
+owner's start as well as its id.
 
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the

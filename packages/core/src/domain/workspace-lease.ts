@@ -23,7 +23,20 @@ export type WorkspaceOwner = Readonly<{
   /** Identifies one host process for as long as it runs, and never a later one. */
   hostId: string
   processId: number
+  /**
+   * What the host can observe about that process id's own start, so a later process that the
+   * kernel gave the same id is not mistaken for it. `null` where the host cannot observe one.
+   */
+  startMarker: string | null
 }>
+
+/**
+ * What a host can see of a recorded owner now. `Running` carries the observed start marker, which
+ * is `null` where the host cannot read one — a process that is running is then taken at face value.
+ */
+export type OwnerObservation =
+  | Readonly<{ _tag: 'Gone' }>
+  | Readonly<{ _tag: 'Running'; startMarker: string | null }>
 
 /** The run a lease belongs to. */
 export type WorkspaceRun = Readonly<{
@@ -53,6 +66,7 @@ const leaseSchema = Schema.Struct({
   owner: Schema.Struct({
     hostId: Schema.String,
     processId: Schema.Number.pipe(Schema.filter((value) => Number.isSafeInteger(value))),
+    startMarker: Schema.NullOr(Schema.String),
   }),
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),
@@ -136,13 +150,34 @@ export const decodeLease = (
  * entered or removed by anyone else.
  *
  * A record this host wrote is claimed while it says so: within one process the release is what
- * clears it. A record another host wrote is claimed while that process is alive, which is how a
- * second host pointed at the same root is respected and how a crashed one stops blocking cleanup.
- * `ownerIsRunning` is the adapter's answer for a foreign owner; when it cannot be established the
- * caller reports the owner as running, because refusing to remove a workspace is the safe error.
+ * clears it. A record another host wrote is claimed while that host's process is still running,
+ * which is how a second host pointed at the same root is respected and how a crashed one stops
+ * blocking cleanup.
+ *
+ * A process id alone does not identify a process: a host restarted into the same id — the ordinary
+ * case for a container's PID 1 — would otherwise keep its predecessor's leases alive for as long as
+ * it runs. So a running process whose start marker is not the recorded one is a different process,
+ * and the lease it left is not claimed. Where either marker is missing the observation cannot tell
+ * them apart, and the owner is taken to be running, because refusing to remove a workspace is the
+ * safe error.
  */
 export const leaseIsClaimed = (
   lease: WorkspaceLeaseRecord,
   hostId: string,
-  ownerIsRunning: boolean,
-): boolean => lease.status === 'held' && (lease.owner.hostId === hostId ? true : ownerIsRunning)
+  observation: OwnerObservation,
+): boolean => {
+  if (lease.status !== 'held') {
+    return false
+  }
+  if (lease.owner.hostId === hostId) {
+    return true
+  }
+  if (observation._tag === 'Gone') {
+    return false
+  }
+  return (
+    observation.startMarker === null ||
+    lease.owner.startMarker === null ||
+    observation.startMarker === lease.owner.startMarker
+  )
+}

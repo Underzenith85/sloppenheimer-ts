@@ -25,7 +25,7 @@ import type { LeasedWorkspace, WorkspaceManagerPort } from '@sloppenheimer/core/
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { isSymbolicLink, removeDirectoryIfEmpty } from './filesystem.js'
-import { hostOwner, leaseIsLive, readLease, writeLease } from './workspace-lease.js'
+import { claimLease, hostOwner, leaseIsLive, readLease, writeLease } from './workspace-lease.js'
 import { runHook } from './workspace-hooks.js'
 
 /**
@@ -75,12 +75,14 @@ const workspaceDirectoryExists = (
   )
 
 /**
- * Claims one run's directory. The directory is created without `recursive`, so creating it is the
- * exclusive claim itself: the kernel refuses the second creation of a name that already exists, and
- * a second dispatch of the same run identity therefore fails here rather than entering a live
- * workspace. The lease record beside it says who the owner is once the claim has been won.
+ * Claims one run's workspace: the lease first, then the directory the agent works in.
+ *
+ * The lease is the claim. Hard-linking it into place is atomic and refuses a name that already
+ * exists, so a second dispatch of one run identity fails here rather than entering a live
+ * workspace — and because the record is complete and in place before the directory exists, cleanup
+ * running elsewhere never comes across a workspace with no lease and takes it for one nobody owns.
  */
-const claimRunDirectory = (
+const claimRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
@@ -92,7 +94,12 @@ const claimRunDirectory = (
     if (!(yield* workspaceDirectoryExists(fileSystem, paths.issuePath))) {
       yield* fileSystem.makeDirectory(paths.issuePath, { recursive: true })
     }
-    yield* fileSystem.makeDirectory(paths.runPath).pipe(
+    const acquiredAt = yield* currentInstant
+    yield* claimLease(
+      fileSystem,
+      paths.leasePath,
+      heldLease(run, paths.runKey, owner, acquiredAt),
+    ).pipe(
       Effect.catchIf(
         (error) => error._tag === 'SystemError' && error.reason === 'AlreadyExists',
         (error) =>
@@ -105,8 +112,7 @@ const claimRunDirectory = (
           ),
       ),
     )
-    const acquiredAt = yield* currentInstant
-    yield* writeLease(fileSystem, paths.leasePath, heldLease(run, paths.runKey, owner, acquiredAt))
+    yield* fileSystem.makeDirectory(paths.runPath)
   })
 
 /**
@@ -222,8 +228,13 @@ const acquireRunWorkspace = (
       run.identifier,
       runWorkspaceKey(run.runId, owner.hostId),
     )
-    yield* claimRunDirectory(fileSystem, paths, run, owner).pipe(
+    yield* claimRunWorkspace(fileSystem, paths, run, owner).pipe(
       reportedAs('create_failed', 'failed to create workspace'),
+      // The lease is taken before the directory: an acquisition that fails after it hands the
+      // caller nothing to release with, so the workspace is retained here instead.
+      Effect.onError((cause) =>
+        Effect.ignore(retainLease(fileSystem, owner, paths, run, provisioningReason(cause))),
+      ),
     )
     const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
     if (hooks.afterCreate !== null) {

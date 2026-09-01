@@ -54,9 +54,12 @@ lifecycle. This section is the architecture record for it; do not create a separ
   `<root>/<issue key>/<run key>`, where the run key names the run number and the host that
   allocated it: the run number restarts with the process that counts it, so the host is what keeps
   two hosts — and a host and its own predecessor — from ever naming one directory.
-- Ownership is an exclusive lease, not orchestrator memory. Creating the run directory is the claim
-  itself, so a duplicate dispatch fails before a process is launched, and the lease record beside it
-  names the issue, the run, and the host process that holds it. It is released on success, failure,
+- Ownership is an exclusive lease, not orchestrator memory. Publishing the lease is the claim — the
+  record is hard-linked into place, which is atomic and refuses an existing name — and the run
+  directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
+  elsewhere never finds a workspace without a lease. The record names the issue, the run, and the
+  host process that holds it, including when that process started, so a host restarted into its
+  predecessor's process id does not keep its leases alive. It is released on success, failure,
   cancellation and shutdown alike, and it outlives the host that wrote it, so a restart and a second
   host reading the same root both see who owns what.
 - **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves

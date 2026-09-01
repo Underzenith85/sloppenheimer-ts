@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { access, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { it } from '@effect/vitest'
 import { Clock, Effect, Either, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
@@ -11,6 +11,7 @@ import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/doma
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.js'
+import { processStartMarker } from '@sloppenheimer/adapter-node/workspace-lease.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
   containedWorkspacePath,
@@ -444,6 +445,27 @@ const foreignWorkspace = async (
   return path
 }
 
+/**
+ * A lease another host published for a run whose directory has not appeared yet — the instant
+ * between the two writes of an acquisition elsewhere.
+ */
+const foreignLease = async (
+  root: string,
+  identifier: string,
+  owner: WorkspaceLeaseRecord['owner'],
+): Promise<string> => {
+  const runKey = 'run-4-acquiringhost'
+  const path = join(root, workspaceKey(issueIdentifier(identifier)), runKey)
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(
+    `${path}.lease`,
+    encodeLease(
+      heldLease({ identifier: issueIdentifier(identifier), runId: 4 }, runKey, owner, new Date()),
+    ),
+  )
+  return path
+}
+
 /** The lease record beside a run workspace, as cleanup and recovery read it. */
 const leaseOf = async (workspacePath: string): Promise<WorkspaceLeaseRecord> =>
   JSON.parse(await readFile(`${workspacePath}.lease`, 'utf8')) as WorkspaceLeaseRecord
@@ -571,6 +593,7 @@ describe('run workspace allocation and leases', (): void => {
         foreignWorkspace(root, identifier, {
           hostId: 'a host that is gone',
           processId: await exitedProcessId(),
+          startMarker: null,
         }),
       )
 
@@ -644,6 +667,48 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('reclaims a lease whose process id was handed to a later process', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-176'
+      // This process is running under the recorded id, and is not the process that recorded it —
+      // the ordinary shape of a host restarted into the same id, which a container's PID 1 is.
+      const abandoned = yield* host(() =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'a host that restarted into this id',
+          processId: process.pid,
+          startMarker: 'a process that is no longer here',
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      expect(existsSync(abandoned)).toBe(false)
+    }),
+  )
+
+  it.live('leaves alone a lease published before its own directory exists', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-177'
+      const acquiring = yield* host(() =>
+        foreignLease(root, identifier, {
+          hostId: 'a host acquiring right now',
+          processId: process.pid,
+          startMarker: processStartMarker(process.pid),
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // An acquisition publishes its lease before it creates its directory, so cleanup that runs in
+      // between finds the lease rather than a workspace it would read as belonging to nobody.
+      expect(existsSync(`${acquiring}.lease`)).toBe(true)
+    }),
+  )
+
   it.live('leaves a workspace a second live host still holds', () =>
     Effect.gen(function* () {
       const root = makeRoot()
@@ -653,6 +718,7 @@ describe('run workspace allocation and leases', (): void => {
         foreignWorkspace(root, identifier, {
           hostId: 'another live host',
           processId: process.pid,
+          startMarker: processStartMarker(process.pid),
         }),
       )
 
