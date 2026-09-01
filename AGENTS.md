@@ -37,11 +37,15 @@ the design, not a starting point to negotiate down: `exactOptionalPropertyTypes`
 - Never `any`, never a non-null assertion, never an unchecked cast. If a value's type is not known,
   narrow it with a predicate or decode it with a schema — an `as` that asserts what was never
   checked is the defect these settings exist to prevent.
-- Every function states its return type — `explicit-function-return-type` is an error, arrow
-  callbacks included. `curly` is `all` and `eqeqeq` is on; a `switch` over a union must be
-  exhaustive.
-- `import type` for types, `.js` specifiers on every relative and workspace import, because
-  `verbatimModuleSyntax` and NodeNext resolution both require it.
+- Every declaration states its return type — `explicit-function-return-type` is an error. It
+  permits a contextually typed function expression, and the code takes that: a callback whose type
+  the combinator already fixes (`Option.flatMap(..., (entry) => ...)`) is left unannotated, while
+  anything bound to a name carries one. `curly` is `all` and `eqeqeq` is on; a `switch` over a
+  union must be exhaustive.
+- `import type` for types, and `.js` specifiers on every relative import and every workspace
+  _subpath_ — `@sloppenheimer/core/support/logging.js` — because `verbatimModuleSyntax` and NodeNext
+  resolution both require it. A package-root import is the bare specifier, `@sloppenheimer/core`,
+  which is the `.` entry each manifest exports; appending `.js` there names nothing.
 - Prefer `type` aliases of `Readonly<{ ... }>` over `interface`. Classes appear only as
   `Data.TaggedError` subclasses, `Context.Tag` subclasses, and two documented carve-outs
   (`CodexConnection`, which is a session's identity, and `JsonConversionError`, which is thrown and
@@ -76,7 +80,7 @@ built, a layer being assembled. Do not mix both for the same expression, and do 
 Neither style may hide a nested runtime: an `Effect` is returned to its caller, not run inside
 another effect.
 
-### Errors: no throw crosses a boundary
+### Errors: the failure channel, not exceptions
 
 The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.TaggedError` classes —
 `WorkflowError`, `TrackerError`, `WorkspaceError`, `SourceControlError`, `AgentError`,
@@ -86,9 +90,9 @@ The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.Tagg
 
 - Extend a `category` union before adding an error class. A new class is warranted only when a new
   port needs a failure that no existing port's callers can handle.
-- The failure channel is how a function reports failure. Do not throw to signal one, do not reject a
-  promise to signal one, and do not return a sentinel value (`null`, `-1`, an empty string) that a
-  caller has to know to check.
+- In Effect-returning code the failure channel is how a function reports failure. Do not throw to
+  signal one, do not reject a promise to signal one, and do not return a sentinel value (`null`,
+  `-1`, an empty string) that a caller has to know to check.
 - Failures are the expected outcomes; defects are the bugs. Do not `Effect.die` for something an
   operator could cause, and do not catch defects to keep a fiber alive — a defect that reaches the
   runtime is information.
@@ -98,10 +102,13 @@ The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.Tagg
 - No error message may carry a credential. Secrets are `Redacted` and messages are built from field
   names, not field values.
 
-There is exactly one sanctioned use of `throw`, and it is a local implementation detail rather than
-a signal: **inside the `try` thunk of `Effect.try` / `Effect.tryPromise`, or inside a helper
-documented as being for a caller already inside one.** The surrounding combinator catches it and
-puts a typed error back on the failure channel, so nothing escapes as a defect. `authoredFields` in
+Two shapes of `throw` are sanctioned, and in neither is the throw a signal that crosses an Effect
+boundary.
+
+The first is a local implementation detail: **inside the `try` thunk of `Effect.try` /
+`Effect.tryPromise`, or inside a helper documented as being for a caller already inside one.** The
+surrounding combinator catches it and puts a typed error back on the failure channel, so nothing
+escapes as a defect. `authoredFields` in
 `packages/adapter-github/src/provider.ts` is the model: a run of small validators that throw a
 `WorkflowError`, wrapped once in `Effect.try` that maps the caught value back. `decodeTrackerOrThrow`
 in `packages/adapter-github/src/client.ts` is the same idea factored out, and its doc comment says so.
@@ -109,6 +116,13 @@ in `packages/adapter-github/src/client.ts` is the same idea factored out, and it
 Keep that pattern inside one module, and keep the wrapping `Effect.try` in view of the throw. A
 throwing helper exported for a caller elsewhere to wrap is not this pattern; it is a rethrown
 exception with extra steps.
+
+The second is the process boundary that runs before there is a runtime to fail into:
+`parseCliArguments` in `src/config/cli-options.ts` throws on a malformed argument, and its caller
+in `src/cli.ts` catches it and returns an exit code. Argument parsing decides whether the
+program starts at all, so it has no failure channel to use; that is what makes it an exception
+rather than a precedent. Everything downstream of it is Effect-returning code, where the rules above
+hold.
 
 `try`/`catch` is for JavaScript APIs that throw as their only failure mode — `new URL(value)` is the
 recurring one — and converts to a typed value immediately, in the same expression. `Effect.tryPromise`
@@ -203,9 +217,12 @@ never through `Date.now()` or `new Date()`.
   none of them acquires a `Clock` dependency.
 - `new Date(value)` stays where the instant comes from a value already in hand: a parsed wire
   timestamp, a restored snapshot, or a deadline derived from a recorded instant.
-- Delays and repetition are `Effect.sleep` and `Schedule`, never `setTimeout` in an effect. The
-  handful of real timers in the repository are in process-lifecycle code that is outside the runtime
-  — a kill grace period, the CLI's shutdown deadline — and each says why.
+- Delays and repetition are `Effect.sleep` and `Schedule`. A native timer appears only in
+  process-lifecycle code, where the thing being timed is a real child process or the host itself and
+  a test clock would not advance it: a hook deadline and its kill grace period in
+  `packages/adapter-node/src/workspace-hooks.ts` — inside `Effect.async`, which is the shape that
+  bridges such a callback — and the CLI's shutdown watchdog. Each says why. Nothing else schedules
+  with `setTimeout`.
 - `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
 
 Tests therefore drive the whole orchestrator from `TestClock` — the clock `Effect.sleep` and
@@ -291,8 +308,8 @@ the whole repository, each with a stated reason. `Effect.runPromise` in
 `packages/adapter-github/src/tools.ts` serves the total host-tool boundary described under
 **Errors**. `Runtime.runFork` in `packages/adapter-codex/src/codex.ts` and in
 `packages/core/src/core/runtime.ts` starts long-lived work from a callback that is not itself an
-effect, and both pass an explicit scope so the fiber is still owned by something. Do not add a
-fourth: a function that needs a runtime is a function that should have returned an `Effect`.
+effect, and both pass an explicit scope so the fiber is still owned by something. Do not add
+another: a function that needs a runtime is a function that should have returned an `Effect`.
 
 ## Packaging
 
