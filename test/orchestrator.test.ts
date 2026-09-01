@@ -1738,6 +1738,86 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('does not retire a slow publication as a stalled agent', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-postflight-stall-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      let release = (): void => undefined
+      const publishing = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-167',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/167',
+              pullRequestNumber: 167,
+              created: true,
+            }),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              // A push that outlasts the stall timeout. No agent is running and no protocol event
+              // can arrive, which is exactly what the stall sweep used to read as a stalled agent.
+              return Effect.promise(() => publishing).pipe(
+                Effect.as({
+                  _tag: 'Published',
+                  branchName: prepared.target.branchName,
+                  headSha: 'published-head',
+                  commitCreated: true,
+                }),
+              )
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          // Well past the stall timeout, with the publication still in flight.
+          yield* TestClock.adjust('30 minutes')
+          yield* control.refresh
+          yield* control.refresh
+          const snapshot = yield* control.snapshot
+
+          // A publication that cannot finish is the source control's to fail, and it fails as a
+          // delivery. Retiring it here would rerun the coding agent on work it already completed.
+          expect(launched).toBe(1)
+          expect(snapshot.retrying).toEqual([])
+          expect(snapshot.running).toHaveLength(1)
+
+          release()
+          while ((yield* control.snapshot).handoffs.length === 0) {
+            yield* Effect.yieldNow()
+          }
+          expect(launched).toBe(1)
+        }),
+      )
+    }),
+  )
+
   it.scoped('keeps the issue claimed while a delivery waits, so no agent joins it', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-claim-')

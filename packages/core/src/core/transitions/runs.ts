@@ -85,6 +85,28 @@ export const applyRunEvent = (entry: RunningEntry, update: AgentEvent): RunningE
 })
 
 /**
+ * Records that the host's postflight has taken this run over from the agent.
+ *
+ * Only the run the event names: a late marker from a superseded turn must not exempt the run that
+ * replaced it from the stall timer.
+ */
+export const notePostflightStarted = (
+  state: RuntimeState,
+  id: IssueId,
+  runId: number,
+  at: Date,
+): RuntimeState => {
+  const entry = state.running.get(id)
+  if (entry === undefined || entry.runId !== runId || entry.postflightStartedAt !== null) {
+    return state
+  }
+  return {
+    ...state,
+    running: withEntry(state.running, id, { ...entry, postflightStartedAt: at }),
+  }
+}
+
+/**
  * Settles the telemetry the runner's callback buffered for a run that is ending. The usage counters
  * only ever rise, so a late report cannot lower what the run already accounted for.
  */

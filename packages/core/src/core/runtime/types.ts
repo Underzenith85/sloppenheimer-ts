@@ -198,6 +198,9 @@ export type OrchestratorControl = Readonly<{
 export type OrchestratorEvent =
   | Readonly<{ _tag: 'Tick' }>
   | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; update: AgentEvent }>
+  // The agent is done and the host has taken the workspace over. Nothing about the run changes
+  // except who is working, which is what the stall timer needs to know.
+  | Readonly<{ _tag: 'PostflightStarted'; issueId: IssueId; runId: number }>
   | Readonly<{
       _tag: 'WorkerExited'
       issueId: IssueId

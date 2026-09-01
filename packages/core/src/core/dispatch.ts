@@ -187,7 +187,13 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
               Effect.zipRight(
                 Effect.suspend(() => {
                   const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                  return runPostflight(publisher, issue, prepared)
+                  // Announced before the first git call: from here the run is the host's work, and
+                  // the silence on the agent protocol that follows is not a stalled agent.
+                  return Queue.offer(context.mailbox, {
+                    _tag: 'PostflightStarted' as const,
+                    issueId: issue.id,
+                    runId,
+                  }).pipe(Effect.zipRight(runPostflight(publisher, issue, prepared)))
                 }),
               ),
               Effect.tap((outcome) =>
@@ -246,6 +252,7 @@ const startingRun = (
   attempt: launch.attempt,
   repairRun: launch.repairRun,
   startedAt,
+  postflightStartedAt: null,
   lastEventAt: null,
   lastEvent: null,
   lastMessage: null,

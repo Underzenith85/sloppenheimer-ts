@@ -183,6 +183,15 @@ export type RunningEntry = Readonly<{
   /** Whether this worker was dispatched to repair an existing pull request. */
   repairRun: boolean
   startedAt: Date
+  /**
+   * When the host's own postflight took over from the agent, if it has.
+   *
+   * The stall timer measures silence on the agent protocol, and a postflight is silent on it by
+   * construction: no agent is running. Without this, an inspection or a push that outlasts the
+   * timeout reads as a stalled agent and is retired as one — turning a slow delivery into another
+   * coding turn, which is the exact confusion the postflight exists to end.
+   */
+  postflightStartedAt: Date | null
   lastEventAt: Date | null
   lastEvent: string | null
   lastMessage: string | null

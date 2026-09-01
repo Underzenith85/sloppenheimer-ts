@@ -556,6 +556,12 @@ repair agent that had achieved nothing.
   inspection found. It answers with one of `NotPerformed`, `NoChanges`, `Published` or
   `DeliveryFailed`, and it cannot fail — raising a publication problem as a worker failure is what
   turned a delivery problem into an agent retry.
+- The agent stall timer does not run over a postflight. It measures silence on the agent protocol,
+  and a postflight is silent on it by construction: no agent is running. A run records when the host
+  took it over, and the stall sweep leaves those alone — otherwise an inspection or a push that
+  outlasts the timeout is retired as a stalled agent and the coding agent runs again on work it had
+  already finished, which is the confusion this whole record exists to end. A publication that
+  cannot finish is the source control's to fail, and it fails as a delivery.
 - The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
   published SHA and expected remote SHA are authoritative.
 - A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing

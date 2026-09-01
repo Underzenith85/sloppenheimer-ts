@@ -1,5 +1,7 @@
-import { Effect, Queue, type Scope } from 'effect'
+import { Effect, Queue, Ref, type Scope } from 'effect'
 
+import { currentInstant } from '../support/clock.js'
+import * as Transitions from './transitions.js'
 import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
 import { onDeliveryDue } from './polling/delivery-due.js'
@@ -37,6 +39,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
       switch (event._tag) {
         case 'Tick': {
           yield* onTick(context)
+          break
+        }
+        case 'PostflightStarted': {
+          const startedAt = yield* currentInstant
+          yield* Ref.update(context.state, (current) =>
+            Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
+          )
           break
         }
         case 'AgentUpdate': {
