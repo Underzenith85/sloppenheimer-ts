@@ -188,10 +188,10 @@ const patchLines = (
   files: readonly FileChange[],
   read: (file: FileChange) => number | null,
 ): number | null =>
-  files.reduce<number | null>(
-    (carried, file) => (read(file) === null ? carried : (carried ?? 0) + (read(file) ?? 0)),
-    null,
-  )
+  files.reduce<number | null>((carried, file) => {
+    const lines = read(file)
+    return lines === null ? carried : (carried ?? 0) + lines
+  }, null)
 
 const appendFile = (
   record: AgentDetailRecord,

@@ -293,7 +293,12 @@ describe('protocol normalization', (): void => {
           {
             path: '/home/agent/work/src/server.ts',
             kind: 'add',
-            diff: ['+++ b/src/server.ts', '+export const serve = (): null => null'].join('\n'),
+            diff: [
+              '--- /dev/null',
+              '+++ b/src/server.ts',
+              '@@ -0,0 +1 @@',
+              '+export const serve = (): null => null',
+            ].join('\n'),
           },
           { path: '/home/agent/work/docs/README.md', kind: 'delete' },
         ],
@@ -345,6 +350,31 @@ describe('protocol normalization', (): void => {
       kind: 'file',
       state: 'completed',
       files: [{ path: 'work/src/counter.ts', change: 'update', addedLines: 1, deletedLines: 1 }],
+    })
+  })
+
+  it('counts a headerless fragment as the content it is', (): void => {
+    // A fragment carrying no hunk marker is all content, and content wears both the characters and
+    // the separator a header does: `++ heading` arrives as `+++ heading`. Only a `---` line with a
+    // `+++` line right after it is a header, which a fragment like this one never has.
+    expect(
+      normalizePayload('item/completed', {
+        item: {
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            {
+              path: '/home/agent/work/docs/notes.md',
+              kind: 'update',
+              diff: ['+++ heading', '+++more', '-- removed', '---gone'].join('\n'),
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: 'file',
+      state: 'completed',
+      files: [{ path: 'work/docs/notes.md', change: 'update', addedLines: 2, deletedLines: 2 }],
     })
   })
 

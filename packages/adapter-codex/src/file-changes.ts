@@ -62,7 +62,7 @@ const changeListSource = Schema.Union(Schema.Array(Schema.Unknown), unknownRecor
 const decodeChange = decodeOrNull(changeSource)
 const decodeChangeList = decodeOrNull(changeListSource)
 
-type ChangeSource = NonNullable<ReturnType<typeof decodeChange>>
+type ChangeSource = Schema.Schema.Type<typeof changeSource>
 
 const fileChangeKinds = new Map<string, FileChangeKind>([
   ['add', 'add'],
@@ -82,23 +82,32 @@ const fileChangeKinds = new Map<string, FileChangeKind>([
 const changeKind = (value: string | null): FileChangeKind =>
   fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
 
-/** A file header: the three characters and the separator that follows the path they name. */
-const fileHeader = /^(?:\+\+\+|---)(?:[ \t]|$)/u
+/** The two halves of a file header, each the three characters and the separator that follows. */
+const oldFileHeader = /^---(?:[ \t]|$)/u
+const newFileHeader = /^\+\+\+(?:[ \t]|$)/u
 
 /**
  * The lines one diff adds and removes.
  *
- * The three characters alone do not make a header. An added line whose own text begins with `++`
- * arrives as `+++counter`, and skipping it would undercount the patch, so a header is recognized by
- * the separator that follows it and only where headers appear: before the first hunk. Inside a
- * hunk every `+` and `-` line is content. Nothing else about the diff is read, and no part of it is
- * returned.
+ * Neither the three characters nor the separator after them makes a header, because content wears
+ * both: an added line reading `++counter` arrives as `+++counter`, and one reading `++ heading`
+ * arrives as `+++ heading`. What distinguishes a header is that it comes in a pair — a `---` line
+ * and the `+++` line right after it — and that it appears before the first hunk. Inside a hunk
+ * every `+` and `-` line is content, which is what keeps a removed `-- x` above an added `++ y`
+ * from reading as one.
+ *
+ * A fragment carrying neither a hunk marker nor a pair is all content. What stays ambiguous is a
+ * fragment with no hunk marker that opens on such a pair, where the header reading is taken. That
+ * is the conventional shape, and a diff that means the other thing is indistinguishable.
+ *
+ * Nothing else about the diff is read, and no part of it is returned.
  */
 const diffCounts = (diff: string): Readonly<{ addedLines: number; deletedLines: number }> => {
+  const lines = diff.split('\n')
   let addedLines = 0
   let deletedLines = 0
   let inHunk = false
-  for (const line of diff.split('\n')) {
+  for (const [index, line] of lines.entries()) {
     if (line.startsWith('@@')) {
       inHunk = true
       continue
@@ -108,7 +117,12 @@ const diffCounts = (diff: string): Readonly<{ addedLines: number; deletedLines: 
       inHunk = false
       continue
     }
-    if (!inHunk && fileHeader.test(line)) {
+    // Either half of a pair, recognized from the other: the `---` line by the `+++` that follows
+    // it, and that `+++` line by the `---` before it.
+    const pairedHeader =
+      (oldFileHeader.test(line) && newFileHeader.test(lines[index + 1] ?? '')) ||
+      (newFileHeader.test(line) && oldFileHeader.test(lines[index - 1] ?? ''))
+    if (!inHunk && pairedHeader) {
       continue
     }
     if (line.startsWith('+')) {
