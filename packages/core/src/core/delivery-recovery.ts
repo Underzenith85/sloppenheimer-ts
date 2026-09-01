@@ -93,7 +93,11 @@ const publishRetained = (
         // No worker attempt owns this work: the process that produced it is gone. A retry that
         // follows starts the agent's numbering afresh, which is the truthful reading.
         attempt: null,
-        repairRun: handoff !== undefined,
+        // The repair identity, not the handoff. A pull request being open says nothing about what
+        // produced the change in this workspace: an ordinary continuation leaves one behind too,
+        // and it is owed the continuation its turn was owed rather than the claim being given up
+        // the way a delivered repair's is.
+        repairRun: handoff !== undefined && Option.isSome(handoff.repair),
       },
       outcome,
       1,

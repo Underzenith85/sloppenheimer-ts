@@ -1893,6 +1893,91 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('continues the session when the work it recovered was not a repair', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-continuation-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      // An ordinary continuation's handoff: a pull request is open, and nothing is repairing it.
+      yield* saveHandoffs(handoffStorePath, [
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
+          state: 'awaiting_checks',
+          headSha: head,
+          reason: 'Awaiting the protected-branch observation',
+          repairAttempts: 0,
+          repairHeadShas: [],
+          repairStartedHeadSha: null,
+          reviewRequestedHeadSha: head,
+          reviewCompletedHeadSha: head,
+          observedAt: new Date(0).toISOString(),
+        },
+      ])
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+
+          // The change this recovered was an ordinary continuation's, not a repair's. Handing the
+          // pull request over continues the session; giving the claim up is what a delivered
+          // repair does, and reading an open pull request as one ends the run early.
+          expect(snapshot.retrying).toHaveLength(1)
+          expect(launched).toBe(0)
+        }),
+      )
+    }),
+  )
+
   it.scoped('keeps a discarded workspace unexamined when its removal failed', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-discard-')

@@ -594,6 +594,10 @@ repair agent that had achieved nothing.
   candidate later and arrives with a workspace of its own; the dispatch pass examines its own
   candidates, so only the one sweep that has to precede the first reconciliation costs a tracker
   call.
+- What recovery republishes is a repair only when a repair identity says so, never because a pull
+  request is open. An ordinary continuation leaves an unpublished workspace behind too, and the
+  handoff that publication opens owes it the continuation its turn was owed — giving the claim up
+  is what a delivered repair does, and reading an open pull request as one ends the session early.
 - When a rediscovered publication cannot be delivered as it stands and the work goes back to the
   coding agent, a repair the recovery restored is put back in flight with it. A restored repair
   carries no attempt behind it, and that is exactly what the queued retry consults to decide whether
