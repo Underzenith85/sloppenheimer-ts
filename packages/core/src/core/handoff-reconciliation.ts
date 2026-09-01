@@ -392,13 +392,22 @@ export const reconcileHandoffs = (
         )
       }
     }
-    // Handoffs are observations, not claim owners. A live worker or queued retry retains its claim;
-    // every idle handoff releases one that was restored from an older snapshot or left behind by a
-    // completed transition.
+    // Handoffs are observations, not claim owners. A live worker, a queued retry and work waiting
+    // to be published each retain their claim; every idle handoff releases one that was restored
+    // from an older snapshot or left behind by a completed transition.
+    //
+    // The delivery belongs in that list for the same reason the other two do: the claim is what
+    // `dispatchAdmission` refuses on, and an agent dispatched while a publication is queued would
+    // be editing the very worktree that publication is about to push.
     yield* Ref.update(context.state, (current) => {
       let released = current
       for (const id of current.handoffs.keys()) {
-        if (selected(id) && !current.running.has(id) && !current.retries.has(id)) {
+        if (
+          selected(id) &&
+          !current.running.has(id) &&
+          !current.retries.has(id) &&
+          !current.deliveries.has(id)
+        ) {
           released = Transitions.releaseClaim(released, id)
         }
       }

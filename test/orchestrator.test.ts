@@ -1149,6 +1149,63 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('keeps the issue claimed while a delivery waits, so no agent joins it', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-claim-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      // Routable and active, so nothing but the claim stands between it and a second dispatch.
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            () => Effect.fail(deliveryFailure()),
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+          }
+          const afterDelivery = launched
+
+          // Reconciliation releases the claim of every handoff nothing is acting on. Work waiting
+          // to be published is something acting on it: an agent admitted here would be editing the
+          // very worktree the queued publication is about to push.
+          yield* control.refresh
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+
+          expect(launched).toBe(afterDelivery)
+          expect(snapshot.delivering).toHaveLength(1)
+          expect(snapshot.running).toEqual([])
+        }),
+      )
+    }),
+  )
+
   it.scoped('rediscovers unpublished work in a workspace a previous process left behind', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-recovery-')
@@ -1989,18 +2046,21 @@ describe('agent turn completion separated from work publication', (): void => {
       let reported = issue
       const harness = makeHarness(isolated, () => [reported])
       let launched = 0
+      let removals = 0
       const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
       const ports: TestPorts = {
         ...harness.ports,
         makeWorkspaces: (settings) => ({
           ...harness.ports.makeWorkspaces(settings),
-          remove: () =>
-            Effect.fail(
+          remove: () => {
+            removals += 1
+            return Effect.fail(
               new WorkspaceError({
                 category: 'remove_failed',
                 message: 'the workspace directory is busy',
               }),
-            ),
+            )
+          },
         }),
         makeSourceControl: () =>
           failingSourceControl(
@@ -2036,13 +2096,18 @@ describe('agent turn completion separated from work publication', (): void => {
           }
 
           // Closed, so the delivery due next discards the work with the workspace holding it —
-          // and the removal that would make that true fails.
+          // and the removal that would make that true fails, every time.
           reported = { ...issue, state: 'closed' }
-          yield* TestClock.adjust('5 minutes')
           while (snapshot.delivering.length > 0) {
+            yield* TestClock.adjust('5 minutes')
             yield* Effect.yieldNow()
             snapshot = yield* control.snapshot
           }
+
+          // Retried while the delivery was retained: the manager that opened that workspace is the
+          // only thing that can remove it, and dropping the delivery on the first failure would
+          // have let a reload retire that manager with the files still under it.
+          expect(removals).toBeGreaterThan(1)
 
           const lookup = yield* control.agentDetail(issue.identifier)
           expect(lookup._tag).toBe('Found')

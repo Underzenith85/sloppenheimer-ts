@@ -92,18 +92,71 @@ const holdDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Effec
   })
 
 /**
+ * What is left when the removal that would make a discard true did not happen.
+ *
+ * Another attempt is worth having, and it has to be this delivery's: the manager that opened the
+ * workspace is the only one that can remove it, a reload may since have moved the workspace root
+ * out from under everything else, and retaining the delivery is what keeps that manager — and the
+ * claim that stops an agent being sent at the issue meanwhile — alive to try again.
+ *
+ * When the attempts are spent the files stay where they are. The workspace goes back to being
+ * unexamined, which refuses a dispatch into it until a pass has established what it holds, and the
+ * operator has the reason in the issue's detail.
+ */
+const retryDiscard = (
+  context: OrchestratorContext,
+  entry: DeliveryEntry,
+  error: string,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const retrying = yield* context.scheduleDelivery({
+      issue: entry.issue,
+      execution: entry.execution,
+      prepared: entry.prepared,
+      attempt: entry.attempt + 1,
+      workerAttempt: entry.workerAttempt,
+      failure: entry.failure,
+      changedFileCount: entry.changedFileCount,
+      repairRun: entry.repairRun,
+    })
+    const failedAt = yield* currentInstant
+    yield* Ref.update(context.state, (current) => {
+      // Written after the scheduling, so the reason an operator reads is the removal that failed
+      // rather than the publication vocabulary the queueing records for itself.
+      const noted = Transitions.updateDetail(current, entry.issue.id, (record) =>
+        recordPublication(record, failedAt, {
+          status: 'failed',
+          branch: entry.prepared.target.branchName,
+          baselineSha: entry.prepared.baselineSha,
+          category: entry.failure.category,
+          attempts: entry.attempt,
+          message: retrying
+            ? `The issue no longer wants this work, and the workspace holding it could not be removed: ${error}. Retrying the removal`
+            : `The issue no longer wants this work, and the workspace holding it could not be removed: ${error}`,
+        }),
+      )
+      return retrying
+        ? noted
+        : Transitions.releaseClaim(
+            Transitions.noteWorkspaceExamined(noted, entry.issue.id, false),
+            entry.issue.id,
+          )
+    })
+  })
+
+/**
  * Discards the work with the workspace holding it, because the issue is finished with.
  *
  * The removal is what makes the discard true, so it happens before anything says so. A removal
  * that failed leaves the files exactly where they were: calling that discarded would report work
  * as gone while it sits on disk, waiting for the next agent on this issue to inherit it as its own.
- * The workspace goes back to being unexamined instead, which is what refuses that dispatch until a
- * pass has established what is in it.
  */
-const discardDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Effect.Effect<void> =>
+const discardDelivery = (
+  context: OrchestratorContext,
+  entry: DeliveryEntry,
+): Effect.Effect<void, never, Scope.Scope> =>
   Effect.gen(function* () {
     const removed = yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(asSettled)
-    const discardedAt = yield* currentInstant
     if (removed._tag === 'Failed') {
       yield* logWarning('delivery workspace cleanup failed; the work is still on disk', {
         ...logContext(entry.issue),
@@ -111,27 +164,10 @@ const discardDelivery = (context: OrchestratorContext, entry: DeliveryEntry): Ef
         outcome: 'failed',
         error: removed.error.message,
       })
-      yield* Ref.update(context.state, (current) =>
-        Transitions.releaseClaim(
-          Transitions.noteWorkspaceExamined(
-            Transitions.updateDetail(current, entry.issue.id, (record) =>
-              recordPublication(record, discardedAt, {
-                status: 'failed',
-                branch: entry.prepared.target.branchName,
-                baselineSha: entry.prepared.baselineSha,
-                category: entry.failure.category,
-                attempts: entry.attempt,
-                message: `The issue no longer wants this work, and the workspace holding it could not be removed: ${removed.error.message}`,
-              }),
-            ),
-            entry.issue.id,
-            false,
-          ),
-          entry.issue.id,
-        ),
-      )
+      yield* retryDiscard(context, entry, removed.error.message)
       return
     }
+    const discardedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
       Transitions.releaseClaim(
         Transitions.updateDetail(current, entry.issue.id, (record) =>

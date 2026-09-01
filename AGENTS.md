@@ -568,6 +568,11 @@ repair agent that had achieved nothing.
   delivery keeps calling the tracker and the code-review port after the run that produced it has
   ended, so a workflow reload or a credential rotation adopts it exactly as it adopts a running run
   and a handoff.
+- A retained delivery holds its issue's claim, which is what `dispatchAdmission` refuses on. It is
+  in that list for the same reason a running run and a queued retry are: an agent admitted while a
+  publication is queued would be editing the very worktree that publication is about to push. The
+  reconciliation pass releases the claim of every handoff nothing is acting on, and a delivery is
+  something acting on it.
 - Retirement waits for a retained delivery exactly as it waits for a running run and a handoff. A
   delivery holds the workspace manager it will open the workspace through again — to publish the
   change or, on the terminal path, to remove it — so releasing that manager's scope from under a
@@ -632,9 +637,11 @@ happens to the work.
   same step, so a delivery can never come due against a directory that no longer exists. That is
   the terminal-issue path, and only it.
 - A discard is only true once the workspace is gone, so the removal happens before anything records
-  one. A removal that failed leaves the files where they were: it is recorded as a delivery failure
-  naming the reason, and the workspace goes back to being unexamined, which is what refuses a
-  dispatch into it until a pass has established what it holds.
+  one. A removal that failed leaves the files where they were, so the delivery has not settled: it
+  is retained for another attempt, which is what keeps alive the one manager that can remove that
+  workspace — a reload may have moved the workspace root out from under everything else. When the
+  attempts are spent the files stay put, the workspace goes back to being unexamined, which refuses
+  a dispatch into it until a pass has established what it holds, and the reason is in the detail.
 - A delivery that comes due re-reads its issue immediately before publishing. An issue that has
   since gone terminal or left its active states has its work discarded rather than pushed: putting
   a branch and a pull request on the remote for work nobody asked for any more is the one thing
