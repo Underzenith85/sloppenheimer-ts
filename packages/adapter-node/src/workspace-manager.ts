@@ -215,49 +215,22 @@ const provisioningReason = (cause: Cause.Cause<WorkspaceError>): string =>
   })
 
 /**
- * Allocates and leases one run's workspace. `after_create` is fatal: a workspace whose provisioning
- * hook failed is not usable. It runs for every run, because every run is given a directory that did
- * not exist before it.
+ * The directory the agent works in, and the operator's chance to provision it. Both belong inside
+ * the lease rather than beside it: the workspace exists only once its lease does.
  */
-const acquireRunWorkspace = (
+const provisionRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
-  root: string,
-  owner: WorkspaceOwner,
-  run: WorkspaceRun,
-): Effect.Effect<LeasedWorkspace, WorkspaceError> =>
+  workspace: Workspace,
+): Effect.Effect<void, WorkspaceError> =>
   Effect.gen(function* () {
-    const paths = yield* containedRunWorkspacePath(
-      root,
-      run.identifier,
-      runWorkspaceKey(run.runId, owner.hostId),
-    )
-    const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
-    // Claiming the lease and installing what hands it back are one step. `acquireUseRelease` takes
-    // the claim uninterruptibly and only then runs the rest, so an interruption between the two
-    // cannot leave a published lease with nothing to release it — and a claim that was refused
-    // belongs to the run that won it, and is never rewritten from here.
-    yield* Effect.acquireUseRelease(
-      claimRunLease(fileSystem, paths, run, owner).pipe(
-        reportedAs('create_failed', 'failed to create workspace'),
-      ),
-      () =>
-        Effect.gen(function* () {
-          yield* fileSystem.makeDirectory(paths.runPath)
-          if (hooks.afterCreate !== null) {
-            yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
-          }
-        }).pipe(reportedAs('create_failed', 'failed to create workspace')),
-      (_claimed, exit) =>
-        Exit.isSuccess(exit)
-          ? Effect.void
-          : Effect.ignore(
-              retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
-            ),
-    )
-    const leased: LeasedWorkspace = { run, workspace }
-    return leased
-  })
+    yield* fileSystem.makeDirectory(workspace.path)
+    // `after_create` is fatal: a workspace whose provisioning hook failed is not usable. It runs
+    // for every run, because every run is given a directory that did not exist before it.
+    if (hooks.afterCreate !== null) {
+      yield* runHook('after_create', hooks.afterCreate, workspace.path, hooks.timeoutMs)
+    }
+  }).pipe(reportedAs('create_failed', 'failed to create workspace'))
 
 /** Discards a released workspace, or keeps it as the recovery artifact its lease names. */
 const disposeOfWorkspace = (
@@ -347,21 +320,70 @@ const issueHoldsWorkspace = (
     return (yield* fileSystem.readDirectory(path)).length > 0
   }).pipe(reportedAs('inspect_failed', 'failed to inspect workspace'))
 
+/**
+ * One run's whole hold on a workspace: the claim, the directory it names, and the release that
+ * hands it back however the run ended.
+ *
+ * Only the claim is uninterruptible. It is one link into place, and taking it under a mask is what
+ * keeps a published lease from ever existing without the finalizer that hands it back. Everything
+ * after it — provisioning, the `after_create` hook, and the caller's own use — runs restored, so a
+ * cancellation reaches a hook's process tree instead of waiting out its timeout, and each of the
+ * two is bracketed in turn with no interruptible gap between them.
+ */
+const leaseRunWorkspace = <Value, Failure, Requirements>(
+  fileSystem: FileSystem.FileSystem,
+  hooks: HooksConfig,
+  root: string,
+  owner: WorkspaceOwner,
+  run: WorkspaceRun,
+  use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
+  disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
+): Effect.Effect<Value, Failure | WorkspaceError, Requirements> =>
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const paths = yield* containedRunWorkspacePath(
+        root,
+        run.identifier,
+        runWorkspaceKey(run.runId, owner.hostId),
+      )
+      yield* claimRunLease(fileSystem, paths, run, owner).pipe(
+        reportedAs('create_failed', 'failed to create workspace'),
+      )
+      const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
+      // From here the lease is this run's own. Provisioning that does not finish keeps the
+      // workspace under the reason it failed for, rather than leaving a lease nobody holds.
+      yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.ignore(
+                retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
+              ),
+        ),
+      )
+      return yield* restore(use(workspace)).pipe(
+        Effect.onExit((exit) =>
+          releaseRunWorkspace(
+            fileSystem,
+            hooks,
+            root,
+            owner,
+            { run, workspace },
+            disposition(exit),
+          ),
+        ),
+      )
+    }),
+  )
+
 export const makeWorkspaceManager = (
   root: string,
   hooks: HooksConfig,
   owner: WorkspaceOwner = hostOwner,
 ): Effect.Effect<WorkspaceManagerPort, never, FileSystem.FileSystem> =>
   Effect.map(FileSystem.FileSystem, (fileSystem) => ({
-    // One bracket: the acquisition is uninterruptible and the release is installed with it, so a
-    // lease can never be published with nothing left to hand it back.
     withLeasedWorkspace: (run, use, disposition) =>
-      Effect.acquireUseRelease(
-        acquireRunWorkspace(fileSystem, hooks, root, owner, run),
-        (leased) => use(leased.workspace),
-        (leased, exit) =>
-          releaseRunWorkspace(fileSystem, hooks, root, owner, leased, disposition(exit)),
-      ),
+      leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
     exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),
     // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
     beforeRun: (workspace) =>

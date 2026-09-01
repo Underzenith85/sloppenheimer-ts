@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { access, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { it } from '@effect/vitest'
@@ -754,6 +754,40 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
 
       // With its owner gone, the artifact is cleanup's to take once the issue is finished with.
       expect(existsSync(abandoned)).toBe(false)
+    }),
+  )
+
+  it.live('terminates an after_create process tree when the acquisition is interrupted', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(
+        root,
+        // A timeout far longer than this test may take: what ends the hook has to be the
+        // interruption itself, not the deadline.
+        hooks({ afterCreate: 'sleep 120 & echo $! > grandchild.pid; wait', timeoutMs: 120_000 }),
+      )
+      const issuePath = join(root, workspaceKey(issueIdentifier('GH-181')))
+      const pidFile = (): string | null => {
+        const runs = existsSync(issuePath) ? readdirSync(issuePath) : []
+        const found = runs
+          .map((entry) => join(issuePath, entry, 'grandchild.pid'))
+          .find((path) => existsSync(path))
+        return found ?? null
+      }
+
+      const fiber = Effect.runFork(retained(manager, 'GH-181'))
+      yield* waitFor(() => pidFile() !== null)
+      const recorded = pidFile() ?? ''
+      const grandchild = Number((yield* host(() => readFile(recorded, 'utf8'))).trim())
+      const interruptedAt = yield* Clock.currentTimeMillis
+      yield* Fiber.interrupt(fiber)
+      const returnedAt = yield* Clock.currentTimeMillis
+
+      // Only the claim is taken uninterruptibly: a cancellation during provisioning reaches the
+      // hook's own process tree there and then, rather than waiting out its timeout.
+      expect(returnedAt - interruptedAt).toBeLessThan(10_000)
+      expect(Number.isSafeInteger(grandchild)).toBe(true)
+      expect(yield* waitFor(() => !processIsAlive(grandchild))).toBe(true)
     }),
   )
 
