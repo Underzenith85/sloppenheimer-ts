@@ -4,23 +4,15 @@ import { normalizeState } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
 import {
-  publishedCompletedWork,
   type AgentDetailLookup,
-  type CompletedSnapshot,
   type DeliverySnapshot,
   type OrchestratorContext,
   type OrchestratorSnapshot,
   type RetrySnapshot,
   type RunningSnapshot,
 } from './runtime.js'
-import type {
-  CompletedEntry,
-  DeliveryEntry,
-  RetryEntry,
-  RunningEntry,
-  RuntimeState,
-} from './state.js'
-import { handoffSnapshots } from './transitions.js'
+import type { DeliveryEntry, RetryEntry, RunningEntry, RuntimeState } from './state.js'
+import { handoffSnapshots, publishedCompletions } from './transitions.js'
 
 /**
  * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
@@ -118,16 +110,6 @@ const deliverySnapshot = (entry: DeliveryEntry): DeliverySnapshot => ({
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 
-const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
-  issueId: entry.issueId,
-  identifier: entry.identifier,
-  title: entry.title,
-  url: entry.url,
-  outcome: entry.outcome,
-  finishedAt: entry.finishedAt.toISOString(),
-  pullRequestUrl: entry.pullRequestUrl,
-})
-
 /**
  * The operator's view of one instant. Pure in the state it is given: the value was read from the
  * cell in a single step, so nothing here has to defend against a container being edited underneath
@@ -144,6 +126,7 @@ export const createSnapshot = (
     (total, entry) => total + (now - entry.startedAt.getTime()) / 1_000,
     0,
   )
+  const completed = publishedCompletions(state)
   const activeTokens = running.reduce(
     (totals, entry) => ({
       inputTokens: totals.inputTokens + entry.tokens.inputTokens,
@@ -191,17 +174,16 @@ export const createSnapshot = (
       running: state.running.size,
       retrying: state.retries.size,
       delivering: state.deliveries.size,
-      completed: state.completed.size,
+      // What this snapshot publishes, restored history included: each count states the length of
+      // the list beside it, and `completed` is the one of the four that is bounded.
+      completed: completed.length,
     },
     pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
     handoffs: handoffSnapshots(state),
     running: running.map(runningSnapshot),
     retrying: [...state.retries.values()].map(retrySnapshot),
     delivering: [...state.deliveries.values()].map(deliverySnapshot),
-    completed: [...state.completed.values()]
-      .sort((left, right) => right.finishedAt.getTime() - left.finishedAt.getTime())
-      .slice(0, publishedCompletedWork)
-      .map(completedSnapshot),
+    completed,
     saturatedStates: saturatedStatesOf(state),
     inspectableAgents: inspectableAgentsOf(state),
     totals: {

@@ -1,6 +1,8 @@
+import { readFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { HTMLInputElement, HTMLSelectElement } from 'happy-dom'
 
+import { completionWindowMs } from '@sloppenheimer/core/core/state.js'
 import { issueId } from '@sloppenheimer/core/domain/domain.js'
 import { accessibilityFindings } from '../harness/accessibility.js'
 import {
@@ -202,12 +204,27 @@ describe('operator console information architecture', (): void => {
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {
     const console_ = await boot()
 
-    expect(console_.text('#finished-scope')).toBe(
-      'Scope: work this host finished in the last 24 hours; a restart clears it.',
-    )
+    // The window alone: completions are persisted, so a restart no longer empties the view and the
+    // scope is no longer a lifetime as well as a window ([#172]).
+    expect(console_.text('#finished-scope')).toBe('Scope: work finished in the last 24 hours.')
     const finished = identifiersIn(console_, '#finished-list')
     expect(finished).toEqual([mergedIdentifier])
     expect(finished).not.toContain(staleMergedIdentifier)
+  })
+
+  it('reaches back exactly as far as the runtime restores finished work', async (): Promise<void> => {
+    // The console's sources are classic scripts and cannot import the runtime's constant, so the
+    // two copies of the window are held to the same span here rather than left to drift.
+    const source = await readFile(
+      new URL('../../src/operator/ui/model.ts', import.meta.url),
+      'utf8',
+    )
+    const declared = /const finishedWindowMs = ([^\n]+)/.exec(source)?.[1]
+
+    expect(declared).toBeDefined()
+    expect(
+      (declared ?? '').split('*').reduce((total, factor) => total * Number(factor.trim()), 1),
+    ).toBe(completionWindowMs)
   })
 
   it('offers the retained post-mortem for work that has finished', async (): Promise<void> => {
