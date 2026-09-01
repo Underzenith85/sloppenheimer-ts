@@ -193,6 +193,18 @@ const patchLines = (
     return lines === null ? carried : (carried ?? 0) + lines
   }, null)
 
+/**
+ * The files an entry retains: as many as the record holds paths for, each copied and frozen as the
+ * record adopts it.
+ *
+ * The payload came from a runner's adapter, and this fold serves every runner, so it cannot assume
+ * the one that built these froze them. Freezing the array alone would leave each entry a shared
+ * mutable object, and an edit to one after the event was recorded would reach the actor's timeline
+ * and every snapshot already published from it.
+ */
+const retainedFiles = (files: readonly FileChange[]): readonly FileChange[] =>
+  Object.freeze(files.slice(0, changedPathLimit).map((file) => Object.freeze({ ...file })))
+
 const appendFile = (
   record: AgentDetailRecord,
   base: EventBase,
@@ -219,7 +231,7 @@ const appendFile = (
     operation: next.operation,
     category: 'file',
     state: payload.state,
-    files: Object.freeze(payload.files.slice(0, changedPathLimit)),
+    files: retainedFiles(payload.files),
     fileCount: payload.files.length,
     addedLines: patchLines(payload.files, (file) => file.addedLines),
     deletedLines: patchLines(payload.files, (file) => file.deletedLines),

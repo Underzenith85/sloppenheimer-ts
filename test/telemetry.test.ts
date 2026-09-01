@@ -1028,7 +1028,17 @@ describe('agent detail records', (): void => {
   it('publishes frozen snapshots that cannot be edited by a consumer', (): void => {
     let record = makeRecord()
     record = recordAgentEvent(record, event({ kind: 'reasoning' }))
+    // A runner's adapter is not required to freeze what it builds, and this one deliberately does
+    // not: what the record adopts has to be safe whichever adapter produced it.
+    const mutable = {
+      path: 'src/telemetry.ts',
+      change: 'update' as const,
+      addedLines: 3,
+      deletedLines: 1,
+    }
+    record = recordAgentEvent(record, event({ kind: 'file', state: 'completed', files: [mutable] }))
     const snapshot = snapshotOf(record)
+    const file = snapshot.timeline.events.find((entry) => entry.category === 'file')
 
     expect(Object.isFrozen(snapshot)).toBe(true)
     expect(Object.isFrozen(snapshot.timeline.events)).toBe(true)
@@ -1037,6 +1047,18 @@ describe('agent detail records', (): void => {
     expect(snapshot.timeline.events.every((entry) => Object.isFrozen(entry))).toBe(true)
     expect(snapshot.attempt.attempts.every((attempt) => Object.isFrozen(attempt))).toBe(true)
     expect(snapshot.errors.every((error) => Object.isFrozen(error))).toBe(true)
+    // Including the files of a patch, which arrived on the payload rather than being built here.
+    expect(
+      file?.category === 'file' ? file.files.every((entry) => Object.isFrozen(entry)) : false,
+    ).toBe(true)
+    mutable.path = 'tampered'
+    mutable.addedLines = 9_000
+    expect(file?.category === 'file' ? file.files[0] : null).toEqual({
+      path: 'src/telemetry.ts',
+      change: 'update',
+      addedLines: 3,
+      deletedLines: 1,
+    })
     const events = snapshot.timeline.events as unknown as { push: (value: unknown) => number }
     expect(() => events.push('tampered')).toThrow()
   })
