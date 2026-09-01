@@ -1,6 +1,6 @@
 import { Effect, Option, Ref, type Scope } from 'effect'
 
-import type { Issue, IssueId } from '../domain/domain.js'
+import type { IssueId } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
 import { logInfo } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
@@ -8,40 +8,25 @@ import { dispatch } from './dispatch.js'
 import {
   afterInspectionFailed,
   afterMerge,
-  afterRepairDispatched,
   afterReviewRequested,
   afterThreadsResolved,
-  awaitingSlot,
   observeHandoff,
-  repairIssue,
   type HandoffAction,
 } from './handoff-decision.js'
+import { afterRepairDispatched, awaitingSlot, repairIssue } from './repair.js'
+import { hasSlot, logContext } from './policy.js'
 import {
-  hasSlot,
-  identifierIssueNumber,
-  issueIsActive,
-  issueIsRoutable,
-  logContext,
-  stateIsIn,
-} from './policy.js'
+  refreshHandoffIssues,
+  repairPermission,
+  skipped,
+  type IssueRefresh,
+  type RepairPermission,
+} from './handoff-eligibility.js'
 import type { CodeReviewPort } from '../ports/index.js'
 import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
+import type { EffectiveWorkflow, HandoffEntry } from './state.js'
 import * as Transitions from './transitions.js'
-
-/** Whether this handoff is the orchestrator's to act on at all in this pass. */
-const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boolean => {
-  if (state.running.has(id) || state.retries.has(id)) {
-    return true
-  }
-  if (handoff.state === 'closed_without_merge') {
-    return true
-  }
-  return Option.exists(identifierIssueNumber(handoff.issue.identifier), (issueNumber) =>
-    state.pausedIssueNumbers.has(issueNumber),
-  )
-}
 
 /**
  * What a merged handoff leaves behind. The runtime already recorded that the issue completed; this
@@ -97,83 +82,6 @@ const stageHandoff = (
   handoff: HandoffEntry,
 ): Effect.Effect<void> =>
   Ref.update(context.state, (current) => Transitions.putHandoff(current, id, handoff))
-
-type IssueRefresh =
-  | Readonly<{ _tag: 'Failed'; reason: string }>
-  | Readonly<{ _tag: 'Succeeded'; issue: Option.Option<Issue> }>
-
-export type RepairPermission =
-  | Readonly<{ _tag: 'Allowed'; issue: Issue }>
-  | Readonly<{ _tag: 'Denied'; reason: string }>
-
-/**
- * A handoff keeps the workflow that created its pull request. A freshly fetched issue is evaluated
- * against that same workflow before new agent work starts, while review and merge observation stay
- * independent of issue eligibility. Removing a label therefore stops repairs without stranding a
- * pull request that is already green.
- */
-export const repairPermission = (
-  handoff: HandoffEntry,
-  refresh: IssueRefresh,
-): RepairPermission => {
-  if (refresh._tag === 'Failed') {
-    return { _tag: 'Denied', reason: `Cannot confirm repair eligibility. ${refresh.reason}` }
-  }
-  if (Option.isNone(refresh.issue)) {
-    return {
-      _tag: 'Denied',
-      reason: 'Repair paused because the tracker no longer reports the issue.',
-    }
-  }
-  const issue = refresh.issue.value
-  const workflow = handoff.execution.workflow
-  if (stateIsIn(issue.state, workflow.config.tracker.terminalStates)) {
-    return { _tag: 'Denied', reason: 'Repair paused because the issue is terminal.' }
-  }
-  if (
-    !issueIsActive(issue, workflow.config.tracker) ||
-    !issueIsRoutable(issue, workflow.config.tracker)
-  ) {
-    return {
-      _tag: 'Denied',
-      reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
-    }
-  }
-  return { _tag: 'Allowed', issue }
-}
-
-/**
- * Refresh each eligible handoff independently.
- *
- * The tracker boundary is fail-fast even when it accepts several IDs, so batching unrelated
- * handoffs would let one malformed or missing tracker record deny repairs for every pull request
- * in that batch. Eligibility refreshes are deliberately isolated here: a provider failure can
- * affect only the handoff whose policy decision depends on it.
- */
-const refreshHandoffIssues = (
-  handoffs: ReadonlyMap<IssueId, HandoffEntry>,
-): Effect.Effect<ReadonlyMap<IssueId, IssueRefresh>, never> =>
-  Effect.gen(function* () {
-    const fetched: readonly (readonly [IssueId, IssueRefresh])[] = yield* Effect.forEach(
-      handoffs,
-      ([id, handoff]) =>
-        handoff.execution.tracker.fetchIssuesByIds([id]).pipe(
-          Effect.match({
-            onFailure: (error) =>
-              [id, { _tag: 'Failed', reason: error.message } satisfies IssueRefresh] as const,
-            onSuccess: (issues) =>
-              [
-                id,
-                {
-                  _tag: 'Succeeded',
-                  issue: Option.fromNullable(issues.find((issue) => issue.id === id)),
-                } satisfies IssueRefresh,
-              ] as const,
-          }),
-        ),
-    )
-    return new Map(fetched)
-  })
 
 /**
  * The protected merge, and everything that follows it here: the handoff is completed and the issue
@@ -472,13 +380,22 @@ export const reconcileHandoffs = (
         )
       }
     }
-    // Handoffs are observations, not claim owners. A live worker or queued retry retains its claim;
-    // every idle handoff releases one that was restored from an older snapshot or left behind by a
-    // completed transition.
+    // Handoffs are observations, not claim owners. A live worker, a queued retry and work waiting
+    // to be published each retain their claim; every idle handoff releases one that was restored
+    // from an older snapshot or left behind by a completed transition.
+    //
+    // The delivery belongs in that list for the same reason the other two do: the claim is what
+    // `dispatchAdmission` refuses on, and an agent dispatched while a publication is queued would
+    // be editing the very worktree that publication is about to push.
     yield* Ref.update(context.state, (current) => {
       let released = current
       for (const id of current.handoffs.keys()) {
-        if (selected(id) && !current.running.has(id) && !current.retries.has(id)) {
+        if (
+          selected(id) &&
+          !current.running.has(id) &&
+          !current.retries.has(id) &&
+          !current.deliveries.has(id)
+        ) {
           released = Transitions.releaseClaim(released, id)
         }
       }

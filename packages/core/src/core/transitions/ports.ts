@@ -110,5 +110,20 @@ export const adoptExecutions = (
       handoffs: withEntry(updated.handoffs, id, { ...entry, execution: adopted(entry.execution) }),
     }
   }
+  // A retained delivery outlives the run that produced it and calls the tracker and the code-review
+  // port when it comes due, so a rotation that missed it would have it publishing through a
+  // credential the orchestrator has already retired.
+  for (const [id, entry] of state.deliveries) {
+    if (entry.execution.tracker !== previous.tracker) {
+      continue
+    }
+    updated = {
+      ...updated,
+      deliveries: withEntry(updated.deliveries, id, {
+        ...entry,
+        execution: adopted(entry.execution),
+      }),
+    }
+  }
   return updated
 }

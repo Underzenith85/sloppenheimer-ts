@@ -178,6 +178,8 @@ describe('port layer composition', (): void => {
                       baselineSha: 'base',
                       expectedRemoteHead: Option.none(),
                     }),
+                  inspect: (prepared) =>
+                    Effect.succeed({ _tag: 'Clean', headSha: prepared.baselineSha }),
                   publish: (_issue, prepared) =>
                     Effect.succeed({
                       _tag: 'NoChanges',

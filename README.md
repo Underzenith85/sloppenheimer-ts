@@ -236,7 +236,7 @@ The console answers four questions, and its navigation is the four answers with 
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                                                                                                                                                                 |
 | **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                                                                                                                                                                               |
-| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                                                                                                                                                                      |
+| **In progress**     | Starting, running, retrying, delivering, handing off, awaiting checks, ready to merge, and merging. _Delivering_ is an agent that finished and whose change has not reached the remote: the work is in its workspace and the host is retrying the publication, with no agent running.                                                                                                                        |
 | **Finished**        | Work merged and closed out in the last 24 hours. The scope is stated on the view, and it is the window alone: completions are persisted to `.sloppenheimer/completions.json`, so a restart inside the window no longer empties it. An item is dated by the provider's merge time rather than by when Sloppenheimer noticed it, so a pull request merged while the host was down does not reappear as recent. |
 
 Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
@@ -311,7 +311,13 @@ path read it too, and a published name has no business travelling back into the 
 | `generated_at`, `counts`, `codex_totals`                                       | `workflow_path`, `effective_workflow`, `polling_interval_ms`, `max_concurrent_agents`, `rate_limits`                                                                                                                      |
 | `running[]` with `issue_id`, `issue_identifier`, `issue_url`, `title`, `state` | `attempt`, `started_at`, `last_event_at`, `last_event`, `last_message`, `process_id`, `thread_id`, `turn_id`, `session_id`, `turn_count`, `tokens`, `last_reported_tokens`, `worker_host`, `stall_deadline`, `detail_url` |
 | `retrying[]` with `attempt`, `due_at`, `error`                                 | the same identity, `worker_host` and `detail_url` as a running row                                                                                                                                                        |
-| —                                                                              | `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                                |
+| —                                                                              | `delivering[]`, `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                |
+
+`counts` carries `delivering` beside `running`, `retrying` and `completed`, and a `delivering[]`
+row names the `branch_name` the work is owed to, the typed source-control `category` and `reason`
+that held it, the `attempt` and `due_at` of the next publication, and `changed_file_count`. A row
+here is Sloppenheimer saying the agent succeeded and the delivery did not — which neither a running
+nor a retrying row can say.
 
 The extension fields follow the baseline's convention, so a reader never has to know which half of
 the document they are in. `rate_limits` is the exception and is passed through exactly as the coding
@@ -664,6 +670,30 @@ normal run starts from its branch's own published head when the branch exists, a
 protected base when it does not, so an attempt that ran out of turns is continued by the branch it
 published; a repair still starts from the exact pull-request head it was dispatched against. Work an
 attempt never published survives only in that attempt's retained workspace.
+
+### After the turn: publication and delivery
+
+A successful agent turn says one thing — the protocol finished — and Sloppenheimer treats it as
+exactly that. After it, the host inspects the workspace against the baseline it recorded before the
+launch, and publishes what it finds. The agent's own account of what it did is never consulted.
+
+| The host found                             | What it reports                    | What happens next                                                                         |
+| ------------------------------------------ | ---------------------------------- | ----------------------------------------------------------------------------------------- |
+| Nothing: the worktree matches its baseline | `no_progress`                      | The handoff lifecycle continues; only this reading can conclude the agent changed nothing |
+| A change, published                        | `published`, with the new commit   | The pull request is asked about, now that there is something on the remote to ask about   |
+| A change it could not publish              | `delivery_failed`, with the reason | The workspace is retained and the publication alone is retried, with no agent running     |
+
+That last row is the point. A publication failure is not an agent failure: the change is real, it is
+still in the workspace, and repeating the turn would pay for it twice. Sloppenheimer retries the
+delivery on its own backoff, up to a small limit, and only hands the work back to the agent when the
+failure did not preserve the worktree or those attempts are spent. A restart does not carry the
+delivery over: the run's workspace stays behind as a retained recovery artifact, kept under the
+reason it was kept for, exactly as the workspace lifecycle above says — and it goes when the issue
+is finished with.
+
+Unpublished work is discarded in exactly one case: the issue is finished with. A cancellation that
+removes the workspace drops the retained delivery in the same step, and a delivery that comes due
+re-reads its issue first, so a closed issue never has a branch pushed for it after the fact.
 
 ### Workspace hooks
 

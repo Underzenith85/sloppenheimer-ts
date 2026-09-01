@@ -9,14 +9,13 @@ import type {
 } from '@sloppenheimer/core/domain/handoff.js'
 import {
   afterMerge,
-  afterRepairDispatched,
   attributeRepairHead,
   afterReviewRequested,
   afterThreadsResolved,
   observeHandoff,
-  repairIssue,
   repairLimit,
 } from '@sloppenheimer/core/core/handoff-decision.js'
+import { afterRepairDispatched, repairIssue } from '@sloppenheimer/core/core/repair.js'
 import type {
   ExecutionSnapshot,
   HandoffEntry,
@@ -46,12 +45,23 @@ const execution = { codeReview: Option.some({}), workflow: {} } as unknown as Ex
  * A repair that owns `startedHeadSha`. `workerStarted` false is a dispatch refused before launch,
  * and `inFlight` false is a baseline nothing is driving any more -- restored from the store, or
  * left by a settled cancellation.
+ *
+ * `publication` defaults to the clean worktree, because that is the case the unchanged-head
+ * verdicts below are about; the delivery cases state their own.
  */
 const repairing = (
   startedHeadSha: string,
   overrides: Partial<RepairEntry> = {},
 ): Option.Option<RepairEntry> =>
-  Option.some({ issue, startedHeadSha, inFlight: true, workerStarted: true, ...overrides })
+  Option.some({
+    issue,
+    startedHeadSha,
+    inFlight: true,
+    workerStarted: true,
+    publication: 'no_changes',
+    publishedHeadSha: null,
+    ...overrides,
+  })
 
 const handoff = (overrides: Partial<HandoffEntry> = {}): HandoffEntry => ({
   issue,
@@ -374,6 +384,9 @@ describe('repair attribution', (): void => {
         startedHeadSha: 'head-1',
         inFlight: true,
         workerStarted: false,
+        // Nothing has run, so nothing is known about the worktree yet.
+        publication: 'pending',
+        publishedHeadSha: null,
       }),
     )
     expect(refused.repairHeadShas).toEqual([])
@@ -385,6 +398,8 @@ describe('repair attribution', (): void => {
         startedHeadSha: 'head-1',
         inFlight: true,
         workerStarted: true,
+        publication: 'pending',
+        publishedHeadSha: null,
       }),
     )
     expect(started.repairObservedHeadShas).toEqual(['head-1'])

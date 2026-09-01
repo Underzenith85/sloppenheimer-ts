@@ -80,7 +80,7 @@ export const consoleState = (): OrchestratorSnapshot => ({
   workflowReloadError: null,
   pollingIntervalMs: 10_000,
   maxConcurrentAgents: 4,
-  counts: { running: 2, retrying: 1, completed: 2 },
+  counts: { running: 2, retrying: 1, delivering: 0, completed: 2 },
   pausedIssueNumbers: [],
   handoffRecovery: {
     status: 'completed',
@@ -116,6 +116,7 @@ export const consoleState = (): OrchestratorSnapshot => ({
       'item/started',
     ),
   ],
+  delivering: [],
   retrying: [
     {
       issueId: issueId('18'),

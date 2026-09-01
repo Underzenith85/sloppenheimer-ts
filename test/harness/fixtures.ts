@@ -6,7 +6,10 @@ import {
   makeGitSourceControl,
   type GitSourceControlSettings,
 } from '@sloppenheimer/adapter-node/source-control.js'
-import type { SourceControlPort } from '@sloppenheimer/core/ports/source-control.js'
+import type {
+  SourceControlPort,
+  WorktreeInspection,
+} from '@sloppenheimer/core/ports/source-control.js'
 import type { GitRepositoryFixture } from './git-repository.js'
 
 /**
@@ -89,6 +92,23 @@ export const anOpenPullRequest = fixture<OpenPullRequestObservation>({
   reviewDecision: null,
   reviewThreads: [],
 })
+
+/**
+ * A worktree that reads as holding one uncommitted change.
+ *
+ * The default for a stubbed source control, because it is what makes the stubbed publication run
+ * at all: the host does not publish a clean worktree, so a stub that inspected as clean would
+ * silently stop testing the publication path it was written for.
+ */
+export const changedWorktree: WorktreeInspection = {
+  _tag: 'Changed',
+  headSha: 'worktree-head',
+  dirtyFileCount: 1,
+  committedAhead: false,
+}
+
+/** A worktree that matches its baseline, which is what a workspace no agent has edited looks like. */
+export const cleanWorktree = (headSha: string): WorktreeInspection => ({ _tag: 'Clean', headSha })
 
 /**
  * Git source control bound to a repository fixture, with no credential.

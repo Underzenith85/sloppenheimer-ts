@@ -152,4 +152,36 @@ describe('SourceControlPort conformance', (): void => {
       )
     }),
   )
+
+  it.live('delivers the retained work on a second attempt, with no agent in between', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
+      )
+      yield* host(() => writeFile(join(fixture.workspace, 'implementation.ts'), 'local work\n'))
+      // The remote is unreachable for the first attempt, exactly as PR #152's Git delivery was.
+      yield* host(() =>
+        git(fixture.workspace, ['remote', 'set-url', 'origin', join(fixture.root, 'absent.git')]),
+      )
+
+      const failure = yield* Effect.flip(sourceControl.publish(issue, prepared))
+      expect(failure).toMatchObject({ worktreePreserved: true })
+      // The host, not the agent, is what tries again: the same preparation, the same worktree.
+      expect(yield* sourceControl.inspect(prepared)).toMatchObject({ _tag: 'Changed' })
+
+      yield* host(() => git(fixture.workspace, ['remote', 'set-url', 'origin', fixture.remote]))
+      const published = yield* sourceControl.publish(issue, prepared)
+
+      expect(published).toMatchObject({ _tag: 'Published', branchName: 'sloppenheimer/issue-165' })
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(published._tag === 'Published' ? published.headSha : '')
+      expect(yield* sourceControl.inspect(prepared)).toMatchObject({ _tag: 'Changed' })
+    }),
+  )
 })

@@ -40,10 +40,13 @@ export const buildAgentDetail = (
   const now = context.now.getTime()
   const activeAt = record.lastActivityAt ?? record.startedAt
   const idleMs = Math.max(now - activeAt.getTime(), 0)
-  // An agent that has been cancelled, is waiting to retry, or is handing off is not working, so
-  // silence from it is expected rather than evidence of a stall.
+  // An agent that has been cancelled, is waiting to retry, is publishing, or is handing off is not
+  // working, so silence from it is expected rather than evidence of a stall.
   const settledPhase =
-    record.phase === 'cancelled' || record.phase === 'retrying' || record.phase === 'handing_off'
+    record.phase === 'cancelled' ||
+    record.phase === 'retrying' ||
+    record.phase === 'publishing' ||
+    record.phase === 'handing_off'
   const stallDeadline =
     context.stallTimeoutMs > 0 && context.status === 'running' && !settledPhase
       ? new Date(activeAt.getTime() + context.stallTimeoutMs)

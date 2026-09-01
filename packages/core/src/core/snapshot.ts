@@ -5,11 +5,13 @@ import { currentInstant } from '../support/clock.js'
 import { agentDetailPath, buildAgentDetail } from '../telemetry.js'
 import {
   type AgentDetailLookup,
+  type DeliverySnapshot,
   type OrchestratorContext,
   type OrchestratorSnapshot,
   type RetrySnapshot,
   type RunningSnapshot,
 } from './runtime.js'
+import type { DeliveryEntry } from './postflight.js'
 import type { RetryEntry, RunningEntry, RuntimeState } from './state.js'
 import { handoffSnapshots, publishedCompletions } from './transitions.js'
 
@@ -68,10 +70,12 @@ const runningSnapshot = (entry: RunningEntry): RunningSnapshot => ({
   tokens: entry.tokens,
   lastReportedTokens: entry.lastReportedTokens,
   workerHost: 'local',
-  stallDeadline: stallDeadlineOf(
-    entry.lastEventAt ?? entry.startedAt,
-    entry.execution.stallTimeoutMs,
-  ),
+  // No deadline once the host's postflight has taken over: the stall sweep exempts such a run, and
+  // publishing a deadline it will never act on is what has the console calling it a stalled agent.
+  stallDeadline:
+    entry.postflightStartedAt !== null
+      ? null
+      : stallDeadlineOf(entry.lastEventAt ?? entry.startedAt, entry.execution.stallTimeoutMs),
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 
@@ -83,6 +87,28 @@ const retrySnapshot = (entry: RetryEntry): RetrySnapshot => ({
   attempt: entry.attempt,
   dueAt: new Date(entry.dueAt).toISOString(),
   error: entry.error,
+  workerHost: 'local',
+  detailUrl: agentDetailPath(entry.issue.identifier),
+})
+
+/**
+ * One piece of work waiting to reach the remote. The reason names the typed source-control
+ * category rather than only the message, so an operator can tell a lease conflict — which the next
+ * attempt may well resolve — from an authentication failure, which it will not.
+ */
+const deliverySnapshot = (entry: DeliveryEntry): DeliverySnapshot => ({
+  issueId: entry.issue.id,
+  identifier: entry.issue.identifier,
+  title: entry.issue.title,
+  url: entry.issue.url,
+  branchName: entry.prepared.target.branchName,
+  attempt: entry.attempt,
+  dueAt: new Date(entry.dueAt).toISOString(),
+  category: entry.failure.category,
+  reason: entry.failure.message,
+  changedFileCount: entry.changedFileCount,
+  repairRun: entry.repairRun,
+  observedAt: entry.observedAt.toISOString(),
   workerHost: 'local',
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
@@ -150,14 +176,16 @@ export const createSnapshot = (
     counts: {
       running: state.running.size,
       retrying: state.retries.size,
+      delivering: state.deliveries.size,
       // What this snapshot publishes, restored history included: each count states the length of
-      // the list beside it, and `completed` is the one of the three that is bounded.
+      // the list beside it, and `completed` is the one of the four that is bounded.
       completed: completed.length,
     },
     pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
     handoffs: handoffSnapshots(state),
     running: running.map(runningSnapshot),
     retrying: [...state.retries.values()].map(retrySnapshot),
+    delivering: [...state.deliveries.values()].map(deliverySnapshot),
     completed,
     saturatedStates: saturatedStatesOf(state),
     inspectableAgents: inspectableAgentsOf(state),

@@ -22,10 +22,9 @@ thing as a tolerated lint.
   `src/operator/ui/`.
 - `pnpm test` is the default Vitest profile. `pnpm test <path>` narrows it; `pnpm test:conformance`
   and `pnpm test:real-integration` are the other two profiles, selected by test path.
-
-Do not add a dependency, a script, or a lint exemption to make a check pass. If a rule is genuinely
-wrong for a case, take the exemption in `.oxlintrc.json` with a comment naming the issue that
-removes it — that is the form every existing exemption takes.
+  Do not add a dependency, a script, or a lint exemption to make a check pass. If a rule is genuinely
+  wrong for a case, take the exemption in `.oxlintrc.json` with a comment naming the issue that
+  removes it — that is the form every existing exemption takes.
 
 ## Language baseline
 
@@ -538,6 +537,152 @@ The following port boundary was accepted in the 2026-08-30 architecture review:
 - The composition root states that gate structurally: composing no code-review services at all is handoff disabled, and composing them is handoff enabled. The orchestrator therefore asks for `CurrentCodeReview` as an optional service, and reports the configuration error only when that service is present and the provider's factory supplies nothing.
 
 This convention is the architecture record for the boundary. Do not create a separate ADR for it.
+
+## Architecture record: turn completion and publication
+
+Accepted 2026-09-01, implementing [#167](https://github.com/Underzenith85/sloppenheimer-ts/issues/167).
+This section is the architecture record for it; do not create a separate ADR.
+
+A successful agent turn is an agent-protocol fact and nothing else. Turn completion, workspace
+change, publication and handoff are four outcomes, and Sloppenheimer used to collapse all four into
+one: a `completed` turn was treated as delivered work, and the only evidence consulted afterwards
+was the remote head. On [#149](https://github.com/Underzenith85/sloppenheimer-ts/issues/149) that
+lost a whole implementation — the agent made the change and passed `pnpm check`, Git delivery was
+blocked by read-only `.git` metadata, and the unchanged remote SHA was reported to operators as a
+repair agent that had achieved nothing.
+
+- After every successful turn the host runs a postflight (`packages/core/src/core/postflight.ts`):
+  inspect the worktree against the baseline the preparation recorded, then publish what the
+  inspection found. It answers with one of `NotPerformed`, `NoChanges`, `Published` or
+  `DeliveryFailed`, and it cannot fail — raising a publication problem as a worker failure is what
+  turned a delivery problem into an agent retry.
+- The agent stall timer does not run over a postflight. It measures silence on the agent protocol,
+  and a postflight is silent on it by construction: no agent is running. A run records when the host
+  took it over, and the stall sweep leaves those alone — otherwise an inspection or a push that
+  outlasts the timeout is retired as a stalled agent and the coding agent runs again on work it had
+  already finished, which is the confusion this whole record exists to end. A publication that
+  cannot finish is the source control's to fail, and it fails as a delivery. The surfaces say the same
+  thing: the run's snapshot publishes no stall deadline once the host has taken over, and its detail
+  moves to the `publishing` phase — a deadline nothing will act on is what has a console reporting a
+  stalled agent for a run whose stall detection is off. The takeover is recorded before the first git
+  call, and the worker waits for it to be recorded rather than merely sent: enqueueing the event and
+  publishing anyway leaves a poll already in flight reading a run nothing had marked, which retires
+  the publication as a stalled agent — the one thing the marker exists to prevent. The wait is on the
+  handler because runtime state changes go through the mailbox; the worker does not write the state
+  itself. All of this is a marker on the agent's session standing in for a phase of the run; the
+  phase becomes explicit, and the marker and its handshake go, under
+  [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
+- The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
+  published SHA and expected remote SHA are authoritative.
+- A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing
+  to deliver" and "the delivery failed" are separate readings rather than one absent branch.
+- `DeliveryFailed` retains the workspace and queues a **delivery**, not a retry: a delivery holds
+  the issue's claim with no worker behind it, and what comes due is one more `publish` of the same
+  preparation. It is bounded by `deliveryAttemptLimit` in `core/retry.ts`; when the failure did not
+  preserve the worktree, or those attempts are spent, the work goes back to the coding agent as an
+  ordinary retry. `deliveryAttemptLimit` counts publications, the turn's own included. A retained
+  delivery keeps calling the tracker and the code-review port after the run that produced it has
+  ended, so a workflow reload or a credential rotation adopts it exactly as it adopts a running run
+  and a handoff.
+- A retained delivery holds its issue's claim, which is what `dispatchAdmission` refuses on. It is
+  in that list for the same reason a running run and a queued retry are: an agent admitted while a
+  publication is queued would be editing the very worktree that publication is about to push. The
+  reconciliation pass releases the claim of every handoff nothing is acting on, and a delivery is
+  something acting on it.
+- Retirement waits for a retained delivery exactly as it waits for a running run and a handoff. A
+  delivery holds the workspace manager it will open the workspace through again — to publish the
+  change or, on the terminal path, to remove it — so releasing that manager's scope from under a
+  reload would take the only copy of the work with it.
+- "Repair agent completed without changing the pull request head" is reachable only when the
+  inspected worktree was clean. The repair identity carries the postflight verdict for exactly this
+  reason: an unchanged head alone cannot tell a no-op turn from a push that failed.
+- A restart does not recover a retained delivery. A delivery is in-memory intent; the workspace it
+  would republish from is the run's own, and what becomes of that directory once the process is
+  gone is the workspace record's decision ([#166](https://github.com/Underzenith85/sloppenheimer-ts/issues/166),
+  retry continuity (b)): it stays as a retained recovery artifact naming why, no later run adopts
+  it, and it goes when the issue reaches a terminal state. This record once carried an in-process
+  sweep that reopened an issue's workspace on restart and published what it found; that depended
+  on `prepare` preserving a dirty worktree and on a workspace belonging to an issue, and both were
+  removed by #166. Republishing retained artifacts on restart is a revision of that decision and a
+  new port surface, not something to reintroduce here.
+- A delivery's publication runs off the event loop. Everything else a handler does is memory and a
+  bounded call; a publication is git, and a push waits on a child process that may never close — so
+  running it inside the loop let one hung delivery stop every issue the host was running, ticks,
+  worker exits and the operator pause that would have called it off included. The attempt is forked
+  and reports back as an event, because the state it settles is still the loop's to write. The entry
+  stays in the state for the duration rather than being taken out and put back: claimed and
+  published as a `delivering` row, so a poll interleaving with the publication finds an issue
+  something is demonstrably doing rather than a workspace nobody owns. A settlement is applied only while the entry is the one that attempt was publishing;
+  anything that superseded, held or dropped it meanwhile has already decided what becomes of the
+  work. Nothing ever waits on an interrupt of a publication for the same reason nothing runs one on
+  the loop. The same rule is not yet true of every handler — terminal cleanup runs an operator's
+  `before_remove` hook on the loop, and reconciliation re-reads the tracker once per running run —
+  which is [#259](https://github.com/Underzenith85/sloppenheimer-ts/issues/259).
+- An operator pause does not interrupt a publication already under way. Cutting off a push mid-flight
+  is what leaves the remote in a state nobody can name, and the pause is not lost: the attempt
+  settles, and whatever is scheduled next re-reads the pause before publishing anything.
+- A publication asks whether the branch already carries its commit before rebasing, not after. The
+  rebase is what makes the question unanswerable: a protected base that moved since the accepted
+  push rewrites the very commit the branch holds, so the comparison could only ever answer that the
+  work is undelivered — and then every attempt fails the stale lease, spends the delivery budget,
+  and hands the agent back what is already on the remote. Containment rather than equality, because
+  a branch the push landed on may since have had commits built on top of it.
+- A cancellation lands on whatever the run had reached — an uncommitted edit, a commit that was
+  never pushed, a publication cut off midway — and the fiber that would have settled the postflight
+  is gone. The workspace is released as retained under the lease, with the interruption as its
+  reason, and nothing in this process reads it again: it is the run's own, and the next run gets
+  its own. What a cancellation owes a postflight that had already reached the remote is an open
+  question ([#257](https://github.com/Underzenith85/sloppenheimer-ts/issues/257) item 1), and it
+  becomes answerable once the postflight is an explicit phase of the run rather than a marker on
+  the agent's session ([#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260)).
+- A normal target starts from its branch's published head, and from the protected base only when
+  the branch does not exist yet; a repair starts from the exact pull-request head. That is the
+  workspace record's `fetchBaseline`, and the reasoning lives there. Publication still rebases onto
+  protected main, which keeps the branch on top of the base and is a different thing from choosing
+  what the branch starts from.
+- A publication whose branch already carries the commit it would push answers `Published` rather
+  than consulting the lease. The likeliest way to arrive there is a push the remote accepted and
+  the client did not see succeed, and a delivery retry has to be idempotent: rejecting it against a
+  tip that is this very commit would spend the delivery budget and hand the agent back work already
+  on the remote.
+- Shutdown preserves it as the run's retained workspace, and nothing is deleted. The next process
+  does not rediscover it; see the restart bullet above.
+- A cancellation that keeps the workspace preserves it: a stall, a workflow reload, a tracker that
+  stopped reporting the issue.
+- An operator pause **suspends** a delivery rather than dropping it. A queued retry is dropped on a
+  pause, because an agent that has not run has produced nothing to keep; a delivery holds a change
+  that exists, and a pause is a decision to stop rather than to discard. The timer is called off,
+  the entry stays, and a resume arms it again from the attempt it was suspended on.
+- A cancellation that removes the workspace discards it, and drops the retained delivery in the
+  same step, so a delivery can never come due against a directory that no longer exists. That is
+  the terminal-issue path, and only it.
+- A discard is only true once the workspace is gone, so the removal happens before anything records
+  one — and it happens once, in the attempt that reports it. The settlement records what the
+  attempt did; it does not remove again, because a second removal that failed would report files
+  remaining that the first deleted, retain the claim, and spend the delivery budget on work that no
+  longer exists. A removal that failed leaves the files where they were, so the delivery has not settled: it
+  is retained for another attempt, which is what keeps alive the one manager that can remove that
+  workspace — a reload may have moved the workspace root out from under everything else. When the
+  attempts are spent the files stay put as the run's retained workspace, the claim is released, and
+  the reason is in the detail.
+- A delivery that comes due re-reads its issue immediately before publishing. An issue that has
+  since gone terminal or left its active states has its work discarded rather than pushed: putting
+  a branch and a pull request on the remote for work nobody asked for any more is the one thing
+  worse than losing a diff.
+
+### Known limits and follow-ups
+
+- No git invocation is bounded: `runProcess` in `packages/adapter-node/src/git-process.ts` waits on
+  `close` with no deadline, so a hung `fetch` or `push` waits forever. A delivery's publication is
+  off the loop, so the host keeps answering; the operation itself does not end. One subprocess
+  primitive with a deadline, and a fake for lifecycle tests, is
+  [#258](https://github.com/Underzenith85/sloppenheimer-ts/issues/258).
+- Handlers still yield on ports that block: `before_remove` hooks from terminal cleanup, and the
+  tracker from reconciliation, retry-due and the poll. The rule that a handler handles messages only
+  is [#259](https://github.com/Underzenith85/sloppenheimer-ts/issues/259).
+- The run entry is the claim, the phase and the agent session in one record, which is why the stall
+  timer has had to be taught about the postflight. Splitting it is
+  [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
 
 ## Architecture record: agent runners
 

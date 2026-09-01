@@ -55,6 +55,16 @@ export const handoffSnapshots = (state: RuntimeState): readonly HandoffSnapshot[
       onNone: () => false,
       onSome: (repair) => repair.workerStarted,
     }),
+    // A repair whose delivery failed keeps that verdict across a restart: recovery must not read
+    // the unchanged head it left behind as a repair that achieved nothing.
+    repairPublication: Option.match(handoff.repair, {
+      onNone: () => 'pending' as const,
+      onSome: (repair) => repair.publication,
+    }),
+    repairPublishedHeadSha: Option.match(handoff.repair, {
+      onNone: () => null,
+      onSome: (repair) => repair.publishedHeadSha,
+    }),
     reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
     reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
     observedAt: handoff.observedAt.toISOString(),

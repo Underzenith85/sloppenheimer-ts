@@ -22,6 +22,7 @@ import type {
   RuntimePorts,
   RuntimeState,
 } from '../state.js'
+import type { DeliveryEntry, PostflightOutcome } from '../postflight.js'
 import type { TickSource } from '../transitions.js'
 
 /**
@@ -58,6 +59,29 @@ export type RunningSnapshot = Readonly<{
    */
   stallDeadline: string | null
   /** Stable link to the versioned detail resource for this agent. */
+  detailUrl: string
+}>
+
+/**
+ * Work an agent finished that is not on the remote yet. Published beside the running and retrying
+ * rows because it is neither: no agent is running, and what is queued is a publication.
+ */
+export type DeliverySnapshot = Readonly<{
+  issueId: IssueId
+  identifier: string
+  title: string
+  url: string | null
+  branchName: string
+  /** How many publication attempts have failed for this work. */
+  attempt: number
+  dueAt: string
+  category: string
+  reason: string
+  /** Paths the inspection found, or `null` when the inspection itself failed. */
+  changedFileCount: number | null
+  repairRun: boolean
+  observedAt: string
+  workerHost: 'local'
   detailUrl: string
 }>
 
@@ -109,11 +133,16 @@ export type OrchestratorSnapshot = Readonly<{
   }>
   pollingIntervalMs: number
   maxConcurrentAgents: number
-  counts: Readonly<{ running: number; retrying: number; completed: number }>
+  counts: Readonly<{ running: number; retrying: number; delivering: number; completed: number }>
   pausedIssueNumbers: readonly number[]
   handoffs: readonly HandoffSnapshot[]
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
+  /**
+   * Work waiting to reach the remote. An operator that sees a row here is being told the agent
+   * succeeded and the publication did not, which the running and retrying rows cannot say.
+   */
+  delivering: readonly DeliverySnapshot[]
   /** Finished work, newest first and bounded by {@link publishedCompletedWork}. */
   completed: readonly CompletedSnapshot[]
   /**
@@ -166,18 +195,64 @@ export type OrchestratorControl = Readonly<{
   awaitTermination: Effect.Effect<never>
 }>
 
+/**
+ * What one delivery attempt amounted to, decided off the event loop and settled on it.
+ *
+ * `Held` and `Discarded` are the dispositions a re-read of the issue reaches — an operator pause
+ * holds the work, an issue that is finished with discards it — and `DiscardFailed` is a removal
+ * that did not happen, which leaves the files exactly where they were. `Abandoned` is a host with
+ * nothing to publish through at all. `Settled` carries whatever the publication answered, for the
+ * same settlement a turn's own postflight goes through.
+ */
+export type DeliveryAttemptResult =
+  | Readonly<{ _tag: 'Held' }>
+  | Readonly<{ _tag: 'Discarded' }>
+  | Readonly<{ _tag: 'DiscardFailed'; error: string }>
+  | Readonly<{ _tag: 'Abandoned' }>
+  | Readonly<{ _tag: 'Settled'; outcome: PostflightOutcome }>
+
 export type OrchestratorEvent =
   | Readonly<{ _tag: 'Tick' }>
   | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; update: AgentEvent }>
+  // The agent is done and the host has taken the workspace over. Nothing about the run changes
+  // except who is working, which is what the stall timer needs to know.
+  // `applied` is completed once the marker is in the state. The worker waits for it before the
+  // first git call: offering alone only enqueues, and a poll already in flight would still read the
+  // run as an agent that has gone quiet — and retire the publication as a stalled agent.
+  | Readonly<{
+      _tag: 'PostflightStarted'
+      issueId: IssueId
+      runId: number
+      applied: Deferred.Deferred<void>
+    }>
   | Readonly<{
       _tag: 'WorkerExited'
       issueId: IssueId
       runId: number
       attempt: number | null
+      /**
+       * How the agent protocol itself ended. It is not a verdict on the work: what the host made
+       * of the workspace afterwards is `postflight`, and only the two together say what the run
+       * achieved.
+       */
       outcome: 'normal' | 'failed'
       error: string | null
+      postflight: PostflightOutcome
     }>
   | Readonly<{ _tag: 'RetryDue'; issueId: IssueId; attempt: number }>
+  /** A retained delivery's next publication attempt is due. No agent runs for this. */
+  | Readonly<{ _tag: 'DeliveryDue'; issueId: IssueId; attempt: number }>
+  /**
+   * What that attempt did, reported from the fiber that ran it. The attempt itself is git and
+   * tracker work, so it runs off the event loop; everything it decides comes back here, because
+   * the state it settles is the loop's to write.
+   */
+  | Readonly<{
+      _tag: 'DeliveryAttempted'
+      issueId: IssueId
+      attempt: number
+      result: DeliveryAttemptResult
+    }>
   | Readonly<{
       _tag: 'SetIssuePaused'
       issueNumber: number
@@ -245,6 +320,15 @@ export type RuntimeCells = Readonly<{
 }>
 
 /**
+ * A delivery as its caller states it: everything but the schedule, which `scheduleDelivery`
+ * decides, and the timer it forks to keep.
+ */
+export type DeliveryRequest = Omit<
+  DeliveryEntry,
+  'dueAt' | 'observedAt' | 'publishingSince' | 'fiber'
+>
+
+/**
  * What a runtime operation is handed when it is reached through the context rather than called
  * directly: every field is one of the extracted operations, bound to the cells the factory made.
  */
@@ -267,6 +351,20 @@ export type OrchestratorContext = Readonly<{
     repairRun: boolean,
     trackerError?: TrackerError,
   ) => Effect.Effect<boolean, never, Scope.Scope>
+  /**
+   * Queues another publication of work already in a workspace. Answers `false` when the work
+   * cannot be delivered as it stands, which is the caller's signal to fall back to an agent retry.
+   */
+  scheduleDelivery: (request: DeliveryRequest) => Effect.Effect<boolean, never, Scope.Scope>
+  /** Discards retained unpublished work, per the cancellation policy in `AGENTS.md`. */
+  abandonDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
+  /**
+   * Holds retained work without discarding it: the attempt waiting to publish is called off and
+   * the change stays in its workspace. What an operator pause does to a delivery.
+   */
+  suspendDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
+  /** Arms a suspended delivery again, from the attempt it was suspended on. */
+  resumeDelivery: (entry: DeliveryEntry) => Effect.Effect<void, never, Scope.Scope>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
   cancelRunning: (

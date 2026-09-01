@@ -124,6 +124,8 @@ const restoredHandoffEntry = (
             // Snapshots written before the flag existed recorded a baseline only once a worker had
             // started, so their absence is a started worker.
             workerStarted: restored.repairWorkerStarted ?? true,
+            publication: restored.repairPublication ?? 'pending',
+            publishedHeadSha: restored.repairPublishedHeadSha ?? null,
           }),
     reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
     reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,

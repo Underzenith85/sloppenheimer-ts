@@ -1,4 +1,15 @@
-import { Cause, Effect, Exit, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  MutableRef,
+  Option,
+  Queue,
+  Ref,
+  type Scope,
+} from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -11,6 +22,7 @@ import { logError, logInfo } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
+import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, SessionPorts } from './state.js'
 import type { SourceControlTarget } from '../ports/index.js'
@@ -160,61 +172,91 @@ const runSession = (
 }
 
 /**
- * Whether the host put what the run produced into the repository. A run the host owns no repository
- * for reaches the end having published nothing, so what it made is still only in its workspace.
+/**
+ * The postflight-bracketed body of one run, inside the workspace the run leases.
+ *
+ * The postflight is reported rather than raised. A turn that ended and a change that reached the
+ * remote are separate outcomes, so a publication that failed leaves the body succeeding with a
+ * `DeliveryFailed` postflight, and only the agent protocol itself can fail a run.
  */
-type RunPublication = 'published' | 'not_published'
-
-/** The publication-bracketed body of one run, inside the workspace the run leases. */
 const runWithSourceControl = (
   launch: SessionLaunch,
   workspace: Workspace,
-): Effect.Effect<RunPublication, AgentError | WorkspaceError | SourceControlError> => {
-  const { issue, sessionPorts, target } = launch
+): Effect.Effect<PostflightOutcome, AgentError | WorkspaceError | SourceControlError> => {
+  const { context, issue, runId, sessionPorts, target } = launch
   const sourceControl = MutableRef.get(sessionPorts).sourceControl
   if (sourceControl === null) {
-    return runSession(launch, workspace).pipe(Effect.as<RunPublication>('not_published'))
+    return runSession(launch, workspace).pipe(
+      Effect.as<PostflightOutcome>({ _tag: 'NotPerformed' }),
+    )
   }
   return sourceControl.prepare(issue, workspace, target).pipe(
     Effect.flatMap((prepared) =>
       runSession(launch, workspace).pipe(
         Effect.zipRight(
-          Effect.suspend(() => {
+          Effect.gen(function* () {
             const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-            return publisher.publish(issue, prepared)
+            // Announced *and applied* before the first git call: from here the run is the host's
+            // work, and the silence on the agent protocol that follows is not a stalled agent.
+            // Offering alone would only enqueue it — a poll already in flight would still read a
+            // run nothing had marked and retire the publication as a stalled agent, which is the
+            // one thing this marker exists to prevent.
+            const applied = yield* Deferred.make<void>()
+            yield* Queue.offer(context.mailbox, {
+              _tag: 'PostflightStarted' as const,
+              issueId: issue.id,
+              runId,
+              applied,
+            })
+            yield* Deferred.await(applied)
+            return yield* runPostflight(publisher, issue, prepared)
           }),
         ),
         Effect.tap((outcome) =>
-          logInfo('host source-control publication completed', {
-            ...logContext(issue),
-            action: 'source_control_publish',
-            outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
-            branch: outcome.branchName,
-          }),
+          (outcome._tag === 'DeliveryFailed' ? logError : logInfo)(
+            'host source-control postflight settled',
+            {
+              ...logContext(issue),
+              action: 'source_control_postflight',
+              outcome: postflightLogOutcome(outcome),
+              branch: target.branchName,
+              error: outcome._tag === 'DeliveryFailed' ? outcome.failure.message : null,
+            },
+          ),
         ),
-        // Both outcomes are a publication: the host read the whole worktree and put everything it
-        // found into the repository, which for `NoChanges` was nothing.
-        Effect.as<RunPublication>('published'),
       ),
     ),
   )
 }
 
 /**
- * What becomes of the run's workspace once the run has ended. A run whose work reached the
- * repository has nothing left in the directory that is not in it; every other ending — a failure, a
- * cancellation, an interrupted shutdown, or a composition with no source control to publish through
- * at all — leaves work that only the directory holds, so the workspace stays as a recovery artifact
- * under the reason it is being kept for.
+ * What becomes of the run's workspace once the run has ended.
+ *
+ * A postflight that published, or that found nothing to publish, has read the whole worktree and
+ * put everything it found into the repository, so the directory holds nothing that is not in it.
+ * Every other ending — a delivery that failed, a composition with no source control to publish
+ * through, a failure, a cancellation, an interrupted shutdown — leaves work that only the directory
+ * holds, so the workspace stays as a recovery artifact under the reason it is being kept for. A
+ * retained delivery republishes from exactly that directory, which is why a failed delivery's
+ * reason names the failure.
  */
 const workspaceRelease = (
-  exit: Exit.Exit<RunPublication, AgentError | WorkspaceError | SourceControlError>,
+  exit: Exit.Exit<PostflightOutcome, AgentError | WorkspaceError | SourceControlError>,
 ): WorkspaceRelease =>
   Exit.match(exit, {
-    onSuccess: (publication): WorkspaceRelease =>
-      publication === 'published'
-        ? { _tag: 'Completed' }
-        : { _tag: 'Retained', reason: 'run ended without publishing its work' },
+    onSuccess: (postflight): WorkspaceRelease => {
+      switch (postflight._tag) {
+        case 'Published':
+        case 'NoChanges':
+          return { _tag: 'Completed' }
+        case 'DeliveryFailed':
+          // The category, never the message: a lease record is a file on disk rather than a log
+          // the redaction rules pass over.
+          return { _tag: 'Retained', reason: `delivery failed: ${postflight.failure.category}` }
+        case 'NotPerformed':
+          return { _tag: 'Retained', reason: 'run ended without publishing its work' }
+      }
+    },
     onFailure: (cause): WorkspaceRelease => ({
       _tag: 'Retained',
       reason: Option.match(Cause.failureOption(cause), {
@@ -231,8 +273,8 @@ const workspaceRelease = (
   })
 
 /**
- * The whole of one run as a fiber body: the workspace this run leases for itself, the source-control
- * preparation and publication that bracket the session when the host owns the repository, and the
+ * The whole of one run as a fiber body: the workspace this run leases for itself, the host-owned
+ * preparation and postflight that bracket the session when the host owns the repository, and the
  * `WorkerExited` that reports how it ended. Every exit path offers that event, so a run can never
  * end unobserved, and every exit path releases the lease — including the interruption that a
  * cancellation or a shutdown ends the run with.
@@ -255,8 +297,9 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             attempt,
             outcome: 'failed',
             error: error.message,
+            postflight: { _tag: 'NotPerformed' },
           }).pipe(Effect.asVoid),
-        onSuccess: () =>
+        onSuccess: (postflight) =>
           Queue.offer(context.mailbox, {
             _tag: 'WorkerExited',
             issueId: issue.id,
@@ -264,6 +307,7 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             attempt,
             outcome: 'normal',
             error: null,
+            postflight,
           }).pipe(Effect.asVoid),
       }),
     )
@@ -283,6 +327,7 @@ const startingRun = (
   attempt: launch.attempt,
   repairRun: launch.repairRun,
   startedAt,
+  postflightStartedAt: null,
   lastEventAt: null,
   lastEvent: null,
   lastMessage: null,
