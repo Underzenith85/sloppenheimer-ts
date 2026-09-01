@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Cause, Effect, Exit, Option } from 'effect'
+import { Cause, Effect, Exit, Fiber, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -338,7 +338,8 @@ const renewLease = (
  * keeps a published lease from ever existing without the finalizer that hands it back. Everything
  * after it — provisioning, the `after_create` hook, and the caller's own use — runs restored, so a
  * cancellation reaches a hook's process tree instead of waiting out its timeout, and each of the
- * two is bracketed in turn with no interruptible gap between them.
+ * two is bracketed in turn with no interruptible gap between them. The renewal that keeps the lease
+ * standing spans both, because neither is bounded from above.
  */
 const leaseRunWorkspace = <Value, Failure, Requirements>(
   fileSystem: FileSystem.FileSystem,
@@ -370,34 +371,44 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
         reportedAs('create_failed', 'failed to create workspace'),
       )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
+      // The renewal starts with the claim rather than with the use, because provisioning is not
+      // bounded either: an `after_create` hook is the caller's own command, and one that runs for
+      // longer than a lease stands must not be concluded gone by a host that cannot see this one's
+      // process. It is forked under the mask so no interruption can land between the published
+      // lease and the finalizers that hand it back, and forked interruptible so that stopping it
+      // is prompt.
+      const renewing = yield* Effect.fork(
+        Effect.interruptible(renewLease(fileSystem, paths, renewal)),
+      )
+      // Every ending stops the renewal before it rewrites the record, so a renewal in flight can
+      // never say `held` again over a release.
+      const stopRenewing = Fiber.interrupt(renewing)
       // From here the lease is this run's own. Provisioning that does not finish keeps the
       // workspace under the reason it failed for, rather than leaving a lease nobody holds.
       yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit)
             ? Effect.void
-            : Effect.ignore(
-                retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
+            : Effect.zipRight(
+                stopRenewing,
+                Effect.ignore(
+                  retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
+                ),
               ),
         ),
       )
-      // The renewal lives exactly as long as the use does: it is what tells a host that cannot
-      // observe this one's process that the run is still here, and it stops when the run does.
-      return yield* restore(
-        Effect.scoped(
-          Effect.forkScoped(renewLease(fileSystem, paths, renewal)).pipe(
-            Effect.zipRight(use(workspace)),
-          ),
-        ),
-      ).pipe(
+      return yield* restore(use(workspace)).pipe(
         Effect.onExit((exit) =>
-          releaseRunWorkspace(
-            fileSystem,
-            hooks,
-            root,
-            owner,
-            { run, workspace },
-            disposition(exit),
+          Effect.zipRight(
+            stopRenewing,
+            releaseRunWorkspace(
+              fileSystem,
+              hooks,
+              root,
+              owner,
+              { run, workspace },
+              disposition(exit),
+            ),
           ),
         ),
       )

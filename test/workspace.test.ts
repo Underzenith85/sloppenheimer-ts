@@ -827,8 +827,41 @@ describe('run workspace allocation and leases', (): void => {
       )
 
       // A host that cannot observe this one's process has nothing else to go on: the run saying so
-      // is what keeps its workspace from being reclaimed under it.
-      expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(renewed.acquiredAt))
+      // is what keeps its workspace from being reclaimed under it. The record stands past the
+      // window the claim itself bought, which only a renewal can have written.
+      expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(
+        Date.parse(renewed.acquiredAt) + leaseValidityMs,
+      )
+    }),
+  )
+
+  it.live('says so while its own provisioning hook is still working', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      // An `after_create` hook is the caller's own command and nothing bounds it: this one runs
+      // far past the interval at which the run says its lease still stands, which on the host is
+      // the difference between a five-minute hook and an hour-long one.
+      const manager = yield* makeWorkspaceManager(
+        root,
+        hooks({ afterCreate: 'sleep 0.4' }),
+        hostOwner,
+        { intervalMs: 50 },
+      ).pipe(Effect.provide(hostFileSystem))
+      const identifier = issueIdentifier('GH-186')
+
+      const lease = yield* manager.withLeasedWorkspace(
+        { identifier, runId: 1 },
+        (workspace) => host(() => leaseOf(workspace.path)),
+        () => ({ _tag: 'Completed' }),
+      )
+
+      // The record stands past the window the claim itself bought, so it was said again while the
+      // hook ran: a host that cannot observe this one's process is never told the run is gone
+      // while its provisioning is still working.
+      expect(Date.parse(lease.expiresAt)).toBeGreaterThan(
+        Date.parse(lease.acquiredAt) + leaseValidityMs,
+      )
+      expect(lease.status).toBe('held')
     }),
   )
 

@@ -590,8 +590,10 @@ lifecycle. This section is the architecture record for it; do not create a separ
   not keep its leases alive, and an owner this host cannot place — another container, another
   kernel, or a platform that names neither — is never probed against whatever process carries its id
   here. Those are reclaimed by renewal instead: a run says its lease still stands every few minutes
-  for as long as it holds it, and one not said again in an hour belongs to a host that is gone. Do
-  not replace that with a lifetime computed from the workflow's limits: `turn_timeout_ms` and
+  for as long as it holds it, and one not said again in an hour belongs to a host that is gone. It
+  starts renewing with the claim rather than with its own work, because an `after_create` hook is
+  the caller's command and is not bounded either, and it stops renewing before either ending
+  rewrites the record. Do not replace renewal with a lifetime computed from the workflow's limits: `turn_timeout_ms` and
   `stall_timeout_ms` are idle timeouts, restarted by every turn and every event, so nothing in a
   configuration bounds a run from above. A lease is released on success, failure, cancellation and
   shutdown alike, and it outlives the host that wrote it, so a restart and a second host reading the

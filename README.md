@@ -639,9 +639,11 @@ nothing at all on another machine, so an owner this host cannot place — anothe
 kernel, or a platform that names neither — is left alone rather than probed against whatever process
 carries that id here. What reclaims those is renewal: a run says its lease still stands every few
 minutes for as long as it holds it, and a lease that has not been said again in an hour belongs to a
-host that is no longer there to say it. Nothing in a workflow bounds a run from above — its timeouts
-are idle ones, restarted by every turn and every event — so a running host saying so is the only
-honest signal there is.
+host that is no longer there to say it. A run starts saying so as soon as it takes the lease, not
+when its own work begins: the `after_create` hook is the caller's own command and may run for longer
+than a lease stands. Nothing in a workflow bounds a run from above — its timeouts are idle ones,
+restarted by every turn and every event — so a running host saying so is the only honest signal there
+is.
 
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the
