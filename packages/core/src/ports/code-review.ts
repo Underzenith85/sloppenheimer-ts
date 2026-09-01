@@ -51,7 +51,16 @@ export type CodeReviewPort = Readonly<{
     pullRequestNumber: number,
     expectedHeadSha: string,
   ) => Effect.Effect<void, TrackerError>
-  resolveReviewThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
+  /**
+   * Resolves review threads under a lease on the head they were judged against. The verdict that
+   * retires a thread is about one head, and an inspection assembles that verdict from several
+   * reads: the lease is what refuses the write when the pull request has moved past it.
+   */
+  resolveReviewThreads: (
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+    threadIds: readonly string[],
+  ) => Effect.Effect<void, TrackerError>
 }>
 
 /**

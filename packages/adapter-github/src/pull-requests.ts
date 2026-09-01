@@ -24,6 +24,7 @@ import {
   decode,
   decodeChecks,
   decodeCodexReview,
+  decodeThreadResolution,
   decodeThreads,
   field,
   openPullRequestFields,
@@ -100,7 +101,7 @@ const fetchReviewGraph = (
         method: 'POST',
         body: JSON.stringify({
           query:
-            'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
+            'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved isOutdated comments(first:1){nodes{body url commit{oid}}}}}}}}',
           variables: { owner: provider.owner, name: provider.repository, number },
         }),
       }),
@@ -138,7 +139,11 @@ export type GitHubPullRequestMonitor = Readonly<{
   inspect: (number: number) => Effect.Effect<PullRequestObservation, TrackerError>
   merge: (number: number, expectedHeadSha: string) => Effect.Effect<string, TrackerError>
   requestReview: (number: number, expectedHeadSha: string) => Effect.Effect<void, TrackerError>
-  resolveThreads: (threadIds: readonly string[]) => Effect.Effect<void, TrackerError>
+  resolveThreads: (
+    number: number,
+    expectedHeadSha: string,
+    threadIds: readonly string[],
+  ) => Effect.Effect<void, TrackerError>
 }>
 
 /**
@@ -231,14 +236,19 @@ const mergePullRequest = (
   })
 
 /**
- * Asks the code-review provider for a review of the head the caller observed. The head is re-read
- * first, so a review is never requested for a commit the caller has not seen.
+ * Fails unless the pull request's head is still the commit the caller observed.
+ *
+ * Both writes below take this lease, for the same reason: it is the only thing tying a decision
+ * made about one head to the mutation that decision authorizes. An inspection reads the merge
+ * state, the checks and the review graph in separate calls, so a head that advances mid-inspection
+ * is exactly how a thread can look retired to one half of an observation and current to the other.
  */
-const requestCodexReview = (
+const assertHeadUnchanged = (
   provider: GitHubProviderConfig,
   prefix: string,
   number: number,
   expectedHeadSha: string,
+  refusal: string,
 ): Effect.Effect<void, TrackerError> =>
   Effect.gen(function* () {
     const pull = yield* decode(
@@ -249,34 +259,73 @@ const requestCodexReview = (
     const head = yield* decode(unknownRecord, pull['head'], 'GitHub pull request head is missing')
     if (head['sha'] !== expectedHeadSha) {
       return yield* Effect.fail(
-        new TrackerError({
-          category: 'tracker_status',
-          message: 'GitHub pull request head changed before Codex review was requested',
-          retryable: true,
-        }),
+        new TrackerError({ category: 'tracker_status', message: refusal, retryable: true }),
       )
     }
+  })
+
+/**
+ * Asks the code-review provider for a review of the head the caller observed. The head is re-read
+ * first, so a review is never requested for a commit the caller has not seen.
+ */
+const requestCodexReview = (
+  provider: GitHubProviderConfig,
+  prefix: string,
+  number: number,
+  expectedHeadSha: string,
+): Effect.Effect<void, TrackerError> =>
+  Effect.gen(function* () {
+    yield* assertHeadUnchanged(
+      provider,
+      prefix,
+      number,
+      expectedHeadSha,
+      'GitHub pull request head changed before Codex review was requested',
+    )
     yield* json(provider, `${prefix}/issues/${String(number)}/comments`, {
       method: 'POST',
       body: JSON.stringify({ body: '@codex review' }),
     })
   })
 
-/** Resolves review threads one at a time, so a rejected mutation stops the rest. */
+/**
+ * Resolves review threads one at a time, so a rejected mutation stops the rest, and each behind its
+ * own read of the head: a thread retired by a commit nobody has reviewed is not this verdict's to
+ * close, and a batch is a sequence of writes rather than one, so a head that advances part-way
+ * through must stop the ones that have not happened yet.
+ *
+ * `resolveReviewThread` takes no expected head, so this is a read before a write and not a
+ * compare-and-swap: a head that lands between the two is a window GitHub gives no way to close.
+ * Reading per thread makes that window one mutation wide instead of a whole batch, and the threads
+ * left unresolved are judged again by the next inspection.
+ */
 const resolveReviewThreads = (
   provider: GitHubProviderConfig,
+  prefix: string,
+  number: number,
+  expectedHeadSha: string,
   threadIds: readonly string[],
 ): Effect.Effect<void, TrackerError> =>
   Effect.forEach(
     threadIds,
     (threadId) =>
-      json(provider, graphqlUrl(provider), {
-        method: 'POST',
-        body: JSON.stringify({
-          query:
-            'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
-          variables: { threadId },
-        }),
+      Effect.gen(function* () {
+        yield* assertHeadUnchanged(
+          provider,
+          prefix,
+          number,
+          expectedHeadSha,
+          'GitHub pull request head changed before its review threads were resolved',
+        )
+        const value = yield* json(provider, graphqlUrl(provider), {
+          method: 'POST',
+          body: JSON.stringify({
+            query:
+              'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
+            variables: { threadId },
+          }),
+        })
+        yield* decodeThreadResolution(threadId, value)
       }),
     { concurrency: 1, discard: true },
   )
@@ -293,6 +342,7 @@ export const makeGitHubPullRequestMonitor = (
       bindClient(mergePullRequest(provider, prefix, number, expectedHeadSha)),
     requestReview: (number, expectedHeadSha) =>
       bindClient(requestCodexReview(provider, prefix, number, expectedHeadSha)),
-    resolveThreads: (threadIds) => bindClient(resolveReviewThreads(provider, threadIds)),
+    resolveThreads: (number, expectedHeadSha, threadIds) =>
+      bindClient(resolveReviewThreads(provider, prefix, number, expectedHeadSha, threadIds)),
   }
 }

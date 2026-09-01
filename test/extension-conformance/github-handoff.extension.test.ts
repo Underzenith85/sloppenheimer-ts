@@ -105,7 +105,9 @@ describe('Extension Conformance: GitHub pull-request handoff', (): void => {
     expect(
       classifyPullRequest({
         ...observation,
-        reviewThreads: [{ id: 'thread', resolved: false, body: 'change this', url: null }],
+        reviewThreads: [
+          { id: 'thread', resolved: false, outdated: false, body: 'change this', url: null },
+        ],
       }),
     ).toMatchObject({ state: 'repair_needed' })
   })
