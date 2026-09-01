@@ -271,7 +271,19 @@ export const sweepRetainedDeliveries = (
       })
       return 'failed'
     }
-    yield* examineWorkspaces(context, candidates.value)
+    // The handoffs as well as the fetch. An open handoff keeps the workflow that created its pull
+    // request, and a repair is judged against that one — so an issue this fetch omits, because a
+    // reload narrowed the active states out from under it, is still an issue reconciliation can
+    // put a repair into moments from now. A handoff's workspace is owed a look for as long as the
+    // handoff lives, whatever the current workflow makes of its issue.
+    const opened = yield* Ref.get(context.state)
+    const byId = new Map(candidates.value.map((issue) => [issue.id, issue] as const))
+    for (const handoff of opened.handoffs.values()) {
+      if (!byId.has(handoff.issue.id)) {
+        byId.set(handoff.issue.id, handoff.issue)
+      }
+    }
+    yield* examineWorkspaces(context, [...byId.values()])
     yield* Ref.update(context.state, Transitions.finishStartupSweep)
     return 'completed'
   })

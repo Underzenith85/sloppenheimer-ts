@@ -598,7 +598,10 @@ repair agent that had achieved nothing.
   is per issue rather than one sweep, because an issue that is inactive at startup becomes a
   candidate later and arrives with a workspace of its own; the dispatch pass examines its own
   candidates, so only the one sweep that has to precede the first reconciliation costs a tracker
-  call.
+  call. That sweep covers the open handoffs as well as its own fetch: a handoff keeps the
+  workflow that created its pull request and its repair is judged against that one, so an issue the
+  current workflow's active states leave out is still an issue reconciliation can put a repair into
+  moments later. A handoff's workspace is owed a look for as long as the handoff lives.
 - What recovery republishes is a repair only when a repair identity says so, never because a pull
   request is open. An ordinary continuation leaves an unpublished workspace behind too, and the
   handoff that publication opens owes it the continuation its turn was owed — giving the claim up

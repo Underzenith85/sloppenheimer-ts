@@ -1295,6 +1295,74 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('sweeps a handoff workspace the active-state fetch leaves out', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-handoff-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      // The state list returns nothing for this issue — a reload that narrowed the active states
+      // out from under an open handoff looks exactly like this to the sweep. Its repair is still
+      // judged against the workflow the handoff kept, so reconciliation can still run one.
+      const harness = makeHarness(
+        isolated,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      let launched = 0
+      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push({
+                branchName: prepared.target.branchName,
+                launchedSoFar: launched,
+              })
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+        }),
+      )
+
+      // A handoff's workspace is owed a look for as long as the handoff lives, whatever the
+      // current workflow makes of its issue — otherwise its repair is the first thing into it.
+      expect(publications[0]).toEqual({
+        branchName: 'sloppenheimer/issue-20',
+        launchedSoFar: 0,
+      })
+    }),
+  )
+
   it.scoped('sweeps for retained work again when a reload moves the workspace root', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-reload-root-')
