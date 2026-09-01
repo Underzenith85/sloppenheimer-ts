@@ -35,11 +35,11 @@ export type WorkspaceOwner = Readonly<{
    */
   namespace: string | null
   /**
-   * The machine and the boot the id belongs to. Nothing survives a reboot, so an owner recorded
-   * under an earlier boot of this machine is gone whatever its process id now names — which is how
-   * a host with no namespace to compare still reclaims what a crash left behind.
+   * The boot the id belongs to, as the kernel names it — a value unique to one boot of one machine,
+   * so two hosts that agree on it are looking at the same process table. `null` where the host
+   * cannot read one.
    */
-  boot: string
+  boot: string | null
 }>
 
 /**
@@ -85,7 +85,7 @@ const leaseSchema = Schema.Struct({
     processId: Schema.Number.pipe(Schema.filter((value) => Number.isSafeInteger(value))),
     startMarker: Schema.NullOr(Schema.String),
     namespace: Schema.NullOr(Schema.String),
-    boot: Schema.String,
+    boot: Schema.NullOr(Schema.String),
   }),
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),
@@ -165,6 +165,17 @@ export const decodeLease = (
 }
 
 /**
+ * How long a held lease whose owner this host cannot observe is still treated as claimed.
+ *
+ * A run is bounded by turn, stall and retry timeouts measured in minutes, so a lease still held a
+ * week later belongs to a host that is not coming back — whatever platform it ran on, and whether
+ * or not this host could ever have observed its process. It is the one rule that reclaims a crashed
+ * host's workspaces where the kernel offers no identity to compare, and it is set far past any run
+ * so that it can never take a live one.
+ */
+export const unobservableLeaseLifetimeMs = 7 * 24 * 60 * 60 * 1_000
+
+/**
  * Whether a lease still belongs to a live owner, and so whether the workspace it holds may be
  * entered or removed by anyone else.
  *
@@ -173,20 +184,25 @@ export const decodeLease = (
  * which is how a second host pointed at the same root is respected and how a crashed one stops
  * blocking cleanup.
  *
- * Only an owner this host can actually observe is ever concluded to be gone. A process id means
- * nothing outside the namespace that issued it, so an owner recorded in another one — two
- * containers sharing a workspace root — stays claimed rather than being probed against whatever
- * process happens to carry that id here. Within one namespace, a process id alone still does not
- * identify a process: a host restarted into the same id, the ordinary case for a container's PID 1,
- * would otherwise keep its predecessor's leases alive for as long as it ran. So a running process
- * whose start marker is not the recorded one is a different process, and the lease it left is not
- * claimed. Where either marker is missing the observation cannot tell them apart, and the owner is
- * taken to be running, because refusing to remove a workspace is the safe error.
+ * Only an owner this host can actually observe is ever concluded to be gone from its process alone.
+ * A process id means nothing outside the namespace that issued it, and nothing at all on another
+ * machine, so an owner the host cannot place — another container, another kernel, or a platform
+ * that names neither — stays claimed rather than being probed against whatever process happens to
+ * carry that id here. What reclaims those is age: past `unobservableLeaseLifetimeMs`, a held lease
+ * no one can observe is no longer treated as one.
+ *
+ * Within one namespace, a process id alone still does not identify a process: a host restarted into
+ * the same id, the ordinary case for a container's PID 1, would otherwise keep its predecessor's
+ * leases alive for as long as it ran. So a running process whose start marker is not the recorded
+ * one is a different process, and the lease it left is not claimed. Where either marker is missing
+ * the observation cannot tell them apart, and the owner is taken to be running, because refusing to
+ * remove a workspace is the safe error.
  */
 export const leaseIsClaimed = (
   lease: WorkspaceLeaseRecord,
   hostId: string,
   observation: OwnerObservation,
+  now: Date,
 ): boolean => {
   if (lease.status !== 'held') {
     return false
@@ -195,7 +211,7 @@ export const leaseIsClaimed = (
     return true
   }
   if (observation._tag === 'Unobservable') {
-    return true
+    return now.getTime() - Date.parse(lease.acquiredAt) < unobservableLeaseLifetimeMs
   }
   if (observation._tag === 'Gone') {
     return false

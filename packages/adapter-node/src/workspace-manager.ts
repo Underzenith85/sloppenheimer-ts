@@ -148,11 +148,12 @@ const removeFreeRunWorkspaces = (
 ): Effect.Effect<readonly string[], WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const entries = yield* fileSystem.readDirectory(issuePath)
+    const now = yield* currentInstant
     const held: string[] = []
     for (const key of runKeysIn(entries)) {
       const runPath = yield* containedWorkspacePath(issuePath, key)
       const lease = yield* readLease(fileSystem, leasePathFor(runPath))
-      if (Option.exists(lease, leaseIsLive)) {
+      if (Option.exists(lease, (record) => leaseIsLive(record, now))) {
         held.push(key)
         continue
       }

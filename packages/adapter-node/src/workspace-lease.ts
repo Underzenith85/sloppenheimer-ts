@@ -2,7 +2,6 @@ import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, readlinkSync } from 'node:fs'
-import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Effect, Either, Option } from 'effect'
 
@@ -67,19 +66,16 @@ const processNamespace = (): string | null => {
 }
 
 /**
- * The machine, and the boot where the kernel names one.
- *
- * Every platform can answer this, which is what makes it the fallback where `/proc` is not there.
- * The boot half is deliberately the kernel's own identifier or nothing: a marker derived from
- * uptime would drift across the rounding boundary within one boot, and a host that concluded from
- * that drift that its neighbour had rebooted would take a live run's workspace. Without it, a
- * machine simply keeps probing process ids, which is what a host with no namespaces can do.
+ * The boot this host is running under, as the kernel names it: a value unique to one boot of one
+ * machine, so two hosts that agree on it really are looking at one process table. It is that or
+ * nothing — a hostname is not a machine, and two machines that share one would then read each
+ * other's process ids as their own.
  */
-const machineBoot = (): string => {
+const machineBoot = (): string | null => {
   try {
-    return `${hostname()}/${readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()}`
+    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
   } catch {
-    return hostname()
+    return null
   }
 }
 
@@ -99,21 +95,22 @@ export const hostOwner: WorkspaceOwner = {
 
 /**
  * Whether an owner's process ids are this host's to read: the same process namespace, where both
- * sides can name one, and otherwise the same machine and boot, where process ids are not namespaced
- * at all.
+ * sides can name one, and otherwise the same boot of the same machine, which is what the kernel's
+ * boot identifier means. A host that can prove neither reads nobody else's process ids.
  */
-const sharesProcessIds = (owner: WorkspaceOwner): boolean =>
-  owner.namespace === null || hostOwner.namespace === null
-    ? owner.boot === hostOwner.boot
-    : owner.namespace === hostOwner.namespace
+const sharesProcessIds = (owner: WorkspaceOwner): boolean => {
+  if (owner.namespace !== null && hostOwner.namespace !== null) {
+    return owner.namespace === hostOwner.namespace
+  }
+  return owner.boot !== null && owner.boot === hostOwner.boot
+}
 
 /**
  * What this host can see of a lease's owner now.
  *
- * An owner whose process ids are not this host's to read — another container's namespace, or
- * another machine — is unobservable, and is left alone rather than probed against whatever process
- * happens to carry its id here. An owner recorded under an earlier boot of this machine is the one
- * case that needs no probe at all: nothing survives a reboot.
+ * An owner whose process ids are not this host's to read — another container's namespace, another
+ * machine, or a platform that names neither — is unobservable, and is left to the age rule rather
+ * than probed against whatever process happens to carry its id here.
  *
  * Otherwise, signal 0 performs the permission and existence checks without delivering anything.
  * `EPERM` means the process exists and belongs to another user, which is still a running owner. Any
@@ -123,10 +120,7 @@ const sharesProcessIds = (owner: WorkspaceOwner): boolean =>
  */
 export const observeOwner = (owner: WorkspaceOwner): OwnerObservation => {
   if (!sharesProcessIds(owner)) {
-    return owner.boot.split('/')[0] === hostOwner.boot.split('/')[0] &&
-      owner.boot !== hostOwner.boot
-      ? { _tag: 'Gone' }
-      : { _tag: 'Unobservable' }
+    return { _tag: 'Unobservable' }
   }
   try {
     process.kill(owner.processId, 0)
@@ -138,9 +132,9 @@ export const observeOwner = (owner: WorkspaceOwner): OwnerObservation => {
   return { _tag: 'Running', startMarker: processStartMarker(owner.processId) }
 }
 
-/** Whether a lease record still belongs to a running owner, as this host sees it. */
-export const leaseIsLive = (lease: WorkspaceLeaseRecord): boolean =>
-  leaseIsClaimed(lease, hostOwner.hostId, observeOwner(lease.owner))
+/** Whether a lease record still belongs to a running owner, as this host sees it now. */
+export const leaseIsLive = (lease: WorkspaceLeaseRecord, now: Date): boolean =>
+  leaseIsClaimed(lease, hostOwner.hostId, observeOwner(lease.owner), now)
 
 /**
  * Stages a lease record for publication and hands the caller the path it was written to.

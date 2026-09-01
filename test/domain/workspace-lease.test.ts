@@ -8,6 +8,7 @@ import {
   heldLease,
   leaseIsClaimed,
   retainedLease,
+  unobservableLeaseLifetimeMs,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
@@ -25,8 +26,10 @@ const owner: WorkspaceOwner = {
   processId: 4242,
   startMarker: '918273',
   namespace: 'boot-1/pid:[4026531836]',
-  boot: 'machine-a/boot-1',
+  boot: 'boot-1',
 }
+/** While the run that took the lease could still plausibly be running. */
+const soonAfter = new Date('2026-08-31T10:30:00.000Z')
 const running = (startMarker: string | null): OwnerObservation => ({ _tag: 'Running', startMarker })
 const gone: OwnerObservation = { _tag: 'Gone' }
 const unobservable: OwnerObservation = { _tag: 'Unobservable' }
@@ -104,44 +107,58 @@ describe('workspace lease records', (): void => {
 
 describe('who a lease belongs to', (): void => {
   it('is claimed while the host that wrote it says so', (): void => {
-    expect(leaseIsClaimed(lease, 'host-a', gone)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-a', gone, soonAfter)).toBe(true)
     expect(
-      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-a', running('918273')),
+      leaseIsClaimed(
+        retainedLease(lease, 'released', releasedAt),
+        'host-a',
+        running('918273'),
+        soonAfter,
+      ),
     ).toBe(false)
   })
 
   it('is claimed by another host only while that host is running', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running('918273'))).toBe(true)
-    expect(leaseIsClaimed(lease, 'host-b', gone)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('918273'), soonAfter)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', gone, soonAfter)).toBe(false)
   })
 
   it('is not claimed by a process that merely inherited the recorded id', (): void => {
     // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
-    expect(leaseIsClaimed(lease, 'host-b', running('554433'))).toBe(false)
-  })
-
-  it('is not claimed by an owner from an earlier boot of this machine', (): void => {
-    // Nothing survives a reboot, so a host with no namespace to compare still reclaims what a
-    // crash left behind: the adapter reports that owner as gone without probing a process id.
-    expect(leaseIsClaimed(lease, 'host-b', gone)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('554433'), soonAfter)).toBe(false)
   })
 
   it('leaves an owner this host cannot observe alone', (): void => {
     // Two containers sharing a workspace root read their own process ids, not each other's, so an
     // owner in another namespace is never concluded to be gone.
-    expect(leaseIsClaimed(lease, 'host-b', unobservable)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', unobservable, soonAfter)).toBe(true)
     expect(
-      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-b', unobservable),
+      leaseIsClaimed(
+        retainedLease(lease, 'released', releasedAt),
+        'host-b',
+        unobservable,
+        soonAfter,
+      ),
     ).toBe(false)
   })
 
+  it('stops claiming an unobservable owner once no run could still be holding it', (): void => {
+    // The one rule that reclaims a crashed host's workspaces where the kernel names nothing to
+    // compare: a run is bounded by timeouts measured in minutes, so a week is far past any of them.
+    const muchLater = new Date(Date.parse(lease.acquiredAt) + unobservableLeaseLifetimeMs + 1_000)
+
+    expect(leaseIsClaimed(lease, 'host-b', unobservable, muchLater)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('918273'), muchLater)).toBe(true)
+  })
+
   it('takes a running owner at face value when either marker is missing', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running(null))).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', running(null), soonAfter)).toBe(true)
     expect(
       leaseIsClaimed(
         { ...lease, owner: { ...owner, startMarker: null } },
         'host-b',
         running('554433'),
+        soonAfter,
       ),
     ).toBe(true)
   })

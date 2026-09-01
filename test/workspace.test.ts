@@ -30,6 +30,7 @@ import {
 import {
   encodeLease,
   heldLease,
+  unobservableLeaseLifetimeMs,
   type WorkspaceLeaseRecord,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
@@ -450,6 +451,7 @@ const foreignWorkspace = async (
   root: string,
   identifier: string,
   owner: WorkspaceLeaseRecord['owner'],
+  acquiredAt = new Date(),
 ): Promise<string> => {
   const runKey = 'run-9-previoushost'
   const path = join(root, workspaceKey(issueIdentifier(identifier)), runKey)
@@ -458,7 +460,7 @@ const foreignWorkspace = async (
   await writeFile(
     `${path}.lease`,
     encodeLease(
-      heldLease({ identifier: issueIdentifier(identifier), runId: 9 }, runKey, owner, new Date()),
+      heldLease({ identifier: issueIdentifier(identifier), runId: 9 }, runKey, owner, acquiredAt),
     ),
   )
   return path
@@ -783,13 +785,41 @@ describe('run workspace allocation and leases', (): void => {
           processId: await exitedProcessId(),
           startMarker: 'a marker from another namespace',
           namespace: 'another kernel/pid:[4026531999]',
-          boot: 'another machine/another boot',
+          boot: 'another-boot-of-another-machine',
         }),
       )
 
       yield* manager.remove(issueIdentifier(identifier))
 
       expect(existsSync(held)).toBe(true)
+    }),
+  )
+
+  it.live('reclaims an unobservable lease once no run could still be holding it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const identifier = 'GH-184'
+      const abandoned = yield* host(() =>
+        foreignWorkspace(
+          root,
+          identifier,
+          {
+            hostId: 'a host in another container',
+            processId: process.pid,
+            startMarker: 'a marker from another namespace',
+            namespace: 'another kernel/pid:[4026531999]',
+            boot: 'another-boot-of-another-machine',
+          },
+          new Date(Date.now() - unobservableLeaseLifetimeMs - 60_000),
+        ),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // Nothing here can observe that owner's process, and no run of any workflow is still going a
+      // week later: age is what reclaims the workspaces a crashed host leaves on such a platform.
+      expect(existsSync(abandoned)).toBe(false)
     }),
   )
 

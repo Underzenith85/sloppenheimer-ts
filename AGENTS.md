@@ -585,10 +585,12 @@ lifecycle. This section is the architecture record for it; do not create a separ
   the record is hard-linked into place, which is atomic and refuses an existing name — and the run
   directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
   elsewhere never finds a workspace without a lease. The record names the issue, the run, and the
-  host process that holds it, including when that process started and the process namespace its id
-  belongs to, so a host restarted into its predecessor's process id does not keep its leases alive,
-  and an owner in another namespace — two containers sharing a root — is never probed against
-  whatever process carries its id here. A lease is released on success, failure, cancellation and
+  host process that holds it, including when that process started, the process namespace its id
+  belongs to and the boot it ran under, so a host restarted into its predecessor's process id does
+  not keep its leases alive, and an owner this host cannot place — another container, another
+  kernel, or a platform that names neither — is never probed against whatever process carries its id
+  here. Those are reclaimed by age instead: a run is bounded by timeouts measured in minutes, so a
+  lease still held a week later is no longer treated as one. A lease is released on success, failure, cancellation and
   shutdown alike, and it outlives the host that wrote it, so a restart and a second host reading the
   same root both see who owns what.
 - **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves

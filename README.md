@@ -634,9 +634,11 @@ run: retained workspaces go when the issue reaches a terminal state, and cleanup
 workspace whose lease is still held by a running owner — this host, or a second one. A lease left by
 a host that is gone stops holding anything back, because its process is no longer there — nor does one
 whose process id the kernel has since handed to a successor, which is why the record carries the
-owner's start as well as its id. A process id means nothing outside the namespace that issued it, so
-an owner recorded in another one — two containers sharing a workspace root — is left alone rather
-than probed against whatever process carries that id here.
+owner's start as well as its id. A process id means nothing outside the namespace that issued it and
+nothing at all on another machine, so an owner this host cannot place — another container, another
+kernel, or a platform that names neither — is left alone rather than probed against whatever process
+carries that id here. What reclaims those is age: a run is bounded by timeouts measured in minutes,
+so a lease still held a week later belongs to a host that is not coming back.
 
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the
