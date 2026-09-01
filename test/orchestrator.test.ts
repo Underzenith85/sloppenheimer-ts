@@ -4023,6 +4023,51 @@ describe('persisted finished work', (): void => {
     }),
   )
 
+  it.scoped('carries restored history to a moved root without waiting for a merge', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-migrate-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-completion-migrated-')
+      const isolated: Workflow = {
+        ...workflow,
+        fingerprint: 'original',
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...isolated,
+        fingerprint: 'reloaded',
+        config: { ...isolated.config, workspaceRoot: reloadedRoot },
+      }
+      const restored = completion(
+        'example/sloppenheimer#70',
+        new Date(now - 2 * 60 * 60 * 1000).toISOString(),
+      )
+      yield* saveCompletions(join(workspaceRoot, '.sloppenheimer', 'completions.json'), [restored])
+      const harness = makeHarness(isolated)
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* control.refresh
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          let current = yield* control.snapshot
+          while (current.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+        }),
+      )
+
+      // Nothing merged while this host ran, and nothing ever might: the move itself is what has to
+      // carry the history across, or a restart under the new root loses it.
+      expect(
+        yield* loadCompletions(join(reloadedRoot, '.sloppenheimer', 'completions.json')),
+      ).toEqual([restored])
+    }),
+  )
+
   it.scoped('starts without its history when the completion store cannot be read', () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(now)
