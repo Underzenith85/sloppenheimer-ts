@@ -177,18 +177,23 @@ composable with Effect.
 ### Immutable state
 
 The scheduler's whole world is one immutable value, `RuntimeState` in
-`packages/core/src/core/state.ts`, held in a `Ref` and written by a single mailbox loop. Everything
+`packages/core/src/core/state.ts`, held in a `Ref` and advanced by pure transitions. Everything
 below follows from that shape.
 
 - Records are `Readonly<{ ... }>`; collections are `readonly T[]`, `ReadonlyMap`, `ReadonlySet`. A
   mutable container in a state or domain record is a defect, not a shortcut.
-- Never mutate an argument. Persistent edits go through `packages/core/src/support/collections.ts`
-  — `withEntry`, `withoutEntry`, `withMember`, `withoutMember`, and the bounded variants — each of
-  which answers with a new collection and leaves its argument untouched. The removal and membership
-  helpers go one step further and return the _original_ collection when there was nothing to remove
-  or the member was already there, so a no-op transition preserves reference equality and a caller
-  may compare by identity. `withEntry` does not: it always copies, because a write of the same value
-  is still a write.
+- Never mutate an argument. A single entry or member edit goes through
+  `packages/core/src/support/collections.ts` — `withEntry`, `withoutEntry`, `withMember`,
+  `withoutMember`, and the bounded variants — each of which answers with a new collection and leaves
+  its argument untouched. The removal and membership helpers go one step further and return the
+  _original_ collection when there was nothing to remove or the member was already there, so a no-op
+  transition preserves reference equality and a caller may compare by identity. `withEntry` does
+  not: it always copies, because a write of the same value is still a write.
+- A transition that rebuilds a whole collection builds a fresh one locally instead, which is the
+  same discipline at a different scale: `publishDetails` in `core/transitions/details.ts` fills a
+  new `Map` as it walks the records, and `pruneSupersededPorts` in `core/transitions/ports.ts`
+  copies, deletes from the copy, and returns the original when it dropped nothing. Neither touches
+  the collection it was given.
 - Every write is one atomic `Ref.modify` or `Ref.update` of a transition function — never a read,
   then a decision, then a write spread across several effects. Most of them happen in the mailbox
   loop, which is what orders event-driven work, but the loop is not the only writer: a runner
@@ -289,7 +294,12 @@ failure. There is no third option and no cast.
   `retirePrevious` when no in-flight work still holds the replaced instance. Each instance gets its
   own child scope, so its resources are released when _it_ is retired rather than accumulating
   finalizers for the life of the process.
-- Construction that allocates a resource is an `Effect`, not a constructor with a side effect.
+- Construction that allocates a resource is an `Effect`, so the acquisition is a step the runtime
+  can see, interrupt, and pair with a release. `CodexConnection` is the exception and shows what it
+  costs: its constructor spawns the child process, so it is safe only because `openConnection` in
+  `packages/adapter-codex/src/codex.ts` is the one thing that builds it and does so inside
+  `Effect.acquireRelease`. Do not copy the shape; if you change that class, keep the construction
+  inside that acquisition.
 
 ### Concurrency and interruption
 
