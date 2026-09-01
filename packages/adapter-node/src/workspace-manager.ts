@@ -16,6 +16,8 @@ import {
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
   heldLease,
+  leaseRenewalIntervalMs,
+  renewedLease,
   retainedLease,
   type WorkspaceOwner,
   type WorkspaceRelease,
@@ -308,6 +310,27 @@ const issueHoldsWorkspace = (
   }).pipe(reportedAs('inspect_failed', 'failed to inspect workspace'))
 
 /**
+ * Says a lease still stands, for as long as the run holds it.
+ *
+ * A host that cannot observe this one's process has nothing else to go on: renewal is what tells it
+ * the run is still there. A renewal that fails is not the run's problem — the record it could not
+ * write is still valid for the rest of its window, and the next one may well land.
+ */
+const renewLease = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  interval: LeaseRenewal,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const now = yield* currentInstant
+    const existing = yield* readLease(fileSystem, paths.leasePath)
+    yield* Option.match(existing, {
+      onNone: () => Effect.void,
+      onSome: (lease) => writeLease(fileSystem, paths, renewedLease(lease, now)),
+    })
+  }).pipe(Effect.ignore, Effect.delay(interval.intervalMs), Effect.forever)
+
+/**
  * One run's whole hold on a workspace: the claim, the directory it names, and the release that
  * hands it back however the run ended.
  *
@@ -322,6 +345,7 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
   hooks: HooksConfig,
   root: string,
   owner: WorkspaceOwner,
+  renewal: LeaseRenewal,
   run: WorkspaceRun,
   use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
   disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
@@ -357,7 +381,15 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
               ),
         ),
       )
-      return yield* restore(use(workspace)).pipe(
+      // The renewal lives exactly as long as the use does: it is what tells a host that cannot
+      // observe this one's process that the run is still here, and it stops when the run does.
+      return yield* restore(
+        Effect.scoped(
+          Effect.forkScoped(renewLease(fileSystem, paths, renewal)).pipe(
+            Effect.zipRight(use(workspace)),
+          ),
+        ),
+      ).pipe(
         Effect.onExit((exit) =>
           releaseRunWorkspace(
             fileSystem,
@@ -379,10 +411,14 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
  */
 const stagedLeaseLifetimeMs = 60 * 60 * 1_000
 
+/** How often a run says its lease still stands. Tests shorten it; the host runs at the default. */
+export type LeaseRenewal = Readonly<{ intervalMs: number }>
+
 export const makeWorkspaceManager = (
   root: string,
   hooks: HooksConfig,
   owner: WorkspaceOwner = hostOwner,
+  renewal: LeaseRenewal = { intervalMs: leaseRenewalIntervalMs },
 ): Effect.Effect<WorkspaceManagerPort, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem
@@ -394,7 +430,7 @@ export const makeWorkspaceManager = (
     yield* pruneStagedLeases(fileSystem, leaseStagingPath(root), now, stagedLeaseLifetimeMs)
     return {
       withLeasedWorkspace: (run, use, disposition) =>
-        leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
+        leaseRunWorkspace(fileSystem, hooks, root, owner, renewal, run, use, disposition),
       exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),
       // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
       beforeRun: (workspace) =>

@@ -29,7 +29,6 @@ import {
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
 import { anIssue } from '../harness/fixtures.js'
-import { leaseLifetimeFloorMs } from '@sloppenheimer/core/domain/workspace-lease.js'
 
 const hooks: HooksConfig = {
   afterCreate: null,
@@ -90,7 +89,6 @@ describe('port layer composition', (): void => {
           {
             identifier: issueIdentifier('example/sloppenheimer#1'),
             runId: 1,
-            lifetimeMs: leaseLifetimeFloorMs,
           },
           (leased) => Effect.succeed(leased),
           () => ({ _tag: 'Completed' }),

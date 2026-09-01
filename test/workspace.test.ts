@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import {
   access,
   mkdir,
@@ -30,7 +30,7 @@ import {
 import {
   encodeLease,
   heldLease,
-  leaseLifetimeFloorMs,
+  leaseValidityMs,
   type WorkspaceLeaseRecord,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
@@ -145,7 +145,7 @@ const retained = (
   runId = 1,
 ): Effect.Effect<Workspace, WorkspaceError> =>
   manager.withLeasedWorkspace(
-    { identifier: issueIdentifier(identifier), runId, lifetimeMs: leaseLifetimeFloorMs },
+    { identifier: issueIdentifier(identifier), runId },
     (workspace) => Effect.succeed(workspace),
     () => ({ _tag: 'Retained', reason: 'the run ended without publishing' }),
   )
@@ -157,7 +157,7 @@ const published = (
   runId = 1,
 ): Effect.Effect<Workspace, WorkspaceError> =>
   manager.withLeasedWorkspace(
-    { identifier: issueIdentifier(identifier), runId, lifetimeMs: leaseLifetimeFloorMs },
+    { identifier: issueIdentifier(identifier), runId },
     (workspace) => Effect.succeed(workspace),
     () => ({ _tag: 'Completed' }),
   )
@@ -169,14 +169,10 @@ const whileLeased = <Value, Failure>(
   runId: number,
   use: (workspace: Workspace) => Effect.Effect<Value, Failure>,
 ): Effect.Effect<Value, Failure | WorkspaceError> =>
-  manager.withLeasedWorkspace(
-    { identifier: issueIdentifier(identifier), runId, lifetimeMs: leaseLifetimeFloorMs },
-    use,
-    () => ({
-      _tag: 'Retained',
-      reason: 'the run ended without publishing',
-    }),
-  )
+  manager.withLeasedWorkspace({ identifier: issueIdentifier(identifier), runId }, use, () => ({
+    _tag: 'Retained',
+    reason: 'the run ended without publishing',
+  }))
 
 describe('hook process hardening', (): void => {
   it.live('drains a hook that writes far more than the capture limit', () =>
@@ -464,12 +460,7 @@ const foreignWorkspace = async (
   await writeFile(
     `${path}.lease`,
     encodeLease(
-      heldLease(
-        { identifier: issueIdentifier(identifier), runId: 9, lifetimeMs: leaseLifetimeFloorMs },
-        runKey,
-        owner,
-        acquiredAt,
-      ),
+      heldLease({ identifier: issueIdentifier(identifier), runId: 9 }, runKey, owner, acquiredAt),
     ),
   )
   return path
@@ -490,12 +481,7 @@ const foreignLease = async (
   await writeFile(
     `${path}.lease`,
     encodeLease(
-      heldLease(
-        { identifier: issueIdentifier(identifier), runId: 4, lifetimeMs: leaseLifetimeFloorMs },
-        runKey,
-        owner,
-        new Date(),
-      ),
+      heldLease({ identifier: issueIdentifier(identifier), runId: 4 }, runKey, owner, new Date()),
     ),
   )
   return path
@@ -573,7 +559,7 @@ describe('run workspace allocation and leases', (): void => {
       yield* host(() => mkdir(staging, { recursive: true }))
       const record = encodeLease(
         heldLease(
-          { identifier: issueIdentifier('GH-183'), runId: 1, lifetimeMs: leaseLifetimeFloorMs },
+          { identifier: issueIdentifier('GH-183'), runId: 1 },
           'run-1-hosta',
           hostOwner,
           new Date(),
@@ -707,7 +693,7 @@ describe('run workspace allocation and leases', (): void => {
       const manager = yield* workspaceManager(root, hooks())
       const identifier = issueIdentifier('GH-169')
       const first = yield* manager.withLeasedWorkspace(
-        { identifier, runId: 1, lifetimeMs: leaseLifetimeFloorMs },
+        { identifier, runId: 1 },
         (workspace) =>
           host(() => writeFile(join(workspace.path, 'unpublished.txt'), 'in progress\n')).pipe(
             Effect.as(workspace),
@@ -809,6 +795,43 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('says a lease still stands for as long as its run holds it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      // A renewal every 50ms rather than every five minutes: the interval is the host's, and a
+      // test that had to wait one would be measuring the clock rather than the renewal.
+      const manager = yield* makeWorkspaceManager(root, hooks(), hostOwner, {
+        intervalMs: 50,
+      }).pipe(Effect.provide(hostFileSystem))
+      const identifier = issueIdentifier('GH-185')
+
+      const renewed = yield* manager.withLeasedWorkspace(
+        { identifier, runId: 1 },
+        (workspace) =>
+          Effect.gen(function* () {
+            const first = yield* host(() => leaseOf(workspace.path))
+            yield* waitFor(
+              () =>
+                existsSync(`${workspace.path}.lease`) &&
+                readFileSync(`${workspace.path}.lease`, 'utf8').includes('"expiresAt"') &&
+                (
+                  JSON.parse(
+                    readFileSync(`${workspace.path}.lease`, 'utf8'),
+                  ) as WorkspaceLeaseRecord
+                ).expiresAt !== first.expiresAt,
+              5_000,
+            )
+            return yield* host(() => leaseOf(workspace.path))
+          }),
+        () => ({ _tag: 'Retained', reason: 'the run ended without publishing' }),
+      )
+
+      // A host that cannot observe this one's process has nothing else to go on: the run saying so
+      // is what keeps its workspace from being reclaimed under it.
+      expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(renewed.acquiredAt))
+    }),
+  )
+
   it.live('reclaims an unobservable lease once no run could still be holding it', () =>
     Effect.gen(function* () {
       const root = makeRoot()
@@ -825,7 +848,7 @@ describe('run workspace allocation and leases', (): void => {
             namespace: 'another kernel/pid:[4026531999]',
             boot: 'another-boot-of-another-machine',
           },
-          new Date(Date.now() - leaseLifetimeFloorMs - 60_000),
+          new Date(Date.now() - leaseValidityMs - 60_000),
         ),
       )
 

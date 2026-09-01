@@ -7,8 +7,8 @@ import {
   encodeLease,
   heldLease,
   leaseIsClaimed,
+  leaseValidityMs,
   retainedLease,
-  leaseLifetimeFloorMs,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
@@ -40,7 +40,6 @@ const lease = heldLease(
   {
     identifier: issueIdentifier('owner/repository#166'),
     runId: 7,
-    lifetimeMs: leaseLifetimeFloorMs,
   },
   'run-7-hosta',
   owner,
@@ -74,7 +73,7 @@ describe('workspace lease records', (): void => {
       acquiredAt: '2026-08-31T10:00:00.000Z',
       // A lease states when the run that took it can no longer be running, by its own workflow's
       // limits, so a host that cannot observe the owner waits out that run rather than guessing.
-      expiresAt: new Date(acquiredAt.getTime() + leaseLifetimeFloorMs).toISOString(),
+      expiresAt: new Date(acquiredAt.getTime() + leaseValidityMs).toISOString(),
       releasedAt: null,
     })
   })

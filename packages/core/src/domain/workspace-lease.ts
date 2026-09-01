@@ -55,32 +55,26 @@ export type OwnerObservation =
   | Readonly<{ _tag: 'Gone' }>
   | Readonly<{ _tag: 'Running'; startMarker: string | null }>
 
-/** The run a lease belongs to, and the longest its own workflow allows it to be running. */
+/** The run a lease belongs to. */
 export type WorkspaceRun = Readonly<{
   identifier: IssueIdentifier
   runId: number
-  /**
-   * What this run's own limits allow it: the turns it may take, the time each may take, and the
-   * silence it may fall into. A lease says so, so that a host which cannot observe the owner waits
-   * out the run the owner was configured for rather than one this reader would have allowed.
-   */
-  lifetimeMs: number
 }>
 
 /**
- * What a workflow's limits allow one run before nothing it does can still be that run.
+ * How long a lease stands without being renewed, and how often the run holding it says so.
  *
- * Turns are the whole of an agent session, and a stall is the longest silence the orchestrator will
- * sit through, so together they bound the session. The floor covers what no limit names: the host's
- * own repository work at either end, and the hooks that bracket the run.
+ * A lease cannot state how long its run will take: the limits a workflow sets are idle timeouts,
+ * restarted by every turn and every event, so nothing in a configuration bounds a run from above.
+ * What a running host can do is keep saying it is there. So a run renews its own lease while it
+ * holds it, and a host that cannot observe the owner's process treats the lease as held until the
+ * renewals stop for longer than any pause between them.
+ *
+ * The window is wide against the interval on purpose: several renewals may be missed — a slow
+ * filesystem, a busy host — before anyone else concludes the run is gone.
  */
-export const runLeaseLifetimeMs = (
-  limits: Readonly<{ maxTurns: number; turnTimeoutMs: number; stallTimeoutMs: number }>,
-): number =>
-  Math.max(limits.maxTurns * limits.turnTimeoutMs + limits.stallTimeoutMs, leaseLifetimeFloorMs)
-
-/** The shortest a lease is ever written for, whatever a workflow's own limits are. */
-export const leaseLifetimeFloorMs = 24 * 60 * 60 * 1_000
+export const leaseRenewalIntervalMs = 5 * 60 * 1_000
+export const leaseValidityMs = 60 * 60 * 1_000
 
 /**
  * Why a released workspace was kept. A run that published its work needs nothing from the
@@ -139,8 +133,14 @@ export const heldLease = (
   status: 'held',
   reason: null,
   acquiredAt: acquiredAt.toISOString(),
-  expiresAt: new Date(acquiredAt.getTime() + run.lifetimeMs).toISOString(),
+  expiresAt: new Date(acquiredAt.getTime() + leaseValidityMs).toISOString(),
   releasedAt: null,
+})
+
+/** The same lease, said again by the run still holding it: it stands for another window. */
+export const renewedLease = (lease: WorkspaceLeaseRecord, at: Date): WorkspaceLeaseRecord => ({
+  ...lease,
+  expiresAt: new Date(at.getTime() + leaseValidityMs).toISOString(),
 })
 
 /** The same lease, released and kept: the run ended without publishing what the directory holds. */
@@ -204,8 +204,9 @@ export const decodeLease = (
  * A process id means nothing outside the namespace that issued it, and nothing at all on another
  * machine, so an owner the host cannot place — another container, another kernel, or a platform
  * that names neither — stays claimed rather than being probed against whatever process happens to
- * carry that id here. What reclaims those is the lease's own expiry: the run said how long its
- * workflow allowed it to be running, and past that, whatever holds the lease is not that run.
+ * carry that id here. What reclaims those is renewal: a run says its lease still stands for as long
+ * as it holds it, and one that has not been said again in far longer than the interval between
+ * renewals belongs to a host that is no longer there to say it.
  *
  * Within one namespace, a process id alone still does not identify a process: a host restarted into
  * the same id, the ordinary case for a container's PID 1, would otherwise keep its predecessor's

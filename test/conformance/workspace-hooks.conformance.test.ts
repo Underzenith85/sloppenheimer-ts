@@ -10,7 +10,6 @@ import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 import { hostFileSystem } from '../harness/filesystem.js'
-import { leaseLifetimeFloorMs } from '@sloppenheimer/core/domain/workspace-lease.js'
 
 /**
  * Built against the host filesystem, the way the composition root builds it. Returned as an
@@ -53,7 +52,7 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
       // The hooks a run's workspace brackets are exercised inside the lease that holds it, which
       // is the only way the port hands one out.
       const rejected = yield* failed.withLeasedWorkspace(
-        { identifier, runId: 1, lifetimeMs: leaseLifetimeFloorMs },
+        { identifier, runId: 1 },
         (workspace) => Effect.flip(failed.beforeRun(workspace)),
         () => ({ _tag: 'Retained', reason: 'before_run failed' }),
       )
@@ -61,7 +60,7 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
 
       const timedOut = yield* workspaceManager(root, hooks({ beforeRun: 'sleep 1', timeoutMs: 20 }))
       const expired = yield* timedOut.withLeasedWorkspace(
-        { identifier, runId: 2, lifetimeMs: leaseLifetimeFloorMs },
+        { identifier, runId: 2 },
         (workspace) => Effect.flip(timedOut.beforeRun(workspace)),
         () => ({ _tag: 'Retained', reason: 'before_run timed out' }),
       )
@@ -80,7 +79,7 @@ describe('Core Conformance workspace hook lifecycle', (): void => {
       // The run releases its lease when its use ends: an issue's workspaces are removable only
       // once no live run holds one.
       const workspace = yield* manager.withLeasedWorkspace(
-        { identifier, runId: 1, lifetimeMs: leaseLifetimeFloorMs },
+        { identifier, runId: 1 },
         (leased) => Effect.as(manager.afterRun(leased), leased),
         () => ({ _tag: 'Retained', reason: 'run failed' }),
       )
