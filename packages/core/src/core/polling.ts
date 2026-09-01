@@ -45,11 +45,17 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
         case 'PostflightStarted': {
           const startedAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>
-            Transitions.updateDetail(
-              Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
-              event.issueId,
-              (record) => recordPostflightStarted(record, startedAt),
-            ),
+            // Both or neither, and neither when the run is gone. A cancellation can reach the loop
+            // while the worker is still waiting to be let past, and the worker it belonged to is
+            // interrupted rather than publishing — so a detail moved to `publishing` here would sit
+            // in a phase no settlement is ever coming to leave.
+            Transitions.postflightTakeoverApplies(current, event.issueId, event.runId)
+              ? Transitions.updateDetail(
+                  Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
+                  event.issueId,
+                  (record) => recordPostflightStarted(record, startedAt),
+                )
+              : current,
           )
           // Only now may the publication begin: the worker is waiting on this, and what it is
           // waiting for is the state, not the message.
