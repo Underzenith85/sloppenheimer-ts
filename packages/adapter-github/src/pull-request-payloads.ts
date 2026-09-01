@@ -31,6 +31,8 @@ const reviewComment = Schema.Struct({
 const reviewThread = Schema.Struct({
   id: Schema.String,
   isResolved: Schema.Boolean,
+  /** GitHub's own judgement that the thread's lines are gone from the current head. */
+  isOutdated: Schema.Boolean,
   comments: Schema.Struct({ nodes: Schema.Array(Schema.Unknown) }),
 })
 const reviewThreads = Schema.Array(reviewThread)
@@ -113,6 +115,7 @@ export const decodeThreads = (
         return {
           id: thread.id,
           resolved: thread.isResolved,
+          outdated: thread.isOutdated,
           body: comment !== null && typeof comment.body === 'string' ? comment.body : '',
           url: comment !== null && typeof comment.url === 'string' ? comment.url : null,
           commentHeadSha:
@@ -122,6 +125,55 @@ export const decodeThreads = (
         }
       }),
     )
+  })
+
+const threadResolution = Schema.Struct({
+  data: Schema.optional(Schema.Unknown),
+  errors: Schema.optional(Schema.Unknown),
+})
+const resolvedThread = Schema.Struct({
+  resolveReviewThread: Schema.Struct({ thread: Schema.Struct({ isResolved: Schema.Boolean }) }),
+})
+const graphQlErrors = Schema.Array(Schema.Struct({ message: Schema.optional(Schema.Unknown) }))
+
+const threadResolutionFailed = (threadId: string, detail: string): TrackerError =>
+  new TrackerError({
+    category: 'tracker_status',
+    message: `GitHub did not resolve review thread ${threadId}: ${detail}`,
+    retryable: false,
+  })
+
+/**
+ * Reads the outcome of one `resolveReviewThread` mutation.
+ *
+ * GraphQL answers a refused mutation with HTTP 200 and an `errors` array, so the transport keeping
+ * quiet is not the thread saying it is resolved. A discarded result would let a rejected thread id
+ * or a token without the permission be recorded as a resolution, leaving the conversation open and
+ * the handoff deciding the same thing every poll.
+ */
+export const decodeThreadResolution = (
+  threadId: string,
+  value: unknown,
+): Effect.Effect<void, TrackerError> =>
+  Effect.gen(function* () {
+    const response = yield* decode(
+      threadResolution,
+      value,
+      'GitHub review-thread resolution response is invalid',
+    )
+    const errors = Schema.decodeUnknownOption(graphQlErrors)(response.errors)
+    if (errors._tag === 'Some' && errors.value.length > 0) {
+      const reported = errors.value
+        .map((error) => (typeof error.message === 'string' ? error.message : 'unspecified error'))
+        .join('; ')
+      return yield* Effect.fail(threadResolutionFailed(threadId, reported))
+    }
+    const resolved = Schema.decodeUnknownOption(resolvedThread)(response.data)
+    if (resolved._tag === 'None' || !resolved.value.resolveReviewThread.thread.isResolved) {
+      return yield* Effect.fail(
+        threadResolutionFailed(threadId, 'the mutation reported no resolved thread'),
+      )
+    }
   })
 
 export const decodeCodexReview = (
