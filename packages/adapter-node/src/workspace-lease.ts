@@ -17,10 +17,14 @@ import {
   decodeLease,
   encodeLease,
   leaseIsClaimed,
+  leaseIsOurs,
+  renewedLease,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
+  type WorkspaceRun,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
+import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 
 /**
  * The host half of the workspace lease: who this process is, whether a lease another process wrote
@@ -347,4 +351,109 @@ export const readLease = (
         onSome: (document) => Effect.map(decodeLease(path, document), Option.some),
       }),
     ),
+  )
+
+/** A lease record cleanup has moved aside, and where it moved it to. */
+export type TakenLease = Readonly<{ lease: WorkspaceLeaseRecord; path: string }>
+
+/**
+ * Takes a lease record out of the issue directory and hands back what it actually took.
+ *
+ * Deciding that a workspace is free and then removing it are two steps, and between them the run
+ * that holds it may say its lease still stands — after which the removal would be running against a
+ * record that no longer says what it was decided on. So the record is moved aside first, in one
+ * rename, which is atomic: what comes back is what was there rather than what the caller read a
+ * moment ago, and once it is gone there is no record at that name for a renewal to find. A caller
+ * that turns out to have taken a lease that still stands puts it back and leaves the workspace be.
+ */
+export const takeLease = (
+  fileSystem: FileSystem.FileSystem,
+  leasePath: string,
+  stagingPath: string,
+): Effect.Effect<Option.Option<TakenLease>, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (!(yield* realDirectoryExists(fileSystem, stagingPath))) {
+      yield* fileSystem.makeDirectory(stagingPath, { recursive: true })
+    }
+    const taken = stagedLeasePath(stagingPath)
+    const moved = yield* fileSystem.rename(leasePath, taken).pipe(
+      Effect.as(true),
+      Effect.catchIf(
+        (error) => error._tag === 'SystemError' && error.reason === 'NotFound',
+        () => Effect.succeed(false),
+      ),
+    )
+    if (!moved) {
+      return Option.none<TakenLease>()
+    }
+    // Whatever was taken is the caller's to account for, so a record that cannot be read goes back
+    // where it came from rather than staying in staging under a name nothing refers to.
+    const record = yield* readLease(fileSystem, taken).pipe(
+      Effect.tapError(() => Effect.ignore(fileSystem.rename(taken, leasePath))),
+    )
+    return Option.map(record, (lease) => ({ lease, path: taken }))
+  })
+
+/** Puts a taken record back, for a run that said its lease still stands while cleanup decided. */
+export const returnLease = (
+  fileSystem: FileSystem.FileSystem,
+  taken: TakenLease,
+  leasePath: string,
+): Effect.Effect<void, PlatformError> => fileSystem.rename(taken.path, leasePath)
+
+/**
+ * Says once that a lease still stands, and answers whether it is still the run's to say.
+ *
+ * A host that cannot observe this one's process has nothing else to go on: renewal is what tells it
+ * the run is still there. A filesystem that would not answer is not a lease lost — the record it
+ * could not write is still standing for the rest of its window, and the next renewal may well land.
+ */
+const sayLeaseStands = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  owner: WorkspaceOwner,
+): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const now = yield* currentInstant
+    const existing = yield* readLease(fileSystem, paths.leasePath)
+    const ours = Option.filter(existing, (lease) =>
+      leaseIsOurs(lease, run, paths.runKey, owner.hostId, now),
+    )
+    if (Option.isNone(ours)) {
+      return false
+    }
+    yield* writeLease(fileSystem, paths, renewedLease(ours.value, now))
+    // The record was still standing when it was read, but writing it took time of its own. A write
+    // that landed after the old record had expired is one cleanup may already have acted on, so it
+    // counts as a lease lost rather than a lease kept.
+    return (yield* currentInstant).getTime() < Date.parse(ours.value.expiresAt)
+    // A filesystem that failed to answer says nothing about who holds the lease; only a record that
+    // is gone, released, taken by another run, or expired does.
+  }).pipe(Effect.catchAll(() => Effect.succeed(true)))
+
+const leaseLost = (paths: RunWorkspacePaths): WorkspaceError =>
+  new WorkspaceError({
+    category: 'lease_conflict',
+    message: `workspace lease is no longer held by this run: ${paths.leasePath}`,
+  })
+
+/**
+ * Says a lease still stands, for as long as the run holds it — and fails when it no longer does.
+ *
+ * The failure is the point: a lease this run has lost is one another host may already be taking the
+ * workspace back on, so the run that lost it stops rather than working on in a directory that is no
+ * longer its own.
+ */
+export const renewLease = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  owner: WorkspaceOwner,
+  intervalMs: number,
+): Effect.Effect<never, WorkspaceError> =>
+  sayLeaseStands(fileSystem, paths, run, owner).pipe(
+    Effect.delay(intervalMs),
+    Effect.flatMap((stands) => (stands ? Effect.void : Effect.fail(leaseLost(paths)))),
+    Effect.forever,
   )

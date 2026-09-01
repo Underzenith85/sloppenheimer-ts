@@ -641,7 +641,11 @@ carries that id here. What reclaims those is renewal: a run says its lease still
 minutes for as long as it holds it, and a lease that has not been said again in an hour belongs to a
 host that is no longer there to say it. A run starts saying so as soon as it takes the lease, not
 when its own work begins: the `after_create` hook is the caller's own command and may run for longer
-than a lease stands. Nothing in a workflow bounds a run from above — its timeouts are idle ones,
+than a lease stands. It is also what stops the run: a lease that is gone, released, taken by another
+run, or past its own expiry is one another host may already be reclaiming, so the run that lost it
+ends rather than working on in a directory that is no longer its own. Cleanup meets it halfway, by
+moving a record it has decided is free out of the way in one rename before it runs a `before_remove`
+hook or removes anything — and putting it back if what it took turns out to still stand. Nothing in a workflow bounds a run from above — its timeouts are idle ones,
 restarted by every turn and every event — so a running host saying so is the only honest signal there
 is.
 

@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Cause, Effect, Exit, Fiber, Option } from 'effect'
+import { Cause, Effect, Exit, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -17,7 +17,6 @@ import {
 import {
   heldLease,
   leaseRenewalIntervalMs,
-  renewedLease,
   retainedLease,
   type WorkspaceOwner,
   type WorkspaceRelease,
@@ -35,7 +34,10 @@ import {
   publishClaimedLease,
   pruneStagedLeases,
   readLease,
+  renewLease,
+  returnLease,
   stagedLeasePath,
+  takeLease,
   writeLease,
   writeStagedLease,
 } from './workspace-lease.js'
@@ -140,6 +142,41 @@ const removeRunWorkspace = (
   })
 
 /**
+ * Removes one run workspace that no live owner holds, unless taking its record shows otherwise.
+ *
+ * Reading a lease and removing what it names are two steps, and a `before_remove` hook stands
+ * between them: an owner this host cannot observe could say its lease still stands in that time,
+ * and the removal would then be taking a workspace back off a live run. So the record is taken out
+ * of the way before anything destructive runs, and the removal proceeds only if what was taken is
+ * still the record that was decided on. A lease that stands again goes back where it was, and the
+ * run keeps its workspace.
+ */
+const removeFreeRunWorkspace = (
+  fileSystem: FileSystem.FileSystem,
+  hooks: HooksConfig,
+  runPath: string,
+  stagingPath: string,
+): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    const leasePath = leasePathFor(runPath)
+    const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
+    const now = yield* currentInstant
+    if (Option.exists(taken, (record) => leaseIsLive(record.lease, now))) {
+      yield* Option.match(taken, {
+        onNone: () => Effect.void,
+        onSome: (record) => returnLease(fileSystem, record, leasePath),
+      })
+      return false
+    }
+    yield* removeRunWorkspace(fileSystem, hooks, runPath)
+    yield* Option.match(taken, {
+      onNone: () => Effect.void,
+      onSome: (record) => discardStagedLease(fileSystem, record.path),
+    })
+    return true
+  })
+
+/**
  * Every run workspace of one issue that no live owner holds, removed; the run keys that were left
  * alone are returned, because an issue directory still holding one of them cannot go with them.
  */
@@ -147,6 +184,7 @@ const removeFreeRunWorkspaces = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   issuePath: string,
+  stagingPath: string,
 ): Effect.Effect<readonly string[], WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const entries = yield* fileSystem.readDirectory(issuePath)
@@ -159,7 +197,9 @@ const removeFreeRunWorkspaces = (
         held.push(key)
         continue
       }
-      yield* removeRunWorkspace(fileSystem, hooks, runPath)
+      if (!(yield* removeFreeRunWorkspace(fileSystem, hooks, runPath, stagingPath))) {
+        held.push(key)
+      }
     }
     return held
   })
@@ -276,7 +316,12 @@ const removeIssueWorkspaces = (
     if (!(yield* realDirectoryExists(fileSystem, issuePath))) {
       return
     }
-    const held = yield* removeFreeRunWorkspaces(fileSystem, hooks, issuePath)
+    const held = yield* removeFreeRunWorkspaces(
+      fileSystem,
+      hooks,
+      issuePath,
+      leaseStagingPath(root),
+    )
     if (held.length > 0) {
       yield* logWarning('leased workspaces kept during cleanup', {
         action: 'workspace_cleanup',
@@ -310,27 +355,6 @@ const issueHoldsWorkspace = (
   }).pipe(reportedAs('inspect_failed', 'failed to inspect workspace'))
 
 /**
- * Says a lease still stands, for as long as the run holds it.
- *
- * A host that cannot observe this one's process has nothing else to go on: renewal is what tells it
- * the run is still there. A renewal that fails is not the run's problem — the record it could not
- * write is still valid for the rest of its window, and the next one may well land.
- */
-const renewLease = (
-  fileSystem: FileSystem.FileSystem,
-  paths: RunWorkspacePaths,
-  interval: LeaseRenewal,
-): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const now = yield* currentInstant
-    const existing = yield* readLease(fileSystem, paths.leasePath)
-    yield* Option.match(existing, {
-      onNone: () => Effect.void,
-      onSome: (lease) => writeLease(fileSystem, paths, renewedLease(lease, now)),
-    })
-  }).pipe(Effect.ignore, Effect.delay(interval.intervalMs), Effect.forever)
-
-/**
  * One run's whole hold on a workspace: the claim, the directory it names, and the release that
  * hands it back however the run ended.
  *
@@ -349,7 +373,7 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
   renewal: LeaseRenewal,
   run: WorkspaceRun,
   use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
-  disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
+  disposition: (exit: Exit.Exit<Value, Failure | WorkspaceError>) => WorkspaceRelease,
 ): Effect.Effect<Value, Failure | WorkspaceError, Requirements> =>
   Effect.uninterruptibleMask((restore) =>
     Effect.gen(function* () {
@@ -371,44 +395,34 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
         reportedAs('create_failed', 'failed to create workspace'),
       )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
-      // The renewal starts with the claim rather than with the use, because provisioning is not
-      // bounded either: an `after_create` hook is the caller's own command, and one that runs for
-      // longer than a lease stands must not be concluded gone by a host that cannot see this one's
-      // process. It is forked under the mask so no interruption can land between the published
-      // lease and the finalizers that hand it back, and forked interruptible so that stopping it
-      // is prompt.
-      const renewing = yield* Effect.fork(
-        Effect.interruptible(renewLease(fileSystem, paths, renewal)),
-      )
-      // Every ending stops the renewal before it rewrites the record, so a renewal in flight can
-      // never say `held` again over a release.
-      const stopRenewing = Fiber.interrupt(renewing)
+      // Both of the steps that follow run against the renewal rather than after it: provisioning is
+      // no more bounded than the run is — an `after_create` hook is the caller's own command — and
+      // neither may go on under a lease this run has stopped holding. Racing is what orders them:
+      // the work ends and the renewal is interrupted, or the renewal fails and the work is
+      // interrupted, and either way both have finished before the record is rewritten below.
+      const keepingLease = renewLease(fileSystem, paths, run, owner, renewal.intervalMs)
       // From here the lease is this run's own. Provisioning that does not finish keeps the
       // workspace under the reason it failed for, rather than leaving a lease nobody holds.
-      yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
+      yield* restore(
+        Effect.raceFirst(provisionRunWorkspace(fileSystem, hooks, workspace), keepingLease),
+      ).pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit)
             ? Effect.void
-            : Effect.zipRight(
-                stopRenewing,
-                Effect.ignore(
-                  retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
-                ),
+            : Effect.ignore(
+                retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
               ),
         ),
       )
-      return yield* restore(use(workspace)).pipe(
+      return yield* restore(Effect.raceFirst(use(workspace), keepingLease)).pipe(
         Effect.onExit((exit) =>
-          Effect.zipRight(
-            stopRenewing,
-            releaseRunWorkspace(
-              fileSystem,
-              hooks,
-              root,
-              owner,
-              { run, workspace },
-              disposition(exit),
-            ),
+          releaseRunWorkspace(
+            fileSystem,
+            hooks,
+            root,
+            owner,
+            { run, workspace },
+            disposition(exit),
           ),
         ),
       )

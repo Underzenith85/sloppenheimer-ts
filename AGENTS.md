@@ -592,8 +592,13 @@ lifecycle. This section is the architecture record for it; do not create a separ
   here. Those are reclaimed by renewal instead: a run says its lease still stands every few minutes
   for as long as it holds it, and one not said again in an hour belongs to a host that is gone. It
   starts renewing with the claim rather than with its own work, because an `after_create` hook is
-  the caller's command and is not bounded either, and it stops renewing before either ending
-  rewrites the record. Do not replace renewal with a lifetime computed from the workflow's limits: `turn_timeout_ms` and
+  the caller's command and is not bounded either, and both provisioning and the run itself are
+  raced against the renewal: a run that has lost its lease — the record gone, released, another
+  run's, or past its own expiry — stops rather than working on in a directory that is no longer its
+  own, and a run that ends stops the renewal before the record is rewritten. Cleanup takes the
+  other side of that: it moves a record it has decided is free out of the way in one rename before
+  anything destructive runs, so a `before_remove` hook never runs against a lease that could still
+  be said again, and a record that turns out to still stand goes back where it was. Do not replace renewal with a lifetime computed from the workflow's limits: `turn_timeout_ms` and
   `stall_timeout_ms` are idle timeouts, restarted by every turn and every event, so nothing in a
   configuration bounds a run from above. A lease is released on success, failure, cancellation and
   shutdown alike, and it outlives the host that wrote it, so a restart and a second host reading the

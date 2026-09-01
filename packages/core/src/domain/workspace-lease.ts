@@ -192,6 +192,29 @@ export const decodeLease = (
 }
 
 /**
+ * Whether a lease is still the run's own to say again.
+ *
+ * A run renews the record it holds, never a name: the record has to be the one it published, still
+ * held, and still standing. A record that is gone, released, replaced by another run's, or already
+ * past its own expiry is one that another host may already be acting on — expiry is exactly what
+ * lets it take an unobservable owner's workspace — so the run treats the lease as lost rather than
+ * writing it back underneath whoever took it.
+ */
+export const leaseIsOurs = (
+  lease: WorkspaceLeaseRecord,
+  run: WorkspaceRun,
+  runKey: string,
+  hostId: string,
+  now: Date,
+): boolean =>
+  lease.status === 'held' &&
+  lease.runKey === runKey &&
+  lease.runId === run.runId &&
+  lease.identifier === run.identifier &&
+  lease.owner.hostId === hostId &&
+  now.getTime() < Date.parse(lease.expiresAt)
+
+/**
  * Whether a lease still belongs to a live owner, and so whether the workspace it holds may be
  * entered or removed by anyone else.
  *

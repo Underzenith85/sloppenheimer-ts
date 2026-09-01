@@ -1,6 +1,7 @@
 import { Effect, Exit } from 'effect'
 
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
+import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 
@@ -53,7 +54,7 @@ export class FakeWorkspaceProcess implements WorkspaceManagerPort {
   withLeasedWorkspace<Value, Failure, Requirements>(
     run: WorkspaceRun,
     use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
-    disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
+    disposition: (exit: Exit.Exit<Value, Failure | WorkspaceError>) => WorkspaceRelease,
   ): Effect.Effect<Value, Failure, Requirements> {
     return Effect.acquireUseRelease(
       Effect.sync(() => {

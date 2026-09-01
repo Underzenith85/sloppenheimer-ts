@@ -14,7 +14,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { it } from '@effect/vitest'
-import { Clock, Effect, Either, Fiber } from 'effect'
+import { Cause, Clock, Effect, Either, Exit, Fiber, Option } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -862,6 +862,61 @@ describe('run workspace allocation and leases', (): void => {
         Date.parse(lease.acquiredAt) + leaseValidityMs,
       )
       expect(lease.status).toBe('held')
+    }),
+  )
+
+  it.live('takes the lease record before anything runs against the workspace', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      // The hook lists the issue directory it is being removed from, into the root, where cleanup
+      // does not reach. Deciding a workspace is free and removing it are two steps, and this is the
+      // one in between: a record still sitting there is a record a run could say again.
+      const listing = join(root, 'issue-entries')
+      const manager = yield* workspaceManager(
+        root,
+        hooks({ beforeRemove: `ls .. > ${JSON.stringify(listing)}` }),
+      )
+      const workspace = yield* retained(manager, 'GH-186')
+
+      yield* manager.remove(issueIdentifier('GH-186'))
+
+      const entries = readFileSync(listing, 'utf8').split('\n').filter(Boolean)
+      expect(entries).toContain(workspace.key)
+      expect(entries).not.toContain(`${workspace.key}.lease`)
+      expect(existsSync(workspace.path)).toBe(false)
+    }),
+  )
+
+  it.live('stops a run whose lease has been taken out from under it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* makeWorkspaceManager(root, hooks(), hostOwner, {
+        intervalMs: 50,
+      }).pipe(Effect.provide(hostFileSystem))
+      let taken = ''
+
+      const outcome = yield* Effect.exit(
+        manager.withLeasedWorkspace(
+          { identifier: issueIdentifier('GH-187'), runId: 1 },
+          (workspace) =>
+            Effect.gen(function* () {
+              taken = workspace.path
+              // Exactly what cleanup does to a workspace it has decided is free. The run would
+              // otherwise work on in a directory another host is already taking back.
+              yield* host(() => rm(`${workspace.path}.lease`))
+              yield* Effect.sleep(30_000)
+            }),
+          () => ({ _tag: 'Retained', reason: 'the run ended without publishing' }),
+        ),
+      )
+
+      expect(Exit.isFailure(outcome)).toBe(true)
+      const failure = Exit.isFailure(outcome)
+        ? Cause.failureOption(outcome.cause)
+        : Option.none<WorkspaceError>()
+      expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
+      // The run stops, and what it had done is kept under the reason the release names.
+      expect((yield* host(() => leaseOf(taken))).status).toBe('retained')
     }),
   )
 
