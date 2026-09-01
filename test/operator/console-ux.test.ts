@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { HTMLInputElement, HTMLSelectElement } from 'happy-dom'
 
+import { issueId } from '@sloppenheimer/core/domain/domain.js'
 import { accessibilityFindings } from '../harness/accessibility.js'
 import {
   bootConsole,
@@ -157,6 +158,45 @@ describe('operator console information architecture', (): void => {
     expect(chipsOf(readyTopIdentifier)).toContain('Not eligible')
     expect(chipsOf(readyMiddleIdentifier)).toContain('Paused')
     expect(chipsOf(runningIdentifier)).toContain('Eligible')
+  })
+
+  it('reports work that reached no remote as delivering, with the failure holding it', async (): Promise<void> => {
+    const state = consoleState()
+    const console_ = await boot({
+      state: {
+        ...state,
+        counts: { ...state.counts, delivering: 1 },
+        delivering: [
+          {
+            issueId: issueId('50'),
+            identifier: readyTopIdentifier,
+            title: 'Publish the retained change',
+            url: null,
+            branchName: 'sloppenheimer/issue-50',
+            attempt: 1,
+            dueAt: new Date(Date.now() + 20_000).toISOString(),
+            category: 'authentication_failed',
+            reason: 'the host credential was rejected',
+            changedFileCount: 4,
+            repairRun: false,
+            observedAt: new Date(Date.now() - 5_000).toISOString(),
+            workerHost: 'local',
+            detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2350',
+          },
+        ],
+      },
+    })
+
+    // In progress rather than needing attention: the change exists and the host is still trying to
+    // deliver it. What the operator is told is which of the two is outstanding.
+    expect(identifiersIn(console_, '#progress-list')).toContain(readyTopIdentifier)
+    const card = console_.card(readyTopIdentifier)
+    expect([...card.querySelectorAll('.chip')].map((chip) => chip.textContent)).toContain(
+      'Delivering',
+    )
+    expect(card.textContent).toContain('sloppenheimer/issue-50')
+    expect(card.textContent).toContain('authentication_failed')
+    expect(card.textContent).toContain('the host credential was rejected')
   })
 
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {

@@ -2,7 +2,7 @@ import { Option } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import { classifyPullRequest, type PullRequestObservation } from '../domain/handoff.js'
-import type { HandoffEntry, RepairEntry } from './state.js'
+import type { HandoffEntry, RepairEntry, RepairPublication } from './state.js'
 
 /** An observation of a pull request that is still open, and so has a head to reason about. */
 type OpenPullRequest = Extract<PullRequestObservation, Readonly<{ state: 'open' }>>
@@ -134,6 +134,29 @@ const attributeRepair = (
     // repair, not a completed no-op. Drop the baseline and let the normal repair path retry; no
     // head was observed, so the budget is untouched.
     return released
+  }
+  if (repair.publication === 'delivery_failed') {
+    // The turn produced work the host could not publish. An unchanged head says nothing about what
+    // the agent achieved here, so no verdict is reached on it: the retained delivery owns the work,
+    // and the repair keeps its identity until that delivery settles it one way or the other.
+    return decided({
+      ...handoff,
+      state: 'delivery_failed',
+      headSha: repairedHeadSha,
+      reason:
+        'Repair agent produced changes that have not reached the pull request; delivery is being retried.',
+    })
+  }
+  if (repair.publication === 'published') {
+    // The host pushed a new head and the provider is still reporting the old one. Waiting for the
+    // observation to catch up costs a poll; calling this a repair that changed nothing would spend
+    // an intervention on a race.
+    return decided({
+      ...handoff,
+      state: 'awaiting_checks',
+      headSha: repairedHeadSha,
+      reason: 'Published the repair; waiting for the pull request to report the new head.',
+    })
   }
   const unchanged = classifyPullRequest(observation)
   if (unchanged.state === 'repair_needed') {
@@ -386,7 +409,13 @@ export const afterRepairDispatched = (
   reason: string,
 ): HandoffEntry => ({
   ...handoff,
-  repair: Option.some({ issue, startedHeadSha: headSha, inFlight: true, workerStarted: started }),
+  repair: Option.some({
+    issue,
+    startedHeadSha: headSha,
+    inFlight: true,
+    workerStarted: started,
+    publication: 'pending',
+  }),
   repairObservedHeadShas: handoff.repairObservedHeadShas.includes(headSha)
     ? handoff.repairObservedHeadShas
     : [...handoff.repairObservedHeadShas, headSha],
@@ -408,6 +437,21 @@ export const settleRepair = (handoff: HandoffEntry): HandoffEntry =>
       ...handoff,
       repair: repair.workerStarted ? Option.some({ ...repair, inFlight: false }) : Option.none(),
     }),
+  })
+
+/**
+ * Records what the host's postflight made of a repair's workspace.
+ *
+ * A handoff with no repair in flight is left alone: the verdict belongs to the repair that
+ * produced it, and a normal continuation turn's publication is not one.
+ */
+export const notePublication = (
+  handoff: HandoffEntry,
+  publication: RepairPublication,
+): HandoffEntry =>
+  Option.match(handoff.repair, {
+    onNone: () => handoff,
+    onSome: (repair) => ({ ...handoff, repair: Option.some({ ...repair, publication }) }),
   })
 
 /** The repair is over: whatever it was carrying goes with it. */

@@ -9,6 +9,7 @@ import type {
   AgentRunnerPort,
   CodeReviewCell,
   CodeReviewPort,
+  PreparedRepository,
   SourceControlCell,
   SourceControlPort,
   TrackerCell,
@@ -18,6 +19,7 @@ import type {
   WorkspaceManagerPort,
 } from '../ports/index.js'
 import type { AgentDetailContext, AgentDetailRecord, AgentEvent } from '../telemetry.js'
+import type { DeliveryFailure } from './postflight.js'
 
 /**
  * The scheduler's whole world, as one immutable value.
@@ -38,6 +40,7 @@ import type { AgentDetailContext, AgentDetailRecord, AgentEvent } from '../telem
 export type RefreshOperation =
   | 'credential_revalidation'
   | 'handoff_recovery'
+  | 'delivery_recovery'
   | 'workflow_reload'
   | 'handoff_reconciliation'
   | 'issue_reconciliation'
@@ -49,6 +52,11 @@ export type RuntimeState = Readonly<{
   /** Issues this orchestrator has taken responsibility for, in any phase. */
   claimed: ReadonlySet<IssueId>
   retries: ReadonlyMap<IssueId, RetryEntry>
+  /**
+   * Work an agent produced that is not on the remote yet, keyed by issue. A delivery is a claim
+   * held without a running worker: the agent is finished with, and only the publication is owed.
+   */
+  deliveries: ReadonlyMap<IssueId, DeliveryEntry>
   /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
   pausedIssueNumbers: ReadonlySet<number>
@@ -102,6 +110,12 @@ export type RuntimeState = Readonly<{
   workflowReloadError: WorkflowReloadError | null
 
   startupRecoveryFinished: boolean
+  /**
+   * Whether this process has looked for work a previous one left unpublished. It runs once, after
+   * handoff recovery, because it needs the restored pull requests to know which branch a retained
+   * worktree belongs to.
+   */
+  deliveryRecoveryFinished: boolean
   storeReadFailed: boolean
   handoffStoreError: HandoffStoreError | null
   recoveryCounts: HandoffRecoveryCounts
@@ -182,6 +196,34 @@ export type RetryEntry = Readonly<{
 }>
 
 /**
+ * One agent's work waiting to reach the remote, and the failure that left it here.
+ *
+ * The preparation is retained rather than rebuilt, because it is what makes the retry a
+ * publication rather than a second agent run: the same worktree, the same baseline, and the same
+ * expected remote head the turn was launched against.
+ */
+export type DeliveryEntry = Readonly<{
+  issue: Issue
+  execution: ExecutionSnapshot
+  prepared: PreparedRepository
+  /** How many publication attempts have failed for this retained work. */
+  attempt: number
+  /**
+   * The worker attempt that produced the work. Carried so that giving up on the delivery continues
+   * the agent's own attempt numbering rather than starting it over.
+   */
+  workerAttempt: number | null
+  dueAt: number
+  failure: DeliveryFailure
+  /** Paths the inspection found, or `null` when the inspection itself is what failed. */
+  changedFileCount: number | null
+  /** Whether the run that produced this work was repairing a pull request. */
+  repairRun: boolean
+  observedAt: Date
+  fiber: Fiber.Fiber<void>
+}>
+
+/**
  * A repair that owns a pull request head, from the decision to repair until the head it produced
  * has been attributed. It outlives a refused dispatch and the retry that follows one, so the
  * retry renders the same repair rather than the bare tracker issue.
@@ -195,7 +237,21 @@ export type RepairEntry = Readonly<{
   inFlight: boolean
   /** Whether a worker actually started, as opposed to a dispatch refused before launch. */
   workerStarted: boolean
+  /**
+   * What the host made of this repair's workspace once its turn settled. An unchanged pull-request
+   * head means the repair achieved nothing only when this says the worktree was clean; a delivery
+   * that failed left work behind, and reading that as "completed without changing the head" is the
+   * defect this field exists to make impossible.
+   */
+  publication: RepairPublication
 }>
+
+/**
+ * The postflight verdict a repair carries, as the handoff state machine needs it.
+ *
+ * `pending` is a repair whose turn has not settled yet — including one dispatched but not started.
+ */
+export type RepairPublication = 'pending' | 'published' | 'no_changes' | 'delivery_failed'
 
 /**
  * What a cancelled run does with the repair identity it was carrying.
@@ -343,6 +399,7 @@ export const initialState = (
   // A persisted handoff is a claim this orchestrator already holds, before its issue is hydrated.
   claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
+  deliveries: new Map(),
   completed: new Map(),
   pausedIssueNumbers: new Set(),
   handoffs: new Map(),
@@ -366,6 +423,7 @@ export const initialState = (
   lastKnownGood,
   workflowReloadError: null,
   startupRecoveryFinished: false,
+  deliveryRecoveryFinished: false,
   storeReadFailed: restored.storeReadFailed,
   handoffStoreError: restored.storeError,
   recoveryCounts: {

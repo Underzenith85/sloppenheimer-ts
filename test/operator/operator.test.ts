@@ -104,7 +104,7 @@ const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): Orchestrat
   },
   pollingIntervalMs: 30_000,
   maxConcurrentAgents: 1,
-  counts: { running: 0, retrying: 0, completed: 0 },
+  counts: { running: 0, retrying: 0, delivering: 0, completed: 0 },
   completed: [],
   saturatedStates: [],
   inspectableAgents: [],
@@ -112,6 +112,7 @@ const orchestratorSnapshot = (pausedIssueNumbers: readonly number[]): Orchestrat
   handoffs: [],
   running: [],
   retrying: [],
+  delivering: [],
   totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
   rateLimits: null,
 })

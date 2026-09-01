@@ -44,12 +44,16 @@ export type AgentPhase =
   | 'editing'
   | 'awaiting_model'
   | 'retrying'
+  /** The turn is over and the host is inspecting or publishing what it left behind. */
+  | 'publishing'
   | 'handing_off'
   | 'cancelled'
   | 'stalled'
 
 export type HandoffStep =
   | 'local_branch'
+  /** The host's own reading of the worktree, and the publication it decided on. */
+  | 'publication'
   | 'remote_branch'
   | 'pull_request'
   | 'dispatch_label'
@@ -197,8 +201,31 @@ export type AgentWorkspaceSummary = Readonly<{
   pathsTruncated: boolean
 }>
 
+/**
+ * What the host made of this agent's workspace after its turn.
+ *
+ * Separate from the pull-request fields below it, because they answer different questions: this
+ * says whether the work exists and whether it reached the remote, and those say what happened to
+ * it once it did. An operator reading only the second could not tell a clean worktree from a push
+ * that failed — which is the confusion this section exists to end.
+ */
+export type AgentPublicationDetail = Readonly<{
+  status: 'not_performed' | 'pending' | 'published' | 'no_changes' | 'failed'
+  branch: string | null
+  /** The commit the publication produced, once one exists. */
+  headSha: string | null
+  /** The commit the turn started from, as the preparation recorded it. */
+  baselineSha: string | null
+  /** The typed source-control category of a failure, so a reason is actionable. */
+  category: string | null
+  /** How many delivery attempts have failed for this work. */
+  attempts: number
+  reason: string | null
+}>
+
 export type AgentHandoffDetail = Readonly<{
   expectedBranch: string | null
+  publication: AgentPublicationDetail
   remoteBranch: Readonly<{ status: HandoffStepStatus; name: string | null }>
   pullRequest: Readonly<{
     status: 'pending' | 'created' | 'reused' | 'absent'
@@ -213,7 +240,11 @@ export type AgentHandoffDetail = Readonly<{
   }>
   outcome:
     | 'in_progress'
+    /** The host published nothing because the worktree matched its baseline. */
+    | 'no_progress'
     | 'no_branch'
+    /** Work exists and is not on the remote; the workspace is retained for another attempt. */
+    | 'delivery_failed'
     | 'pull_request_open'
     | 'merged'
     | 'intervention_required'

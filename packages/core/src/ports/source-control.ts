@@ -19,6 +19,30 @@ export type PreparedRepository = Readonly<{
   expectedRemoteHead: Option.Option<string>
 }>
 
+/**
+ * What the host observed in a prepared worktree after an agent turn, measured against the baseline
+ * recorded before the launch.
+ *
+ * The agent's own account of what it did is never consulted: `Clean` means the host looked and
+ * found nothing to deliver, and `Changed` means there is recoverable work whether the agent
+ * reported any or not.
+ */
+export type WorktreeInspection =
+  | Readonly<{ _tag: 'Clean'; headSha: string }>
+  | Readonly<{
+      _tag: 'Changed'
+      headSha: string
+      /** Paths differing from the current commit or untracked; zero once the work is committed. */
+      dirtyFileCount: number
+      /**
+       * Whether the worktree carries a commit the branch's remote head does not — the baseline,
+       * when the preparation found no remote branch. Measured against the remote rather than the
+       * baseline alone, so work that a previous publication already delivered does not read as
+       * work to deliver again.
+       */
+      committedAhead: boolean
+    }>
+
 export type PublicationOutcome =
   | Readonly<{ _tag: 'NoChanges'; branchName: string; baselineSha: string }>
   | Readonly<{
@@ -38,6 +62,12 @@ export type SourceControlPort = Readonly<{
     workspace: Workspace,
     target: SourceControlTarget,
   ) => Effect.Effect<PreparedRepository, SourceControlError>
+  /**
+   * Reads the prepared worktree against its recorded baseline. Separate from {@link publish}
+   * because a turn that ended is not the same event as work reaching the remote: the inspection is
+   * what decides which of those the run is owed.
+   */
+  inspect: (prepared: PreparedRepository) => Effect.Effect<WorktreeInspection, SourceControlError>
   publish: (
     issue: Issue,
     prepared: PreparedRepository,

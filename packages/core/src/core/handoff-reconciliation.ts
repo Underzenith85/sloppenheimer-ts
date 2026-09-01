@@ -32,7 +32,10 @@ import * as Transitions from './transitions.js'
 
 /** Whether this handoff is the orchestrator's to act on at all in this pass. */
 const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boolean => {
-  if (state.running.has(id) || state.retries.has(id)) {
+  // A retained delivery is work this pull request has not seen yet. Observing the head while it
+  // waits would read the pre-delivery state as the repair's output, which is the reading this
+  // whole separation exists to prevent.
+  if (state.running.has(id) || state.retries.has(id) || state.deliveries.has(id)) {
     return true
   }
   if (handoff.state === 'closed_without_merge') {

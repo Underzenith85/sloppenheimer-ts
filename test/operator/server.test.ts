@@ -36,7 +36,7 @@ const snapshot: OrchestratorSnapshot = {
   },
   pollingIntervalMs: 10_000,
   maxConcurrentAgents: 2,
-  counts: { running: 1, retrying: 0, completed: 3 },
+  counts: { running: 1, retrying: 0, delivering: 0, completed: 3 },
   pausedIssueNumbers: [],
   handoffs: [
     {
@@ -76,6 +76,7 @@ const snapshot: OrchestratorSnapshot = {
     },
   ],
   retrying: [],
+  delivering: [],
   completed: [],
   saturatedStates: [],
   inspectableAgents: [],
@@ -608,7 +609,7 @@ describe('operator server', (): void => {
         snapshot: Effect.succeed({
           ...snapshot,
           running: [],
-          counts: { running: 0, retrying: 0, completed: 0 },
+          counts: { running: 0, retrying: 0, delivering: 0, completed: 0 },
           // Every one of these is an issue this host knows about, addressable or not.
           handoffs: ['state', 'backlog', 'refresh', 'agents', 'issues'].map(handoff),
         }),

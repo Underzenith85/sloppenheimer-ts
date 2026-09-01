@@ -5,6 +5,7 @@ import type { Workflow } from '../../config/workflow.js'
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
+import { recoverRetainedDeliveries } from '../delivery-recovery.js'
 import { dispatch } from '../dispatch.js'
 import { reconcileHandoffs } from '../handoff-reconciliation.js'
 import { dispatchAdmission, sortIssues } from '../policy.js'
@@ -166,6 +167,12 @@ export const poll = (
     yield* context.hydrateRestoredHandoffs
     yield* context.recoverMissingHandoffs
     performed.push('handoff_recovery')
+    // Before anything can put an agent on an issue: a workspace holding work a previous process
+    // never published is published from here, rather than being handed to a repair that would
+    // spend a turn and one of the repair budget rediscovering it.
+    if (yield* recoverRetainedDeliveries(context)) {
+      performed.push('delivery_recovery')
+    }
     dispatchValidationFailed = (yield* reloadWorkflow(context)) || dispatchValidationFailed
     performed.push('workflow_reload')
     yield* reconcileHandoffs(context, !dispatchValidationFailed)

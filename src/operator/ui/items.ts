@@ -145,6 +145,38 @@ const retryingItem = (
   action: 'pause',
 })
 
+/**
+ * Work an agent finished that has not reached the remote. It is progress rather than attention:
+ * the change exists, the host is retrying the publication, and an operator has nothing to do until
+ * those attempts are spent — at which point the issue goes back to the agent as an ordinary retry.
+ */
+const deliveringItem = (
+  entry: DeliveringEntry,
+  issue: BacklogIssue | undefined,
+  paused: ReadonlySet<number>,
+  inspectable: ReadonlySet<string>,
+): WorkItem => ({
+  identifier: entry.issue_identifier,
+  issueNumber: issue?.number ?? issueNumberOf(entry.issue_identifier),
+  title: entry.title,
+  url: entry.issue_url,
+  state: 'progress',
+  attention: null,
+  phase: 'delivering',
+  eligibility: eligibilityOf(issue, paused),
+  priority: issue?.priority ?? null,
+  labels: issue?.labels ?? [],
+  reason: `Publishing to ${entry.branch_name} failed (${entry.category}) · ${entry.reason}`,
+  ranking: null,
+  blockers: [],
+  unlocks: issue?.unlocks ?? 0,
+  hasDetail: inspectable.has(entry.issue_identifier),
+  queueReason: null,
+  finishedAt: null,
+  pullRequestUrl: null,
+  action: 'pause',
+})
+
 const handoffAttention = (phase: PipelinePhase): AttentionKind | null => {
   if (phase === 'repair_needed') {
     return 'repair_needed'

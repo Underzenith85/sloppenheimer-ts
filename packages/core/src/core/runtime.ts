@@ -32,6 +32,7 @@ import {
   recordCancellation,
   recordHandoff,
   recordIssueRefreshed,
+  recordPublication,
   recordRetryScheduled,
   type AgentDetailRecord,
   type AgentDetailSnapshot,
@@ -58,10 +59,12 @@ import {
   stateIsIn,
 } from './policy.js'
 import { releaseRepair, settleRepair } from './handoff-decision.js'
-import { agentRetryDelay, trackerRetryDelay } from './retry.js'
+import type { PostflightOutcome } from './postflight.js'
+import { agentRetryDelay, deliveryAttemptLimit, trackerRetryDelay } from './retry.js'
 import { agentDetail, createSnapshot } from './snapshot.js'
 import {
   initialState,
+  type DeliveryEntry,
   type EffectiveWorkflow,
   type HandoffEntry,
   type RefreshOperation,
@@ -83,6 +86,7 @@ export const publishedCompletedWork = 50
 export {
   retainedCompletedDetails,
   type CompletedEntry,
+  type DeliveryEntry,
   type EffectiveWorkflow,
   type ExecutionSnapshot,
   type HandoffEntry,
@@ -139,6 +143,29 @@ export type CompletedSnapshot = Readonly<{
   pullRequestUrl: string | null
 }>
 
+/**
+ * Work an agent finished that is not on the remote yet. Published beside the running and retrying
+ * rows because it is neither: no agent is running, and what is queued is a publication.
+ */
+export type DeliverySnapshot = Readonly<{
+  issueId: IssueId
+  identifier: string
+  title: string
+  url: string | null
+  branchName: string
+  /** How many publication attempts have failed for this work. */
+  attempt: number
+  dueAt: string
+  category: string
+  reason: string
+  /** Paths the inspection found, or `null` when the inspection itself failed. */
+  changedFileCount: number | null
+  repairRun: boolean
+  observedAt: string
+  workerHost: 'local'
+  detailUrl: string
+}>
+
 export type RetrySnapshot = Readonly<{
   issueId: IssueId
   identifier: string
@@ -187,11 +214,16 @@ export type OrchestratorSnapshot = Readonly<{
   }>
   pollingIntervalMs: number
   maxConcurrentAgents: number
-  counts: Readonly<{ running: number; retrying: number; completed: number }>
+  counts: Readonly<{ running: number; retrying: number; delivering: number; completed: number }>
   pausedIssueNumbers: readonly number[]
   handoffs: readonly HandoffSnapshot[]
   running: readonly RunningSnapshot[]
   retrying: readonly RetrySnapshot[]
+  /**
+   * Work waiting to reach the remote. An operator that sees a row here is being told the agent
+   * succeeded and the publication did not, which the running and retrying rows cannot say.
+   */
+  delivering: readonly DeliverySnapshot[]
   /** Finished work, newest first and bounded by {@link publishedCompletedWork}. */
   completed: readonly CompletedSnapshot[]
   /**
@@ -252,16 +284,30 @@ export type OrchestratorEvent =
       issueId: IssueId
       runId: number
       attempt: number | null
+      /**
+       * How the agent protocol itself ended. It is not a verdict on the work: what the host made
+       * of the workspace afterwards is `postflight`, and only the two together say what the run
+       * achieved.
+       */
       outcome: 'normal' | 'failed'
       error: string | null
+      postflight: PostflightOutcome
     }>
   | Readonly<{ _tag: 'RetryDue'; issueId: IssueId; attempt: number }>
+  /** A retained delivery's next publication attempt is due. No agent runs for this. */
+  | Readonly<{ _tag: 'DeliveryDue'; issueId: IssueId; attempt: number }>
   | Readonly<{
       _tag: 'SetIssuePaused'
       issueNumber: number
       paused: boolean
       reply: Deferred.Deferred<void>
     }>
+
+/**
+ * A delivery as its caller states it: everything but the schedule, which `scheduleDelivery`
+ * decides, and the timer it forks to keep.
+ */
+export type DeliveryRequest = Omit<DeliveryEntry, 'dueAt' | 'observedAt' | 'fiber'>
 
 /**
  * What the composition root must provide for the orchestrator to run. The code-review capability is
@@ -303,6 +349,13 @@ export type OrchestratorContext = Readonly<{
     repairRun: boolean,
     trackerError?: TrackerError,
   ) => Effect.Effect<boolean, never, Scope.Scope>
+  /**
+   * Queues another publication of work already in a workspace. Answers `false` when the work
+   * cannot be delivered as it stands, which is the caller's signal to fall back to an agent retry.
+   */
+  scheduleDelivery: (request: DeliveryRequest) => Effect.Effect<boolean, never, Scope.Scope>
+  /** Discards retained unpublished work, per the cancellation policy in `AGENTS.md`. */
+  abandonDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
   cancelRunning: (
@@ -648,6 +701,7 @@ export const startOrchestratorRuntime = (
                     // Snapshots written before the flag existed recorded a baseline only once a
                     // worker had started, so their absence is a started worker.
                     workerStarted: restored.repairWorkerStarted ?? true,
+                    publication: restored.repairPublication ?? 'pending',
                   }),
             reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
             reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
@@ -856,6 +910,126 @@ export const startOrchestratorRuntime = (
         return applied
       })
 
+    /**
+     * Queues another publication attempt for work an agent has already produced.
+     *
+     * This is not a retry in the sense `scheduleRetry` means: no agent runs, no attempt number
+     * moves, and the worktree is left exactly as the turn left it. What is queued is one more
+     * `publish` of the same preparation, which is the whole difference between recovering a
+     * delivery and paying for the turn again.
+     *
+     * Answers whether a delivery was queued. `false` means the work cannot be delivered as it
+     * stands — the failure did not preserve the worktree, or the attempts are spent — and the
+     * caller owes the issue whatever it would have owed a failed run.
+     */
+    const scheduleDelivery = (
+      request: DeliveryRequest,
+    ): Effect.Effect<boolean, never, Scope.Scope> =>
+      Effect.gen(function* () {
+        const branchName = request.prepared.target.branchName
+        const refusal = !request.failure.worktreePreserved
+          ? 'the failure did not preserve the worktree'
+          : !request.failure.retryable
+            ? 'the failure is not retryable'
+            : request.attempt > deliveryAttemptLimit
+              ? `the delivery attempt limit of ${String(deliveryAttemptLimit)} is spent`
+              : null
+        if (refusal !== null) {
+          yield* logWarning('action=delivery outcome=not_retryable', {
+            ...logContext(request.issue),
+            action: 'delivery',
+            outcome: 'not_retryable',
+            attempt: request.attempt,
+            branch: branchName,
+            error: `${request.failure.message} (${refusal})`,
+          })
+          return false
+        }
+        const current = yield* Ref.get(state)
+        const delay = yield* agentRetryDelay(
+          request.attempt,
+          current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs,
+        )
+        const dueAt = (yield* Clock.currentTimeMillis) + delay
+        const fiber = yield* Effect.forkScoped(
+          Effect.sleep(delay).pipe(
+            Effect.zipRight(
+              Queue.offer(mailbox, {
+                _tag: 'DeliveryDue',
+                issueId: request.issue.id,
+                attempt: request.attempt,
+              }),
+            ),
+            Effect.asVoid,
+          ),
+        )
+        const observedAt = yield* currentInstant
+        const displaced = yield* Ref.modify(state, (pending) =>
+          Transitions.scheduleDelivery(pending, { ...request, dueAt, observedAt, fiber }),
+        )
+        if (Option.isSome(displaced)) {
+          yield* Fiber.interrupt(displaced.value.fiber)
+        }
+        yield* Ref.update(state, (pending) =>
+          Transitions.updateDetail(pending, request.issue.id, (record) =>
+            recordPublication(record, observedAt, {
+              status: 'failed',
+              branch: branchName,
+              baselineSha: request.prepared.baselineSha,
+              category: request.failure.category,
+              attempts: request.attempt,
+              message: `${request.failure.message}. Retrying delivery at ${new Date(dueAt).toISOString()}`,
+            }),
+          ),
+        )
+        yield* logInfo('action=delivery outcome=scheduled', {
+          ...logContext(request.issue),
+          action: 'delivery',
+          outcome: 'scheduled',
+          attempt: request.attempt,
+          branch: branchName,
+          due_at: new Date(dueAt).toISOString(),
+          error: request.failure.message,
+        })
+        return true
+      })
+
+    /**
+     * Drops a retained delivery, interrupting the attempt it was waiting on.
+     *
+     * Called only where the documented policy says unpublished work is discarded rather than
+     * preserved: an issue that reached a terminal state, whose workspace goes with it. Everywhere
+     * else the delivery outlives the event, which is what lets the work survive a cancellation.
+     */
+    const abandonDelivery = (id: IssueId, reason: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const dropped = yield* Ref.modify(state, (current) => Transitions.takeDelivery(current, id))
+        if (Option.isNone(dropped)) {
+          return
+        }
+        yield* Fiber.interrupt(dropped.value.fiber)
+        const observedAt = yield* currentInstant
+        yield* Ref.update(state, (current) =>
+          Transitions.updateDetail(current, id, (record) =>
+            recordPublication(record, observedAt, {
+              status: 'not_performed',
+              branch: dropped.value.prepared.target.branchName,
+              baselineSha: dropped.value.prepared.baselineSha,
+              attempts: dropped.value.attempt,
+              message: `Unpublished work discarded: ${reason}`,
+            }),
+          ),
+        )
+        yield* logWarning('action=delivery outcome=discarded', {
+          ...logContext(dropped.value.issue),
+          action: 'delivery',
+          outcome: 'discarded',
+          attempt: dropped.value.attempt,
+          branch: dropped.value.prepared.target.branchName,
+          error: reason,
+        })
+      })
+
     const cancelRunning = (
       id: IssueId,
       cleanupWorkspace: boolean,
@@ -924,6 +1098,10 @@ export const startOrchestratorRuntime = (
           })
         }
         if (cleanupWorkspace) {
+          // Removing the workspace destroys anything unpublished in it, so the delivery that would
+          // have republished it goes in the same step rather than coming due against a directory
+          // that no longer exists.
+          yield* abandonDelivery(id, reason)
           yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
             Effect.catchAll((error) =>
               logWarning('terminal workspace cleanup failed', {
@@ -1165,6 +1343,8 @@ export const startOrchestratorRuntime = (
       mailbox,
       detailRecord,
       scheduleRetry,
+      scheduleDelivery,
+      abandonDelivery,
       applyLifecycleUpdate,
       cancelRunning,
       noteHandoffOutcome,

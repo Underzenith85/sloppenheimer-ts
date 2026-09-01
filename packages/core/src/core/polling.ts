@@ -2,6 +2,7 @@ import { Effect, Queue, type Scope } from 'effect'
 
 import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
+import { onDeliveryDue } from './polling/delivery-due.js'
 import { onIssuePauseChanged } from './polling/issue-pause.js'
 import { onRetryDue } from './polling/retry-due.js'
 import { onTick } from './polling/tick.js'
@@ -20,6 +21,7 @@ import { onWorkerExited } from './polling/worker-exited.js'
  * - `polling/agent-update.ts` — one protocol event from a live run.
  * - `polling/worker-exited.ts` — a worker fiber ending, and the handoff that may follow.
  * - `polling/retry-due.ts` — a queued retry coming due, continuing work or resuming a repair.
+ * - `polling/delivery-due.ts` — a retained delivery's next publication attempt, with no agent.
  * - `polling/issue-pause.ts` — the operator pausing or resuming an issue number.
  *
  * `polling/pass.ts` holds the reconciliation pass itself, and `polling/repair-identity.ts` the
@@ -47,6 +49,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
         }
         case 'RetryDue': {
           yield* onRetryDue(context, event)
+          break
+        }
+        case 'DeliveryDue': {
+          yield* onDeliveryDue(context, event)
           break
         }
         case 'SetIssuePaused': {

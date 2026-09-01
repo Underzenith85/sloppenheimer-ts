@@ -5,7 +5,7 @@ import { Effect } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueId, issueIdentifier, type Issue } from '@sloppenheimer/core/domain/domain.js'
-import { makeGitRepository, git } from './harness/git-repository.js'
+import { commitFile, makeGitRepository, git } from './harness/git-repository.js'
 import { anIssue, sourceControlFor } from './harness/fixtures.js'
 
 const roots: string[] = []
@@ -56,6 +56,82 @@ describe('host Git source control', (): void => {
       expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
         'sloppenheimer: example/sloppenheimer#165 Host-owned publication',
       )
+    }),
+  )
+
+  it.live('reads a prepared worktree as clean, and an agent edit as work to deliver', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
+      )
+
+      expect(yield* sourceControl.inspect(prepared)).toEqual({
+        _tag: 'Clean',
+        headSha: prepared.baselineSha,
+      })
+
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+
+      expect(yield* sourceControl.inspect(prepared)).toMatchObject({
+        _tag: 'Changed',
+        dirtyFileCount: 1,
+        committedAhead: false,
+      })
+    }),
+  )
+
+  it.live('reads a commit the last publication could not push as work to deliver', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
+      )
+      // The shape a publication that committed and then failed to push leaves behind: nothing is
+      // dirty any more, and reading that as an empty worktree would discard the work.
+      yield* host(() =>
+        commitFile(fixture.workspace, 'implementation.ts', 'export const done = true\n', 'work'),
+      )
+
+      const inspected = yield* sourceControl.inspect(prepared)
+
+      expect(inspected).toMatchObject({
+        _tag: 'Changed',
+        dirtyFileCount: 0,
+        committedAhead: true,
+      })
+    }),
+  )
+
+  it.live('reads an already-published workspace as clean on a later preparation', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      const first = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+      yield* sourceControl.publish(issue, first)
+
+      // What a restart does: a fresh preparation of the same workspace. The commit is on the
+      // remote now, so there is nothing retained — reading it as retained work would have every
+      // restart republishing what the last process already delivered.
+      const second = yield* sourceControl.prepare(issue, workspace, target)
+
+      expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
     }),
   )
 

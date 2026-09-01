@@ -3,13 +3,14 @@ import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effec
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
-import { AgentError, type WorkspaceError } from '../domain/errors.js'
+import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
+import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, SessionPorts } from './state.js'
 import type { SourceControlTarget } from '../ports/index.js'
@@ -159,40 +160,53 @@ const runSession = (
 }
 
 /**
- * The whole of one run as a fiber body: a workspace, the source-control preparation and publication
- * that bracket the session when the host owns the repository, and the `WorkerExited` that reports
- * how it ended. Every exit path offers that event, so a run can never end unobserved.
+ * The whole of one run as a fiber body: a workspace, the host-owned preparation and postflight that
+ * bracket the session when the host owns the repository, and the `WorkerExited` that reports how it
+ * ended. Every exit path offers that event, so a run can never end unobserved.
+ *
+ * The postflight is reported rather than raised. A turn that ended and a change that reached the
+ * remote are separate outcomes, so a publication that failed leaves the worker succeeding with a
+ * `DeliveryFailed` postflight, and only the agent protocol itself can fail a run.
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution, sessionPorts, target } = launch
   return execution.workspaces.create(issue.identifier).pipe(
-    Effect.flatMap((workspace) => {
-      const sourceControl = MutableRef.get(sessionPorts).sourceControl
-      if (sourceControl === null) {
-        return runSession(launch, workspace)
-      }
-      return sourceControl.prepare(issue, workspace, target).pipe(
-        Effect.flatMap((prepared) =>
-          runSession(launch, workspace).pipe(
-            Effect.zipRight(
-              Effect.suspend(() => {
-                const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                return publisher.publish(issue, prepared)
-              }),
+    Effect.flatMap(
+      (
+        workspace,
+      ): Effect.Effect<PostflightOutcome, AgentError | WorkspaceError | SourceControlError> => {
+        const sourceControl = MutableRef.get(sessionPorts).sourceControl
+        if (sourceControl === null) {
+          return runSession(launch, workspace).pipe(
+            Effect.as<PostflightOutcome>({ _tag: 'NotPerformed' }),
+          )
+        }
+        return sourceControl.prepare(issue, workspace, target).pipe(
+          Effect.flatMap((prepared) =>
+            runSession(launch, workspace).pipe(
+              Effect.zipRight(
+                Effect.suspend(() => {
+                  const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
+                  return runPostflight(publisher, issue, prepared)
+                }),
+              ),
+              Effect.tap((outcome) =>
+                (outcome._tag === 'DeliveryFailed' ? logError : logInfo)(
+                  'host source-control postflight settled',
+                  {
+                    ...logContext(issue),
+                    action: 'source_control_postflight',
+                    outcome: postflightLogOutcome(outcome),
+                    branch: target.branchName,
+                    error: outcome._tag === 'DeliveryFailed' ? outcome.failure.message : null,
+                  },
+                ),
+              ),
             ),
-            Effect.tap((outcome) =>
-              logInfo('host source-control publication completed', {
-                ...logContext(issue),
-                action: 'source_control_publish',
-                outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
-                branch: outcome.branchName,
-              }),
-            ),
-            Effect.asVoid,
           ),
-        ),
-      )
-    }),
+        )
+      },
+    ),
     Effect.matchEffect({
       onFailure: (error) =>
         Queue.offer(context.mailbox, {
@@ -202,8 +216,9 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
           attempt,
           outcome: 'failed',
           error: error.message,
+          postflight: { _tag: 'NotPerformed' },
         }).pipe(Effect.asVoid),
-      onSuccess: () =>
+      onSuccess: (postflight) =>
         Queue.offer(context.mailbox, {
           _tag: 'WorkerExited',
           issueId: issue.id,
@@ -211,6 +226,7 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
           attempt,
           outcome: 'normal',
           error: null,
+          postflight,
         }).pipe(Effect.asVoid),
     }),
   )

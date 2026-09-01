@@ -55,6 +55,12 @@ export const handoffSnapshots = (state: RuntimeState): readonly HandoffSnapshot[
       onNone: () => false,
       onSome: (repair) => repair.workerStarted,
     }),
+    // A repair whose delivery failed keeps that verdict across a restart: recovery must not read
+    // the unchanged head it left behind as a repair that achieved nothing.
+    repairPublication: Option.match(handoff.repair, {
+      onNone: () => 'pending' as const,
+      onSome: (repair) => repair.publication,
+    }),
     reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
     reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
     observedAt: handoff.observedAt.toISOString(),
@@ -86,6 +92,12 @@ export const resolveRecovery = (state: RuntimeState, id: IssueId): RuntimeState 
 export const finishStartupRecovery = (state: RuntimeState): RuntimeState => ({
   ...state,
   startupRecoveryFinished: true,
+})
+
+/** This process has finished looking for work a previous one left unpublished. */
+export const finishDeliveryRecovery = (state: RuntimeState): RuntimeState => ({
+  ...state,
+  deliveryRecoveryFinished: true,
 })
 
 export const setHandoffStoreError = (

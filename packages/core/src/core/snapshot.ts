@@ -7,12 +7,19 @@ import {
   publishedCompletedWork,
   type AgentDetailLookup,
   type CompletedSnapshot,
+  type DeliverySnapshot,
   type OrchestratorContext,
   type OrchestratorSnapshot,
   type RetrySnapshot,
   type RunningSnapshot,
 } from './runtime.js'
-import type { CompletedEntry, RetryEntry, RunningEntry, RuntimeState } from './state.js'
+import type {
+  CompletedEntry,
+  DeliveryEntry,
+  RetryEntry,
+  RunningEntry,
+  RuntimeState,
+} from './state.js'
 import { handoffSnapshots } from './transitions.js'
 
 /**
@@ -89,6 +96,28 @@ const retrySnapshot = (entry: RetryEntry): RetrySnapshot => ({
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 
+/**
+ * One piece of work waiting to reach the remote. The reason names the typed source-control
+ * category rather than only the message, so an operator can tell a lease conflict — which the next
+ * attempt may well resolve — from an authentication failure, which it will not.
+ */
+const deliverySnapshot = (entry: DeliveryEntry): DeliverySnapshot => ({
+  issueId: entry.issue.id,
+  identifier: entry.issue.identifier,
+  title: entry.issue.title,
+  url: entry.issue.url,
+  branchName: entry.prepared.target.branchName,
+  attempt: entry.attempt,
+  dueAt: new Date(entry.dueAt).toISOString(),
+  category: entry.failure.category,
+  reason: entry.failure.message,
+  changedFileCount: entry.changedFileCount,
+  repairRun: entry.repairRun,
+  observedAt: entry.observedAt.toISOString(),
+  workerHost: 'local',
+  detailUrl: agentDetailPath(entry.issue.identifier),
+})
+
 const completedSnapshot = (entry: CompletedEntry): CompletedSnapshot => ({
   issueId: entry.issueId,
   identifier: entry.identifier,
@@ -161,12 +190,14 @@ export const createSnapshot = (
     counts: {
       running: state.running.size,
       retrying: state.retries.size,
+      delivering: state.deliveries.size,
       completed: state.completed.size,
     },
     pausedIssueNumbers: [...state.pausedIssueNumbers].sort((left, right) => left - right),
     handoffs: handoffSnapshots(state),
     running: running.map(runningSnapshot),
     retrying: [...state.retries.values()].map(retrySnapshot),
+    delivering: [...state.deliveries.values()].map(deliverySnapshot),
     completed: [...state.completed.values()]
       .sort((left, right) => right.finishedAt.getTime() - left.finishedAt.getTime())
       .slice(0, publishedCompletedWork)

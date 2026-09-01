@@ -132,7 +132,7 @@ export type HandoffSnapshot = Readonly<{
   identifier: string
   pullRequestUrl: string
   branchName: string
-  state: HandoffDisposition['state'] | 'merging' | 'intervention_required'
+  state: HandoffDisposition['state'] | 'merging' | 'intervention_required' | 'delivery_failed'
   headSha: string | null
   reason: string | null
   repairAttempts: number
@@ -147,6 +147,13 @@ export type HandoffSnapshot = Readonly<{
    * ever persisted a baseline once a worker had started.
    */
   repairWorkerStarted?: boolean
+  /**
+   * What the host's postflight made of the repair's workspace. Absent in snapshots written before
+   * turn completion and publication were separate outcomes, which is read as `pending`: those
+   * runs recorded no publication either way, and assuming a clean worktree would revive exactly
+   * the wrong verdict.
+   */
+  repairPublication?: 'pending' | 'published' | 'no_changes' | 'delivery_failed'
   reviewRequestedHeadSha?: string | null
   reviewCompletedHeadSha?: string | null
   observedAt: string

@@ -11,7 +11,12 @@ import { boundRedacted } from '../support/redaction.js'
 import { endAttempt, nextSequence, noteError, push, setPhase } from './folding.js'
 import type { AgentDetailRecord } from './record.js'
 import { retainedAttemptLimit } from './snapshot.js'
-import type { AgentHandoffDetail, HandoffStep, HandoffStepStatus } from './snapshot.js'
+import type {
+  AgentHandoffDetail,
+  AgentPublicationDetail,
+  HandoffStep,
+  HandoffStepStatus,
+} from './snapshot.js'
 
 /**
  * Records a scheduled retry. The attempt boundary is explicit on the timeline, and the sequence
@@ -121,6 +126,101 @@ export const recordCancellation = (
     category: 'cancellation',
     reason: summary,
   })
+}
+
+/**
+ * One reading of what the host did with the workspace after a turn.
+ *
+ * It is recorded separately from the handoff steps that follow it because it is separately true: a
+ * publication that failed leaves recoverable work whether or not a pull request is ever opened,
+ * and an operator has to be able to see which of the two is blocking.
+ */
+export type PublicationObservation = Readonly<{
+  status: AgentPublicationDetail['status']
+  branch: string | null
+  headSha?: string | null
+  baselineSha?: string | null
+  category?: string | null
+  /** How many delivery attempts have failed for this work, when any have. */
+  attempts?: number
+  message: string | null
+}>
+
+/** The publication status as one of the handoff step statuses the timeline is written in. */
+const publicationStepStatus = (status: AgentPublicationDetail['status']): HandoffStepStatus => {
+  switch (status) {
+    case 'not_performed': {
+      return 'not_performed'
+    }
+    case 'pending': {
+      return 'pending'
+    }
+    case 'published': {
+      return 'observed'
+    }
+    case 'no_changes': {
+      return 'absent'
+    }
+    case 'failed': {
+      return 'failed'
+    }
+  }
+}
+
+/**
+ * Records the postflight. `pending` moves the phase to `publishing`, so an operator watching a
+ * finished turn sees the host working rather than an agent that has gone quiet; every other status
+ * leaves the phase alone, because what happens next — a handoff, a retry, a wait — is what should
+ * name it.
+ */
+export const recordPublication = (
+  record: AgentDetailRecord,
+  at: Date,
+  observation: PublicationObservation,
+): AgentDetailRecord => {
+  const summary = observation.message === null ? null : boundRedacted(observation.message).text
+  const publication: AgentPublicationDetail = Object.freeze({
+    status: observation.status,
+    branch: observation.branch,
+    headSha: observation.headSha ?? null,
+    baselineSha: observation.baselineSha ?? null,
+    category: observation.category ?? null,
+    attempts: observation.attempts ?? record.handoff.publication.attempts,
+    reason: summary,
+  })
+  // The postflight is the newest thing known about this work, so it names the outcome: a failed
+  // delivery is what the issue is waiting on, and a clean worktree is the whole of what the turn
+  // achieved. A handoff step recorded afterwards supersedes it, which is correct — by then
+  // something later is true.
+  const outcome =
+    observation.status === 'failed'
+      ? ('delivery_failed' as const)
+      : observation.status === 'no_changes'
+        ? ('no_progress' as const)
+        : record.handoff.outcome
+  const observed: AgentDetailRecord = {
+    ...record,
+    handoff: Object.freeze({ ...record.handoff, publication, outcome }),
+  }
+  const next =
+    observation.status === 'pending'
+      ? setPhase(observed, 'publishing', summary ?? 'Publishing the agent changes', at)
+      : observed
+  const pushed = push(next, {
+    sequence: nextSequence(next),
+    attempt: next.attempt,
+    at: at.toISOString(),
+    event: 'handoff/publication',
+    operation: next.operation,
+    truncated: false,
+    category: 'handoff',
+    step: 'publication',
+    status: publicationStepStatus(observation.status),
+    message: summary,
+  })
+  return observation.status === 'failed' && summary !== null
+    ? noteError(pushed, at, 'error', observation.category ?? 'publication', summary)
+    : pushed
 }
 
 export type HandoffObservation = Readonly<{

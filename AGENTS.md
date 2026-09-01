@@ -15,6 +15,60 @@ The following port boundary was accepted in the 2026-08-30 architecture review:
 
 This convention is the architecture record for the boundary. Do not create a separate ADR for it.
 
+## Postflight: what a settled turn is worth
+
+Accepted 2026-09-01, implementing [#167](https://github.com/Underzenith85/sloppenheimer-ts/issues/167).
+This section is the architecture record for it; do not create a separate ADR.
+
+A successful agent turn is an agent-protocol fact and nothing else. Turn completion, workspace
+change, publication and handoff are four outcomes, and Sloppenheimer used to collapse all four into
+one: a `completed` turn was treated as delivered work, and the only evidence consulted afterwards
+was the remote head. On [#149](https://github.com/Underzenith85/sloppenheimer-ts/issues/149) that
+lost a whole implementation — the agent made the change and passed `pnpm check`, Git delivery was
+blocked by read-only `.git` metadata, and the unchanged remote SHA was reported to operators as a
+repair agent that had achieved nothing.
+
+- After every successful turn the host runs a postflight (`packages/core/src/core/postflight.ts`):
+  inspect the worktree against the baseline the preparation recorded, then publish what the
+  inspection found. It answers with one of `NotPerformed`, `NoChanges`, `Published` or
+  `DeliveryFailed`, and it cannot fail — raising a publication problem as a worker failure is what
+  turned a delivery problem into an agent retry.
+- The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
+  published SHA and expected remote SHA are authoritative.
+- A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing
+  to deliver" and "the delivery failed" are separate readings rather than one absent branch.
+- `DeliveryFailed` retains the workspace and queues a **delivery**, not a retry: a delivery holds
+  the issue's claim with no worker behind it, and what comes due is one more `publish` of the same
+  preparation. It is bounded by `deliveryAttemptLimit` in `core/retry.ts`; when the failure did not
+  preserve the worktree, or those attempts are spent, the work goes back to the coding agent as an
+  ordinary retry.
+- "Repair agent completed without changing the pull request head" is reachable only when the
+  inspected worktree was clean. The repair identity carries the postflight verdict for exactly this
+  reason: an unchanged head alone cannot tell a no-op turn from a push that failed.
+- Restart recovery reads the workspace, not a persisted queue. The host's preparation preserves a
+  worktree that is on the expected branch and carries uncommitted edits or a commit past the
+  baseline, so a prepared workspace that inspects as changed is work a previous process never
+  published. `core/delivery-recovery.ts` publishes it once, before anything can put an agent on the
+  issue, and it is never counted as a repair attempt.
+
+### Cancellation and shutdown policy for unpublished work
+
+Unpublished work is **preserved** by default and **discarded** only where the issue itself is
+finished with. The rule is the workspace: work lives in it, so whatever happens to the workspace
+happens to the work.
+
+- Shutdown preserves it. Nothing is deleted, and the next process rediscovers it through delivery
+  recovery.
+- A cancellation that keeps the workspace preserves it: a stall, a workflow reload, a paused issue,
+  a tracker that stopped reporting the issue.
+- A cancellation that removes the workspace discards it, and drops the retained delivery in the
+  same step, so a delivery can never come due against a directory that no longer exists. That is
+  the terminal-issue path, and only it.
+- A delivery that comes due re-reads its issue immediately before publishing. An issue that has
+  since gone terminal or left its active states has its work discarded rather than pushed: putting
+  a branch and a pull request on the remote for work nobody asked for any more is the one thing
+  worse than losing a diff.
+
 ## Agent runners
 
 The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/sloppenheimer-ts/issues/214),

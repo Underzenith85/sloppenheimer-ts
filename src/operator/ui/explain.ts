@@ -112,6 +112,12 @@ const expectedOutcome = (snapshot: AgentDetailSnapshot): string => {
   if (handoff.outcome === 'merged') {
     return 'Merged. Nothing further is scheduled for this issue.'
   }
+  if (handoff.outcome === 'delivery_failed') {
+    return `The changes are in the workspace and not on the remote: ${handoff.publication.reason ?? 'the publication failed.'} Sloppenheimer retries the publication without running the agent again.`
+  }
+  if (handoff.outcome === 'no_progress') {
+    return 'The turn left the workspace exactly as it found it, so there was nothing to publish and no pull request follows from it.'
+  }
   if (handoff.outcome === 'intervention_required' || handoff.outcome === 'failed') {
     return `Needs a human: ${handoff.reason ?? 'the handoff could not complete on its own.'}`
   }

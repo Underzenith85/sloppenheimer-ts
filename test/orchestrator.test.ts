@@ -94,7 +94,7 @@ import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
 import { stubProvider } from './harness/stub-tracker-provider.js'
 import { hostFileSystem } from './harness/filesystem.js'
-import { anIssue, anOpenPullRequest } from './harness/fixtures.js'
+import { anIssue, anOpenPullRequest, changedWorktree, cleanWorktree } from './harness/fixtures.js'
 
 /**
  * A temp directory the enclosing scope owns, for the runs that read and write a real handoff store.
@@ -412,10 +412,26 @@ const layerTestAdapters = (ports: TestPorts): Layer.Layer<AdapterServices> =>
 const layerTestPorts = (
   ports: TestPorts,
 ): Layer.Layer<OrchestratorServices, TrackerError | SourceControlError> => {
+  /**
+   * Whether any agent has run yet, which is what the stub source control reads the worktree as.
+   *
+   * A workspace is clean until an agent edits it. Saying so matters: the host publishes only what
+   * it can see, and startup delivery recovery reads a prepared workspace that inspects as changed
+   * as work a previous process never published. A stub that always read as changed would have
+   * every test's first pass republishing a workspace no agent had touched.
+   */
+  let anyAgentLaunched = false
+  const tracked: TestPorts = {
+    ...ports,
+    runAgent: (launch) => {
+      anyAgentLaunched = true
+      return ports.runAgent(launch)
+    },
+  }
   // The orchestrator reads and writes the handoff store through `FileSystem`; the harness binds the
   // host's, so a test drives real files exactly as the composition root does.
   const base = Layer.mergeAll(
-    layerPorts(ports.configuration, layerTestAdapters(ports)),
+    layerPorts(tracked.configuration, layerTestAdapters(tracked)),
     hostFileSystem,
   )
   const makeCodeReview = ports.makeCodeReview
@@ -433,6 +449,8 @@ const layerTestPorts = (
         expectedRemoteHead:
           target._tag === 'Repair' ? Option.some(target.expectedHeadSha) : Option.none(),
       }),
+    inspect: (prepared) =>
+      Effect.succeed(anyAgentLaunched ? changedWorktree : cleanWorktree(prepared.baselineSha)),
     publish: (_issue, prepared) =>
       Effect.succeed({
         _tag: 'Published',
@@ -722,12 +740,21 @@ describe('host-owned source-control dispatch', (): void => {
       const harness = makeHarness(workflow, () => [issue])
       const targets: SourceControlTarget[] = []
       const publications: string[] = []
+      // The worktree is clean until this run's agent has edited it, so startup delivery recovery
+      // sees nothing to republish and the publication below is the one this test dispatched.
+      let launched = false
       let launchSecretNames: readonly string[] = []
       const ports: TestPorts = {
         ...harness.ports,
         makeTracker: (provider) => ({
           ...harness.ports.makeTracker(provider),
           secretEnvironmentNames: ['SLOPPENHEIMER_TEST_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'],
+        }),
+        // A host with no workspace for this issue yet, so startup delivery recovery has nothing to
+        // examine and the preparation below is the one this dispatch made.
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          exists: () => Effect.succeed(false),
         }),
         makeSourceControl: () => ({
           prepare: (_candidate, workspace, target) => {
@@ -741,6 +768,8 @@ describe('host-owned source-control dispatch', (): void => {
               expectedRemoteHead: Option.none(),
             })
           },
+          inspect: (prepared) =>
+            Effect.succeed(launched ? changedWorktree : cleanWorktree(prepared.baselineSha)),
           publish: (_candidate, prepared) => {
             publications.push(prepared.target.branchName)
             return Effect.succeed({
@@ -752,6 +781,7 @@ describe('host-owned source-control dispatch', (): void => {
           },
         }),
         runAgent: (launch) => {
+          launched = true
           launchSecretNames = launch.secretEnvironmentNames
           return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
         },
@@ -787,6 +817,7 @@ describe('host-owned source-control dispatch', (): void => {
       const harness = makeHarness(isolated, () => [issue])
       const targets: SourceControlTarget[] = []
       const publications: string[] = []
+      let launched = false
       const ports: TestPorts = {
         ...harness.ports,
         makeCodeReview: (provider) => ({
@@ -805,6 +836,8 @@ describe('host-owned source-control dispatch', (): void => {
               expectedRemoteHead: Option.some(head),
             })
           },
+          inspect: (prepared) =>
+            Effect.succeed(launched ? changedWorktree : cleanWorktree(prepared.baselineSha)),
           publish: (_candidate, prepared) => {
             publications.push(prepared.target.branchName)
             return Effect.succeed({
@@ -815,7 +848,10 @@ describe('host-owned source-control dispatch', (): void => {
             })
           },
         }),
-        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        runAgent: () => {
+          launched = true
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
       }
 
       yield* Effect.scoped(
@@ -833,6 +869,335 @@ describe('host-owned source-control dispatch', (): void => {
         expectedHeadSha: head,
       })
       expect(publications).toEqual(['sloppenheimer/issue-20'])
+    }),
+  )
+})
+
+/**
+ * Issue #167: a turn that reported `completed` is not a claim that any work exists, nor that it
+ * reached the remote. These drive the exact sequence PR #152 hit — the agent implements the change,
+ * the turn completes, and Git delivery fails — and assert that Sloppenheimer keeps the work and
+ * says what is wrong, rather than reading the unchanged remote as an agent that achieved nothing.
+ */
+describe('agent turn completion separated from work publication', (): void => {
+  const deliveryFailure = (
+    overrides: Partial<ConstructorParameters<typeof SourceControlError>[0]> = {},
+  ): SourceControlError =>
+    new SourceControlError({
+      category: 'publication_failed',
+      message: 'read-only .git metadata',
+      retryable: true,
+      worktreePreserved: true,
+      ...overrides,
+    })
+
+  /** A host source control whose worktree holds work once the agent has run, and cannot publish. */
+  const failingSourceControl = (
+    hasWork: () => boolean,
+    publish: SourceControlPort['publish'],
+  ): SourceControlPort => ({
+    prepare: (_candidate, workspace, target) =>
+      Effect.succeed({
+        workspace,
+        target,
+        baseBranch: 'main',
+        baseSha: 'protected-main',
+        baselineSha: target._tag === 'Repair' ? target.expectedHeadSha : 'protected-main',
+        expectedRemoteHead:
+          target._tag === 'Repair' ? Option.some(target.expectedHeadSha) : Option.none(),
+      }),
+    inspect: (prepared) =>
+      Effect.succeed(hasWork() ? changedWorktree : cleanWorktree(prepared.baselineSha)),
+    publish,
+  })
+
+  it.scoped('retains the work a failed publication left, rather than retrying the agent', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-retained-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            () => Effect.fail(deliveryFailure()),
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // The turn completed and the change exists. Neither "running", nor "retrying the agent",
+          // nor "completed without changing the head": the publication is what is outstanding.
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toEqual([])
+          expect(snapshot.counts.delivering).toBe(1)
+          expect(snapshot.delivering[0]).toMatchObject({
+            issueId: issue.id,
+            identifier: issue.identifier,
+            branchName: 'sloppenheimer/issue-167',
+            attempt: 1,
+            category: 'publication_failed',
+            reason: 'read-only .git metadata',
+            repairRun: false,
+          })
+          expect(launched).toBe(1)
+
+          const lookup = yield* control.agentDetail(issue.identifier)
+          expect(lookup._tag).toBe('Found')
+          if (lookup._tag === 'Found') {
+            expect(lookup.detail.handoff.publication).toMatchObject({
+              status: 'failed',
+              branch: 'sloppenheimer/issue-167',
+              category: 'publication_failed',
+              attempts: 1,
+            })
+            expect(lookup.detail.handoff.outcome).toBe('delivery_failed')
+          }
+        }),
+      )
+    }),
+  )
+
+  it.scoped('publishes retained work on a later attempt without running the agent again', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-retry-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-167',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/167',
+              pullRequestNumber: 167,
+              created: true,
+            }),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              // The first attempt is the one PR #152 hit; the second is the credential or the
+              // metadata being usable again, with the same worktree still in place.
+              return publications.length === 1
+                ? Effect.fail(deliveryFailure({ category: 'authentication_failed' }))
+                : Effect.succeed({
+                    _tag: 'Published',
+                    branchName: prepared.target.branchName,
+                    headSha: 'delivered-head',
+                    commitCreated: true,
+                  })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // Past the delivery backoff: what comes due is a publication, not a turn.
+          yield* TestClock.adjust('30 seconds')
+          while (snapshot.handoffs.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          expect(publications).toEqual(['sloppenheimer/issue-167', 'sloppenheimer/issue-167'])
+          expect(launched).toBe(1)
+          expect(snapshot.delivering).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({
+            issueId: issue.id,
+            branchName: 'sloppenheimer/issue-167',
+            state: 'awaiting_checks',
+          })
+
+          const lookup = yield* control.agentDetail(issue.identifier)
+          if (lookup._tag === 'Found') {
+            expect(lookup.detail.handoff.publication).toMatchObject({
+              status: 'published',
+              headSha: 'delivered-head',
+            })
+          }
+        }),
+      )
+    }),
+  )
+
+  it.scoped('reports a repair whose delivery failed as delivery_failed, not as no progress', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-delivery-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            () => Effect.fail(deliveryFailure()),
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      // The pull-request head is exactly where the repair started, which is the observation that
+      // used to be reported as an agent that changed nothing. It is not: the change is in the
+      // workspace, and what failed is the delivery.
+      expect(snapshot.handoffs[0]).toMatchObject({
+        issueId: issue.id,
+        state: 'delivery_failed',
+        headSha: head,
+        repairAttempts: 0,
+      })
+      expect(snapshot.handoffs[0]?.reason).toContain('have not reached the pull request')
+      expect(snapshot.handoffs[0]?.reason).not.toContain(
+        'completed without changing the pull request head',
+      )
+      expect(snapshot.delivering[0]).toMatchObject({
+        identifier: issue.identifier,
+        branchName: 'sloppenheimer/issue-20',
+        repairRun: true,
+      })
+    }),
+  )
+
+  it.scoped('rediscovers unpublished work in a workspace a previous process left behind', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-recovery-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const publications: Readonly<{ branchName: string; launchedFirst: boolean }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-20',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+              pullRequestNumber: 65,
+              created: false,
+            }),
+        }),
+        // The workspace this host starts with already holds a change no process published: the
+        // worktree reads as changed before any agent of this process has run in it.
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push({
+                branchName: prepared.target.branchName,
+                launchedFirst: launched > 0,
+              })
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      // Published by the recovery rather than by a run: no agent had started when it happened, and
+      // the repair budget an operator's intervention threshold is measured against is untouched.
+      expect(publications[0]).toEqual({
+        branchName: 'sloppenheimer/issue-20',
+        launchedFirst: false,
+      })
+      expect(snapshot.handoffs[0]).toMatchObject({
+        issueId: issue.id,
+        repairAttempts: 0,
+        repairStartedHeadSha: null,
+      })
     }),
   )
 })
@@ -1864,6 +2229,27 @@ describe('restored pull request handoffs', (): void => {
               pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
               pullRequestNumber: 65,
               created: false,
+            }),
+        }),
+        // A repair that achieved nothing, stated as the host can verify it: the worktree came back
+        // matching its baseline. Only that reading earns the no-progress verdict below — an
+        // unchanged pull-request head on its own could equally be a publication that failed.
+        makeSourceControl: () => ({
+          prepare: (_candidate, workspace, target) =>
+            Effect.succeed({
+              workspace,
+              target,
+              baseBranch: 'main',
+              baseSha: 'protected-main',
+              baselineSha: head,
+              expectedRemoteHead: Option.some(head),
+            }),
+          inspect: (prepared) => Effect.succeed(cleanWorktree(prepared.baselineSha)),
+          publish: (_candidate, prepared) =>
+            Effect.succeed({
+              _tag: 'NoChanges',
+              branchName: prepared.target.branchName,
+              baselineSha: prepared.baselineSha,
             }),
         }),
         runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
@@ -3016,6 +3402,9 @@ describe('restored pull request handoffs', (): void => {
         }),
         makeWorkspaces: (settings) => ({
           ...harness.ports.makeWorkspaces(settings),
+          // No workspace survives from a previous process, so startup delivery recovery has none
+          // to open and every creation counted below belongs to a dispatched repair.
+          exists: () => Effect.succeed(false),
           create: () =>
             Effect.sync(() => {
               workspacesCreated += 1
@@ -5616,8 +6005,16 @@ describe('live agent detail', (): void => {
         dispatchLabels: { labels: ['sloppenheimer', 'ready'], status: 'not_performed' },
         outcome: 'pull_request_open',
       })
-      // Four handoff steps are followed by the mandatory continuation retry.
+      // The host's own publication is recorded before anything asks about a pull request: the
+      // work reached the remote, and only then is there a branch to hand off.
+      expect(detail.handoff.publication).toMatchObject({
+        status: 'published',
+        branch: 'sloppenheimer/issue-13',
+        headSha: 'published-head',
+      })
+      // The publication and the four handoff steps are followed by the mandatory continuation retry.
       expect(detail.timeline.events.map((event) => event.category)).toEqual([
+        'handoff',
         'handoff',
         'handoff',
         'handoff',
@@ -5626,7 +6023,7 @@ describe('live agent detail', (): void => {
       ])
       expect(
         detail.timeline.events.map((event) => event.category === 'handoff' && event.status),
-      ).toEqual(['pending', 'observed', 'observed', 'not_performed', false])
+      ).toEqual(['observed', 'pending', 'observed', 'observed', 'not_performed', false])
       expect(detail.activity.stallDeadline).toBeNull()
     }),
   )

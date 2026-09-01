@@ -7,6 +7,7 @@ import type {
   PublicationOutcome,
   SourceControlPort,
   SourceControlTarget,
+  WorktreeInspection,
 } from '@sloppenheimer/core/ports/source-control.js'
 import {
   gitIdentity,
@@ -209,6 +210,34 @@ const prepareRepository = (
     return prepared
   })
 
+/**
+ * Reads the worktree against what the preparation recorded, without changing anything.
+ *
+ * Both halves of "there is work here" are asked separately, because they fail differently: an
+ * uncommitted edit is what a turn normally leaves, while a commit the remote does not have is what
+ * a publication that failed after committing left behind, and the second must not read as an empty
+ * worktree just because the first is now clean.
+ *
+ * The commit is measured against the branch's remote head, falling back to the baseline where the
+ * preparation found no remote branch. Against the baseline alone, a workspace whose work has
+ * already been published would read as work to publish for the rest of its life — which is exactly
+ * what startup delivery recovery would then act on.
+ */
+const inspectRepository = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<WorktreeInspection, SourceControlError> =>
+  Effect.gen(function* () {
+    const porcelain = yield* status(settings, 'publish', prepared.workspace)
+    const dirtyFileCount = porcelain.split('\n').filter((line) => line.trim().length > 0).length
+    const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    const delivered = Option.getOrElse(prepared.expectedRemoteHead, () => prepared.baselineSha)
+    const committedAhead = headSha !== delivered
+    return dirtyFileCount === 0 && !committedAhead
+      ? { _tag: 'Clean', headSha }
+      : { _tag: 'Changed', headSha, dirtyFileCount, committedAhead }
+  })
+
 const sameHead = (left: Option.Option<string>, right: Option.Option<string>): boolean =>
   Option.match(left, {
     onNone: () => Option.isNone(right),
@@ -357,5 +386,6 @@ const publishRepository = (
 
 export const makeGitSourceControl = (settings: GitSourceControlSettings): SourceControlPort => ({
   prepare: (issue, workspace, target) => prepareRepository(settings, issue, workspace, target),
+  inspect: (prepared) => inspectRepository(settings, prepared),
   publish: (issue, prepared) => publishRepository(settings, issue, prepared),
 })
