@@ -267,10 +267,11 @@ describe('protocol normalization', (): void => {
 
   it('reads every file a patch item changed and counts its lines from the diff', (): void => {
     // The App Server's `fileChange` item is `{id, changes, status}`, where `changes` lists every
-    // file the patch touched as `{path, kind, diff}` and no entry carries a line count at all.
-    // Reading only the first entry lost the rest of a multi-file patch, and waiting for a count
-    // the protocol never sends left the workspace summary reporting no lines however much the
-    // agent wrote.
+    // file the patch touched as `{path, kind, diff}`: `kind` is the tagged `PatchChangeKind`
+    // record rather than a word, and no entry carries a line count at all. Reading only the first
+    // entry lost the rest of a multi-file patch, reading `kind` as a word published every change
+    // as `unknown`, and waiting for a count the protocol never sends left the workspace summary
+    // reporting no lines however much the agent wrote.
     const payload = normalizePayload('item/completed', {
       item: {
         id: 'item_3',
@@ -279,7 +280,7 @@ describe('protocol normalization', (): void => {
         changes: [
           {
             path: '/home/agent/work/src/telemetry.ts',
-            kind: 'update',
+            kind: { type: 'update', movePath: null },
             diff: [
               '--- a/src/telemetry.ts',
               '+++ b/src/telemetry.ts',
@@ -292,7 +293,7 @@ describe('protocol normalization', (): void => {
           },
           {
             path: '/home/agent/work/src/server.ts',
-            kind: 'add',
+            kind: { type: 'add' },
             diff: [
               '--- /dev/null',
               '+++ b/src/server.ts',
@@ -300,7 +301,7 @@ describe('protocol normalization', (): void => {
               '+export const serve = (): null => null',
             ].join('\n'),
           },
-          { path: '/home/agent/work/docs/README.md', kind: 'delete' },
+          { path: '/home/agent/work/docs/README.md', kind: { type: 'delete' } },
         ],
       },
     })

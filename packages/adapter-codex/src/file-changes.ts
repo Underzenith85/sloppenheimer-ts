@@ -31,6 +31,22 @@ import {
 import type { FileChange, FileChangeKind } from '@sloppenheimer/core/telemetry.js'
 
 /**
+ * What the change did to the file, as the word itself or as the tagged record the App Server sends
+ * it in: `PatchChangeKind` is an enum serialized as `{"type": "add"}` or `{"type": "update",
+ * "movePath": null}`, never as a bare word. Reading only the word left every real change decoding
+ * as `null` and publishing as `unknown`, so the timeline named no additions, updates or deletions
+ * at all.
+ */
+const changeKindSource = Schema.Union(
+  nonEmptyString,
+  Schema.transform(protocolStruct({ type: tolerant(nonEmptyString) }), Schema.String, {
+    strict: false,
+    decode: (tagged: Readonly<{ type: string | null }>) => tagged.type ?? '',
+    encode: (word: string) => ({ type: word }),
+  }).pipe(Schema.filter((word) => word.length > 0)),
+)
+
+/**
  * One entry of a change list. `path`, `kind`, and `diff` are what the App Server sends; the rest
  * are the spellings a backend reporting the same change under other names would use, read here so
  * a count that was stated outright is never recomputed from a diff.
@@ -39,10 +55,10 @@ const changeSource = protocolStruct({
   path: tolerant(nonEmptyString),
   file: tolerant(nonEmptyString),
   filePath: tolerant(nonEmptyString),
-  kind: tolerant(nonEmptyString),
-  type: tolerant(nonEmptyString),
-  change: tolerant(nonEmptyString),
-  changeKind: tolerant(nonEmptyString),
+  kind: tolerant(changeKindSource),
+  type: tolerant(changeKindSource),
+  change: tolerant(changeKindSource),
+  changeKind: tolerant(changeKindSource),
   addedLines: tolerant(finiteNumber),
   additions: tolerant(finiteNumber),
   deletedLines: tolerant(finiteNumber),
