@@ -135,6 +135,31 @@ const expectedRepairHead = (
 }
 
 /**
+ * Whether `candidate` is already contained in `reference`, so it carries nothing that one lacks.
+ *
+ * A failure is read as "not contained": the caller acts on that by treating the commit as work,
+ * and a commit that cannot be compared is safer inspected than assumed delivered.
+ */
+const containedIn = (
+  settings: GitSourceControlSettings,
+  operation: GitOperation,
+  workspace: Workspace,
+  candidate: string,
+  reference: string,
+): Effect.Effect<boolean> =>
+  Effect.map(
+    Effect.either(
+      runGit(settings, operation, workspace.path, [
+        'merge-base',
+        '--is-ancestor',
+        candidate,
+        reference,
+      ]),
+    ),
+    (outcome) => outcome._tag === 'Right',
+  )
+
+/**
  * Puts the target branch at the baseline with nothing carried over.
  *
  * Uninterruptible as a pair. `checkout -B` carries a tracked edit across when the file is identical
@@ -197,7 +222,15 @@ const prepareRepository = (
     const head = yield* currentHead(settings, 'prepare', workspace)
     const dirty = (yield* status(settings, 'prepare', workspace)).length > 0
     const baselineSha = Option.getOrElse(repairHead, () => baseSha)
-    const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
+    // Measured against what the remote already has, exactly as the inspection measures it. A
+    // workspace the branch has moved past holds a commit the remote has since built on: preserving
+    // it would hand the next agent a stale head, and publishing from there force-pushes over the
+    // commits that arrived in the meantime.
+    const delivered = Option.getOrElse(observedRemoteHead, () => baselineSha)
+    const unpublishedCommit = Option.isSome(head)
+      ? head.value !== delivered &&
+        !(yield* containedIn(settings, 'prepare', workspace, head.value, delivered))
+      : false
     const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
     if (!preserve) {
       yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
@@ -212,30 +245,6 @@ const prepareRepository = (
     }
     return prepared
   })
-
-/**
- * Whether `candidate` is already contained in `reference`, so it carries nothing that one lacks.
- *
- * A failure is read as "not contained": the caller acts on that by treating the commit as work,
- * and a commit that cannot be compared is safer inspected than assumed delivered.
- */
-const containedIn = (
-  settings: GitSourceControlSettings,
-  prepared: PreparedRepository,
-  candidate: string,
-  reference: string,
-): Effect.Effect<boolean> =>
-  Effect.map(
-    Effect.either(
-      runGit(settings, 'publish', prepared.workspace.path, [
-        'merge-base',
-        '--is-ancestor',
-        candidate,
-        reference,
-      ]),
-    ),
-    (outcome) => outcome._tag === 'Right',
-  )
 
 /**
  * Reads the worktree against what the preparation recorded, without changing anything.
@@ -260,7 +269,8 @@ const inspectRepository = (
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
     const delivered = Option.getOrElse(prepared.expectedRemoteHead, () => prepared.baselineSha)
     const committedAhead =
-      headSha !== delivered && !(yield* containedIn(settings, prepared, headSha, delivered))
+      headSha !== delivered &&
+      !(yield* containedIn(settings, 'publish', prepared.workspace, headSha, delivered))
     return dirtyFileCount === 0 && !committedAhead
       ? { _tag: 'Clean', headSha }
       : { _tag: 'Changed', headSha, dirtyFileCount, committedAhead }

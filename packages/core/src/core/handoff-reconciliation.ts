@@ -1,6 +1,6 @@
 import { Effect, Option, Ref, type Scope } from 'effect'
 
-import type { Issue, IssueId } from '../domain/domain.js'
+import type { IssueId } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
 import { logInfo } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
@@ -14,35 +14,20 @@ import {
   type HandoffAction,
 } from './handoff-decision.js'
 import { afterRepairDispatched, awaitingSlot, repairIssue } from './repair.js'
+import { hasSlot, logContext } from './policy.js'
 import {
-  hasSlot,
-  identifierIssueNumber,
-  issueIsActive,
-  issueIsRoutable,
-  logContext,
-  stateIsIn,
-} from './policy.js'
+  refreshHandoffIssues,
+  repairPermission,
+  skipped,
+  workspaceUnexamined,
+  type IssueRefresh,
+  type RepairPermission,
+} from './handoff-eligibility.js'
 import type { CodeReviewPort } from '../ports/index.js'
 import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
+import type { EffectiveWorkflow, HandoffEntry } from './state.js'
 import * as Transitions from './transitions.js'
-
-/** Whether this handoff is the orchestrator's to act on at all in this pass. */
-const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boolean => {
-  // A retained delivery is work this pull request has not seen yet. Observing the head while it
-  // waits would read the pre-delivery state as the repair's output, which is the reading this
-  // whole separation exists to prevent.
-  if (state.running.has(id) || state.retries.has(id) || state.deliveries.has(id)) {
-    return true
-  }
-  if (handoff.state === 'closed_without_merge') {
-    return true
-  }
-  return Option.exists(identifierIssueNumber(handoff.issue.identifier), (issueNumber) =>
-    state.pausedIssueNumbers.has(issueNumber),
-  )
-}
 
 /**
  * What a merged handoff leaves behind. The runtime already recorded that the issue completed; this
@@ -98,83 +83,6 @@ const stageHandoff = (
   handoff: HandoffEntry,
 ): Effect.Effect<void> =>
   Ref.update(context.state, (current) => Transitions.putHandoff(current, id, handoff))
-
-type IssueRefresh =
-  | Readonly<{ _tag: 'Failed'; reason: string }>
-  | Readonly<{ _tag: 'Succeeded'; issue: Option.Option<Issue> }>
-
-export type RepairPermission =
-  | Readonly<{ _tag: 'Allowed'; issue: Issue }>
-  | Readonly<{ _tag: 'Denied'; reason: string }>
-
-/**
- * A handoff keeps the workflow that created its pull request. A freshly fetched issue is evaluated
- * against that same workflow before new agent work starts, while review and merge observation stay
- * independent of issue eligibility. Removing a label therefore stops repairs without stranding a
- * pull request that is already green.
- */
-export const repairPermission = (
-  handoff: HandoffEntry,
-  refresh: IssueRefresh,
-): RepairPermission => {
-  if (refresh._tag === 'Failed') {
-    return { _tag: 'Denied', reason: `Cannot confirm repair eligibility. ${refresh.reason}` }
-  }
-  if (Option.isNone(refresh.issue)) {
-    return {
-      _tag: 'Denied',
-      reason: 'Repair paused because the tracker no longer reports the issue.',
-    }
-  }
-  const issue = refresh.issue.value
-  const workflow = handoff.execution.workflow
-  if (stateIsIn(issue.state, workflow.config.tracker.terminalStates)) {
-    return { _tag: 'Denied', reason: 'Repair paused because the issue is terminal.' }
-  }
-  if (
-    !issueIsActive(issue, workflow.config.tracker) ||
-    !issueIsRoutable(issue, workflow.config.tracker)
-  ) {
-    return {
-      _tag: 'Denied',
-      reason: 'Repair paused because the issue is not eligible under its handoff workflow.',
-    }
-  }
-  return { _tag: 'Allowed', issue }
-}
-
-/**
- * Refresh each eligible handoff independently.
- *
- * The tracker boundary is fail-fast even when it accepts several IDs, so batching unrelated
- * handoffs would let one malformed or missing tracker record deny repairs for every pull request
- * in that batch. Eligibility refreshes are deliberately isolated here: a provider failure can
- * affect only the handoff whose policy decision depends on it.
- */
-const refreshHandoffIssues = (
-  handoffs: ReadonlyMap<IssueId, HandoffEntry>,
-): Effect.Effect<ReadonlyMap<IssueId, IssueRefresh>, never> =>
-  Effect.gen(function* () {
-    const fetched: readonly (readonly [IssueId, IssueRefresh])[] = yield* Effect.forEach(
-      handoffs,
-      ([id, handoff]) =>
-        handoff.execution.tracker.fetchIssuesByIds([id]).pipe(
-          Effect.match({
-            onFailure: (error) =>
-              [id, { _tag: 'Failed', reason: error.message } satisfies IssueRefresh] as const,
-            onSuccess: (issues) =>
-              [
-                id,
-                {
-                  _tag: 'Succeeded',
-                  issue: Option.fromNullable(issues.find((issue) => issue.id === id)),
-                } satisfies IssueRefresh,
-              ] as const,
-          }),
-        ),
-    )
-    return new Map(fetched)
-  })
 
 /**
  * The protected merge, and everything that follows it here: the handoff is completed and the issue
@@ -247,6 +155,17 @@ const performRepair = (
     }
     const issue = repairIssue(handoff, permission.issue, baselineHeadSha, action.reason)
     const current = yield* Ref.get(context.state)
+    // A repair is an agent put into a workspace, and this path does not go through
+    // `dispatchAdmission`. A workspace nobody has conclusively looked at may hold work a previous
+    // process never published; the repair would carry it as its own and spend one of the budget
+    // rediscovering it, so it waits for a pass that manages to look.
+    if (workspaceUnexamined(current, id)) {
+      yield* stageHandoff(context, id, {
+        ...handoff,
+        reason: `Waiting to inspect the workspace for unpublished changes. ${action.reason}`,
+      })
+      return
+    }
     if (!hasSlot(current, issue, handoff.execution.workflow)) {
       if (Option.isNone(executionAttempt)) {
         yield* stageHandoff(context, id, awaitingSlot(handoff, action.reason))

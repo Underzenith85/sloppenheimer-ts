@@ -583,10 +583,17 @@ repair agent that had achieved nothing.
   A workspace it could not read — or was not allowed to act on, because the issue is paused — is
   recorded in `unexaminedWorkspaces`, and `dispatchAdmission` refuses that issue until a later pass
   manages to look: an agent dispatched into an unread workspace would carry whatever a previous
-  process left there as its own work. Examination is per issue rather than one sweep, because an
-  issue that is inactive at startup becomes a candidate later and arrives with a workspace of its
-  own; the dispatch pass examines its own candidates, so only the one sweep that has to precede the
-  first reconciliation costs a tracker call.
+  process left there as its own work. A repair does not go through `dispatchAdmission`, so the
+  reconciliation pass holds one back for an issue whose workspace is recorded unexamined, and a
+  sweep that could not fetch its candidates at all refuses repair dispatch for that pass. Examination
+  is per issue rather than one sweep, because an issue that is inactive at startup becomes a
+  candidate later and arrives with a workspace of its own; the dispatch pass examines its own
+  candidates, so only the one sweep that has to precede the first reconciliation costs a tracker
+  call.
+- A workspace the branch has moved past is not retained work and is not preserved either. The
+  preparation resets it, for the same reason the inspection calls it clean: the next agent would
+  otherwise start from a commit the remote has built on, and publishing from there force-pushes
+  over what arrived in between.
 
 ### Cancellation and shutdown policy for unpublished work
 

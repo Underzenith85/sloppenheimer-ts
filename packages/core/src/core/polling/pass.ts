@@ -174,12 +174,15 @@ export const poll = (
     // never published is published from here, rather than being handed to a repair that would
     // spend a turn and one of the repair budget rediscovering it. A workspace it could not read is
     // recorded, and dispatch refuses that issue until a later pass manages to look.
-    if (yield* sweepRetainedDeliveries(context)) {
+    const sweep = yield* sweepRetainedDeliveries(context)
+    if (sweep !== 'skipped') {
       performed.push('delivery_recovery')
     }
     dispatchValidationFailed = (yield* reloadWorkflow(context)) || dispatchValidationFailed
     performed.push('workflow_reload')
-    yield* reconcileHandoffs(context, !dispatchValidationFailed)
+    // A sweep that could not look at anything refuses repair dispatch as well: a repair is an agent
+    // put into a workspace, and this pass cannot say which workspaces hold work nobody published.
+    yield* reconcileHandoffs(context, !dispatchValidationFailed && sweep !== 'failed')
     performed.push('handoff_reconciliation')
     yield* context.reconcile(!dispatchValidationFailed)
     performed.push('issue_reconciliation')

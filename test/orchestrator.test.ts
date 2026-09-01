@@ -1728,6 +1728,77 @@ describe('agent turn completion separated from work publication', (): void => {
       })
     }),
   )
+
+  it.scoped('holds a repair back while its workspace has not been read', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-unread-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      let readable = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () => ({
+          ...failingSourceControl(
+            () => true,
+            (_candidate, prepared) =>
+              Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              }),
+          ),
+          inspect: () =>
+            readable
+              ? Effect.succeed(cleanWorktree('protected-main'))
+              : Effect.fail(
+                  new SourceControlError({
+                    category: 'invalid_repository',
+                    message: 'the worktree could not be read',
+                    retryable: true,
+                    worktreePreserved: true,
+                  }),
+                ),
+        }),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          yield* control.refresh
+
+          // A repair is an agent put into a workspace, and it does not go through
+          // `dispatchAdmission`. Until something has read this one, the pull request waits.
+          expect(launched).toBe(0)
+          const held = yield* control.snapshot
+          expect(held.handoffs[0]?.reason).toContain('Waiting to inspect the workspace')
+
+          readable = true
+          while (launched === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+        }),
+      )
+    }),
+  )
 })
 
 describe('restored pull request handoffs', (): void => {

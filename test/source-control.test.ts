@@ -170,6 +170,39 @@ describe('host Git source control', (): void => {
     }),
   )
 
+  it.live('resets a workspace the branch has moved past, rather than preserving a stale head', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      const sourceControl = sourceControlFor(fixture)
+      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
+      const first = yield* sourceControl.prepare(issue, workspace, target)
+      yield* host(() =>
+        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
+      )
+      yield* sourceControl.publish(issue, first)
+      yield* host(() => git(fixture.seed, ['fetch', 'origin', 'sloppenheimer/issue-165']))
+      yield* host(() =>
+        git(fixture.seed, ['checkout', '-B', 'sloppenheimer/issue-165', 'FETCH_HEAD']),
+      )
+      yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+
+      // What the next agent receives. Preserving the stale head would start it from a commit the
+      // branch has moved past — and republish that commit as though it were new work.
+      const second = yield* sourceControl.prepare(issue, workspace, target)
+
+      expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(
+        second.baselineSha,
+      )
+      yield* Effect.promise(() =>
+        expect(readFile(join(fixture.workspace, 'implementation.ts'), 'utf8')).rejects.toThrow(),
+      )
+      expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
+    }),
+  )
+
   it.live('reports an empty diff without creating a remote branch', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)

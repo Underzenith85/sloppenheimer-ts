@@ -224,6 +224,9 @@ export const examineWorkspaces = (
     return true
   })
 
+/** What one startup sweep amounted to, which is what decides whether repairs may dispatch. */
+export type SweepOutcome = 'skipped' | 'completed' | 'failed'
+
 /**
  * The one sweep that runs before the first reconciliation.
  *
@@ -236,11 +239,11 @@ export const examineWorkspaces = (
  */
 export const sweepRetainedDeliveries = (
   context: OrchestratorContext,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+): Effect.Effect<SweepOutcome, never, Scope.Scope> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(context.state)
     if (opening.startupSweepFinished || !opening.startupRecoveryFinished) {
-      return false
+      return 'skipped'
     }
     const effective = opening.lastKnownGood
     const candidates = yield* effective.tracker
@@ -256,9 +259,9 @@ export const sweepRetainedDeliveries = (
         outcome: 'failed',
         error: candidates.error.message,
       })
-      return false
+      return 'failed'
     }
     yield* examineWorkspaces(context, candidates.value)
     yield* Ref.update(context.state, Transitions.finishStartupSweep)
-    return true
+    return 'completed'
   })
