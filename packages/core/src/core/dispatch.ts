@@ -87,6 +87,11 @@ export const dispatch = (
     }
 
     const base = effectiveOverride ?? before.lastKnownGood
+    const target: SourceControlTarget = sourceTarget ?? {
+      _tag: 'Normal',
+      branchName: issueBranchName(issue),
+    }
+    const repairRun = target._tag === 'Repair'
     // Opened before preflight, not after the worker starts: a dispatch that fails validation or
     // prompt rendering schedules a retry, and that retry's published link has to resolve to the
     // reason it failed rather than to "no active session".
@@ -99,7 +104,13 @@ export const dispatch = (
         outcome: 'failed',
         error: preflight.error.message,
       })
-      yield* context.scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
+      yield* context.scheduleRetry(
+        issue,
+        (attempt ?? 0) + 1,
+        preflight.error.message,
+        false,
+        repairRun,
+      )
       return false
     }
     const effective = preflight.value
@@ -108,14 +119,16 @@ export const dispatch = (
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(asSettled)
     if (renderedPrompt._tag === 'Failed') {
-      yield* context.scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
+      yield* context.scheduleRetry(
+        issue,
+        (attempt ?? 0) + 1,
+        renderedPrompt.error.message,
+        false,
+        repairRun,
+      )
       return false
     }
     const execution = captureExecutionSnapshot(effective, renderedPrompt.value)
-    const target: SourceControlTarget = sourceTarget ?? {
-      _tag: 'Normal',
-      branchName: issueBranchName(issue),
-    }
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
     /**
      * The ports this run reaches its provider through, in a cell the non-Effect world can read. A
@@ -252,6 +265,7 @@ export const dispatch = (
         execution,
         sessionPorts,
         attempt,
+        repairRun,
         startedAt,
         lastEventAt: null,
         lastEvent: null,

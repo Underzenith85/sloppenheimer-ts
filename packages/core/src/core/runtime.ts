@@ -300,6 +300,7 @@ export type OrchestratorContext = Readonly<{
     attempt: number,
     error: string | null,
     continuation: boolean,
+    repairRun: boolean,
     trackerError?: TrackerError,
   ) => Effect.Effect<boolean, never, Scope.Scope>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
@@ -978,6 +979,7 @@ export const startOrchestratorRuntime = (
       attempt: number,
       error: string | null,
       continuation: boolean,
+      repairRun: boolean,
       trackerError?: TrackerError,
     ): Effect.Effect<boolean, never, Scope.Scope> =>
       Effect.gen(function* () {
@@ -1017,7 +1019,7 @@ export const startOrchestratorRuntime = (
           ),
         )
         const displaced = yield* Ref.modify(state, (pending) =>
-          Transitions.scheduleRetry(pending, { issue, attempt, dueAt, error, fiber }),
+          Transitions.scheduleRetry(pending, { issue, attempt, repairRun, dueAt, error, fiber }),
         )
         if (Option.isSome(displaced)) {
           yield* Fiber.interrupt(displaced.value.fiber)
@@ -1089,6 +1091,7 @@ export const startOrchestratorRuntime = (
                 (ended.value.attempt ?? 0) + 1,
                 'agent stalled',
                 false,
+                ended.value.repairRun,
               )
             }
           }
