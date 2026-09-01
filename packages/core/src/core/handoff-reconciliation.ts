@@ -1,6 +1,7 @@
 import { Effect, Option, Ref, type Scope } from 'effect'
 
 import type { Issue, IssueId } from '../domain/domain.js'
+import type { TrackerPort } from '../ports/tracker.js'
 import { currentInstant } from '../support/clock.js'
 import { logInfo } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
@@ -92,6 +93,8 @@ export type RepairPermission =
   | Readonly<{ _tag: 'Allowed'; issue: Issue }>
   | Readonly<{ _tag: 'Denied'; reason: string }>
 
+type IssueRefreshEntry = readonly [IssueId, IssueRefresh]
+
 /**
  * A handoff keeps the workflow that created its pull request. A freshly fetched issue is evaluated
  * against that same workflow before new agent work starts, while review and merge observation stay
@@ -128,37 +131,71 @@ export const repairPermission = (
   return { _tag: 'Allowed', issue }
 }
 
+const succeededRefreshes = (
+  ids: readonly IssueId[],
+  issues: readonly Issue[],
+): readonly IssueRefreshEntry[] => {
+  const issuesById = new Map(issues.map((issue) => [issue.id, issue] as const))
+  return ids.map(
+    (id) =>
+      [
+        id,
+        { _tag: 'Succeeded', issue: Option.fromNullable(issuesById.get(id)) },
+      ] satisfies IssueRefreshEntry,
+  )
+}
+
+const refreshOne = (tracker: TrackerPort, id: IssueId): Effect.Effect<IssueRefreshEntry, never> =>
+  tracker.fetchIssuesByIds([id], { hydrateDependencies: true }).pipe(
+    Effect.match({
+      onFailure: (error) =>
+        [id, { _tag: 'Failed', reason: error.message }] satisfies IssueRefreshEntry,
+      onSuccess: (issues) =>
+        [
+          id,
+          {
+            _tag: 'Succeeded',
+            issue: Option.fromNullable(issues.find((issue) => issue.id === id)),
+          },
+        ] satisfies IssueRefreshEntry,
+    }),
+  )
+
 /**
- * Refresh each eligible handoff independently.
- *
- * The tracker boundary is fail-fast even when it accepts several IDs, so batching unrelated
- * handoffs would let one malformed or missing tracker record deny repairs for every pull request
- * in that batch. Eligibility refreshes are deliberately isolated here: a provider failure can
- * affect only the handoff whose policy decision depends on it.
+ * Use one dependency-aware batch in the normal case. A fail-fast provider cannot identify the bad
+ * record, so retry separately after a batch failure to keep one malformed issue from pausing
+ * unrelated work.
  */
+const refreshTrackerIssues = (
+  tracker: TrackerPort,
+  ids: readonly IssueId[],
+): Effect.Effect<readonly IssueRefreshEntry[], never> =>
+  tracker.fetchIssuesByIds(ids, { hydrateDependencies: true }).pipe(
+    Effect.matchEffect({
+      onFailure: () => Effect.forEach(ids, (id) => refreshOne(tracker, id)),
+      onSuccess: (issues) => Effect.succeed(succeededRefreshes(ids, issues)),
+    }),
+  )
+
+/** Refresh eligible handoffs once per tracker snapshot, including adapter-owned eligibility. */
 const refreshHandoffIssues = (
   handoffs: ReadonlyMap<IssueId, HandoffEntry>,
 ): Effect.Effect<ReadonlyMap<IssueId, IssueRefresh>, never> =>
   Effect.gen(function* () {
-    const fetched: readonly (readonly [IssueId, IssueRefresh])[] = yield* Effect.forEach(
-      handoffs,
-      ([id, handoff]) =>
-        handoff.execution.tracker.fetchIssuesByIds([id]).pipe(
-          Effect.match({
-            onFailure: (error) =>
-              [id, { _tag: 'Failed', reason: error.message } satisfies IssueRefresh] as const,
-            onSuccess: (issues) =>
-              [
-                id,
-                {
-                  _tag: 'Succeeded',
-                  issue: Option.fromNullable(issues.find((issue) => issue.id === id)),
-                } satisfies IssueRefresh,
-              ] as const,
-          }),
-        ),
+    const groups = new Map<TrackerPort, IssueId[]>()
+    for (const [id, handoff] of handoffs) {
+      const tracker = handoff.execution.tracker
+      const ids = groups.get(tracker)
+      if (ids === undefined) {
+        groups.set(tracker, [id])
+      } else {
+        ids.push(id)
+      }
+    }
+    const fetched = yield* Effect.forEach(groups, ([tracker, ids]) =>
+      refreshTrackerIssues(tracker, ids),
     )
-    return new Map(fetched)
+    return new Map<IssueId, IssueRefresh>(fetched.flat())
   })
 
 /**
