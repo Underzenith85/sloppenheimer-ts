@@ -1,51 +1,300 @@
 # Repository conventions
 
-## Architecture and ports
+This file is the standing brief for anyone — human or agent — writing code in this repository. It
+states the conventions the existing code already follows, so a change reads like the code around it
+rather than like a second dialect. Where a convention was a deliberate architectural decision, this
+file is also the record of that decision: do not open a separate ADR for something written down
+here.
 
-The following port boundary was accepted in the 2026-08-30 architecture review:
+Read it as rules with reasons. When a rule and its reason disagree in a case it did not anticipate,
+say so in the change rather than quietly taking the exception.
 
-- `TrackerPort` contains only tracker-neutral issue operations: fetching normalized issues, adapter-supplied dispatch eligibility, dependency hydration, tracker credentials, and issue-state operations expressed in tracker-neutral terms.
-- Pull-request handoff is an optional application capability exposed through `CodeReviewPort`. It owns completed-work handoff and discovery of an existing handoff, inspection of a proposed change, protected merge, and review-thread resolution. The port may use honest pull-request and code-review vocabulary.
-- Repository preparation and publication are a tracker-neutral application capability exposed through `SourceControlPort`. The host owns Git metadata and credentials, prepares normal work from the protected base and repairs from an exact pull-request head, commits agent file changes, rebases under policy, and pushes with an expected-head lease. Agents edit only worktree files. Source control must not be folded into `TrackerPort`, and pull-request inspection and merge remain in `CodeReviewPort`.
-- GitHub supplies both `TrackerPort` and `CodeReviewPort`; other tracker providers are not required to simulate code-review concepts that they do not support.
-- When handoff is enabled, a provider that does not supply `CodeReviewPort` is an operator-visible configuration error. When handoff is disabled, no `CodeReviewPort` is required and the application follows the core continuation lifecycle. The workflow key that selects between the two is `handoff.enabled`, read once by the composition root at startup ([#73](https://github.com/Underzenith85/sloppenheimer-ts/issues/73)).
-- `HandoffResult` belongs with `CodeReviewPort`, because its pull-request variant is a code-review concept rather than an issue-tracker concept.
-- The composition root states that gate structurally: composing no code-review services at all is handoff disabled, and composing them is handoff enabled. The orchestrator therefore asks for `CurrentCodeReview` as an optional service, and reports the configuration error only when that service is present and the provider's factory supplies nothing.
-- During implementation of this boundary, remove the unused `dispatchLabels` parameter from `handoffCompletedWork`; do not preserve it in either port.
+## Verification
 
-This convention is the architecture record for the boundary. Do not create a separate ADR for it.
+`pnpm check` is the gate: it runs `format:check`, `lint`, `typecheck`, `test`, and `build`, in that
+order, and CI runs the same command. Run it before handing work off, and treat every one of its
+stages as an error rather than a warning — `oxlint` runs with `--deny-warnings`, so there is no such
+thing as a tolerated lint.
 
-## Agent runners
+- `pnpm format` rewrites files with Oxfmt. Never hand-format around it.
+- `pnpm lint` is Oxlint with its native type-aware engine.
+- `pnpm typecheck` covers the workspace and, separately, the browser sources under
+  `src/operator/ui/`.
+- `pnpm test` is the default Vitest profile. `pnpm test <path>` narrows it; `pnpm test:conformance`
+  and `pnpm test:real-integration` are the other two profiles, selected by test path.
 
-The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/sloppenheimer-ts/issues/214),
-against the design in `docs/agent-runner-claude-code.md`. This section is the architecture record for
-it; do not create a separate ADR.
+Do not add a dependency, a script, or a lint exemption to make a check pass. If a rule is genuinely
+wrong for a case, take the exemption in `.oxlintrc.json` with a comment naming the issue that
+removes it — that is the form every existing exemption takes.
 
-- A workflow selects its coding agent with `runner: {kind, settings}`, the same shape `tracker` uses.
-  `settings` is preserved exactly as authored and validated only by the adapter owning the kind.
-- `AgentRunnerConfig` carries only what the core consumes — `command`, `turnTimeoutMs`,
-  `readTimeoutMs`, `stallTimeoutMs` — plus the opaque validated `settings`. A second backend adds no
-  field to it. Backend policy values (Codex's approval policy and sandbox modes) are validated in
-  that backend's adapter, never in `packages/core`.
-- Each `AgentEvent` states its own `lifecycle`. The orchestrator must never recognize a session
-  transition by matching a runner's event names: that was the defect #214 removed, and it fails
-  silently rather than loudly. `AgentEventSemantics` was deleted rather than extended, because an
-  event that carries its own meaning cannot be consulted for the wrong runner.
-- `packages/core` names no backend. `test/runner-neutrality.test.ts` enforces that, with the
-  `@codex review` handoff vocabulary as the one listed carve-out — that names a code-review
-  provider, not the agent that authored the change.
-- Authentication environment names belong to the registered runner, not to a core constant. The
-  loader refuses a tracker credential that names the _selected_ runner's own authentication, since
-  the host would have to both strip and preserve it.
-- `src/agent-runners.ts` is the only file outside the adapters that names a concrete runner kind.
-  Adding a backend is one entry there and no change under `config/` or `core/`.
-- The runner is bound once at startup and has no cell: it holds no per-workflow state, so everything
-  that varies reaches it on the launch. A reload may change how it is configured, but a reload that
-  changes `runner.kind` is refused with an operator-visible error and the last known good workflow
-  stays in force. Do not add a runner cell to make that reload succeed without a deliberate design
-  decision about what happens to a session already running under the previous kind.
+## Language baseline
 
-## Repository structure
+TypeScript 7's native compiler, Node 24, ESM only. The strictness in `tsconfig.base.json` is part of
+the design, not a starting point to negotiate down: `exactOptionalPropertyTypes`,
+`noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`, `noImplicitReturns`,
+`useUnknownInCatchVariables`, and `verbatimModuleSyntax` are all on, and no file may weaken them.
+
+- Never `any`, never a non-null assertion, never an unchecked cast. If a value's type is not known,
+  narrow it with a predicate or decode it with a schema — an `as` that asserts what was never
+  checked is the defect these settings exist to prevent.
+- Every function states its return type — `explicit-function-return-type` is an error, arrow
+  callbacks included. `curly` is `all` and `eqeqeq` is on; a `switch` over a union must be
+  exhaustive.
+- `import type` for types, `.js` specifiers on every relative and workspace import, because
+  `verbatimModuleSyntax` and NodeNext resolution both require it.
+- Prefer `type` aliases of `Readonly<{ ... }>` over `interface`. Classes appear only as
+  `Data.TaggedError` subclasses, `Context.Tag` subclasses, and two documented carve-outs
+  (`CodexConnection`, which is a session's identity, and `JsonConversionError`, which is thrown and
+  caught inside one module). A new class needs a reason of that kind.
+- Formatting is Oxfmt's: no semicolons, single quotes, 100-column width, trailing commas. Numeric
+  literals over four digits take separators (`10_000`).
+- Names are whole words. `argumentsValue`, `secretEnvironmentNames`, `retirePrevious` — not `args`,
+  `envs`, `prev`. A name that needs a comment to expand it is the wrong name.
+- Modules cap at 500 lines and functions at 100, enforced where `.oxlintrc.json` turns the limits on
+  and being extended package by package. Write to the limit even where it is not yet enforced; the
+  way past it is extraction, not an exemption.
+
+## Effect is the default vocabulary
+
+`effect`, `@effect/platform`, and `@effect/platform-node` are pinned as one compatible Effect 3 set
+and are upgraded together — Platform releases declare Effect-line peer ranges, and a partial upgrade
+produces incompatible runtime types.
+
+Anything that can fail, needs a resource, reads the clock or the environment, or performs I/O is an
+`Effect`. Ports are described as records of functions returning `Effect`s; a bare `Promise` in a
+port surface is a design statement, made only where the boundary is deliberately total (see
+**Errors**).
+
+### `Effect.gen` or `pipe`
+
+Use `Effect.gen` where a computation sequences steps, branches on what it observed, or writes state:
+`yield*` reads like the order things happen, and the failure channel stays typed throughout. Use
+`.pipe(...)` for a single value being transformed — a decode mapped onto an error, a schedule being
+built, a layer being assembled. Do not mix both for the same expression, and do not wrap a one-line
+`pipe` in `Effect.gen`.
+
+Neither style may hide a nested runtime: an `Effect` is returned to its caller, not run inside
+another effect.
+
+### Errors: no throw crosses a boundary
+
+The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.TaggedError` classes —
+`WorkflowError`, `TrackerError`, `WorkspaceError`, `SourceControlError`, `AgentError`,
+`HandoffStoreError`, `ServerError`. Each carries a `category` union, a human `message`, an optional
+`cause`, and whatever the callers must branch on (`retryable` and `retryAfterMs` on `TrackerError`,
+`worktreePreserved` on `SourceControlError`).
+
+- Extend a `category` union before adding an error class. A new class is warranted only when a new
+  port needs a failure that no existing port's callers can handle.
+- The failure channel is how a function reports failure. Do not throw to signal one, do not reject a
+  promise to signal one, and do not return a sentinel value (`null`, `-1`, an empty string) that a
+  caller has to know to check.
+- Failures are the expected outcomes; defects are the bugs. Do not `Effect.die` for something an
+  operator could cause, and do not catch defects to keep a fiber alive — a defect that reaches the
+  runtime is information.
+- Preserve `cause` when converting between layers. `Effect.mapError` at the boundary is how an
+  adapter's failure becomes a port's failure; a rewritten message that drops the cause loses the
+  only record of what actually happened.
+- No error message may carry a credential. Secrets are `Redacted` and messages are built from field
+  names, not field values.
+
+There is exactly one sanctioned use of `throw`, and it is a local implementation detail rather than
+a signal: **inside the `try` thunk of `Effect.try` / `Effect.tryPromise`, or inside a helper
+documented as being for a caller already inside one.** The surrounding combinator catches it and
+puts a typed error back on the failure channel, so nothing escapes as a defect. `authoredFields` in
+`packages/adapter-github/src/provider.ts` is the model: a run of small validators that throw a
+`WorkflowError`, wrapped once in `Effect.try` that maps the caught value back. `decodeTrackerOrThrow`
+in `packages/adapter-github/src/client.ts` is the same idea factored out, and its doc comment says so.
+
+Keep that pattern inside one module, and keep the wrapping `Effect.try` in view of the throw. A
+throwing helper exported for a caller elsewhere to wrap is not this pattern; it is a rethrown
+exception with extra steps.
+
+`try`/`catch` is for JavaScript APIs that throw as their only failure mode — `new URL(value)` is the
+recurring one — and converts to a typed value immediately, in the same expression. `Effect.tryPromise`
+is how a promise-returning API is admitted. A floating promise is a lint error, and a promise
+created outside the runtime is an interruption leak.
+
+Where a boundary must be total, say so and make it so. `TrackerPort.executeTool` returns a
+`Promise<HostToolResult>` because the agent runner calls it as a host tool: every invocation resolves
+to a JSON-safe success or failure, and a rejection would be a protocol violation rather than a
+reportable outcome. That totality is the boundary's contract — enforced where the effect is run out,
+in `packages/adapter-github/src/tools.ts` — not a licence to swallow failures anywhere else.
+
+### Absence: `Option` versus `null`
+
+Accepted 2026-08-30: use `null` at data boundaries and `Option` for internal control-flow absence.
+
+- Use `null` in values that are serialized, persisted, logged, returned by the HTTP API, received
+  from an external protocol, or represented as domain or wire records. Keep these values as
+  ordinary JSON-shaped data.
+- Use Effect's `Option` in internal service APIs, lookups, and partial computations when absence
+  determines the next control-flow branch.
+- Convert once at the architectural boundary. Do not carry `Option` into JSON-facing records, and
+  do not carry a nullable result deeper into Effect-based orchestration when it represents a
+  branch.
+- Keep native `undefined` where JavaScript APIs inherently produce it, such as `Map.get` or an
+  omitted optional property. Convert it to `Option` when it crosses into an internal service
+  contract.
+
+`findPullRequest` in `packages/adapter-github/src/code-review.ts` is the worked example on the
+`Option` side: absence decides the next branch in both handoff paths, so it answers
+`Effect.Effect<Option.Option<string>, TrackerError>` rather than carrying a `null` deeper. One
+signature still predates this record — `refreshIssue: () => Effect.Effect<Issue | null, AgentError>`
+in `packages/core/src/ports/agent-runner.ts` — and should become `Option<Issue>` for the same
+reason. In contrast, wire-shaped `Issue` fields including `description`, `branchName`, `url`,
+`createdAt`, and `updatedAt` remain nullable, as do telemetry and snapshot fields such as
+`AgentEvent.message`, `sessionId`, `HandoffSnapshot.headSha`, and `reason`.
+
+An optional _capability_ shows the conversion working. `CurrentCodeReview` reads
+`CodeReviewPort | null`, because at that seam the absence is a composition fact — the provider
+supplied none. The orchestrator converts once, when it records the ports a session runs against:
+`ExecutionSnapshot.codeReview` is `Option<CodeReviewPort>`, and every handoff decision below it
+branches with `Option.match` rather than re-testing for `null`.
+
+This mixed style is intentional. It costs one explicit conversion at each architectural boundary,
+but keeps serialized types honest and naturally JSON-compatible while making internal absence
+composable with Effect.
+
+### Immutable state
+
+The scheduler's whole world is one immutable value, `RuntimeState` in
+`packages/core/src/core/state.ts`, held in a `Ref` and written by a single mailbox loop. Everything
+below follows from that shape.
+
+- Records are `Readonly<{ ... }>`; collections are `readonly T[]`, `ReadonlyMap`, `ReadonlySet`. A
+  mutable container in a state or domain record is a defect, not a shortcut.
+- Never mutate an argument. Persistent edits go through `packages/core/src/support/collections.ts`
+  (`withEntry`, `withoutEntry`, `withMember`, `withoutMember`, and the bounded variants), which
+  answer with a new collection and return the _original_ when nothing changed, so a no-op transition
+  preserves reference equality.
+- Transitions are pure functions of the state and what happened, living in
+  `packages/core/src/core/transitions/`. They take no fibers, ports, or clock. A transition whose
+  caller must then act returns `[value, nextState]`, in the order `Ref.modify` consumes — which is
+  how a call site hands one straight to the cell (`Ref.modify(context.state, Transitions.takeRunId)`).
+- A lookup that may find nothing answers with `Option`, because what it found decides the caller's
+  next branch.
+- Local mutation is fine when it never escapes: a function building a fresh object or array may fill
+  it with a loop before returning it (`withCamelCasedKeys` in `support/schema.ts` does exactly that).
+  What is forbidden is a mutation observable by anyone else.
+- Prefer an expression to a reassigned `let`. A `let` that exists to accumulate a result is usually
+  a `map`, a `reduce`, or a fold over a state record.
+- Freeze what is published across a boundary. `makeHostToolSession` hands out `Object.freeze`d specs
+  and context because the value goes to another program's session.
+- `MutableRef` is a deliberate, documented carve-out, used only for `SessionPorts` in
+  `core/dispatch.ts` and `core/workflow-reload.ts`: a running session must observe a port that a
+  reload replaced under it, and the alternative is threading a `Ref` read through every callback. A
+  new `MutableRef` needs that kind of justification in a comment.
+
+The single-writer mailbox is what makes this affordable, not a defence against a second writer that
+does not exist. Immutability is what makes the writes expressible as pure functions and lets a
+reader — the snapshot path above all — observe one coherent instant.
+
+### Time: read the clock, do not read the ambient one
+
+Accepted 2026-08-31: an effect that needs the current instant reads it through Effect's `Clock`,
+never through `Date.now()` or `new Date()`.
+
+- `packages/core/src/support/clock.ts` exports `currentInstant`, the `Clock.currentTimeMillis` read
+  wrapped as a `Date`. Use it wherever the instant is carried as a `Date`, and
+  `Clock.currentTimeMillis` directly wherever it is compared or added to as a number.
+- Pure functions keep taking the instant as a parameter — `createSnapshot`, and the transitions in
+  `core/transitions/`. The caller reads the clock; the function stays a function of its inputs, and
+  none of them acquires a `Clock` dependency.
+- `new Date(value)` stays where the instant comes from a value already in hand: a parsed wire
+  timestamp, a restored snapshot, or a deadline derived from a recorded instant.
+- Delays and repetition are `Effect.sleep` and `Schedule`, never `setTimeout` in an effect. The
+  handful of real timers in the repository are in process-lifecycle code that is outside the runtime
+  — a kill grace period, the CLI's shutdown deadline — and each says why.
+- `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
+
+Tests therefore drive the whole orchestrator from `TestClock` — the clock `Effect.sleep` and
+`Schedule` already run against — instead of waiting on the wall clock.
+
+### Environment and secrets
+
+- A declared environment reference is read as an Effect `Config`, through whatever `ConfigProvider`
+  the fiber carries: `packages/core/src/config/env-reference.ts` is the one place that resolves
+  `$VAR` indirection, and a test supplies a provider instead of mutating `process.env`.
+- Credentials are `Redacted` from the moment they are resolved, so a log line, a serialized config
+  record, or a stack trace cannot echo them by printing the object that carries them. Unwrap with
+  `Redacted.value` at the call that needs the bytes, never earlier.
+- A workflow file may not carry a literal credential; only a `$VAR` reference is accepted.
+- Reading `process.env` directly is reserved for assembling a child process's whole environment,
+  where the point is the set of names rather than one value — and the selected runner's own
+  authentication names are stripped there.
+- Retained telemetry is redacted and bounded at ingest, in `support/redaction.ts`, not at
+  serialization: redacting on the way out would leave the secret resident in memory and depend on
+  every response path remembering to apply it.
+
+### Wire boundaries: decode, do not assert
+
+Everything arriving from another program — a GitHub payload, an App Server notification, a stored
+snapshot, a workflow file — enters as `unknown` and leaves a `Schema` as a checked value or a typed
+failure. There is no third option and no cast.
+
+- `packages/core/src/support/schema.ts` holds the tolerance protocol payloads need: a _record_ that
+  is not a record fails, because there is nothing to read; a _field_ that is missing or malformed
+  reads as `null`, because the rest of the record is still worth having. Use `protocolStruct` and
+  `tolerant` for a format Sloppenheimer reads but does not define.
+- Formats Sloppenheimer _does_ define — its own persisted handoff store, its workflow schema — are
+  decoded strictly. Tolerance there would hide a bug in our own writer.
+- `support/json.ts` holds the JSON vocabulary (`JsonValue`, `JsonObject`, `isJsonObject`) that every
+  JSON-facing record is expressed in. `isJsonObject` is the repository's one structural record test;
+  do not hand-roll `typeof value === 'object'`, which accepts arrays and `null`.
+
+### Resources, services, and layers
+
+- A port is a `Context.Tag` over a record of functions. `core/` depends on the tag and never names a
+  concrete adapter; the composition root in `src/` binds implementations with `Layer`.
+- Anything acquired is acquired in a `Scope` — `Effect.acquireRelease`, `Effect.addFinalizer`,
+  `Layer.scoped` — never a `finally`. A finalizer is visible to the runtime, so it also runs on
+  interruption.
+- A port whose instance is not a singleton — rebuilt by a workflow reload or a credential rotation —
+  goes through the `AdapterCell` in `packages/core/src/ports/cell.ts`. Consumers resolve the tag
+  once and read through `get`; the reload path calls `rebuild` and runs the returned
+  `retirePrevious` when no in-flight work still holds the replaced instance. Each instance gets its
+  own child scope, so its resources are released when _it_ is retired rather than accumulating
+  finalizers for the life of the process.
+- Construction that allocates a resource is an `Effect`, not a constructor with a side effect.
+
+### Concurrency and interruption
+
+- Concurrent work is forked into a scope (`Effect.fork`, or `Runtime.runFork` with an explicit
+  scope at the callback boundaries named below), never left as a dangling promise.
+- The orchestrator is a mailbox actor: an unbounded `Queue` of events, one loop applying pure
+  transitions. Anything that wants to change state offers an event; a callback that cannot be an
+  effect enqueues rather than writing.
+- Mutual exclusion is `Effect.Semaphore` (the cell takes one so two rebuilds cannot drop an
+  instance unreleased), not a boolean flag.
+- Byte and line streams are `Stream`, so backpressure and interruption are the runtime's problem.
+- Write interruption-safe code: assume any effect can be interrupted between two steps, and put the
+  cleanup in a finalizer.
+
+### Retry
+
+Retry policy is a `Schedule` value in `packages/core/src/core/retry.ts`, not a loop with a counter.
+Retryability is a property the error carries (`TrackerError.retryable`, `retryAfterMs`) and a
+recurrence condition of the schedule, rather than a decision each call site repeats.
+
+### Logging and telemetry
+
+Structured logging goes through `packages/core/src/support/logging.ts`, which sanitizes fields,
+redacts secret-named keys, and bounds strings before anything is emitted. Every record carries an
+`action` and an `outcome`. Telemetry events state their own `lifecycle`; nothing infers a session
+transition by matching a runner's event names.
+
+### Where the runtime is entered
+
+`Effect.runPromiseExit` in `src/cli.ts` is the process boundary, and there are three other runs in
+the whole repository, each with a stated reason. `Effect.runPromise` in
+`packages/adapter-github/src/tools.ts` serves the total host-tool boundary described under
+**Errors**. `Runtime.runFork` in `packages/adapter-codex/src/codex.ts` and in
+`packages/core/src/core/runtime.ts` starts long-lived work from a callback that is not itself an
+effect, and both pass an explicit scope so the fiber is still owned by something. Do not add a
+fourth: a function that needs a runtime is a function that should have returned an `Effect`.
+
+## Packaging
 
 Sloppenheimer is a private pnpm workspace. `pnpm-workspace.yaml` declares `packages/*` beside the
 `allowBuilds` policy that gates postinstall scripts.
@@ -91,6 +340,24 @@ same reason.
 The tests stay in the root `test/` tree and run once, against the whole workspace, from the root
 `pnpm check`. The three Vitest configurations select by test path, so a package split does not
 change which tests each profile runs.
+
+### Working within the packaging
+
+- **Adding a module.** Put it in the lowest layer that can hold it, and export it from that layer's
+  own subpath rather than widening a package's barrel. `packages/core/src/index.ts` is deliberately
+  only the composition root's view — the ports and the orchestrator — so every other importer names
+  the layer it depends on (`@sloppenheimer/core/domain/domain.js`).
+- **Adding a package** is a last resort, justified the way `adapter-node` is: two packages above it
+  need it and neither should depend on the other. It copies the existing manifest shape exactly —
+  `private`, `type: module`, the two-entry `exports` map, a `build` script of `tsc -b tsconfig.json`
+  — extends `tsconfig.package.json`, declares `@types/node` itself, is added to
+  `tsconfig.build.json`'s references and to the root `tsconfig.json` `paths`, and is asserted in
+  `test/package-boundaries.test.ts`.
+- **Dependencies** are pinned exactly, never with a range. A new one needs a reason that survives
+  the question "what does this do that Effect or Node does not". The Effect trio moves as a set.
+- **Adding an adapter** of an existing kind is one entry in the registry beside the composition root
+  — `src/tracker-adapters.ts` or `src/agent-runners.ts` — and no change under `config/` or `core/`.
+  Backend-specific settings are validated in that backend's adapter, never in `packages/core`.
 
 ## Module import direction
 
@@ -151,48 +418,79 @@ definition off disk stays in the composition root.
 Add to an allow-list only for a type that has not moved yet; never to admit an import of an adapter
 package, which stays denied at every tier.
 
-## TypeScript and Effect
+## Architecture record: ports and the handoff boundary
 
-### Absence: `Option` versus `null`
+The following port boundary was accepted in the 2026-08-30 architecture review:
 
-Accepted 2026-08-30: use `null` at data boundaries and `Option` for internal control-flow absence.
+- `TrackerPort` contains only tracker-neutral issue operations: fetching normalized issues, adapter-supplied dispatch eligibility, dependency hydration, tracker credentials, and issue-state operations expressed in tracker-neutral terms.
+- Pull-request handoff is an optional application capability exposed through `CodeReviewPort`. It owns completed-work handoff and discovery of an existing handoff, inspection of a proposed change, protected merge, and review-thread resolution. The port may use honest pull-request and code-review vocabulary.
+- Repository preparation and publication are a tracker-neutral application capability exposed through `SourceControlPort`. The host owns Git metadata and credentials, prepares normal work from the protected base and repairs from an exact pull-request head, commits agent file changes, rebases under policy, and pushes with an expected-head lease. Agents edit only worktree files. Source control must not be folded into `TrackerPort`, and pull-request inspection and merge remain in `CodeReviewPort`.
+- GitHub supplies both `TrackerPort` and `CodeReviewPort`; other tracker providers are not required to simulate code-review concepts that they do not support.
+- When handoff is enabled, a provider that does not supply `CodeReviewPort` is an operator-visible configuration error. When handoff is disabled, no `CodeReviewPort` is required and the application follows the core continuation lifecycle. The workflow key that selects between the two is `handoff.enabled`, read once by the composition root at startup ([#73](https://github.com/Underzenith85/sloppenheimer-ts/issues/73)).
+- `HandoffResult` belongs with `CodeReviewPort`, because its pull-request variant is a code-review concept rather than an issue-tracker concept.
+- The composition root states that gate structurally: composing no code-review services at all is handoff disabled, and composing them is handoff enabled. The orchestrator therefore asks for `CurrentCodeReview` as an optional service, and reports the configuration error only when that service is present and the provider's factory supplies nothing.
 
-- Use `null` in values that are serialized, persisted, logged, returned by the HTTP API, received
-  from an external protocol, or represented as domain or wire records. Keep these values as
-  ordinary JSON-shaped data.
-- Use Effect's `Option` in internal service APIs, lookups, and partial computations when absence
-  determines the next control-flow branch.
-- Convert once at the architectural boundary. Do not carry `Option` into JSON-facing records, and
-  do not carry a nullable result deeper into Effect-based orchestration when it represents a
-  branch.
-- Keep native `undefined` where JavaScript APIs inherently produce it, such as `Map.get` or an
-  omitted optional property. Convert it to `Option` when it crosses into an internal service
-  contract.
+This convention is the architecture record for the boundary. Do not create a separate ADR for it.
 
-For example, `findPullRequest(...): Effect.Effect<string | null, TrackerError>` and
-`refreshIssue: () => Effect.Effect<Issue | null, AgentError>` should use `Option<string>` and
-`Option<Issue>` respectively. In contrast, wire-shaped `Issue` fields including `description`,
-`branchName`, `url`, `createdAt`, and `updatedAt` should remain nullable, as should telemetry and
-snapshot fields such as `AgentEvent.message`, `sessionId`, `HandoffSnapshot.headSha`, and `reason`.
+## Architecture record: agent runners
 
-This mixed style is intentional. It costs one explicit conversion at each architectural boundary,
-but keeps serialized types honest and naturally JSON-compatible while making internal absence
-composable with Effect.
+The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/sloppenheimer-ts/issues/214),
+against the design in `docs/agent-runner-claude-code.md`. This section is the architecture record for
+it; do not create a separate ADR.
 
-### Time: read the clock, do not read the ambient one
+- A workflow selects its coding agent with `runner: {kind, settings}`, the same shape `tracker` uses.
+  `settings` is preserved exactly as authored and validated only by the adapter owning the kind.
+- `AgentRunnerConfig` carries only what the core consumes — `command`, `turnTimeoutMs`,
+  `readTimeoutMs`, `stallTimeoutMs` — plus the opaque validated `settings`. A second backend adds no
+  field to it. Backend policy values (Codex's approval policy and sandbox modes) are validated in
+  that backend's adapter, never in `packages/core`.
+- Each `AgentEvent` states its own `lifecycle`. The orchestrator must never recognize a session
+  transition by matching a runner's event names: that was the defect #214 removed, and it fails
+  silently rather than loudly. `AgentEventSemantics` was deleted rather than extended, because an
+  event that carries its own meaning cannot be consulted for the wrong runner.
+- `packages/core` names no backend. `test/runner-neutrality.test.ts` enforces that, with the
+  `@codex review` handoff vocabulary as the one listed carve-out — that names a code-review
+  provider, not the agent that authored the change.
+- Authentication environment names belong to the registered runner, not to a core constant. The
+  loader refuses a tracker credential that names the _selected_ runner's own authentication, since
+  the host would have to both strip and preserve it.
+- `src/agent-runners.ts` is the only file outside the adapters that names a concrete runner kind.
+  Adding a backend is one entry there and no change under `config/` or `core/`.
+- The runner is bound once at startup and has no cell: it holds no per-workflow state, so everything
+  that varies reaches it on the launch. A reload may change how it is configured, but a reload that
+  changes `runner.kind` is refused with an operator-visible error and the last known good workflow
+  stays in force. Do not add a runner cell to make that reload succeed without a deliberate design
+  decision about what happens to a session already running under the previous kind.
 
-Accepted 2026-08-31: an effect that needs the current instant reads it through Effect's `Clock`,
-never through `Date.now()` or `new Date()`.
+## Testing
 
-- `src/support/clock.ts` exports `currentInstant`, the `Clock.currentTimeMillis` read wrapped as a
-  `Date`. Use it wherever the instant is carried as a `Date`, and `Clock.currentTimeMillis` directly
-  wherever it is compared or added to as a number.
-- Pure functions keep taking the instant as a parameter — `createSnapshot`, and the transitions in
-  `src/core/transitions.ts`. The caller reads the clock; the function stays a function of its
-  inputs, and none of them acquires a `Clock` dependency.
-- `new Date(value)` stays where the instant comes from a value already in hand: a parsed wire
-  timestamp, a restored snapshot, or a deadline derived from a recorded instant.
-- `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
+Tests live in the root `test/` tree, mirroring the source they cover, and run against workspace
+sources rather than builds.
 
-Tests therefore drive the whole orchestrator from `TestClock` — the clock `Effect.sleep` and
-`Schedule` already run against — instead of waiting on the wall clock.
+- `@effect/vitest` supplies the test constructors. `it.effect` is the default and runs on
+  `TestClock`, so a test advances time instead of waiting on it. `it.scoped` is for a test that
+  acquires scoped resources — the orchestrator suites are all `it.scoped`. `it.live` is reserved for
+  what genuinely needs the wall clock or a real subprocess, and choosing it should be a considered
+  decision rather than a way past a hanging test.
+- Fakes live in `test/harness/` and are ports implemented honestly — a fake tracker, a fake App
+  Server, a real temporary Git repository. Prefer one of those to a mocked module; a stubbed global
+  (`vi.stubGlobal` for `fetch`) is acceptable at an adapter's HTTP edge and is unstubbed in
+  `afterEach`.
+- Test the pure transition where the behavior is a pure transition. That is the point of
+  `core/transitions/`: `test/core/transitions.test.ts` exercises the scheduler's decisions without
+  booting an orchestrator.
+- Architectural rules are tests, not just documentation: `test/package-boundaries.test.ts`,
+  `test/import-boundaries.test.ts`, and `test/runner-neutrality.test.ts` each fail `pnpm check` when
+  a boundary in this file is crossed. A new structural rule earns a test of the same kind.
+- The size limits do not apply to `test/`, where a `describe` callback would be counted as a
+  function.
+
+## Writing it down
+
+Comments in this repository explain _why_, at the top of a module and at the decision that needed
+one. Match that: a module doc comment saying what the module is for and what it deliberately does
+not do, and inline comments only where the reason is not visible in the code.
+
+Record a decision here, in the section it belongs to, rather than in a new ADR file. Reference
+issues as full Markdown links to `https://github.com/Underzenith85/sloppenheimer-ts/issues/<number>`,
+and when a rule is temporary, name the issue that removes it.
