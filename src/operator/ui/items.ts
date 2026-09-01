@@ -155,27 +155,33 @@ const deliveringItem = (
   issue: BacklogIssue | undefined,
   paused: ReadonlySet<number>,
   inspectable: ReadonlySet<string>,
-): WorkItem => ({
-  identifier: entry.issue_identifier,
-  issueNumber: issue?.number ?? issueNumberOf(entry.issue_identifier),
-  title: entry.title,
-  url: entry.issue_url,
-  state: 'progress',
-  attention: null,
-  phase: 'delivering',
-  eligibility: eligibilityOf(issue, paused),
-  priority: issue?.priority ?? null,
-  labels: issue?.labels ?? [],
-  reason: `Publishing to ${entry.branch_name} failed (${entry.category}) · ${entry.reason}`,
-  ranking: null,
-  blockers: [],
-  unlocks: issue?.unlocks ?? 0,
-  hasDetail: inspectable.has(entry.issue_identifier),
-  queueReason: null,
-  finishedAt: null,
-  pullRequestUrl: null,
-  action: 'pause',
-})
+): WorkItem => {
+  const eligibility = eligibilityOf(issue, paused)
+  return {
+    identifier: entry.issue_identifier,
+    issueNumber: issue?.number ?? issueNumberOf(entry.issue_identifier),
+    title: entry.title,
+    url: entry.issue_url,
+    state: 'progress',
+    attention: null,
+    phase: 'delivering',
+    eligibility,
+    priority: issue?.priority ?? null,
+    labels: issue?.labels ?? [],
+    reason: `Publishing to ${entry.branch_name} failed (${entry.category}) · ${entry.reason}`,
+    ranking: null,
+    blockers: [],
+    unlocks: issue?.unlocks ?? 0,
+    hasDetail: inspectable.has(entry.issue_identifier),
+    queueReason: null,
+    finishedAt: null,
+    pullRequestUrl: null,
+    // A pause suspends a delivery rather than dropping it, so the row an operator sees while one is
+    // held has to offer the way back: without a resume here the timer is never re-armed and the
+    // retained change waits on an API call by hand.
+    action: eligibility === 'paused' ? 'start' : 'pause',
+  }
+}
 
 const handoffAttention = (phase: PipelinePhase): AttentionKind | null => {
   if (phase === 'repair_needed') {

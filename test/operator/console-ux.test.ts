@@ -201,6 +201,41 @@ describe('operator console information architecture', (): void => {
     expect(card.textContent).toContain('the host credential was rejected')
   })
 
+  it('offers a resume on a delivering row an operator has paused', async (): Promise<void> => {
+    const state = consoleState()
+    const console_ = await boot({
+      state: {
+        ...state,
+        // Paused while delivering. The change is retained and its timer called off, so the only
+        // thing that re-arms it is a resume — which has to be reachable from this row.
+        pausedIssueNumbers: [50],
+        counts: { ...state.counts, delivering: 1 },
+        delivering: [
+          {
+            issueId: issueId('50'),
+            identifier: readyTopIdentifier,
+            title: 'Publish the retained change',
+            url: null,
+            branchName: 'sloppenheimer/issue-50',
+            attempt: 1,
+            dueAt: new Date(Date.now() + 20_000).toISOString(),
+            category: 'authentication_failed',
+            reason: 'the host credential was rejected',
+            changedFileCount: 4,
+            repairRun: false,
+            observedAt: new Date(Date.now() - 5_000).toISOString(),
+            workerHost: 'local',
+            detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2350',
+          },
+        ],
+      },
+    })
+
+    const card = console_.card(readyTopIdentifier)
+    expect([...card.querySelectorAll('.chip')].map((chip) => chip.textContent)).toContain('Paused')
+    expect(card.querySelector('.action')?.textContent).toBe('Start agent')
+  })
+
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {
     const console_ = await boot()
 
