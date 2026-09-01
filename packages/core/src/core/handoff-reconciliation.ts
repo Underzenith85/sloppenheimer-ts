@@ -24,6 +24,7 @@ import {
   logContext,
   stateIsIn,
 } from './policy.js'
+import type { CodeReviewPort } from '../ports/index.js'
 import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
@@ -161,6 +162,121 @@ const refreshHandoffIssues = (
   })
 
 /**
+ * The protected merge, and everything that follows it here: the handoff is completed and the issue
+ * filed as finished, so nothing dispatches it again. A refused merge only records why.
+ */
+const performMerge = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+  capability: CodeReviewPort,
+  headSha: string,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* stageHandoff(context, id, handoff)
+    const merged = yield* capability
+      .mergePullRequest(handoff.pullRequestNumber, headSha)
+      .pipe(asSettled)
+    const settled = afterMerge(handoff, merged._tag === 'Failed' ? merged.error.message : null)
+    yield* stageHandoff(context, id, settled)
+    if (merged._tag === 'Failed') {
+      return
+    }
+    yield* context.noteHandoffOutcome(id, settled, 'merged')
+    // This host performed the merge just now, so the instant is its own.
+    const finished = finishedWork(id, settled, null, yield* currentInstant)
+    yield* Ref.update(context.state, (current) =>
+      Transitions.completeHandoff(current, id, finished),
+    )
+    yield* logInfo('pull request merged', {
+      ...logContext(handoff.issue),
+      action: 'pull_request_merge',
+      outcome: 'completed',
+      error: null,
+      pull_request_url: handoff.pullRequestUrl,
+      merge_commit_sha: merged.value,
+    })
+  })
+
+/**
+ * Putting a worker on the pull request the review asked to be repaired. Every refusal — a pass that
+ * may not dispatch, a denied permission, a missing baseline, no slot — is recorded on the handoff
+ * as the reason, so the console says why the repair has not started rather than staying silent.
+ */
+const performRepair = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+  action: Extract<HandoffAction, { _tag: 'Repair' }>,
+  permission: RepairPermission,
+  executionAttempt: Option.Option<number>,
+  repairDispatchAllowed: boolean,
+  codeReview: Option.Option<CodeReviewPort>,
+): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    if (!repairDispatchAllowed) {
+      yield* stageHandoff(context, id, handoff)
+      return
+    }
+    if (permission._tag === 'Denied') {
+      yield* stageHandoff(context, id, {
+        ...handoff,
+        reason: permission.reason,
+      })
+      return
+    }
+    const baselineHeadSha = action.headSha
+    if (baselineHeadSha === null) {
+      yield* stageHandoff(context, id, {
+        ...handoff,
+        reason: `Cannot dispatch a repair without a pull request head. ${action.reason}`,
+      })
+      return
+    }
+    const issue = repairIssue(handoff, permission.issue, baselineHeadSha, action.reason)
+    const current = yield* Ref.get(context.state)
+    if (!hasSlot(current, issue, handoff.execution.workflow)) {
+      if (Option.isNone(executionAttempt)) {
+        yield* stageHandoff(context, id, awaitingSlot(handoff, action.reason))
+        return
+      }
+      yield* stageHandoff(
+        context,
+        id,
+        afterRepairDispatched(handoff, false, issue, baselineHeadSha, action.reason),
+      )
+      yield* context.scheduleRetry(
+        issue,
+        executionAttempt.value,
+        'no available orchestrator slots',
+        false,
+        true,
+      )
+      return
+    }
+    yield* stageHandoff(context, id, handoff)
+    const effective: EffectiveWorkflow = {
+      workflow: handoff.execution.workflow,
+      tracker: handoff.execution.tracker,
+      codeReview,
+      sourceControl: handoff.execution.sourceControl,
+      workspaces: handoff.execution.workspaces,
+      loadedAt: handoff.observedAt,
+    }
+    const attempt = Option.getOrElse(executionAttempt, () => action.attempt)
+    const started = yield* dispatch(context, issue, attempt, effective, {
+      _tag: 'Repair',
+      branchName: handoff.branchName,
+      expectedHeadSha: baselineHeadSha,
+    })
+    yield* stageHandoff(
+      context,
+      id,
+      afterRepairDispatched(handoff, started, issue, baselineHeadSha, action.reason),
+    )
+  })
+
+/**
  * Carries out the one call an observation asked for and folds its result back into the handoff.
  * Every branch ends with the handoff written, so the state after a pass reflects what actually
  * happened rather than what was proposed.
@@ -225,91 +341,19 @@ const perform = (
         return
       }
       case 'Merge': {
-        yield* stageHandoff(context, id, handoff)
-        const merged = yield* capability
-          .mergePullRequest(handoff.pullRequestNumber, action.headSha)
-          .pipe(asSettled)
-        const settled = afterMerge(handoff, merged._tag === 'Failed' ? merged.error.message : null)
-        yield* stageHandoff(context, id, settled)
-        if (merged._tag === 'Failed') {
-          return
-        }
-        yield* context.noteHandoffOutcome(id, settled, 'merged')
-        // This host performed the merge just now, so the instant is its own.
-        const finished = finishedWork(id, settled, null, yield* currentInstant)
-        yield* Ref.update(context.state, (current) =>
-          Transitions.completeHandoff(current, id, finished),
-        )
-        yield* logInfo('pull request merged', {
-          ...logContext(handoff.issue),
-          action: 'pull_request_merge',
-          outcome: 'completed',
-          error: null,
-          pull_request_url: handoff.pullRequestUrl,
-          merge_commit_sha: merged.value,
-        })
+        yield* performMerge(context, id, handoff, capability, action.headSha)
         return
       }
       case 'Repair': {
-        if (!repairDispatchAllowed) {
-          yield* stageHandoff(context, id, handoff)
-          return
-        }
-        if (permission._tag === 'Denied') {
-          yield* stageHandoff(context, id, {
-            ...handoff,
-            reason: permission.reason,
-          })
-          return
-        }
-        const baselineHeadSha = action.headSha
-        if (baselineHeadSha === null) {
-          yield* stageHandoff(context, id, {
-            ...handoff,
-            reason: `Cannot dispatch a repair without a pull request head. ${action.reason}`,
-          })
-          return
-        }
-        const issue = repairIssue(handoff, permission.issue, baselineHeadSha, action.reason)
-        const current = yield* Ref.get(context.state)
-        if (!hasSlot(current, issue, handoff.execution.workflow)) {
-          if (Option.isNone(executionAttempt)) {
-            yield* stageHandoff(context, id, awaitingSlot(handoff, action.reason))
-            return
-          }
-          yield* stageHandoff(
-            context,
-            id,
-            afterRepairDispatched(handoff, false, issue, baselineHeadSha, action.reason),
-          )
-          yield* context.scheduleRetry(
-            issue,
-            executionAttempt.value,
-            'no available orchestrator slots',
-            false,
-            true,
-          )
-          return
-        }
-        yield* stageHandoff(context, id, handoff)
-        const effective: EffectiveWorkflow = {
-          workflow: handoff.execution.workflow,
-          tracker: handoff.execution.tracker,
-          codeReview,
-          sourceControl: handoff.execution.sourceControl,
-          workspaces: handoff.execution.workspaces,
-          loadedAt: handoff.observedAt,
-        }
-        const attempt = Option.getOrElse(executionAttempt, () => action.attempt)
-        const started = yield* dispatch(context, issue, attempt, effective, {
-          _tag: 'Repair',
-          branchName: handoff.branchName,
-          expectedHeadSha: baselineHeadSha,
-        })
-        yield* stageHandoff(
+        yield* performRepair(
           context,
           id,
-          afterRepairDispatched(handoff, started, issue, baselineHeadSha, action.reason),
+          handoff,
+          action,
+          permission,
+          executionAttempt,
+          repairDispatchAllowed,
+          codeReview,
         )
         return
       }
