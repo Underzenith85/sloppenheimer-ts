@@ -268,8 +268,15 @@ Tests therefore drive the whole orchestrator from `TestClock` — the clock `Eff
 ### Wire boundaries: decode, do not assert
 
 Everything arriving from another program — a GitHub payload, an App Server notification, a stored
-snapshot, a workflow file — enters as `unknown` and leaves a `Schema` as a checked value or a typed
-failure. There is no third option and no cast.
+snapshot, a workflow file — enters as `unknown` and is checked before it is used. No cast, ever: the
+question is only which of the two checks fits.
+
+Payloads are decoded with a `Schema`, which is the default and what every field read should sit
+behind. The exception is envelope routing, where the shape being tested is which kind of message
+arrived rather than what it contains: `receiveLine` in `packages/adapter-codex/src/inbound.ts`
+narrows the parsed line with the `support/json.ts` predicates, reports an unusable line as a
+`malformed` event rather than failing the session, and hands the payload on — where the schemas in
+`protocol.ts` and `payload.ts` do decode it. Route with predicates, read fields with a schema.
 
 - `packages/core/src/support/schema.ts` holds the tolerance protocol payloads need: a _record_ that
   is not a record fails, because there is nothing to read; a _field_ that is missing or malformed
@@ -286,8 +293,9 @@ failure. There is no third option and no cast.
 - A port is a `Context.Tag` over a record of functions. `core/` depends on the tag and never names a
   concrete adapter; the composition root in `src/` binds implementations with `Layer`.
 - Anything acquired is acquired in a `Scope` — `Effect.acquireRelease`, `Effect.addFinalizer`,
-  `Layer.scoped` — never a `finally`. A finalizer is visible to the runtime, so it also runs on
-  interruption.
+  `Layer.scoped` — never a `try`/`finally` around an effect. A finalizer is visible to the runtime,
+  so it also runs on interruption, which a `finally` does not. (`finally` is still right for a
+  synchronous restore outside the runtime, as in `src/operator/ui-assets.ts`.)
 - A port whose instance is not a singleton — rebuilt by a workflow reload or a credential rotation —
   goes through the `AdapterCell` in `packages/core/src/ports/cell.ts`. Consumers resolve the tag
   once and read through `get`; the reload path calls `rebuild` and runs the returned
@@ -306,13 +314,23 @@ failure. There is no third option and no cast.
 - Concurrent work is forked into a scope (`Effect.fork`, or `Runtime.runFork` with an explicit
   scope at the callback boundaries named below), never left as a dangling promise.
 - The orchestrator is a mailbox actor: an unbounded `Queue` of events, one loop applying pure
-  transitions. Anything that wants to change state offers an event; a callback that cannot be an
-  effect enqueues rather than writing.
+  transitions to the state. Offering an event is how work gets ordered, and it is the default. A
+  callback outside the runtime bridges in through `runFromCallback`, and may — as `runSession`'s
+  `onEvent` does in `core/dispatch.ts` — write its own atomic transition first and then offer, so
+  that what it recorded cannot be overtaken by the session's exit. Anything more than one atomic
+  transition belongs in the mailbox.
 - Mutual exclusion between fibers is `Effect.Semaphore` — the adapter cells and the Codex session's
   lifecycle each take one, so two rebuilds cannot drop an instance unreleased. The scheduler's `tickQueued`
   and `pollRunning` are not that: they are fields of the state record that coalesce work, reached
   only through transitions.
-- Byte and line streams are `Stream`, so backpressure and interruption are the runtime's problem.
+- A protocol read is a `Stream`: the Codex reader lifts the child's stdout with
+  `NodeStream.fromReadable` and frames it in `packages/adapter-codex/src/readers.ts`, so
+  backpressure and interruption are the runtime's problem. Draining a subprocess pipe for its
+  diagnostics is not that, and does not pretend to be — `runProcess` in
+  `packages/adapter-node/src/git-process.ts` and `captureStream` in its `workspace-hooks.ts` attach
+  `data` and `error` listeners inside the `Effect.async` that owns the child, bounding what they
+  keep. Use a `Stream` when the bytes are a protocol; use the listeners when you are draining a
+  process you are already holding.
 - Write interruption-safe code: assume any effect can be interrupted between two steps, and put the
   cleanup in a finalizer.
 
