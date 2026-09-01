@@ -657,7 +657,10 @@ repair agent that had achieved nothing.
   same step, so a delivery can never come due against a directory that no longer exists. That is
   the terminal-issue path, and only it.
 - A discard is only true once the workspace is gone, so the removal happens before anything records
-  one. A removal that failed leaves the files where they were, so the delivery has not settled: it
+  one — and it happens once, in the attempt that reports it. The settlement records what the
+  attempt did; it does not remove again, because a second removal that failed would report files
+  remaining that the first deleted, retain the claim, and spend the delivery budget on work that no
+  longer exists. A removal that failed leaves the files where they were, so the delivery has not settled: it
   is retained for another attempt, which is what keeps alive the one manager that can remove that
   workspace — a reload may have moved the workspace root out from under everything else. When the
   attempts are spent the files stay put as the run's retained workspace, the claim is released, and

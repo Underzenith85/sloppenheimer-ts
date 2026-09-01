@@ -1333,8 +1333,10 @@ describe('agent turn completion separated from work publication', (): void => {
             snapshot = yield* control.snapshot
           }
 
-          // The second removal made the discard true, so the delivery and its claim are gone.
+          // The second removal made the discard true, so the delivery and its claim are gone — and
+          // it was the attempt's removal that made it true: the settlement did not remove again.
           expect(launched).toBe(1)
+          expect(removals).toBe(2)
         }),
       )
     }),

@@ -142,28 +142,15 @@ const retryDiscard = (
   })
 
 /**
- * Discards the work with the workspace holding it, because the issue is finished with.
+ * Records a discard the attempt has already made true.
  *
- * The removal is what makes the discard true, so it happens before anything says so. A removal
- * that failed leaves the files exactly where they were: calling that discarded would report work
- * as gone while it sits on disk, waiting for the next agent on this issue to inherit it as its own.
+ * The removal happened off the loop, in the attempt that reported `Discarded`; what is left is to
+ * say so. Removing again here would be a second I/O call on the loop, and a second removal that
+ * failed — an adapter whose removal is not idempotent — would report files remaining that the first
+ * call deleted, retain the claim, and spend the delivery budget on work that no longer exists.
  */
-const discardDelivery = (
-  context: OrchestratorContext,
-  entry: DeliveryEntry,
-): Effect.Effect<void, never, Scope.Scope> =>
+const recordDiscarded = (context: OrchestratorContext, entry: DeliveryEntry): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const removed = yield* entry.execution.workspaces.remove(entry.issue.identifier).pipe(asSettled)
-    if (removed._tag === 'Failed') {
-      yield* logWarning('delivery workspace cleanup failed; the work is still on disk', {
-        ...logContext(entry.issue),
-        action: 'workspace_cleanup',
-        outcome: 'failed',
-        error: removed.error.message,
-      })
-      yield* retryDiscard(context, entry, removed.error.message)
-      return
-    }
     const discardedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
       Transitions.releaseClaim(
@@ -209,10 +196,12 @@ const runDeliveryAttempt = (
         ? ({ _tag: 'DiscardFailed', error: removed.error.message } as const)
         : ({ _tag: 'Discarded' } as const)
     }
-    // Whichever instance the orchestrator holds now: a credential rotation between the failure and
-    // this attempt is exactly the kind of thing that makes the retry worth having.
-    const current = yield* Ref.get(context.state)
-    const sourceControl = current.lastKnownGood.sourceControl ?? entry.execution.sourceControl
+    // The delivery's own. The execution snapshot is the record of what this work is published
+    // under, and a reload that replaces the tracker moves every delivery holding it onto the
+    // replacements, source control included — so the snapshot is already current when that is what
+    // a retry needs. Reading the workflow in force instead agrees with it in every state the
+    // transitions produce, and would disagree only in one they do not: a snapshot nothing adopted.
+    const sourceControl = entry.execution.sourceControl
     if (sourceControl === null) {
       yield* logWarning('retained delivery has no source control to publish through', {
         ...logContext(entry.issue),
@@ -327,7 +316,7 @@ export const onDeliveryAttempted = (
       return
     }
     if (event.result._tag === 'Discarded') {
-      yield* discardDelivery(context, entry)
+      yield* recordDiscarded(context, entry)
       return
     }
     if (event.result._tag === 'Abandoned') {
