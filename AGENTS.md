@@ -601,7 +601,17 @@ repair agent that had achieved nothing.
   call. That sweep covers the open handoffs as well as its own fetch: a handoff keeps the
   workflow that created its pull request and its repair is judged against that one, so an issue the
   current workflow's active states leave out is still an issue reconciliation can put a repair into
-  moments later. A handoff's workspace is owed a look for as long as the handoff lives.
+  moments later. A handoff's workspace is owed a look for as long as the handoff lives. Those handoff issues are refetched rather
+  than read from the handoff, because the record persisted there is as old as the handoff — and the
+  very reason the state fetch omitted an issue may be that it went terminal while the host was down.
+  An issue that is finished with has the work in its workspace discarded rather than published: a
+  branch pushed, or a pull request's head moved, for work nobody asked for any more is the one case
+  the policy calls a discard.
+- A recovered publication carries the handoff's own ports, because a repair's verdict is judged
+  against the workflow that created its pull request — but always this process's workspace manager,
+  because that is the one that opened the workspace being published from. A delivery holding the
+  older manager would later remove a directory under a root the files are not under, and report the
+  discard as done.
 - What recovery republishes is a repair only when a repair identity says so, never because a pull
   request is open. An ordinary continuation leaves an unpublished workspace behind too, and the
   handoff that publication opens owes it the continuation its turn was owed — giving the claim up

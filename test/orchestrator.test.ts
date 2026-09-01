@@ -1295,6 +1295,149 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped("discards a closed handoff issue's retained work rather than publishing it", () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-terminal-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      // Closed while the host was down. The persisted handoff still holds the record as it was,
+      // and the active-state fetch no longer returns it at all.
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+        state: 'closed',
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      const harness = makeHarness(
+        isolated,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      const removed: string[] = []
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
+        }),
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+        runAgent: () => Effect.die('a closed issue must never be dispatched'),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (removed.length === 0 && publications.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+        }),
+      )
+
+      // Pushing a branch and moving a pull request's head for work nobody asked for any more is
+      // the one case the policy calls a discard, and the record the handoff persisted is too old
+      // to know that on its own.
+      expect(publications).toEqual([])
+      expect(removed).toEqual([issue.identifier])
+    }),
+  )
+
+  it.scoped('settles a recovered delivery through the manager that opened its workspace', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-recovered-manager-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-recovered-manager-other-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: reloadedRoot },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      // The handoff is created under the first root, so the execution it keeps names that manager.
+      yield* saveRepairHandoff(handoffStorePath, issue, head)
+      let reported = issue
+      const harness = makeHarness(initial, () => [reported])
+      // Nothing to recover until the root has moved, so the work this publishes is the work the
+      // new root holds.
+      let retained = false
+      const removals: string[] = []
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: () => Effect.sync(() => removals.push(settings.root)).pipe(Effect.asVoid),
+        }),
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => retained,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.fail(deliveryFailure())
+            },
+          ),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          expect(publications).toEqual([])
+
+          retained = true
+          harness.setWorkflow(reloaded)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // Closed, so the delivery due next discards the work with the workspace holding it.
+          reported = { ...issue, state: 'closed' }
+          while (removals.length === 0) {
+            yield* TestClock.adjust('5 minutes')
+            yield* Effect.yieldNow()
+          }
+        }),
+      )
+
+      // Through the manager that opened the workspace, which is this process's — not the one the
+      // handoff was created with, whose root the recovered files are not under.
+      expect(removals).toContain(reloadedRoot)
+    }),
+  )
+
   it.scoped('sweeps a handoff workspace the active-state fetch leaves out', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-handoff-')

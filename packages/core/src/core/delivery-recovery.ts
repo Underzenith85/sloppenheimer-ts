@@ -24,7 +24,12 @@ import { issueBranchName } from '../domain/handoff.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
 import { settlePostflight } from './delivery.js'
-import { captureExecutionSnapshot, identifierIssueNumber, logContext } from './policy.js'
+import {
+  captureExecutionSnapshot,
+  identifierIssueNumber,
+  issueIsActive,
+  logContext,
+} from './policy.js'
 import { runPostflight } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
@@ -93,9 +98,19 @@ const publishRetained = (
       context,
       {
         issue,
-        // The workflow in force, with no prompt: nothing here launches an agent, and the ports the
-        // settlement needs are the ones this process is running under.
-        execution: handoff?.execution ?? captureExecutionSnapshot(effective, ''),
+        // A handoff's own ports, because a repair's verdict is judged against the workflow that
+        // created its pull request — but always this process's workspace manager, because that is
+        // the one that opened the workspace being published from. A reload may have moved the root
+        // since the handoff was created, and a delivery carrying the older manager would later
+        // remove a directory under a root the files are not under.
+        execution:
+          handoff === undefined
+            ? captureExecutionSnapshot(effective, '')
+            : {
+                ...handoff.execution,
+                workspaces: effective.workspaces,
+                workspaceRoot: effective.workflow.config.workspaceRoot,
+              },
         // No worker attempt owns this work: the process that produced it is gone. A retry that
         // follows starts the agent's numbering afresh, which is the truthful reading.
         attempt: null,
@@ -145,6 +160,22 @@ const recoverIssue = (
       return false
     }
     if (!exists.value) {
+      return true
+    }
+    if (!issueIsActive(issue, effective.workflow.config.tracker)) {
+      // The issue is finished with, so what is in its workspace goes with it rather than reaching
+      // the remote. Publishing here would put a branch — and a pull request's next head — behind
+      // work nobody asked for any more, which is the one case the policy calls a discard.
+      yield* effective.workspaces.remove(issue.identifier).pipe(
+        Effect.catchAll((error) =>
+          logWarning('terminal workspace cleanup failed', {
+            ...logContext(issue),
+            action: 'workspace_cleanup',
+            outcome: 'failed',
+            error: error.message,
+          }),
+        ),
+      )
       return true
     }
     const workspace = yield* effective.workspaces.create(issue.identifier).pipe(asSettled)
@@ -278,10 +309,28 @@ export const sweepRetainedDeliveries = (
     // handoff lives, whatever the current workflow makes of its issue.
     const opened = yield* Ref.get(context.state)
     const byId = new Map(candidates.value.map((issue) => [issue.id, issue] as const))
-    for (const handoff of opened.handoffs.values()) {
-      if (!byId.has(handoff.issue.id)) {
-        byId.set(handoff.issue.id, handoff.issue)
-      }
+    const missing = [...opened.handoffs.values()]
+      .map((handoff) => handoff.issue)
+      .filter((issue) => !byId.has(issue.id))
+    // Fetched rather than taken from the handoff. The record persisted there is as old as the
+    // handoff, and the very reason this fetch omitted the issue may be that it went terminal while
+    // the host was down — which is a decision about the work in its workspace, not a gap.
+    const refreshed =
+      missing.length === 0
+        ? { _tag: 'Succeeded' as const, value: [] as readonly Issue[] }
+        : yield* effective.tracker
+            .fetchIssuesByIds(missing.map((issue) => issue.id))
+            .pipe(asSettled)
+    if (refreshed._tag === 'Failed') {
+      yield* logWarning('delivery recovery handoff refresh failed; retrying on the next pass', {
+        action: 'delivery_recovery',
+        outcome: 'failed',
+        error: refreshed.error.message,
+      })
+      return 'failed'
+    }
+    for (const issue of refreshed.value) {
+      byId.set(issue.id, issue)
     }
     yield* examineWorkspaces(context, [...byId.values()])
     yield* Ref.update(context.state, Transitions.finishStartupSweep)
