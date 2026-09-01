@@ -1412,6 +1412,15 @@ describe('agent turn completion separated from work publication', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           yield* control.refresh
+          // The repair the restored handoff dispatches has to have settled before the workspace is
+          // made to hold anything: what this covers is what a delivery recovery rediscovers, and a
+          // run still in its own postflight would publish the same workspace as its own work.
+          let started = yield* control.snapshot
+          while (started.running.length > 0 || started.delivering.length > 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            started = yield* control.snapshot
+          }
           expect(publications).toEqual([])
 
           retained = true
@@ -1425,7 +1434,10 @@ describe('agent turn completion separated from work publication', (): void => {
 
           // Closed, so the delivery due next discards the work with the workspace holding it.
           reported = { ...issue, state: 'closed' }
-          while (removals.length === 0) {
+          // Waited for the delivery's own removal, not merely the first one: the terminal paths
+          // that clean up through the handoff's manager also fire here, and which lands first is
+          // not what this asserts.
+          while (!removals.includes(reloadedRoot)) {
             yield* TestClock.adjust('5 minutes')
             yield* Effect.yieldNow()
           }
@@ -1824,6 +1836,77 @@ describe('agent turn completion separated from work publication', (): void => {
             yield* Effect.yieldNow()
           }
           expect(launched).toBe(1)
+        }),
+      )
+    }),
+  )
+
+  it.scoped('records the postflight takeover before the publication makes its first call', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-postflight-takeover-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      // What the run looked like from outside at the moment the postflight first touched git.
+      const seen: Readonly<{ marked: boolean; phase: string | null }>[] = []
+      let observe: Effect.Effect<void> = Effect.void
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () => {
+          const port = failingSourceControl(
+            () => launched > 0,
+            () => Effect.fail(deliveryFailure()),
+          )
+          return {
+            ...port,
+            inspect: (prepared) =>
+              Effect.gen(function* () {
+                yield* observe
+                return yield* port.inspect(prepared)
+              }),
+          }
+        },
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          // Assigned before anything can suspend this fiber, so the loop the start forked cannot
+          // reach a postflight ahead of it.
+          observe = Effect.gen(function* () {
+            const snapshot = yield* control.snapshot
+            // The recovery sweep inspects the same workspace with no run behind it, and a
+            // publication nobody is running an agent for has no takeover to record.
+            if (snapshot.running.length === 0) {
+              return
+            }
+            const lookup = yield* control.agentDetail(issue.identifier)
+            seen.push({
+              marked: snapshot.running[0]?.stallDeadline === null,
+              phase: lookup._tag === 'Found' ? lookup.detail.phase.phase : null,
+            })
+          })
+
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+          }
+
+          // Enqueueing the takeover and publishing anyway would leave a poll already in flight
+          // reading a run nothing had marked — and retiring the publication as a stalled agent.
+          // So the worker waits for the marker to be in the state, not merely sent.
+          expect(seen.length).toBeGreaterThan(0)
+          expect(seen).toEqual(seen.map(() => ({ marked: true, phase: 'publishing' })))
         }),
       )
     }),
@@ -7379,8 +7462,12 @@ describe('rebuilt port lifecycle', (): void => {
           expect(harness.releasedTrackers()).toHaveLength(1)
 
           finishWorker()
-          yield* control.refresh
-          yield* control.refresh
+          // Waited for rather than counted in refreshes: what is under test is that the release
+          // happens once the run ends, not how many passes that takes.
+          while (harness.releasedTrackers().length < 2) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
 
           expect(
             harness.releasedTrackers().map((each) => Redacted.value(githubProviderOf(each).token)),
@@ -7488,8 +7575,12 @@ describe('rebuilt port lifecycle', (): void => {
           expect(harness.releasedTrackers()).toHaveLength(1)
 
           finishWorker()
-          yield* control.refresh
-          yield* control.refresh
+          // Waited for rather than counted in refreshes: what is under test is that the release
+          // happens once the run ends, not how many passes that takes.
+          while (harness.releasedTrackers().length < 2) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
           const snapshot = yield* control.snapshot
 
           // The run has ended into a handoff under the same issue, and that handoff holds the

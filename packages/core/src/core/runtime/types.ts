@@ -200,7 +200,15 @@ export type OrchestratorEvent =
   | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; update: AgentEvent }>
   // The agent is done and the host has taken the workspace over. Nothing about the run changes
   // except who is working, which is what the stall timer needs to know.
-  | Readonly<{ _tag: 'PostflightStarted'; issueId: IssueId; runId: number }>
+  // `applied` is completed once the marker is in the state. The worker waits for it before the
+  // first git call: offering alone only enqueues, and a poll already in flight would still read the
+  // run as an agent that has gone quiet — and retire the publication as a stalled agent.
+  | Readonly<{
+      _tag: 'PostflightStarted'
+      issueId: IssueId
+      runId: number
+      applied: Deferred.Deferred<void>
+    }>
   | Readonly<{
       _tag: 'WorkerExited'
       issueId: IssueId

@@ -1,4 +1,4 @@
-import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
+import { Deferred, Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -185,15 +185,22 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
           Effect.flatMap((prepared) =>
             runSession(launch, workspace).pipe(
               Effect.zipRight(
-                Effect.suspend(() => {
+                Effect.gen(function* () {
                   const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                  // Announced before the first git call: from here the run is the host's work, and
-                  // the silence on the agent protocol that follows is not a stalled agent.
-                  return Queue.offer(context.mailbox, {
+                  // Announced *and applied* before the first git call: from here the run is the
+                  // host's work, and the silence on the agent protocol that follows is not a
+                  // stalled agent. Offering alone would only enqueue it — a poll already in flight
+                  // would still read a run nothing had marked and retire the publication as a
+                  // stalled agent, which is the one thing this marker exists to prevent.
+                  const applied = yield* Deferred.make<void>()
+                  yield* Queue.offer(context.mailbox, {
                     _tag: 'PostflightStarted' as const,
                     issueId: issue.id,
                     runId,
-                  }).pipe(Effect.zipRight(runPostflight(publisher, issue, prepared)))
+                    applied,
+                  })
+                  yield* Deferred.await(applied)
+                  return yield* runPostflight(publisher, issue, prepared)
                 }),
               ),
               Effect.tap((outcome) =>

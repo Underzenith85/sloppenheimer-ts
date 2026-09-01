@@ -564,7 +564,12 @@ repair agent that had achieved nothing.
   cannot finish is the source control's to fail, and it fails as a delivery. The surfaces say the same
   thing: the run's snapshot publishes no stall deadline once the host has taken over, and its detail
   moves to the `publishing` phase — a deadline nothing will act on is what has a console reporting a
-  stalled agent for a run whose stall detection is off.
+  stalled agent for a run whose stall detection is off. The takeover is recorded before the first git
+  call, and the worker waits for it to be recorded rather than merely sent: enqueueing the event and
+  publishing anyway leaves a poll already in flight reading a run nothing had marked, which retires
+  the publication as a stalled agent — the one thing the marker exists to prevent. The wait is on the
+  handler because runtime state changes go through the mailbox; the worker does not write the state
+  itself.
 - The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
   published SHA and expected remote SHA are authoritative.
 - A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing

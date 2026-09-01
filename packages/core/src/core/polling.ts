@@ -1,4 +1,4 @@
-import { Effect, Queue, Ref, type Scope } from 'effect'
+import { Deferred, Effect, Queue, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
 import { recordPostflightStarted } from '../telemetry.js'
@@ -51,6 +51,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
               (record) => recordPostflightStarted(record, startedAt),
             ),
           )
+          // Only now may the publication begin: the worker is waiting on this, and what it is
+          // waiting for is the state, not the message.
+          yield* Deferred.succeed(event.applied, undefined)
           break
         }
         case 'AgentUpdate': {
