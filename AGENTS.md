@@ -584,42 +584,28 @@ lifecycle. This section is the architecture record for it; do not create a separ
   would leave a lease that nobody holds and nobody will release. Publishing the lease is the claim —
   the record is hard-linked into place, which is atomic and refuses an existing name — and the run
   directory follows it, so a duplicate dispatch fails before a process is launched and cleanup
-  elsewhere never finds a workspace without a lease. The record names the issue, the run, and the
-  host process that holds it, including when that process started and the process namespace its id
-  belongs to, so a host restarted into its predecessor's process id does not keep its leases alive.
-  An owner is probed only when both sides name the same process namespace: two containers can share
-  a kernel and a root while each sees only its own ids, so anything weaker — the machine's boot
-  identifier included, which both of them share — would read a stranger's process as the owner. Those are reclaimed by renewal instead: a run says its lease still stands every few minutes
-  for as long as it holds it, and one not said again in an hour belongs to a host that is gone. Whether the
-  renewals have stopped is a duration, and durations need one clock: a second host measures how long
-  the record has gone unwritten, from the record's own stamp against the time the filesystem itself
-  reports — as does the sweep that takes away staged records no writer can still be holding — never
-  the writer's `expiresAt` against the reader's wall clock — two hosts an hour apart
-  would read an expiry that never came, or one that came at once. The `expiresAt` in the record is
-  the owner's own deadline on the owner's clock, which is the only host that reads it. A run
-  says its lease once as soon as it holds the claim — the published record carries the stamp of the
-  file it was linked from, and until that write lands a second host reads it as having gone unsaid
-  for however long publishing took. That first saying has to land: unlike a renewal, which has an
-  open window to fall back on, a claim that cannot be said is withdrawn rather than built on. A release says it too, for as long as
-  its `before_remove` hook runs: that hook is the operator's own command, as unbounded as
-  `after_create`, and a workspace whose lease went unsaid while it ran could be taken from under it.
-  Only what rewrites or removes the record happens after the renewal has stopped. Either
-  way, saying a lease is interruptible up to the rename that publishes it — nothing has changed yet,
-  and a cancellation must not wait out a filesystem that will not answer — and indivisible from
-  there, so a record that stands longer than the run has been told never outlives the telling. It keeps renewing from the claim rather than from its own work,
-  because an `after_create` hook is the caller's command and is not bounded either, and both provisioning and the run itself are
-  raced against the renewal: a run that has lost its lease — the record gone, released, another
-  run's, past its own expiry, or one it has not managed to say again by the time the window it knew
-  about ran out — stops, and takes back a renewal that crossed the expiry it was renewing rather
-  than leaving a record at a name cleanup may have emptied; it stops rather than working on in a directory that is no longer its own, and lets go
-  of the record rather than publishing one for a workspace it no longer holds, and a run that ends stops the renewal before the record is rewritten. Cleanup takes the
-  other side of that: it moves a record it has decided is free out of the way in one rename before
-  anything destructive runs, so a `before_remove` hook never runs against a lease that could still
-  be said again, and a record that turns out to still stand goes back where it was. Do not replace renewal with a lifetime computed from the workflow's limits: `turn_timeout_ms` and
-  `stall_timeout_ms` are idle timeouts, restarted by every turn and every event, so nothing in a
-  configuration bounds a run from above. A lease is released on success, failure, cancellation and
-  shutdown alike, and it outlives the host that wrote it, so a restart and a second host reading the
-  same root both see who owns what.
+  elsewhere never finds a workspace without a lease. A lease is released on success, failure,
+  cancellation and shutdown alike, and it outlives the host that wrote it, so a restart and a second
+  host reading the same root both see who owns what.
+- **A lease is given up or observed to be free — never waited out.** The record names the host
+  process that holds it, when that process started, and the process namespace its id belongs to, and
+  those are the only things that can take one back: the owner released it, or its process is gone in
+  a namespace this host shares. A host restarted into its predecessor's process id — the ordinary
+  case for a container's PID 1 — is caught by the start marker rather than by any clock. An owner
+  probed at all only where both sides name the same namespace: two containers can share a kernel and
+  a root while each sees only its own ids, so anything weaker, the machine's boot identifier
+  included, would read a stranger's process as the owner.
+  The deliberate limit is that an owner this host cannot place is claimed for good, and its
+  workspace stays a retained artifact that cleanup reports and never takes. Do not replace that with
+  an expiry, a renewal, or an age. Two hosts do not share a wall clock, a run has no upper bound —
+  `turn_timeout_ms` and `stall_timeout_ms` are idle timeouts, restarted by every turn and every
+  event — and a workspace deleted from under a live run is unrecoverable where a workspace left
+  behind is merely untidy. This was built once with a renewable lease and taken out again: every
+  clock it introduced was a way for one host to delete another's work.
+  Cleanup still fences what it does take. Deciding a workspace is free and removing it are two
+  steps with an operator's `before_remove` hook between them, so the record is moved aside in one
+  rename first and the decision made again on what was actually taken; a lease that turns out to
+  still be held goes back where it was.
 - **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves
   nothing behind; every other ending — including a composition with no `SourceControlPort` to
   publish through — keeps its workspace as a retained recovery artifact naming why, which no later

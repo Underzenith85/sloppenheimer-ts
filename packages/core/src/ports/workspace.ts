@@ -13,9 +13,8 @@ import { makeAdapterCell, type AdapterCell } from './cell.js'
  * `withLeasedWorkspace` allocates a workspace for exactly one dispatched run or repair attempt,
  * leases it to that run for the whole of `use`, and releases it as `disposition` decides from how
  * `use` ended: a run that published its work leaves nothing behind, and every other ending leaves
- * the directory as a named recovery artifact. `disposition` sees the workspace's own failures too,
- * because a run can end by losing the lease it was working under. A second acquisition of the same
- * run identity fails, before anything is launched.
+ * the directory as a named recovery artifact. A second acquisition of the same run identity fails,
+ * before anything is launched.
  *
  * It is a bracket rather than an acquire and a release the caller pairs up itself, because
  * ownership must not be able to escape between them: an interruption arriving in that gap would
@@ -30,7 +29,7 @@ export type WorkspaceManagerPort = Readonly<{
   withLeasedWorkspace: <Value, Failure, Requirements>(
     run: WorkspaceRun,
     use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
-    disposition: (exit: Exit.Exit<Value, Failure | WorkspaceError>) => WorkspaceRelease,
+    disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
   ) => Effect.Effect<Value, Failure | WorkspaceError, Requirements>
   exists: (identifier: IssueIdentifier) => Effect.Effect<boolean, WorkspaceError>
   beforeRun: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>

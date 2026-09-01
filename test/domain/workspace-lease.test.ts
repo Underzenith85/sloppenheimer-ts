@@ -7,7 +7,6 @@ import {
   encodeLease,
   heldLease,
   leaseIsClaimed,
-  leaseValidityMs,
   retainedLease,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
@@ -27,8 +26,6 @@ const owner: WorkspaceOwner = {
   startMarker: '918273',
   namespace: 'boot-1/pid:[4026531836]',
 }
-/** How long the record has gone unwritten while the run holding it is still renewing. */
-const saidRecently = 30 * 1_000
 const running = (startMarker: string | null): OwnerObservation => ({ _tag: 'Running', startMarker })
 const gone: OwnerObservation = { _tag: 'Gone' }
 const unobservable: OwnerObservation = { _tag: 'Unobservable' }
@@ -70,9 +67,6 @@ describe('workspace lease records', (): void => {
       status: 'held',
       reason: null,
       acquiredAt: '2026-08-31T10:00:00.000Z',
-      // A lease states when the run that took it can no longer be running, by its own workflow's
-      // limits, so a host that cannot observe the owner waits out that run rather than guessing.
-      expiresAt: new Date(acquiredAt.getTime() + leaseValidityMs).toISOString(),
       releasedAt: null,
     })
   })
@@ -112,59 +106,41 @@ describe('workspace lease records', (): void => {
 
 describe('who a lease belongs to', (): void => {
   it('is claimed while the host that wrote it says so', (): void => {
-    expect(leaseIsClaimed(lease, 'host-a', gone, saidRecently)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-a', gone)).toBe(true)
     expect(
-      leaseIsClaimed(
-        retainedLease(lease, 'released', releasedAt),
-        'host-a',
-        running('918273'),
-        saidRecently,
-      ),
+      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-a', running('918273')),
     ).toBe(false)
   })
 
   it('is claimed by another host only while that host is running', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running('918273'), saidRecently)).toBe(true)
-    expect(leaseIsClaimed(lease, 'host-b', gone, saidRecently)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('918273'))).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', gone)).toBe(false)
   })
 
   it('is not claimed by a process that merely inherited the recorded id', (): void => {
     // The ordinary case is a host restarted into the same id, which a container's PID 1 always is.
-    expect(leaseIsClaimed(lease, 'host-b', running('554433'), saidRecently)).toBe(false)
+    expect(leaseIsClaimed(lease, 'host-b', running('554433'))).toBe(false)
   })
 
-  it('leaves an owner this host cannot observe alone', (): void => {
+  it('leaves an owner this host cannot observe alone, and goes on leaving it', (): void => {
     // Two containers sharing a workspace root read their own process ids, not each other's, so an
-    // owner in another namespace is never concluded to be gone.
-    expect(leaseIsClaimed(lease, 'host-b', unobservable, saidRecently)).toBe(true)
+    // owner in another namespace is never concluded to be gone — and never will be. That is the
+    // deliberate limit of this rule: there is no honest way to tell a peer that has crashed from
+    // one that is working, so its workspace stays a retained artifact rather than being waited out.
+    expect(leaseIsClaimed(lease, 'host-b', unobservable)).toBe(true)
+    // A lease its owner released is another matter: the record says so itself.
     expect(
-      leaseIsClaimed(
-        retainedLease(lease, 'released', releasedAt),
-        'host-b',
-        unobservable,
-        saidRecently,
-      ),
+      leaseIsClaimed(retainedLease(lease, 'released', releasedAt), 'host-b', unobservable),
     ).toBe(false)
   })
 
-  it('stops claiming an unobservable owner once the renewals have stopped', (): void => {
-    // The one rule that reclaims a crashed host's workspaces where the kernel names nothing to
-    // compare, and it waits out far more missed renewals than a slow filesystem could cause. How
-    // long the record has gone unwritten is the caller's to measure, on the storage's own clock.
-    const unsaidForTooLong = leaseValidityMs + 1_000
-
-    expect(leaseIsClaimed(lease, 'host-b', unobservable, unsaidForTooLong)).toBe(false)
-    expect(leaseIsClaimed(lease, 'host-b', running('918273'), unsaidForTooLong)).toBe(true)
-  })
-
   it('takes a running owner at face value when either marker is missing', (): void => {
-    expect(leaseIsClaimed(lease, 'host-b', running(null), saidRecently)).toBe(true)
+    expect(leaseIsClaimed(lease, 'host-b', running(null))).toBe(true)
     expect(
       leaseIsClaimed(
         { ...lease, owner: { ...owner, startMarker: null } },
         'host-b',
         running('554433'),
-        saidRecently,
       ),
     ).toBe(true)
   })

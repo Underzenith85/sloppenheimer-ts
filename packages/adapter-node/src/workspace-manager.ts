@@ -1,6 +1,6 @@
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
-import { Cause, Effect, Exit, Option, Ref } from 'effect'
+import { Cause, Effect, Exit, Option } from 'effect'
 
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -13,7 +13,6 @@ import {
 import {
   heldLease,
   leaseNamesRun,
-  leaseRenewalIntervalMs,
   retainedLease,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
@@ -25,22 +24,20 @@ import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.j
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { realDirectoryExists, reportedAs } from './filesystem.js'
-import { hostOwner, renewLease, sayClaimStands, storageInstant } from './workspace-lease.js'
+import { hostOwner } from './workspace-lease.js'
 import {
   discardStagedLease,
   publishClaimedLease,
   pruneStagedLeases,
   readLease,
   stagedLeasePath,
-  withdrawLease,
   writeLease,
   writeStagedLease,
 } from './workspace-lease-store.js'
 import {
   issueHoldsWorkspace,
   removeIssueWorkspaces,
-  removeRunWorkspaceFiles,
-  runBeforeRemove,
+  removeRunWorkspace,
 } from './workspace-cleanup.js'
 import { runHook } from './workspace-hooks.js'
 
@@ -172,6 +169,7 @@ const provisionRunWorkspace = (
 /** Discards a released workspace, or keeps it as the recovery artifact its lease names. */
 const disposeOfWorkspace = (
   fileSystem: FileSystem.FileSystem,
+  hooks: HooksConfig,
   owner: WorkspaceOwner,
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
@@ -179,9 +177,7 @@ const disposeOfWorkspace = (
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     if (reason === null) {
-      // Without the hook: a release ran it while its lease was still being renewed, because an
-      // operator's command is not bounded and a workspace must not go unsaid for while it runs.
-      yield* removeRunWorkspaceFiles(fileSystem, paths.runPath)
+      yield* removeRunWorkspace(fileSystem, hooks, paths.runPath)
       // The issue directory itself stays. It is an empty container once its last run has gone, and
       // removing it here would race an acquisition that has just created its own run directory
       // inside it; cleanup takes it when the issue is finished with.
@@ -193,6 +189,7 @@ const disposeOfWorkspace = (
 /** Releasing reports to nobody: the run it followed has already ended, so a failure is logged. */
 const releaseRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
+  hooks: HooksConfig,
   root: string,
   owner: WorkspaceOwner,
   leased: LeasedWorkspace,
@@ -202,6 +199,7 @@ const releaseRunWorkspace = (
     Effect.flatMap((paths) =>
       disposeOfWorkspace(
         fileSystem,
+        hooks,
         owner,
         paths,
         leased.run,
@@ -219,18 +217,19 @@ const releaseRunWorkspace = (
  * keeps a published lease from ever existing without the finalizer that hands it back. Everything
  * after it — provisioning, the `after_create` hook, and the caller's own use — runs restored, so a
  * cancellation reaches a hook's process tree instead of waiting out its timeout, and each of the
- * two is bracketed in turn with no interruptible gap between them. The renewal that keeps the lease
- * standing spans both, because neither is bounded from above.
+ * two is bracketed in turn with no interruptible gap between them.
+ *
+ * Nothing here has to be kept alive while it runs. A lease is held until the run gives it up, for
+ * however long the run and the operator's hooks take, and no other host takes it in the meantime.
  */
 const leaseRunWorkspace = <Value, Failure, Requirements>(
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   root: string,
   owner: WorkspaceOwner,
-  renewal: LeaseRenewal,
   run: WorkspaceRun,
   use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,
-  disposition: (exit: Exit.Exit<Value, Failure | WorkspaceError>) => WorkspaceRelease,
+  disposition: (exit: Exit.Exit<Value, Failure>) => WorkspaceRelease,
 ): Effect.Effect<Value, Failure | WorkspaceError, Requirements> =>
   Effect.uninterruptibleMask((restore) =>
     Effect.gen(function* () {
@@ -242,7 +241,7 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       // Preparing the claim is ordinary filesystem work and stays interruptible; what is masked
       // is the link that publishes it, which is one step and cannot be left half done.
       const staged = stagedLeasePath(paths.stagingPath)
-      const claim = yield* restore(prepareRunClaim(fileSystem, paths, run, owner, staged)).pipe(
+      yield* restore(prepareRunClaim(fileSystem, paths, run, owner, staged)).pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit) ? Effect.void : discardStagedLease(fileSystem, staged),
         ),
@@ -251,30 +250,10 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       yield* publishRunClaim(fileSystem, paths, staged).pipe(
         reportedAs('create_failed', 'failed to create workspace'),
       )
-      // What the run knows its lease stands for, carried across both of the races below: the
-      // renewal is stopped and started again between them, and the window it had bought stands.
-      const standing = yield* Ref.make(Date.parse(claim.expiresAt))
-      // Said once here rather than an interval from now, because the published record still carries
-      // the stamp of the file it was linked from: until this write lands, a second host reads the
-      // lease as having gone unsaid for however long the claim took to publish. A claim this run
-      // cannot say — one that expired while it was being published, or one the filesystem would not
-      // take — is withdrawn rather than built on.
-      yield* sayClaimStands(fileSystem, paths, run, owner, standing).pipe(
-        Effect.onError(() => Effect.ignore(withdrawLease(fileSystem, paths, claim))),
-        reportedAs('create_failed', 'failed to create workspace'),
-      )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
-      // Both of the steps that follow run against the renewal rather than after it: provisioning is
-      // no more bounded than the run is — an `after_create` hook is the caller's own command — and
-      // neither may go on under a lease this run has stopped holding. Racing is what orders them:
-      // the work ends and the renewal is interrupted, or the renewal fails and the work is
-      // interrupted, and either way both have finished before the record is rewritten below.
-      const keepingLease = renewLease(fileSystem, paths, run, owner, renewal.intervalMs, standing)
       // From here the lease is this run's own. Provisioning that does not finish keeps the
       // workspace under the reason it failed for, rather than leaving a lease nobody holds.
-      yield* restore(
-        Effect.raceFirst(provisionRunWorkspace(fileSystem, hooks, workspace), keepingLease),
-      ).pipe(
+      yield* restore(provisionRunWorkspace(fileSystem, hooks, workspace)).pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit)
             ? Effect.void
@@ -283,65 +262,36 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
               ),
         ),
       )
-      // The `before_remove` hook runs inside the race, where the renewal still is: it is the
-      // operator's own command and nothing bounds it either, and a workspace whose lease went
-      // unsaid while it ran could be taken by another host from under the hook. Everything that
-      // rewrites or removes the record runs after, where the renewal has stopped.
-      return yield* restore(
-        Effect.raceFirst(
-          use(workspace).pipe(
-            Effect.onExit((exit) =>
-              disposition(exit)._tag === 'Completed'
-                ? Effect.ignore(runBeforeRemove(fileSystem, hooks, workspace.path))
-                : Effect.void,
-            ),
-          ),
-          keepingLease,
-        ),
-      ).pipe(
+      return yield* restore(use(workspace)).pipe(
         Effect.onExit((exit) =>
-          releaseRunWorkspace(fileSystem, root, owner, { run, workspace }, disposition(exit)),
+          releaseRunWorkspace(
+            fileSystem,
+            hooks,
+            root,
+            owner,
+            { run, workspace },
+            disposition(exit),
+          ),
         ),
       )
     }),
   )
 
-/**
- * How long a staged lease record can be in flight before it can only be an abandoned one. Staging
- * is a single write, so an hour is far past any writer and far short of leaving orphans on disk for
- * the life of the root.
- */
-const stagedLeaseLifetimeMs = 60 * 60 * 1_000
-
-/** How often a run says its lease still stands. Tests shorten it; the host runs at the default. */
-export type LeaseRenewal = Readonly<{ intervalMs: number }>
-
 export const makeWorkspaceManager = (
   root: string,
   hooks: HooksConfig,
   owner: WorkspaceOwner = hostOwner,
-  renewal: LeaseRenewal = { intervalMs: leaseRenewalIntervalMs },
 ): Effect.Effect<WorkspaceManagerPort, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem
     // A host killed between staging a record and publishing it leaves the staged file behind, and
     // nothing else ever reads that directory. Sweeping it here takes those away once per manager —
-    // at startup, and again whenever a reload rebuilds one — and can never reach a record a live
-    // writer is still holding, because such a record is seconds old.
-    const staging = leaseStagingPath(root)
-    // A root nothing has ever staged a record in has nothing to sweep, and building a manager over
-    // one creates no directories. Where there is something, it is aged on the filesystem's clock
-    // like every other record: this host's own may be hours from the one that stamped the file, and
-    // a claim in flight must not be swept out from under its own writer.
-    if (yield* Effect.orElseSucceed(realDirectoryExists(fileSystem, staging), () => false)) {
-      const storageNow = yield* Effect.orElseSucceed(storageInstant(fileSystem, staging), () =>
-        Option.none<number>(),
-      )
-      yield* pruneStagedLeases(fileSystem, staging, storageNow, stagedLeaseLifetimeMs)
-    }
+    // at startup, and again whenever a reload rebuilds one — and takes only records whose writer
+    // this host can see is gone, so one still on its way to publication is left alone.
+    yield* pruneStagedLeases(fileSystem, leaseStagingPath(root))
     return {
       withLeasedWorkspace: (run, use, disposition) =>
-        leaseRunWorkspace(fileSystem, hooks, root, owner, renewal, run, use, disposition),
+        leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
       exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),
       // `before_run` is fatal: the orchestrator retries the issue instead of launching an agent.
       beforeRun: (workspace) =>

@@ -56,21 +56,6 @@ export type WorkspaceRun = Readonly<{
 }>
 
 /**
- * How long a lease stands without being renewed, and how often the run holding it says so.
- *
- * A lease cannot state how long its run will take: the limits a workflow sets are idle timeouts,
- * restarted by every turn and every event, so nothing in a configuration bounds a run from above.
- * What a running host can do is keep saying it is there. So a run renews its own lease while it
- * holds it, and a host that cannot observe the owner's process treats the lease as held until the
- * renewals stop for longer than any pause between them.
- *
- * The window is wide against the interval on purpose: several renewals may be missed — a slow
- * filesystem, a busy host — before anyone else concludes the run is gone.
- */
-export const leaseRenewalIntervalMs = 5 * 60 * 1_000
-export const leaseValidityMs = 60 * 60 * 1_000
-
-/**
  * Why a released workspace was kept. A run that published its work needs nothing from the
  * directory afterwards; every other ending leaves work that only the directory holds.
  */
@@ -98,13 +83,6 @@ const leaseSchema = Schema.Struct({
   status: leaseStatus,
   reason: Schema.NullOr(Schema.String),
   acquiredAt: timestamp,
-  /**
-   * When this lease stops standing unless the run says it again — on the clock of the host that
-   * wrote it, and so meaningful to that host alone. It is what the run itself renews against; a
-   * second host reads how long the record has gone unwritten instead, because two wall clocks are
-   * not one clock.
-   */
-  expiresAt: timestamp,
   releasedAt: Schema.NullOr(timestamp),
 }).annotations({ message: () => 'workspace lease record is malformed' })
 
@@ -128,14 +106,7 @@ export const heldLease = (
   status: 'held',
   reason: null,
   acquiredAt: acquiredAt.toISOString(),
-  expiresAt: new Date(acquiredAt.getTime() + leaseValidityMs).toISOString(),
   releasedAt: null,
-})
-
-/** The same lease, said again by the run still holding it: it stands for another window. */
-export const renewedLease = (lease: WorkspaceLeaseRecord, at: Date): WorkspaceLeaseRecord => ({
-  ...lease,
-  expiresAt: new Date(at.getTime() + leaseValidityMs).toISOString(),
 })
 
 /** The same lease, released and kept: the run ended without publishing what the directory holds. */
@@ -204,23 +175,6 @@ export const leaseNamesRun = (
   lease.owner.hostId === hostId
 
 /**
- * Whether a lease is still the run's own to say again: its own record, and still standing.
- *
- * A run renews the record it published, never a name. One that is gone, released, replaced by
- * another run's, or already past its own expiry is one another host may be acting on — expiry is
- * exactly what lets it take an unobservable owner's workspace — so the run treats the lease as lost
- * rather than writing it back underneath whoever took it.
- */
-export const leaseIsOurs = (
-  lease: WorkspaceLeaseRecord,
-  run: WorkspaceRun,
-  runKey: string,
-  hostId: string,
-  now: Date,
-): boolean =>
-  leaseNamesRun(lease, run, runKey, hostId) && now.getTime() < Date.parse(lease.expiresAt)
-
-/**
  * Whether a lease still belongs to a live owner, and so whether the workspace it holds may be
  * entered or removed by anyone else.
  *
@@ -229,29 +183,25 @@ export const leaseIsOurs = (
  * which is how a second host pointed at the same root is respected and how a crashed one stops
  * blocking cleanup.
  *
- * Only an owner this host can actually observe is ever concluded to be gone from its process alone.
- * A process id means nothing outside the namespace that issued it, and nothing at all on another
- * machine, so an owner the host cannot place — another container, another kernel, or a platform
- * that names neither — stays claimed rather than being probed against whatever process happens to
- * carry that id here. What reclaims those is renewal: a run says its lease still stands for as long
- * as it holds it, and one that has not been said again in far longer than the interval between
- * renewals belongs to a host that is no longer there to say it. How long it has gone unsaid is the
- * caller's to measure, and it must measure it on one clock — the record's own storage, never the
- * writer's `expiresAt` against the reader's wall clock, which two hosts an hour apart would read as
- * an expiry that never came or one that came at once.
+ * Nothing here is decided by time. A lease is given up by the run that holds it, or taken from a
+ * host that can be seen to be gone — never waited out. A host restarted into its predecessor's
+ * process id, which is the ordinary case for a container's PID 1, is exactly what makes a process
+ * id alone insufficient: a running process whose start marker is not the recorded one is a
+ * different process, and the lease it left is not claimed. Where either marker is missing the
+ * observation cannot tell them apart, and the owner is taken to be running.
  *
- * Within one namespace, a process id alone still does not identify a process: a host restarted into
- * the same id, the ordinary case for a container's PID 1, would otherwise keep its predecessor's
- * leases alive for as long as it ran. So a running process whose start marker is not the recorded
- * one is a different process, and the lease it left is not claimed. Where either marker is missing
- * the observation cannot tell them apart, and the owner is taken to be running, because refusing to
- * remove a workspace is the safe error.
+ * An owner this host cannot place at all — another container, another kernel, or a platform that
+ * names neither — stays claimed, and stays claimed for good. Its workspace is a retained artifact
+ * that cleanup reports and never takes. That is the deliberate limit of this rule: refusing to
+ * remove a workspace is the safe error, and there is no honest way to tell a peer that has crashed
+ * from one that is working, when the kernel will not say and clocks are not shared. Do not replace
+ * it with an expiry. Two hosts do not share a wall clock, and a lease waited out on the reader's
+ * clock is a live run's workspace deleted underneath it.
  */
 export const leaseIsClaimed = (
   lease: WorkspaceLeaseRecord,
   hostId: string,
   observation: OwnerObservation,
-  unrenewedForMs: number,
 ): boolean => {
   if (lease.status !== 'held') {
     return false
@@ -260,7 +210,7 @@ export const leaseIsClaimed = (
     return true
   }
   if (observation._tag === 'Unobservable') {
-    return unrenewedForMs < leaseValidityMs
+    return true
   }
   if (observation._tag === 'Gone') {
     return false

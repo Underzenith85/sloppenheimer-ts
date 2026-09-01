@@ -13,30 +13,23 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { FileSystem } from '@effect/platform'
 import { it } from '@effect/vitest'
-import { Cause, Clock, Effect, Either, Exit, Fiber, Option, Ref } from 'effect'
+import { Clock, Effect, Either, Fiber } from 'effect'
 import { afterEach, describe, expect } from 'vitest'
 
 import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/domain.js'
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.js'
-import {
-  hostOwner,
-  renewLease,
-  sayClaimStands,
-} from '@sloppenheimer/adapter-node/workspace-lease.js'
+import { hostOwner } from '@sloppenheimer/adapter-node/workspace-lease.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
-  containedRunWorkspacePath,
   containedWorkspacePath,
   workspaceKey,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
 import {
   encodeLease,
   heldLease,
-  leaseValidityMs,
   type WorkspaceLeaseRecord,
 } from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
@@ -566,47 +559,60 @@ describe('run workspace allocation and leases', (): void => {
       const root = makeRoot()
       const staging = join(root, '#lease-writes')
       yield* host(() => mkdir(staging, { recursive: true }))
-      const record = encodeLease(
-        heldLease(
-          { identifier: issueIdentifier('GH-183'), runId: 1 },
-          'run-1-hosta',
-          hostOwner,
-          new Date(),
-        ),
-      )
+      const staged = (owner: WorkspaceLeaseRecord['owner']): string =>
+        encodeLease(
+          heldLease(
+            { identifier: issueIdentifier('GH-183'), runId: 1 },
+            'run-1-hosta',
+            owner,
+            new Date(),
+          ),
+        )
       const abandoned = join(staging, `${crypto.randomUUID()}.lease`)
       const inFlight = join(staging, `${crypto.randomUUID()}.lease`)
+      const elsewhere = join(staging, `${crypto.randomUUID()}.lease`)
       const somebodyElses = join(staging, `${crypto.randomUUID()}.lease`)
       const notOurName = join(staging, 'notes.txt')
-      // A probe, which is how this host asks the storage what time it is: empty by construction,
-      // and left behind only by a host killed between writing one and taking it away.
-      const probe = join(staging, `${crypto.randomUUID()}.now`)
-      const notAProbe = join(staging, `${crypto.randomUUID()}.now`)
-      yield* host(() => writeFile(abandoned, record))
-      yield* host(() => writeFile(inFlight, record))
-      yield* host(() => writeFile(somebodyElses, 'a file that is not a lease record'))
-      yield* host(() => writeFile(notOurName, record))
-      yield* host(() => writeFile(probe, ''))
-      yield* host(() => writeFile(notAProbe, "not empty, so not this host's probe"))
-      const longAgo = new Date(Date.now() - 4 * 60 * 60 * 1_000)
-      yield* Effect.all(
-        [abandoned, somebodyElses, notOurName, probe, notAProbe].map((path) =>
-          host(() => utimes(path, longAgo, longAgo)),
+      // A record whose writer this host can see is gone, one this host is still writing, and one
+      // whose writer it cannot place at all.
+      yield* host(async () =>
+        writeFile(
+          abandoned,
+          staged({
+            hostId: 'a host that was killed mid-write',
+            processId: await exitedProcessId(),
+            startMarker: null,
+            namespace: hostOwner.namespace,
+          }),
         ),
       )
+      yield* host(() => writeFile(inFlight, staged(hostOwner)))
+      yield* host(() =>
+        writeFile(
+          elsewhere,
+          staged({
+            hostId: 'a host in another container',
+            processId: process.pid,
+            startMarker: 'a marker from another namespace',
+            namespace: 'another kernel/pid:[4026531999]',
+          }),
+        ),
+      )
+      yield* host(() => writeFile(somebodyElses, 'a file that is not a lease record'))
+      yield* host(() => writeFile(notOurName, staged(hostOwner)))
 
       // Building a manager is what sweeps them: once at startup, and again on every reload.
       yield* workspaceManager(root, hooks())
 
-      // Staging is a single write, so an old record belongs to a host that was killed between
-      // writing one and publishing it. Anything recent may still be on its way — and the sweep
-      // unlinks by pathname, so it removes only what it can show is a record it wrote itself.
+      // Staging is a single write, so a record whose writer is gone was left by a host killed
+      // between writing one and publishing it. A record still being written is this host's own —
+      // and the sweep unlinks by pathname, so it removes only what it can show is a record it
+      // wrote itself, and leaves an owner it cannot place alone as everything else here does.
       expect(existsSync(abandoned)).toBe(false)
       expect(existsSync(inFlight)).toBe(true)
+      expect(existsSync(elsewhere)).toBe(true)
       expect(existsSync(somebodyElses)).toBe(true)
       expect(existsSync(notOurName)).toBe(true)
-      expect(existsSync(probe)).toBe(false)
-      expect(existsSync(notAProbe)).toBe(true)
     }),
   )
 
@@ -810,76 +816,6 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
-  it.live('says a lease still stands for as long as its run holds it', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      // A renewal every 50ms rather than every five minutes: the interval is the host's, and a
-      // test that had to wait one would be measuring the clock rather than the renewal.
-      const manager = yield* makeWorkspaceManager(root, hooks(), hostOwner, {
-        intervalMs: 50,
-      }).pipe(Effect.provide(hostFileSystem))
-      const identifier = issueIdentifier('GH-185')
-
-      const renewed = yield* manager.withLeasedWorkspace(
-        { identifier, runId: 1 },
-        (workspace) =>
-          Effect.gen(function* () {
-            const first = yield* host(() => leaseOf(workspace.path))
-            yield* waitFor(
-              () =>
-                existsSync(`${workspace.path}.lease`) &&
-                readFileSync(`${workspace.path}.lease`, 'utf8').includes('"expiresAt"') &&
-                (
-                  JSON.parse(
-                    readFileSync(`${workspace.path}.lease`, 'utf8'),
-                  ) as WorkspaceLeaseRecord
-                ).expiresAt !== first.expiresAt,
-              5_000,
-            )
-            return yield* host(() => leaseOf(workspace.path))
-          }),
-        () => ({ _tag: 'Retained', reason: 'the run ended without publishing' }),
-      )
-
-      // A host that cannot observe this one's process has nothing else to go on: the run saying so
-      // is what keeps its workspace from being reclaimed under it. The record stands past the
-      // window the claim itself bought, which only a renewal can have written.
-      expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(
-        Date.parse(renewed.acquiredAt) + leaseValidityMs,
-      )
-    }),
-  )
-
-  it.live('says so while its own provisioning hook is still working', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      // An `after_create` hook is the caller's own command and nothing bounds it: this one runs
-      // far past the interval at which the run says its lease still stands, which on the host is
-      // the difference between a five-minute hook and an hour-long one.
-      const manager = yield* makeWorkspaceManager(
-        root,
-        hooks({ afterCreate: 'sleep 0.4' }),
-        hostOwner,
-        { intervalMs: 50 },
-      ).pipe(Effect.provide(hostFileSystem))
-      const identifier = issueIdentifier('GH-186')
-
-      const lease = yield* manager.withLeasedWorkspace(
-        { identifier, runId: 1 },
-        (workspace) => host(() => leaseOf(workspace.path)),
-        () => ({ _tag: 'Completed' }),
-      )
-
-      // The record stands well past the window the claim itself bought — past anything the say at
-      // claim time could have written — so it was said again while the hook ran: a host that cannot
-      // observe this one's process is never told the run is gone while provisioning is still going.
-      expect(Date.parse(lease.expiresAt)).toBeGreaterThan(
-        Date.parse(lease.acquiredAt) + leaseValidityMs + 200,
-      )
-      expect(lease.status).toBe('held')
-    }),
-  )
-
   it.live('takes the lease record before anything runs against the workspace', () =>
     Effect.gen(function* () {
       const root = makeRoot()
@@ -902,192 +838,12 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
-  it.live('stops a run whose lease has been taken out from under it', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const manager = yield* makeWorkspaceManager(root, hooks(), hostOwner, {
-        intervalMs: 50,
-      }).pipe(Effect.provide(hostFileSystem))
-      let taken = ''
-
-      const outcome = yield* Effect.exit(
-        manager.withLeasedWorkspace(
-          { identifier: issueIdentifier('GH-187'), runId: 1 },
-          (workspace) =>
-            Effect.gen(function* () {
-              taken = workspace.path
-              // Exactly what cleanup does to a workspace it has decided is free. The run would
-              // otherwise work on in a directory another host is already taking back.
-              yield* host(() => rm(`${workspace.path}.lease`))
-              yield* Effect.sleep(30_000)
-            }),
-          () => ({ _tag: 'Retained', reason: 'the run ended without publishing' }),
-        ),
-      )
-
-      expect(Exit.isFailure(outcome)).toBe(true)
-      const failure = Exit.isFailure(outcome)
-        ? Cause.failureOption(outcome.cause)
-        : Option.none<WorkspaceError>()
-      expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
-      // And it lets go of what it no longer holds: a run that publishes a record here would be
-      // naming a workspace whoever took the lease may already have removed.
-      expect(existsSync(`${taken}.lease`)).toBe(false)
-    }),
-  )
-
-  it.live('stops saying a lease stands once the window it knew about has run out', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const fileSystem = yield* FileSystem.FileSystem
-      const paths = yield* containedRunWorkspacePath(
-        root,
-        issueIdentifier('GH-188'),
-        'run-1-a-host',
-      )
-      // A record that cannot be read or written at all: renewals fail rather than answering. A
-      // filesystem that is full, read-only, or unreachable is the case this stands in for.
-      yield* host(() => mkdir(paths.leasePath, { recursive: true }))
-      const run = { identifier: issueIdentifier('GH-188'), runId: 1 }
-
-      // While the run still knows its lease stands, a renewal it cannot make is not a lease lost.
-      const kept = yield* Effect.exit(
-        renewLease(
-          fileSystem,
-          paths,
-          run,
-          hostOwner,
-          10,
-          yield* Ref.make(Date.now() + 60_000),
-        ).pipe(Effect.timeout(200)),
-      )
-      const stillRenewing = Exit.isFailure(kept)
-        ? Cause.failureOption(kept.cause)
-        : Option.none<WorkspaceError>()
-      expect(Option.getOrThrow(stillRenewing)._tag).toBe('TimeoutException')
-
-      // Once that window has run out, another host is free to take the workspace, so the run stops.
-      const lost = yield* Effect.exit(
-        renewLease(fileSystem, paths, run, hostOwner, 10, yield* Ref.make(Date.now() - 1)),
-      )
-      const failure = Exit.isFailure(lost)
-        ? Cause.failureOption(lost.cause)
-        : Option.none<WorkspaceError>()
-      expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
-    }).pipe(Effect.provide(hostFileSystem)),
-  )
-
-  it.live('says a lease again as soon as it is claimed, before anything is built on it', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const fileSystem = yield* FileSystem.FileSystem
-      const runKey = 'run-1-a-host'
-      const paths = yield* containedRunWorkspacePath(root, issueIdentifier('GH-190'), runKey)
-      const run = { identifier: issueIdentifier('GH-190'), runId: 1 }
-      // A claim published half an hour after it was written — a host stopped between staging the
-      // record and linking it. The record still stands, but it reads as half spent, and a second
-      // host reads its stamp rather than this one's word for it.
-      const claimed = heldLease(run, runKey, hostOwner, new Date(Date.now() - leaseValidityMs / 2))
-      yield* host(() => mkdir(paths.issuePath, { recursive: true }))
-      yield* host(() => writeFile(paths.leasePath, encodeLease(claimed)))
-      const standing = yield* Ref.make(Date.parse(claimed.expiresAt))
-
-      yield* sayClaimStands(fileSystem, paths, run, hostOwner, standing)
-
-      const said = yield* host(() => leaseOf(paths.runPath))
-      expect(Date.parse(said.expiresAt)).toBeGreaterThan(Date.parse(claimed.expiresAt))
-      expect(said.acquiredAt).toBe(claimed.acquiredAt)
-      // And what the run believes moves with it, so the next renewal starts from the window it has.
-      expect(yield* Ref.get(standing)).toBe(Date.parse(said.expiresAt))
-    }).pipe(Effect.provide(hostFileSystem)),
-  )
-
-  it.live('refuses a claim it cannot say, where a renewal would have waited', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const fileSystem = yield* FileSystem.FileSystem
-      const runKey = 'run-1-a-host'
-      const paths = yield* containedRunWorkspacePath(root, issueIdentifier('GH-191'), runKey)
-      const run = { identifier: issueIdentifier('GH-191'), runId: 1 }
-      const claimed = heldLease(run, runKey, hostOwner, new Date())
-      yield* host(() => mkdir(paths.issuePath, { recursive: true }))
-      yield* host(() => writeFile(paths.leasePath, encodeLease(claimed)))
-      // Nowhere to stage a record, so the write cannot land. A renewal would wait for the next one,
-      // having a window still open; a claim has nothing to wait on but the stamp it arrived with.
-      yield* host(() => writeFile(paths.stagingPath, 'not a directory\n'))
-      const standing = yield* Ref.make(Date.parse(claimed.expiresAt))
-
-      const refused = yield* Effect.exit(
-        sayClaimStands(fileSystem, paths, run, hostOwner, standing),
-      )
-
-      expect(Exit.isFailure(refused)).toBe(true)
-      expect(readFileSync(paths.leasePath, 'utf8')).toBe(encodeLease(claimed))
-    }).pipe(Effect.provide(hostFileSystem)),
-  )
-
-  it.live('keeps saying a lease while the hook that empties its workspace runs', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const seen = join(root, 'lease-at-before-remove')
-      // The hook copies the record beside the workspace it is being run against, after long enough
-      // for several renewals. `before_remove` is the operator's own command and nothing bounds it.
-      const manager = yield* makeWorkspaceManager(
-        root,
-        hooks({
-          beforeRemove: `sleep 0.4; cp "../$(basename "$PWD").lease" ${JSON.stringify(seen)}`,
-        }),
-        hostOwner,
-        { intervalMs: 50 },
-      ).pipe(Effect.provide(hostFileSystem))
-
-      const workspace = yield* published(manager, 'GH-192')
-
-      const said = JSON.parse(readFileSync(seen, 'utf8')) as WorkspaceLeaseRecord
-      // Said well past the window the claim bought, so the run was still holding its lease while
-      // the hook worked in the directory — which is what keeps another host from taking it away.
-      expect(Date.parse(said.expiresAt)).toBeGreaterThan(
-        Date.parse(said.acquiredAt) + leaseValidityMs + 200,
-      )
-      // And the workspace is gone once the release finishes, hook and all.
-      expect(existsSync(workspace.path)).toBe(false)
-      expect(existsSync(`${workspace.path}.lease`)).toBe(false)
-    }),
-  )
-
-  it.live('never says a lease again once it has expired', () =>
-    Effect.gen(function* () {
-      const root = makeRoot()
-      const fileSystem = yield* FileSystem.FileSystem
-      const runKey = 'run-1-a-host'
-      const paths = yield* containedRunWorkspacePath(root, issueIdentifier('GH-189'), runKey)
-      const run = { identifier: issueIdentifier('GH-189'), runId: 1 }
-      // This host's own record, expired: another host is already free to take the workspace on the
-      // strength of it, so writing it back would be taking it out from under whoever did.
-      const expired = encodeLease(
-        heldLease(run, runKey, hostOwner, new Date(Date.now() - 2 * leaseValidityMs)),
-      )
-      yield* host(() => mkdir(paths.issuePath, { recursive: true }))
-      yield* host(() => writeFile(paths.leasePath, expired))
-
-      const lost = yield* Effect.exit(
-        renewLease(fileSystem, paths, run, hostOwner, 10, yield* Ref.make(Date.now() + 60_000)),
-      )
-
-      const failure = Exit.isFailure(lost)
-        ? Cause.failureOption(lost.cause)
-        : Option.none<WorkspaceError>()
-      expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
-      expect(readFileSync(paths.leasePath, 'utf8')).toBe(expired)
-    }).pipe(Effect.provide(hostFileSystem)),
-  )
-
-  it.live('reclaims an unobservable lease once no run could still be holding it', () =>
+  it.live("keeps an unobservable owner's workspace however old it is", () =>
     Effect.gen(function* () {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
       const identifier = 'GH-184'
-      const abandoned = yield* host(() =>
+      const kept = yield* host(() =>
         foreignWorkspace(
           root,
           identifier,
@@ -1097,15 +853,17 @@ describe('run workspace allocation and leases', (): void => {
             startMarker: 'a marker from another namespace',
             namespace: 'another kernel/pid:[4026531999]',
           },
-          new Date(Date.now() - leaseValidityMs - 60_000),
+          new Date('2020-01-01T00:00:00.000Z'),
         ),
       )
 
       yield* manager.remove(issueIdentifier(identifier))
 
-      // Nothing here can observe that owner's process, and no run of any workflow is still going a
-      // week later: age is what reclaims the workspaces a crashed host leaves on such a platform.
-      expect(existsSync(abandoned)).toBe(false)
+      // Nothing here can observe that owner's process, and age is not evidence: a run that has been
+      // going for years is unlikely, but a workspace deleted from under a live one is unrecoverable
+      // and this is not. The lease holds, and cleanup says so rather than guessing.
+      expect(existsSync(kept)).toBe(true)
+      expect(existsSync(`${kept}.lease`)).toBe(true)
     }),
   )
 

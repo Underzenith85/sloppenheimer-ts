@@ -6,6 +6,7 @@ import { Effect, Either, Option } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { isSymbolicLink, realDirectoryExists } from './filesystem.js'
+import { leaseIsLive } from './workspace-lease.js'
 import {
   rejectWorkspace,
   sameIdentity,
@@ -96,63 +97,46 @@ const stagingIdentity = (
     })
   })
 
-/**
- * The shapes this module gives the files it stages: a UUID and one of two suffixes, and nothing
- * else. `.lease` is a record on its way to being published; `.now` is a probe written to ask the
- * storage what time it is.
- */
-const stagedFileName =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(lease|now)$/u
+/** The shape this module gives a staged record: a UUID and the suffix, and nothing else. */
+const stagedRecordName = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.lease$/u
 
 /**
  * Whether one entry is an abandoned staged record — and the last word on whether the sweep may
  * unlink it.
  *
+ * A staged record names the host that wrote it, so the sweep asks the same question cleanup asks of
+ * a published one: is that host still there? A record whose writer is gone was left by a host
+ * killed between writing it and publishing it, and nothing refers to it. One whose writer is
+ * running — this process's own, seconds old — is in flight. One whose writer this host cannot place
+ * is left alone, like every other record of an owner it cannot see.
+ *
  * Node offers no `unlinkat`, so the removal that follows resolves a pathname the sweep cannot hold
  * still. What it can do is refuse to remove anything that is not demonstrably its own: the name has
- * this module's shape, the entry is a plain file rather than a link or a directory, its contents
- * are what that shape promises — a record that decodes as one, a probe that is empty — and it is
- * older than any writer could be — aged on the storage's own
- * clock against `storageNow`, never this host's, which may be hours from the one that stamped it.
- * A file reached through a substituted path is a file the sweep does not recognize, and leaves
- * alone.
+ * this module's shape, the entry is a plain file rather than a link or a directory, and the
+ * contents decode as a lease record. A file reached through a substituted path is a file the sweep
+ * does not recognize, and leaves alone.
  */
 const isAbandonedRecord = (
   fileSystem: FileSystem.FileSystem,
   stagingPath: string,
   entry: string,
-  storageNow: Option.Option<number>,
-  lifetimeMs: number,
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
-    if (!stagedFileName.test(entry)) {
+    if (!stagedRecordName.test(entry)) {
       return false
     }
     const staged = join(stagingPath, entry)
     if (yield* isSymbolicLink(fileSystem, staged)) {
       return false
     }
-    const info = yield* fileSystem.stat(staged)
-    const abandoned =
-      info.type === 'File' &&
-      Option.getOrElse(
-        Option.zipWith(
-          storageNow,
-          info.mtime,
-          (now, written) => now - written.getTime() > lifetimeMs,
-        ),
-        () => false,
-      )
-    if (!abandoned) {
+    if ((yield* fileSystem.stat(staged)).type !== 'File') {
       return false
     }
-    // What each kind has to show for itself: a record decodes as one, and a probe is empty, which
-    // is what this module writes and what nothing else would leave under such a name.
-    if (entry.endsWith('.now')) {
-      return Number(info.size) === 0
-    }
     const document = yield* fileSystem.readFileString(staged, 'utf8')
-    return Either.isRight(decodeLease(staged, document))
+    return Either.match(decodeLease(staged, document), {
+      onLeft: () => false,
+      onRight: (record) => !leaseIsLive(record),
+    })
   })
 
 /**
@@ -172,8 +156,6 @@ const isAbandonedRecord = (
 export const pruneStagedLeases = (
   fileSystem: FileSystem.FileSystem,
   stagingPath: string,
-  storageNow: Option.Option<number>,
-  lifetimeMs: number,
 ): Effect.Effect<void> =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -193,7 +175,7 @@ export const pruneStagedLeases = (
         if (!sameIdentity(verified, current)) {
           return
         }
-        if (yield* isAbandonedRecord(fileSystem, stagingPath, entry, storageNow, lifetimeMs)) {
+        if (yield* isAbandonedRecord(fileSystem, stagingPath, entry)) {
           yield* discardStagedLease(fileSystem, join(stagingPath, entry))
         }
       }
@@ -213,21 +195,10 @@ export const writeLease = (
   Effect.suspend(() => {
     const staged = stagedLeasePath(paths.stagingPath)
     return writeStagedLease(fileSystem, staged, lease).pipe(
-      Effect.zipRight(publishStagedLease(fileSystem, staged, paths.leasePath)),
+      Effect.zipRight(fileSystem.rename(staged, paths.leasePath)),
       Effect.ensuring(discardStagedLease(fileSystem, staged)),
     )
   })
-
-/**
- * Puts a staged record in place of the one already there: one rename, which is atomic and the whole
- * of the change. A caller that must not be interrupted between writing a record and acting on it
- * masks this alone, rather than the reading and staging that lead up to it.
- */
-export const publishStagedLease = (
-  fileSystem: FileSystem.FileSystem,
-  staged: string,
-  leasePath: string,
-): Effect.Effect<void, PlatformError> => fileSystem.rename(staged, leasePath)
 
 /**
  * Reads the lease beside a run workspace. A lease that is not there is `none` — a run directory
@@ -308,26 +279,3 @@ export const returnLease = (
   taken: TakenLease,
   leasePath: string,
 ): Effect.Effect<void, PlatformError> => fileSystem.rename(taken.path, leasePath)
-
-/**
- * Takes back a record this host wrote, when writing it turned out to be a mistake — a renewal that
- * crossed the expiry it was renewing, or a claim published after it had already stopped standing.
- *
- * It is taken with the same atomic rename cleanup uses, and given up only when what came back is
- * still exactly what that write left. Anything else — a claim published in the meantime — goes back
- * where it was.
- */
-export const withdrawLease = (
-  fileSystem: FileSystem.FileSystem,
-  paths: RunWorkspacePaths,
-  written: WorkspaceLeaseRecord,
-): Effect.Effect<void, WorkspaceError | PlatformError> =>
-  Effect.flatMap(takeLease(fileSystem, paths.leasePath, paths.stagingPath), (taken) =>
-    Option.match(taken, {
-      onNone: () => Effect.void,
-      onSome: (record) =>
-        encodeLease(record.lease) === encodeLease(written)
-          ? discardStagedLease(fileSystem, record.path)
-          : returnLease(fileSystem, record, paths.leasePath),
-    }),
-  )

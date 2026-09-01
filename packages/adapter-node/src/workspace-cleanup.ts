@@ -11,11 +11,10 @@ import {
   leaseStagingPath,
   workspaceKey,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
-import type { WorkspaceLeaseRecord } from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { realDirectoryExists, removeDirectoryIfEmpty, reportedAs } from './filesystem.js'
-import { leaseIsLive, leaseUnrenewedFor, storageInstant } from './workspace-lease.js'
+import { leaseIsLive } from './workspace-lease.js'
 import { discardStagedLease, readLease, returnLease, takeLease } from './workspace-lease-store.js'
 import { runHook } from './workspace-hooks.js'
 
@@ -28,19 +27,6 @@ import { runHook } from './workspace-hooks.js'
  * taken; a lease that turns out to still stand goes back where it was.
  */
 
-/**
- * Whether a record is still held, given how long it has gone unwritten. An age this host could not
- * measure is not evidence that anything expired, so the lease is left where it is.
- */
-const leaseStillHeld = (
-  lease: WorkspaceLeaseRecord,
-  unrenewedFor: Option.Option<number>,
-): boolean =>
-  Option.match(unrenewedFor, {
-    onNone: () => true,
-    onSome: (age) => leaseIsLive(lease, age),
-  })
-
 /** The run keys an issue directory holds, from its run directories and its lease records alike. */
 const runKeysIn = (entries: readonly string[]): readonly string[] => [
   ...new Set(
@@ -51,11 +37,8 @@ const runKeysIn = (entries: readonly string[]): readonly string[] => [
 /**
  * The operator's last look at a workspace before it goes. It is their own command, so nothing
  * bounds it, and its failures are logged rather than raised: the removal happens either way.
- *
- * A release runs this while its lease is still being renewed, which is why it is a step of its own:
- * a hook that outlasts the window its run's lease stands for must not leave that lease unsaid.
  */
-export const runBeforeRemove = (
+const runBeforeRemove = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   runPath: string,
@@ -69,7 +52,7 @@ export const runBeforeRemove = (
   })
 
 /** Takes away one run's directory and the lease record beside it, and nothing else. */
-export const removeRunWorkspaceFiles = (
+const removeRunWorkspaceFiles = (
   fileSystem: FileSystem.FileSystem,
   runPath: string,
 ): Effect.Effect<void, PlatformError> =>
@@ -104,19 +87,18 @@ const removeFreeRunWorkspace = (
   hooks: HooksConfig,
   runPath: string,
   stagingPath: string,
-  storageNow: Option.Option<number>,
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const leasePath = leasePathFor(runPath)
     const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
-    if (Option.isSome(taken)) {
-      // The rename kept the record's own stamp, so what was taken is still dated by the last run
-      // to say it — on the storage's clock, which is the one clock both hosts have.
-      const unrenewed = yield* leaseUnrenewedFor(fileSystem, taken.value.path, storageNow)
-      if (leaseStillHeld(taken.value.lease, unrenewed)) {
-        yield* returnLease(fileSystem, taken.value, leasePath)
-        return false
-      }
+    // What was decided on and what was taken are two reads of one name, so the decision is made
+    // again on the record actually in hand.
+    if (Option.exists(taken, (record) => leaseIsLive(record.lease))) {
+      yield* Option.match(taken, {
+        onNone: () => Effect.void,
+        onSome: (record) => returnLease(fileSystem, record, leasePath),
+      })
+      return false
     }
     yield* removeRunWorkspace(fileSystem, hooks, runPath)
     yield* Option.match(taken, {
@@ -138,21 +120,16 @@ const removeFreeRunWorkspaces = (
 ): Effect.Effect<readonly string[], WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const entries = yield* fileSystem.readDirectory(issuePath)
-    const storageNow = yield* storageInstant(fileSystem, stagingPath)
     const held: string[] = []
     for (const key of runKeysIn(entries)) {
       const runPath = yield* containedWorkspacePath(issuePath, key)
       const lease = yield* readLease(fileSystem, leasePathFor(runPath))
-      // A lease that is plainly still held is never taken, even for a moment: the run holding it
-      // reads its own record every renewal, and one it could not find would be one it had lost.
-      if (Option.isSome(lease)) {
-        const unrenewed = yield* leaseUnrenewedFor(fileSystem, leasePathFor(runPath), storageNow)
-        if (leaseStillHeld(lease.value, unrenewed)) {
-          held.push(key)
-          continue
-        }
+      // A lease that is plainly still held is left where it is rather than taken and put back.
+      if (Option.exists(lease, leaseIsLive)) {
+        held.push(key)
+        continue
       }
-      if (!(yield* removeFreeRunWorkspace(fileSystem, hooks, runPath, stagingPath, storageNow))) {
+      if (!(yield* removeFreeRunWorkspace(fileSystem, hooks, runPath, stagingPath))) {
         held.push(key)
       }
     }

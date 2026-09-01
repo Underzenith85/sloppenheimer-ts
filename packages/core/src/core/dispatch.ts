@@ -240,7 +240,7 @@ const workspaceRelease = (
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
   return execution.workspaces
-    .withLeasedWorkspace<RunPublication, AgentError | WorkspaceError | SourceControlError, never>(
+    .withLeasedWorkspace(
       { identifier: issue.identifier, runId },
       (workspace) => runWithSourceControl(launch, workspace),
       workspaceRelease,
