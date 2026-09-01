@@ -8,14 +8,12 @@ import { dispatch } from './dispatch.js'
 import {
   afterInspectionFailed,
   afterMerge,
-  afterRepairDispatched,
   afterReviewRequested,
   afterThreadsResolved,
-  awaitingSlot,
   observeHandoff,
-  repairIssue,
   type HandoffAction,
 } from './handoff-decision.js'
+import { afterRepairDispatched, awaitingSlot, repairIssue } from './repair.js'
 import {
   hasSlot,
   identifierIssueNumber,
@@ -335,7 +333,7 @@ const perform = (
       }
       case 'ResolveThreads': {
         const resolved = yield* capability
-          .resolveReviewThreads(action.threadIds)
+          .resolveReviewThreads(handoff.pullRequestNumber, action.headSha, action.threadIds)
           .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
         yield* stageHandoff(context, id, afterThreadsResolved(handoff, resolved))
         return

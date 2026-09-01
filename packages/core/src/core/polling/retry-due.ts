@@ -6,7 +6,7 @@ import { logContext, hasSlot, issueIsActive, issueIsRoutable, stateIsIn } from '
 import { logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
-import { settleRepair } from '../handoff-decision.js'
+import { settleRepair } from '../repair.js'
 import {
   applyHandoffObservation,
   reconcileHandoffs,

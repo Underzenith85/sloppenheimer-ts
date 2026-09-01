@@ -9,13 +9,13 @@ import type {
 } from '@sloppenheimer/core/domain/handoff.js'
 import {
   afterMerge,
-  afterRepairDispatched,
   attributeRepairHead,
   afterReviewRequested,
   afterThreadsResolved,
   observeHandoff,
   repairLimit,
 } from '@sloppenheimer/core/core/handoff-decision.js'
+import { afterRepairDispatched, repairIssue } from '@sloppenheimer/core/core/repair.js'
 import type {
   ExecutionSnapshot,
   HandoffEntry,
@@ -451,49 +451,293 @@ describe('intervention', (): void => {
   })
 })
 
-describe('stale review threads on a verified repair', (): void => {
-  const staleThread: PullRequestReviewThread = {
+describe('retiring feedback a head has superseded', (): void => {
+  /** Raised on an earlier head, and still raised against this one: outstanding work. */
+  const standingThread: PullRequestReviewThread = {
     id: 'thread-1',
     resolved: false,
+    outdated: false,
     body: 'please fix',
     url: null,
     commentHeadSha: 'head-0',
   }
+  const retiredThread: PullRequestReviewThread = { ...standingThread, outdated: true }
 
-  it('resolves threads left against an earlier head', (): void => {
-    const repaired = handoff({
-      repairHeadShas: ['head-1'],
-      reviewRequestedHeadSha: 'head-1',
-      reviewCompletedHeadSha: 'head-1',
-    })
+  const clean = (overrides: Partial<HandoffEntry> = {}): HandoffEntry =>
+    handoff({ reviewRequestedHeadSha: 'head-1', reviewCompletedHeadSha: 'head-1', ...overrides })
 
+  it('resolves what the provider marked outdated once the head came back clean', (): void => {
     const decision = observeHandoff(
-      repaired,
-      open({ codexReview: reviewed, reviewThreads: [staleThread] }),
+      clean({ repairHeadShas: ['head-1'] }),
+      open({ codexReview: reviewed, reviewThreads: [retiredThread] }),
       observedAt,
     )
 
-    expect(decision.action).toEqual({ _tag: 'ResolveThreads', threadIds: ['thread-1'] })
+    expect(decision.action).toEqual({
+      _tag: 'ResolveThreads',
+      headSha: 'head-1',
+      threadIds: ['thread-1'],
+    })
     expect(decision.handoff.state).toBe('awaiting_checks')
   })
 
-  it('leaves threads against the current head to the disposition', (): void => {
-    const repaired = handoff({
-      repairHeadShas: ['head-1'],
-      reviewRequestedHeadSha: 'head-1',
-      reviewCompletedHeadSha: 'head-1',
-    })
-
+  it('resolves it on a pull request no repair was recorded for', (): void => {
+    // A handoff restored from the store, or a head a human pushed the fix for, has retired threads
+    // nobody else will clear. A protection rule that requires resolved conversations would hold
+    // such a pull request open forever if the threads were left for a repair that never runs.
     const decision = observeHandoff(
-      repaired,
+      clean(),
       open({
         codexReview: reviewed,
-        reviewThreads: [{ ...staleThread, commentHeadSha: 'head-1' }],
+        reviewThreads: [retiredThread],
+        mergeState: 'blocked',
       }),
       observedAt,
     )
 
+    expect(decision.action).toEqual({
+      _tag: 'ResolveThreads',
+      headSha: 'head-1',
+      threadIds: ['thread-1'],
+    })
+
+    const afterwards = observeHandoff(
+      decision.handoff,
+      open({ codexReview: reviewed, reviewThreads: [{ ...retiredThread, resolved: true }] }),
+      observedAt,
+    )
+
+    expect(afterwards.action).toEqual({ _tag: 'Merge', headSha: 'head-1' })
+  })
+
+  it('leaves a thread the provider still raises against this head outstanding', (): void => {
+    const decision = observeHandoff(
+      clean({ repairHeadShas: ['head-1'] }),
+      open({ codexReview: reviewed, reviewThreads: [standingThread] }),
+      observedAt,
+    )
+
+    // Where the comment was written is provenance, not a verdict: the finding still applies, so it
+    // is repaired rather than resolved on the reviewer's behalf.
     expect(decision.action).toMatchObject({ _tag: 'Repair' })
+  })
+
+  it('waits while GitHub is still deciding, or reporting against the head', (): void => {
+    for (const mergeState of ['unknown', 'unstable']) {
+      const decision = observeHandoff(
+        clean({ repairHeadShas: ['head-1'] }),
+        // Every check run fetched is green, but GitHub has not settled: a signal it can see and
+        // this observation cannot must not cost a thread its resolution.
+        open({ codexReview: reviewed, reviewThreads: [retiredThread], mergeState }),
+        observedAt,
+      )
+
+      expect(decision.action).toEqual({ _tag: 'None' })
+      expect(decision.handoff.state).toBe('awaiting_checks')
+    }
+  })
+
+  it('waits for a head that has not come back clean', (): void => {
+    const decision = observeHandoff(
+      clean({ repairHeadShas: ['head-1'] }),
+      open({
+        codexReview: reviewed,
+        reviewThreads: [retiredThread],
+        checks: [{ name: 'quality', status: 'completed', conclusion: 'failure', url: null }],
+      }),
+      observedAt,
+    )
+
+    expect(decision.action).toMatchObject({ _tag: 'Repair', reason: 'Failed CI checks: quality' })
+  })
+})
+
+describe('the feedback a repair is asked to act on', (): void => {
+  const reviewedHandoff = (overrides: Partial<HandoffEntry> = {}): HandoffEntry =>
+    handoff({
+      repairHeadShas: ['head-1'],
+      repairObservedHeadShas: ['head-0', 'head-1'],
+      reviewRequestedHeadSha: 'head-1',
+      reviewCompletedHeadSha: 'head-1',
+      ...overrides,
+    })
+
+  /** A finding raised on an earlier head that the repaired head has since retired. */
+  const retired = (id: string, body: string, headSha: string): PullRequestReviewThread => ({
+    id,
+    resolved: false,
+    outdated: true,
+    body,
+    url: `https://example.test/${id}`,
+    commentHeadSha: headSha,
+  })
+
+  /** A finding the rereview raised against the head under inspection. */
+  const raised = (id: string, body: string): PullRequestReviewThread => ({
+    id,
+    resolved: false,
+    outdated: false,
+    body,
+    url: `https://example.test/${id}`,
+    commentHeadSha: 'head-1',
+  })
+
+  // The six threads of PR #152, spread over three reviewed heads: four already addressed and
+  // marked outdated by GitHub, two raised by the rereview of the head in hand.
+  const threadsOfThreeHeads: readonly PullRequestReviewThread[] = [
+    retired('thread-1', 'Addressed on head zero', 'head-0'),
+    retired('thread-2', 'Also addressed on head zero', 'head-0'),
+    retired('thread-3', 'Addressed on head one', 'head-a'),
+    retired('thread-4', 'Also addressed on head one', 'head-a'),
+    raised('thread-5', 'Guard the empty case'),
+    raised('thread-6', 'Name the failure honestly'),
+  ]
+
+  const failingCheck: PullRequestCheck = {
+    name: 'quality',
+    status: 'completed',
+    conclusion: 'failure',
+    url: null,
+  }
+
+  it('supplies only the findings raised against the inspected head', (): void => {
+    // The repaired head has not come back clean, so nothing is resolved this pass and the whole
+    // six-thread history is still on the pull request when the repair is decided.
+    const decision = observeHandoff(
+      reviewedHandoff(),
+      open({
+        codexReview: reviewed,
+        checks: [failingCheck],
+        reviewThreads: threadsOfThreeHeads,
+      }),
+      observedAt,
+    )
+
+    const repairReason =
+      'Unresolved review feedback:\nGuard the empty case\n\nName the failure honestly'
+    expect(decision.action).toEqual({
+      _tag: 'Repair',
+      headSha: 'head-1',
+      attempt: 2,
+      reason: repairReason,
+    })
+
+    const prompt = repairIssue(decision.handoff, issue, 'head-1', repairReason)
+
+    expect(prompt.description).toContain('Guard the empty case')
+    expect(prompt.description).toContain('Name the failure honestly')
+    for (const retiredBody of ['head zero', 'head one']) {
+      expect(prompt.description).not.toContain(retiredBody)
+    }
+    // The operator's record keeps what the agent was not asked to audit.
+    expect(decision.handoff.reason).toContain('Guard the empty case')
+    expect(decision.handoff.reason).toContain(
+      'Retained review history (outdated, not part of this repair): 4 threads',
+    )
+  })
+
+  it('retires the superseded threads first, then repairs against what the rereview raised', (): void => {
+    const clean = reviewedHandoff()
+    const first = observeHandoff(
+      clean,
+      open({ codexReview: reviewed, reviewThreads: threadsOfThreeHeads }),
+      observedAt,
+    )
+
+    // Only a published head that came back clean resolves anything, and only the threads the
+    // rereview did not raise against it.
+    expect(first.action).toEqual({
+      _tag: 'ResolveThreads',
+      headSha: 'head-1',
+      threadIds: ['thread-1', 'thread-2', 'thread-3', 'thread-4'],
+    })
+
+    const second = observeHandoff(
+      first.handoff,
+      open({
+        codexReview: reviewed,
+        reviewThreads: threadsOfThreeHeads.map((thread) =>
+          thread.outdated ? { ...thread, resolved: true } : thread,
+        ),
+      }),
+      observedAt,
+    )
+
+    expect(second.action).toEqual({
+      _tag: 'Repair',
+      headSha: 'head-1',
+      attempt: 2,
+      reason: 'Unresolved review feedback:\nGuard the empty case\n\nName the failure honestly',
+    })
+    expect(second.handoff.reason).not.toContain('Retained review history')
+  })
+
+  it('merges a repaired head whose feedback a human resolved, and a clean rereview', (): void => {
+    const humanResolved = observeHandoff(
+      reviewedHandoff(),
+      open({
+        codexReview: reviewed,
+        reviewThreads: threadsOfThreeHeads.map((thread) => ({ ...thread, resolved: true })),
+      }),
+      observedAt,
+    )
+
+    expect(humanResolved.action).toEqual({ _tag: 'Merge', headSha: 'head-1' })
+
+    const cleanRereview = observeHandoff(
+      reviewedHandoff(),
+      open({ codexReview: reviewed, reviewThreads: [] }),
+      observedAt,
+    )
+
+    expect(cleanRereview.action).toEqual({ _tag: 'Merge', headSha: 'head-1' })
+  })
+
+  it('never lets retired feedback alone spend a repair', (): void => {
+    const observation = open({
+      codexReview: reviewed,
+      reviewThreads: [retired('thread-1', 'Addressed on head zero', 'head-0')],
+      // Not clean yet, so nothing is resolved this pass and the disposition decides alone.
+      checks: [failingCheck],
+    })
+
+    const decision = observeHandoff(
+      handoff({ reviewRequestedHeadSha: 'head-1', reviewCompletedHeadSha: 'head-1' }),
+      observation,
+      observedAt,
+    )
+
+    expect(decision.action).toEqual({
+      _tag: 'Repair',
+      headSha: 'head-1',
+      attempt: 1,
+      reason: 'Failed CI checks: quality',
+    })
+    expect(decision.handoff.reason).toBe(
+      'Failed CI checks: quality\n\nRetained review history (outdated, not part of this repair): 1 thread -- https://example.test/thread-1',
+    )
+  })
+
+  it('keeps the history out of the prompt but in the intervention reason at the repair limit', (): void => {
+    const decision = observeHandoff(
+      reviewedHandoff({
+        repairHeadShas: ['head-a', 'head-b', 'head-1'],
+        repairObservedHeadShas: ['head-0', 'head-a', 'head-b', 'head-1'],
+      }),
+      open({
+        codexReview: reviewed,
+        checks: [failingCheck],
+        reviewThreads: threadsOfThreeHeads,
+      }),
+      observedAt,
+    )
+
+    expect(decision.action).toEqual({ _tag: 'None' })
+    expect(decision.handoff.state).toBe('intervention_required')
+    expect(decision.handoff.reason).toContain('Repair limit reached.')
+    expect(decision.handoff.reason).toContain('Guard the empty case')
+    expect(decision.handoff.reason).not.toContain('Addressed on head zero')
+    expect(decision.handoff.reason).toContain('Retained review history')
   })
 })
 

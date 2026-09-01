@@ -2488,6 +2488,7 @@ describe('restored pull request handoffs', (): void => {
                   {
                     id: 'thread-1',
                     resolved: false,
+                    outdated: false,
                     body: 'Fix this',
                     url: null,
                     commentHeadSha: reviewedHead,
@@ -2584,6 +2585,7 @@ describe('restored pull request handoffs', (): void => {
                       {
                         id: 'thread-1',
                         resolved: false,
+                        outdated: false,
                         body: 'Fix this',
                         url: null,
                         commentHeadSha: originalHead,
@@ -2952,6 +2954,7 @@ describe('restored pull request handoffs', (): void => {
                 {
                   id: 'thread-1',
                   resolved: false,
+                  outdated: false,
                   body: 'Fix this',
                   url: null,
                   commentHeadSha: head,

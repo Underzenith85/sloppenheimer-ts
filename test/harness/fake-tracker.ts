@@ -31,7 +31,12 @@ export type TrackerCall =
       pullRequestNumber: number
       expectedHeadSha: string
     }>
-  | Readonly<{ operation: 'resolveReviewThreads'; threadIds: readonly string[] }>
+  | Readonly<{
+      operation: 'resolveReviewThreads'
+      pullRequestNumber: number
+      expectedHeadSha: string
+      threadIds: readonly string[]
+    }>
 
 /** Exact in-memory implementation of both production ports for conformance scenarios. */
 export class FakeTracker implements TrackerPort, CodeReviewPort {
@@ -106,8 +111,17 @@ export class FakeTracker implements TrackerPort, CodeReviewPort {
     return Effect.void
   }
 
-  resolveReviewThreads(threadIds: readonly string[]): Effect.Effect<void> {
-    this.calls.push({ operation: 'resolveReviewThreads', threadIds })
+  resolveReviewThreads(
+    pullRequestNumber: number,
+    expectedHeadSha: string,
+    threadIds: readonly string[],
+  ): Effect.Effect<void> {
+    this.calls.push({
+      operation: 'resolveReviewThreads',
+      pullRequestNumber,
+      expectedHeadSha,
+      threadIds,
+    })
     return Effect.void
   }
 

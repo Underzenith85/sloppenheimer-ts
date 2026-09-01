@@ -12,7 +12,7 @@ import { Effect, Option, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
 import { recordPublication } from '../telemetry.js'
-import { notePublication } from './handoff-decision.js'
+import { notePublication } from './repair.js'
 import { requestHandoff, type SettledWork } from './handoff-request.js'
 import { postflightReason, type PostflightOutcome } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'

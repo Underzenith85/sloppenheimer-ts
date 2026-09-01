@@ -16,7 +16,7 @@ import {
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
 import { abandonDelivery } from './deliveries.js'
-import { releaseRepair, settleRepair } from '../handoff-decision.js'
+import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { persistHandoffs } from './store.js'
