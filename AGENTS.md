@@ -597,8 +597,10 @@ lifecycle. This section is the architecture record for it; do not create a separ
   the writer's `expiresAt` against the reader's wall clock — two hosts an hour apart
   would read an expiry that never came, or one that came at once. The `expiresAt` in the record is
   the owner's own deadline on the owner's clock, which is the only host that reads it. A run
-  starts renewing with the claim rather than with its own work, because an `after_create` hook is
-  the caller's command and is not bounded either, and both provisioning and the run itself are
+  says its lease once as soon as it holds the claim — the published record carries the stamp of the
+  file it was linked from, and until that write lands a second host reads it as having gone unsaid
+  for however long publishing took. It keeps renewing from the claim rather than from its own work,
+  because an `after_create` hook is the caller's command and is not bounded either, and both provisioning and the run itself are
   raced against the renewal: a run that has lost its lease — the record gone, released, another
   run's, past its own expiry, or one it has not managed to say again by the time the window it knew
   about ran out — stops, and takes back a renewal that crossed the expiry it was renewing rather

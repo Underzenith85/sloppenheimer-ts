@@ -25,7 +25,7 @@ import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.j
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import { realDirectoryExists, reportedAs } from './filesystem.js'
-import { hostOwner, renewLease, storageInstant } from './workspace-lease.js'
+import { hostOwner, renewLease, sayLeaseAgain, storageInstant } from './workspace-lease.js'
 import {
   discardStagedLease,
   publishClaimedLease,
@@ -282,6 +282,12 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
       // What the run knows its lease stands for, carried across both of the races below: the
       // renewal is stopped and started again between them, and the window it had bought stands.
       const standing = yield* Ref.make(Date.parse(claim.expiresAt))
+      // Said once here rather than an interval from now, because the published record still carries
+      // the stamp of the file it was linked from: until this write lands, a second host reads the
+      // lease as having gone unsaid for however long the claim took to publish.
+      yield* sayLeaseAgain(fileSystem, paths, run, owner, standing).pipe(
+        reportedAs('create_failed', 'failed to create workspace'),
+      )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
       // Both of the steps that follow run against the renewal rather than after it: provisioning is
       // no more bounded than the run is — an `after_create` hook is the caller's own command — and

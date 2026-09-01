@@ -22,7 +22,11 @@ import { issueIdentifier, type Workspace } from '@sloppenheimer/core/domain/doma
 import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import { removeDirectoryIfEmpty } from '@sloppenheimer/adapter-node/filesystem.js'
-import { hostOwner, renewLease } from '@sloppenheimer/adapter-node/workspace-lease.js'
+import {
+  hostOwner,
+  renewLease,
+  sayLeaseAgain,
+} from '@sloppenheimer/adapter-node/workspace-lease.js'
 import { makeWorkspaceManager } from '@sloppenheimer/adapter-node/workspace-manager.js'
 import {
   containedRunWorkspacePath,
@@ -858,11 +862,11 @@ describe('run workspace allocation and leases', (): void => {
         () => ({ _tag: 'Completed' }),
       )
 
-      // The record stands past the window the claim itself bought, so it was said again while the
-      // hook ran: a host that cannot observe this one's process is never told the run is gone
-      // while its provisioning is still working.
+      // The record stands well past the window the claim itself bought — past anything the say at
+      // claim time could have written — so it was said again while the hook ran: a host that cannot
+      // observe this one's process is never told the run is gone while provisioning is still going.
       expect(Date.parse(lease.expiresAt)).toBeGreaterThan(
-        Date.parse(lease.acquiredAt) + leaseValidityMs,
+        Date.parse(lease.acquiredAt) + leaseValidityMs + 200,
       )
       expect(lease.status).toBe('held')
     }),
@@ -962,6 +966,31 @@ describe('run workspace allocation and leases', (): void => {
         ? Cause.failureOption(lost.cause)
         : Option.none<WorkspaceError>()
       expect(Option.getOrThrow(failure).category).toBe('lease_conflict')
+    }).pipe(Effect.provide(hostFileSystem)),
+  )
+
+  it.live('says a lease again as soon as it is claimed, before anything is built on it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const fileSystem = yield* FileSystem.FileSystem
+      const runKey = 'run-1-a-host'
+      const paths = yield* containedRunWorkspacePath(root, issueIdentifier('GH-190'), runKey)
+      const run = { identifier: issueIdentifier('GH-190'), runId: 1 }
+      // A claim published half an hour after it was written — a host stopped between staging the
+      // record and linking it. The record still stands, but it reads as half spent, and a second
+      // host reads its stamp rather than this one's word for it.
+      const claimed = heldLease(run, runKey, hostOwner, new Date(Date.now() - leaseValidityMs / 2))
+      yield* host(() => mkdir(paths.issuePath, { recursive: true }))
+      yield* host(() => writeFile(paths.leasePath, encodeLease(claimed)))
+      const standing = yield* Ref.make(Date.parse(claimed.expiresAt))
+
+      yield* sayLeaseAgain(fileSystem, paths, run, hostOwner, standing)
+
+      const said = yield* host(() => leaseOf(paths.runPath))
+      expect(Date.parse(said.expiresAt)).toBeGreaterThan(Date.parse(claimed.expiresAt))
+      expect(said.acquiredAt).toBe(claimed.acquiredAt)
+      // And what the run believes moves with it, so the next renewal starts from the window it has.
+      expect(yield* Ref.get(standing)).toBe(Date.parse(said.expiresAt))
     }).pipe(Effect.provide(hostFileSystem)),
   )
 

@@ -241,14 +241,41 @@ const sayLeaseStands = (
   })
 
 /**
- * Says a lease still stands, for as long as the run holds it — and fails when it no longer does.
+ * Says a lease still stands, once, and records how long it now stands for.
  *
- * The failure is the point: a lease this run has lost is one another host may already be taking the
- * workspace back on, so the run that lost it stops rather than working on in a directory that is no
- * longer its own. What it carries between renewals is how long it knows the lease stands for, so
- * that renewals which never land are not mistaken for a lease that never expires — and the caller
- * holds that, not this loop, because one run's renewal is stopped and started again as the run
- * moves from provisioning to its own work, and what the earlier renewals bought is still bought.
+ * A run says it once itself, as soon as it has the claim: the record it published carries the stamp
+ * of the file it was linked from, which is as old as whatever happened between writing that file
+ * and linking it, and a run must not build anything on a record another host could already be
+ * reading as unrenewed. The loop below says it again on every interval after that.
+ *
+ * Failing is how a lost lease reaches the run: one another host may already be taking the workspace
+ * back on is not one to go on working under.
+ */
+export const sayLeaseAgain = (
+  fileSystem: FileSystem.FileSystem,
+  paths: RunWorkspacePaths,
+  run: WorkspaceRun,
+  owner: WorkspaceOwner,
+  standing: Ref.Ref<number>,
+): Effect.Effect<void, WorkspaceError> =>
+  // Writing the record and recording what it now stands for are one step. An interruption between
+  // them — the run ending as a renewal lands — would leave the window on disk longer than the
+  // window this run believes in, and the next renewal starting from the shorter one.
+  Effect.uninterruptible(
+    Ref.get(standing).pipe(
+      Effect.flatMap((until) => sayLeaseStands(fileSystem, paths, run, owner, until)),
+      Effect.flatMap((until) => Ref.set(standing, until)),
+    ),
+  )
+
+/**
+ * Says it again on every interval, for as long as the run holds the lease — and fails when it no
+ * longer does, which is what stops a run working on in a directory that is no longer its own.
+ *
+ * What the run carries between renewals is how long it knows the lease stands for, so that renewals
+ * which never land are not mistaken for a lease that never expires. The caller holds that, not this
+ * loop: a run's renewal is stopped and started again as it moves from provisioning to its own work,
+ * and what the earlier renewals bought is still bought.
  */
 export const renewLease = (
   fileSystem: FileSystem.FileSystem,
@@ -258,10 +285,4 @@ export const renewLease = (
   intervalMs: number,
   standing: Ref.Ref<number>,
 ): Effect.Effect<never, WorkspaceError> =>
-  Effect.forever(
-    Ref.get(standing).pipe(
-      Effect.flatMap((until) => sayLeaseStands(fileSystem, paths, run, owner, until)),
-      Effect.flatMap((until) => Ref.set(standing, until)),
-      Effect.delay(intervalMs),
-    ),
-  )
+  Effect.forever(Effect.delay(sayLeaseAgain(fileSystem, paths, run, owner, standing), intervalMs))
