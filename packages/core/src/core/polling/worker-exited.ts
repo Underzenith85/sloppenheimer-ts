@@ -77,7 +77,7 @@ const adoptOpenedHandoff = (
         reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
         observedAt: handedOffAt,
       })
-      return [existing !== undefined && Option.isSome(existing.repair), next] as const
+      return [settled.repairRun, next] as const
     })
     yield* context.persistHandoffs
     yield* logInfo('worker handed off pull request', {
@@ -93,7 +93,7 @@ const adoptOpenedHandoff = (
         Transitions.releaseClaim(current, event.issueId),
       )
     } else {
-      yield* context.scheduleRetry(settled.issue, 1, null, true)
+      yield* context.scheduleRetry(settled.issue, 1, null, true, false)
     }
   })
 
@@ -142,6 +142,7 @@ const requestHandoff = (
         (event.attempt ?? 0) + 1,
         `handoff failed: ${handoff.error.message}`,
         false,
+        settled.repairRun,
       )
       return
     }
@@ -159,7 +160,7 @@ const requestHandoff = (
           }),
         ),
       )
-      yield* context.scheduleRetry(settled.issue, 1, null, true)
+      yield* context.scheduleRetry(settled.issue, 1, null, true, settled.repairRun)
       return
     }
     yield* adoptOpenedHandoff(context, event, settled, result)
@@ -201,12 +202,18 @@ export const onWorkerExited = (
       )
     }
     if (event.outcome !== 'normal') {
-      yield* context.scheduleRetry(settled.issue, (event.attempt ?? 0) + 1, event.error, false)
+      yield* context.scheduleRetry(
+        settled.issue,
+        (event.attempt ?? 0) + 1,
+        event.error,
+        false,
+        settled.repairRun,
+      )
       return
     }
     const codeReview = settled.execution.codeReview
     if (Option.isNone(codeReview)) {
-      yield* context.scheduleRetry(settled.issue, 1, null, true)
+      yield* context.scheduleRetry(settled.issue, 1, null, true, settled.repairRun)
       return
     }
     yield* requestHandoff(context, event, settled, codeReview.value)

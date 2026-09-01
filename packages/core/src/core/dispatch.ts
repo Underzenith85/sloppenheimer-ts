@@ -80,6 +80,8 @@ type SessionLaunch = Readonly<{
   sessionPorts: MutableRef.MutableRef<SessionPorts>
   hostTools: HostToolSession
   target: SourceControlTarget
+  /** Whether this worker was dispatched to repair an existing pull request. */
+  repairRun: boolean
 }>
 
 /** Re-reads the issue through whichever tracker instance the run holds at the moment it asks. */
@@ -226,6 +228,7 @@ const startingRun = (
   execution: launch.execution,
   sessionPorts: launch.sessionPorts,
   attempt: launch.attempt,
+  repairRun: launch.repairRun,
   startedAt,
   lastEventAt: null,
   lastEvent: null,
@@ -263,6 +266,11 @@ export const dispatch = (
     }
 
     const base = effectiveOverride ?? before.lastKnownGood
+    const target: SourceControlTarget = sourceTarget ?? {
+      _tag: 'Normal',
+      branchName: issueBranchName(issue),
+    }
+    const repairRun = target._tag === 'Repair'
     // Opened before preflight, not after the worker starts: a dispatch that fails validation or
     // prompt rendering schedules a retry, and that retry's published link has to resolve to the
     // reason it failed rather than to "no active session".
@@ -275,7 +283,13 @@ export const dispatch = (
         outcome: 'failed',
         error: preflight.error.message,
       })
-      yield* context.scheduleRetry(issue, (attempt ?? 0) + 1, preflight.error.message, false)
+      yield* context.scheduleRetry(
+        issue,
+        (attempt ?? 0) + 1,
+        preflight.error.message,
+        false,
+        repairRun,
+      )
       return false
     }
     const effective = preflight.value
@@ -284,14 +298,16 @@ export const dispatch = (
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(asSettled)
     if (renderedPrompt._tag === 'Failed') {
-      yield* context.scheduleRetry(issue, (attempt ?? 0) + 1, renderedPrompt.error.message, false)
+      yield* context.scheduleRetry(
+        issue,
+        (attempt ?? 0) + 1,
+        renderedPrompt.error.message,
+        false,
+        repairRun,
+      )
       return false
     }
     const execution = captureExecutionSnapshot(effective, renderedPrompt.value)
-    const target: SourceControlTarget = sourceTarget ?? {
-      _tag: 'Normal',
-      branchName: issueBranchName(issue),
-    }
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
     const sessionPorts = MutableRef.make<SessionPorts>({
       tracker: execution.tracker,
@@ -307,6 +323,7 @@ export const dispatch = (
       sessionPorts,
       hostTools: makeHostToolSession(execution, issue, () => MutableRef.get(sessionPorts)),
       target,
+      repairRun,
     }
     const fiber = yield* Effect.forkScoped(makeWorker(launch))
     const startedAt = yield* currentInstant

@@ -145,6 +145,7 @@ const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
     sourceControl: null,
   }),
   attempt: null,
+  repairRun: false,
   startedAt: new Date('2026-01-01T00:00:00.000Z'),
   lastEventAt: null,
   lastEvent: null,
@@ -159,9 +160,10 @@ const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
   lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
 })
 
-const retryEntry = (issue: Issue, attempt: number): RetryEntry => ({
+const retryEntry = (issue: Issue, attempt: number, repairRun = false): RetryEntry => ({
   issue,
   attempt,
+  repairRun,
   dueAt: 1_000,
   error: null,
   fiber: settledFiber,
@@ -526,6 +528,14 @@ describe('retry scheduling', (): void => {
     expect(unchanged.retries.has(issue.id)).toBe(true)
     expect(Option.getOrNull(due)?.attempt).toBe(2)
     expect(drained.retries.has(issue.id)).toBe(false)
+  })
+
+  it('preserves repair identity independently of the worker attempt', (): void => {
+    const [, ordinary] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 3))
+    const [, repair] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1, true))
+
+    expect(ordinary.retries.get(issue.id)).toMatchObject({ attempt: 3, repairRun: false })
+    expect(repair.retries.get(issue.id)).toMatchObject({ attempt: 1, repairRun: true })
   })
 })
 

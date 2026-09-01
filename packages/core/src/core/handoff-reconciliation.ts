@@ -250,6 +250,7 @@ const performRepair = (
         executionAttempt.value,
         'no available orchestrator slots',
         false,
+        true,
       )
       return
     }

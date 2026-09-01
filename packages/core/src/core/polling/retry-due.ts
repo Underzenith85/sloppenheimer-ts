@@ -91,6 +91,7 @@ const resumeRepair = (
         event.attempt + 1,
         `repair baseline refresh failed: ${inspected.error.message}`,
         false,
+        true,
         inspected.error,
       )
       if (!scheduled) {
@@ -162,6 +163,7 @@ const resumeContinuation = (
         event.attempt + 1,
         'no available orchestrator slots',
         false,
+        false,
       )
       return
     }
@@ -189,9 +191,9 @@ export const onRetryDue = (
     const current = yield* Ref.get(context.state)
     const effective = current.lastKnownGood
     const handoff = Option.fromNullable(current.handoffs.get(event.issueId))
-    const repairHandoff = Option.filter(handoff, (entry) =>
-      Option.exists(entry.repair, (repair) => repair.inFlight),
-    )
+    const repairHandoff = due.value.repairRun
+      ? Option.filter(handoff, (entry) => Option.exists(entry.repair, (repair) => repair.inFlight))
+      : Option.none<HandoffEntry>()
     const refreshTracker = Option.match(repairHandoff, {
       onNone: () => effective.tracker,
       onSome: (entry) => entry.execution.tracker,
@@ -203,6 +205,7 @@ export const onRetryDue = (
         event.attempt + 1,
         `retry refresh failed: ${refreshResult.error.message}`,
         false,
+        due.value.repairRun,
         refreshResult.error,
       )
       if (!scheduled && Option.isSome(repairHandoff)) {

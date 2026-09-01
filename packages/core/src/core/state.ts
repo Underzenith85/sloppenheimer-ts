@@ -140,6 +140,8 @@ export type RunningEntry = Readonly<{
    */
   sessionPorts: MutableRef.MutableRef<SessionPorts>
   attempt: number | null
+  /** Whether this worker was dispatched to repair an existing pull request. */
+  repairRun: boolean
   startedAt: Date
   lastEventAt: Date | null
   lastEvent: string | null
@@ -172,6 +174,8 @@ export type CompletedEntry = Readonly<{
 export type RetryEntry = Readonly<{
   issue: Issue
   attempt: number
+  /** Preserved independently of `attempt`, which counts every kind of worker retry. */
+  repairRun: boolean
   dueAt: number
   error: string | null
   fiber: Fiber.Fiber<void>
