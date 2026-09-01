@@ -70,6 +70,20 @@ const finishedWork = (
 }
 
 /**
+ * Files the issue as finished and records it on disk in the same step. Persisted here rather than
+ * with the pass's handoffs: a completion is a single event, and the store it lands in is the one
+ * thing that will still know about it after a restart.
+ */
+const completeWork = (
+  context: OrchestratorContext,
+  id: IssueId,
+  finished: CompletedEntry,
+): Effect.Effect<void> =>
+  Ref.update(context.state, (current) => Transitions.completeHandoff(current, id, finished)).pipe(
+    Effect.zipRight(context.persistCompletions),
+  )
+
+/**
  * Records one handoff in the state cell without persisting it.
  *
  * A reconciliation pass rewrites many handoffs, and `reconcileHandoffs` flushes all of them with a
@@ -184,10 +198,7 @@ const performMerge = (
     }
     yield* context.noteHandoffOutcome(id, settled, 'merged')
     // This host performed the merge just now, so the instant is its own.
-    const finished = finishedWork(id, settled, null, yield* currentInstant)
-    yield* Ref.update(context.state, (current) =>
-      Transitions.completeHandoff(current, id, finished),
-    )
+    yield* completeWork(context, id, finishedWork(id, settled, null, yield* currentInstant))
     yield* logInfo('pull request merged', {
       ...logContext(handoff.issue),
       action: 'pull_request_merge',
@@ -329,9 +340,10 @@ const perform = (
       case 'Complete': {
         yield* stageHandoff(context, id, handoff)
         yield* context.noteHandoffOutcome(id, handoff, 'merged')
-        const finished = finishedWork(id, handoff, action.mergedAt, yield* currentInstant)
-        yield* Ref.update(context.state, (current) =>
-          Transitions.completeHandoff(current, id, finished),
+        yield* completeWork(
+          context,
+          id,
+          finishedWork(id, handoff, action.mergedAt, yield* currentInstant),
         )
         return
       }

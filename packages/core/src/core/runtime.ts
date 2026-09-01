@@ -19,7 +19,7 @@ import { orchestratorControl } from './runtime/control.js'
 import { hydrateRestoredHandoffs } from './runtime/handoff-recovery.js'
 import { requestTick } from './runtime/scheduling.js'
 import { cleanupTerminalWorkspaces } from './runtime/startup.js'
-import { handoffStoreFor, restoreHandoffs } from './runtime/store.js'
+import { openStores } from './runtime/store.js'
 import type {
   OrchestratorControl,
   OrchestratorEvent,
@@ -35,7 +35,7 @@ import type {
  *
  * - `runtime/types.ts` — the wire and context types, and the cells the operations are handed.
  * - `runtime/startup.ts` — the terminal-workspace sweep that runs before any state exists.
- * - `runtime/store.ts` — binding, reading and writing the persisted handoff store.
+ * - `runtime/store.ts` — binding, reading and writing the persisted handoff and completion stores.
  * - `runtime/handoff-recovery.ts` — restoring persisted handoffs and adopting unrecorded ones.
  * - `runtime/runs.ts` — opening a detail record, applying a protocol event, cancelling a run.
  * - `runtime/scheduling.ts` — ticks, refresh requests, the poll timer and retry scheduling.
@@ -48,7 +48,6 @@ export {
   publishedCompletedWork,
   type AgentDetailLookup,
   type CompletedSnapshot,
-  type HandoffStore,
   type OrchestratorContext,
   type OrchestratorControl,
   type OrchestratorEvent,
@@ -58,9 +57,12 @@ export {
   type RetrySnapshot,
   type RunningSnapshot,
   type RuntimeCells,
+  type RuntimeStore,
+  type RuntimeStores,
 } from './runtime/types.js'
 
 export {
+  completionWindowMs,
   retainedCompletedDetails,
   type CompletedEntry,
   type EffectiveWorkflow,
@@ -107,16 +109,16 @@ export const startOrchestratorRuntime = (
     const bootstrapWorkflow = yield* bootstrap.value
     yield* cleanupTerminalWorkspaces(bootstrapWorkflow)
 
-    const handoffStore = yield* handoffStoreFor(bootstrapWorkflow)
+    const opened = yield* openStores(bootstrapWorkflow)
     const cells: RuntimeCells = {
       state: yield* Ref.make(
         Transitions.holdRetirements(
-          initialState(bootstrapWorkflow, yield* restoreHandoffs(handoffStore)),
+          initialState(bootstrapWorkflow, opened.restored),
           bootstrap.retirements,
         ),
       ),
       mailbox: yield* Queue.unbounded<OrchestratorEvent>(),
-      handoffStore,
+      stores: opened.stores,
     }
 
     /**
