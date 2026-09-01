@@ -31,6 +31,8 @@ const reviewComment = Schema.Struct({
 const reviewThread = Schema.Struct({
   id: Schema.String,
   isResolved: Schema.Boolean,
+  /** GitHub's own judgement that the thread's lines are gone from the current head. */
+  isOutdated: Schema.Boolean,
   comments: Schema.Struct({ nodes: Schema.Array(Schema.Unknown) }),
 })
 const reviewThreads = Schema.Array(reviewThread)
@@ -113,6 +115,7 @@ export const decodeThreads = (
         return {
           id: thread.id,
           resolved: thread.isResolved,
+          outdated: thread.isOutdated,
           body: comment !== null && typeof comment.body === 'string' ? comment.body : '',
           url: comment !== null && typeof comment.url === 'string' ? comment.url : null,
           commentHeadSha:

@@ -100,7 +100,7 @@ const fetchReviewGraph = (
         method: 'POST',
         body: JSON.stringify({
           query:
-            'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{body url commit{oid}}}}}}}}',
+            'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{id isResolved isOutdated comments(first:1){nodes{body url commit{oid}}}}}}}}',
           variables: { owner: provider.owner, name: provider.repository, number },
         }),
       }),

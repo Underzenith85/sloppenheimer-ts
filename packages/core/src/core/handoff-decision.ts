@@ -1,7 +1,13 @@
 import { Option } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
-import { classifyPullRequest, type PullRequestObservation } from '../domain/handoff.js'
+import {
+  classifyPullRequest,
+  outdatedThreadNote,
+  supersededReviewThreads,
+  type HandoffDisposition,
+  type PullRequestObservation,
+} from '../domain/handoff.js'
 import type { HandoffEntry, RepairEntry } from './state.js'
 
 /** An observation of a pull request that is still open, and so has a head to reason about. */
@@ -227,6 +233,23 @@ export const gateReview = (
 }
 
 /**
+ * What the operator is told about this observation: the disposition's own reason, plus a line for
+ * the outdated feedback that was deliberately kept out of it. Diagnostics retain what a repair
+ * request must not restate.
+ */
+const recordedReason = (
+  disposition: HandoffDisposition,
+  observation: PullRequestObservation,
+): string | null => {
+  const reason = 'reason' in disposition ? disposition.reason : null
+  const history = outdatedThreadNote(observation)
+  if (history === null) {
+    return reason
+  }
+  return reason === null ? history : `${reason}\n\n${history}`
+}
+
+/**
  * The whole per-observation state machine, as one function. The order is the order the orchestrator
  * applied inline before this was extracted, and each step can end the pass.
  */
@@ -262,15 +285,16 @@ export const observeHandoff = (
       return gated.value
     }
   }
-  const unresolvedThreadIds = observation.reviewThreads
-    .filter((thread) => !thread.resolved && thread.commentHeadSha !== observation.headSha)
-    .map((thread) => thread.id)
-  if (unresolvedThreadIds.length > 0 && repairedHeadIsVerified(next, observation)) {
+  // Only a published head that has come back clean retires a thread. Withholding an outdated
+  // thread from a repair request says nothing about the thread on GitHub, which is why the two
+  // selections are separate: this one resolves, `classifyPullRequest` only asks.
+  const supersededThreadIds = supersededReviewThreads(observation).map((thread) => thread.id)
+  if (supersededThreadIds.length > 0 && repairedHeadIsVerified(next, observation)) {
     return decided(
       { ...next, state: 'awaiting_checks' },
       {
         _tag: 'ResolveThreads',
-        threadIds: unresolvedThreadIds,
+        threadIds: supersededThreadIds,
       },
     )
   }
@@ -279,7 +303,9 @@ export const observeHandoff = (
     ...next,
     state: disposition.state,
     headSha: observation.headSha,
-    reason: 'reason' in disposition ? disposition.reason : null,
+    // The operator's record keeps the withheld history; the repair request below carries the
+    // disposition's reason alone, so an agent is never handed feedback it cannot act on.
+    reason: recordedReason(disposition, observation),
   }
   switch (disposition.state) {
     case 'merged': {
@@ -302,7 +328,7 @@ export const observeHandoff = (
         return decided({
           ...settled,
           state: 'intervention_required',
-          reason: `Repair limit reached. ${disposition.reason}`,
+          reason: `Repair limit reached. ${settled.reason ?? disposition.reason}`,
         })
       }
       return decided(settled, {

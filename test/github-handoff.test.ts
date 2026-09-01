@@ -392,6 +392,7 @@ describe('GitHub pull request monitor', (): void => {
                     {
                       id: 'thread-1',
                       isResolved: false,
+                      isOutdated: false,
                       comments: {
                         nodes: [
                           {
@@ -405,6 +406,7 @@ describe('GitHub pull request monitor', (): void => {
                     {
                       id: 'thread-2',
                       isResolved: false,
+                      isOutdated: true,
                       comments: {
                         nodes: [
                           {
@@ -431,11 +433,16 @@ describe('GitHub pull request monitor', (): void => {
       expect(result.checks[0]?.name).toBe('quality')
       expect(result.reviewThreads[0]).toMatchObject({
         resolved: false,
+        outdated: false,
         body: 'Fix this',
         commentHeadSha: 'reviewed-head',
       })
+      // Resolution and outdatedness are read as separate answers: GitHub retired this thread
+      // against the current head without anyone resolving it.
       expect(result.reviewThreads[1]).toMatchObject({
         id: 'thread-2',
+        resolved: false,
+        outdated: true,
         commentHeadSha: null,
       })
       expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
