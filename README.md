@@ -134,9 +134,11 @@ A review thread's resolution and its outdatedness are read as separate answers, 
 feedback is not the same thing as feedback that still applies. Only unresolved threads GitHub still
 raises against the inspected head reach a repair agent or count towards `repair_needed`; feedback
 the head under inspection has already retired stays on the pull request, and the handoff's reason
-records how much of it was withheld and where to read it. Withholding a thread never resolves it:
-Sloppenheimer resolves the threads an earlier head left behind only once a repaired head has been
-published and comes back clean, and never the ones a rereview raised against that head.
+records how much of it was withheld and where to read it. Withholding a thread never resolves it: a
+thread is resolved only once GitHub has retired it against a head that then came back clean and
+reviewed, whether Sloppenheimer, a human, or a restored handoff produced that head. Feedback GitHub
+still raises against the head under inspection is outstanding work whoever wrote it, and is
+repaired rather than resolved on the reviewer's behalf.
 The operator console shows each active handoff, its current blocker, and why its issue is not
 dispatchable when tracker eligibility prevents continuation. No handoff or pause transition removes
 the Sloppenheimer label.

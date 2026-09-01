@@ -4,7 +4,7 @@ import type { Issue } from '../domain/domain.js'
 import {
   classifyPullRequest,
   outdatedThreadNote,
-  supersededReviewThreads,
+  outdatedReviewThreads,
   type HandoffDisposition,
   type PullRequestObservation,
 } from '../domain/handoff.js'
@@ -52,14 +52,15 @@ const decided = (
 })
 
 /**
- * Whether a repaired head has come back clean enough that the review threads raised against the
- * head before it are stale rather than outstanding.
+ * Whether the head in hand has come back clean enough to retire the feedback the provider has
+ * already marked outdated against it. The review gate has passed by the time this is asked, so
+ * this states the rest of the condition: no conflict, no stale base, every check green.
+ *
+ * It does not ask whether Sloppenheimer performed the repair. A pull request restored from the
+ * store, or one a human pushed the fix for, carries retired threads that nobody else will clear,
+ * and a protection rule requiring resolved conversations would otherwise hold it forever.
  */
-const repairedHeadIsVerified = (
-  handoff: HandoffEntry,
-  observation: PullRequestObservation,
-): boolean =>
-  handoff.repairHeadShas.length > 0 &&
+const headIsVerified = (observation: PullRequestObservation): boolean =>
   observation.mergeable === true &&
   observation.mergeState !== 'dirty' &&
   observation.mergeState !== 'behind' &&
@@ -285,16 +286,16 @@ export const observeHandoff = (
       return gated.value
     }
   }
-  // Only a published head that has come back clean retires a thread. Withholding an outdated
-  // thread from a repair request says nothing about the thread on GitHub, which is why the two
-  // selections are separate: this one resolves, `classifyPullRequest` only asks.
-  const supersededThreadIds = supersededReviewThreads(observation).map((thread) => thread.id)
-  if (supersededThreadIds.length > 0 && repairedHeadIsVerified(next, observation)) {
+  // Only feedback the provider has retired is resolved, and only once the head that retired it
+  // has come back clean. A thread still raised against this head is outstanding work whoever
+  // wrote it, and withholding one from a repair request says nothing about it on GitHub.
+  const retiredThreadIds = outdatedReviewThreads(observation).map((thread) => thread.id)
+  if (retiredThreadIds.length > 0 && headIsVerified(observation)) {
     return decided(
       { ...next, state: 'awaiting_checks' },
       {
         _tag: 'ResolveThreads',
-        threadIds: supersededThreadIds,
+        threadIds: retiredThreadIds,
       },
     )
   }

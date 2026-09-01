@@ -22,7 +22,11 @@ export type PullRequestReviewThread = Readonly<{
   outdated: boolean
   body: string
   url: string | null
-  /** The commit the thread's first comment was written against, when the provider reports one. */
+  /**
+   * The commit the thread's first comment was written against, when the provider reports one. It
+   * is provenance -- which review raised this -- and not a judgement about whether the finding
+   * still applies, which is what `outdated` answers.
+   */
   commentHeadSha?: string | null
 }>
 
@@ -45,27 +49,16 @@ export const currentReviewThreads = (
  * Unresolved feedback the provider has already retired against this head. It is kept for
  * auditability -- it is why the change looks the way it does -- but it is nobody's outstanding
  * work, so it neither blocks a merge nor enters a repair request.
+ *
+ * It is also the only feedback that may be resolved on the provider's behalf: the provider marking
+ * a thread outdated is its own statement that a later head superseded the lines it was raised on.
+ * Selecting a thread here does not resolve it; the caller decides whether the head in hand has
+ * earned that, and withholding a thread from a repair request never resolves it.
  */
 export const outdatedReviewThreads = (
   observation: PullRequestObservation,
 ): readonly PullRequestReviewThread[] =>
   unresolvedThreads(observation).filter((thread) => thread.outdated)
-
-/**
- * The threads a verified repair left behind: unresolved, and either retired by the provider or
- * raised against a head other than the one inspected. A rereview of the repaired head raises its
- * findings against that head, so those are excluded and remain the actionable set.
- *
- * Selecting a thread here is what makes it eligible for resolution; the caller still decides
- * whether the repaired head has earned that. Withholding a thread from a repair request never
- * resolves it.
- */
-export const supersededReviewThreads = (
-  observation: PullRequestObservation,
-): readonly PullRequestReviewThread[] =>
-  unresolvedThreads(observation).filter(
-    (thread) => thread.outdated || (thread.commentHeadSha ?? null) !== observation.headSha,
-  )
 
 /**
  * One line of provenance for the feedback that was withheld, for the operator rather than for the
