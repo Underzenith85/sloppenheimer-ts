@@ -154,6 +154,8 @@ export type HandoffSnapshot = Readonly<{
    * the wrong verdict.
    */
   repairPublication?: 'pending' | 'published' | 'no_changes' | 'delivery_failed'
+  /** The commit that publication produced, so a restart can still tell a stale head from a no-op. */
+  repairPublishedHeadSha?: string | null
   reviewRequestedHeadSha?: string | null
   reviewCompletedHeadSha?: string | null
   observedAt: string

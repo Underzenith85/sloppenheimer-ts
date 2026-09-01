@@ -169,7 +169,8 @@ export const poll = (
     performed.push('handoff_recovery')
     // Before anything can put an agent on an issue: a workspace holding work a previous process
     // never published is published from here, rather than being handed to a repair that would
-    // spend a turn and one of the repair budget rediscovering it.
+    // spend a turn and one of the repair budget rediscovering it. A workspace it could not read is
+    // recorded, and dispatch refuses that issue until a later pass manages to look.
     if (yield* recoverRetainedDeliveries(context)) {
       performed.push('delivery_recovery')
     }

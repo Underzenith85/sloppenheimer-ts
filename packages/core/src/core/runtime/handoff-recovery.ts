@@ -125,6 +125,7 @@ const restoredHandoffEntry = (
             // started, so their absence is a started worker.
             workerStarted: restored.repairWorkerStarted ?? true,
             publication: restored.repairPublication ?? 'pending',
+            publishedHeadSha: restored.repairPublishedHeadSha ?? null,
           }),
     reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
     reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,

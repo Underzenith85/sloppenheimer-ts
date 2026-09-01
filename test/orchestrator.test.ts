@@ -68,6 +68,7 @@ import {
   type OrchestratorControl,
   type OrchestratorServices,
 } from '@sloppenheimer/core'
+import { deliveryAttemptLimit } from '@sloppenheimer/core/core/retry.js'
 import { makeRedactor } from '@sloppenheimer/core/support/redaction.js'
 import { normalizePayload } from '@sloppenheimer/adapter-codex/payload.js'
 import type { AgentDetailSnapshot } from '@sloppenheimer/core/telemetry.js'
@@ -1390,6 +1391,268 @@ describe('agent turn completion separated from work publication', (): void => {
           // reading this scan exists to avoid, so the next pass looks again.
           yield* control.refresh
           expect(inspections).toBeGreaterThan(1)
+        }),
+      )
+    }),
+  )
+
+  it.scoped('refuses to dispatch into a workspace the recovery scan could not read', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-unread-gate-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      // Routable, so nothing but the unread workspace stands between it and a dispatch.
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let inspections = 0
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () => ({
+          ...failingSourceControl(
+            () => true,
+            () => Effect.die('the inspection failed, so nothing should be published'),
+          ),
+          inspect: () => {
+            inspections += 1
+            return Effect.fail(
+              new SourceControlError({
+                category: 'invalid_repository',
+                message: 'the worktree could not be read',
+                retryable: true,
+                worktreePreserved: true,
+              }),
+            )
+          },
+        }),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (inspections === 0) {
+            yield* Effect.yieldNow()
+          }
+          yield* control.refresh
+
+          // An agent put into this workspace would carry whatever a previous process left in it as
+          // its own work, so the issue waits until a pass manages to look.
+          expect(launched).toBe(0)
+          // And the scan keeps looking rather than concluding there was nothing there.
+          expect(inspections).toBeGreaterThan(1)
+        }),
+      )
+    }),
+  )
+
+  it.scoped('leaves a paused workspace unexamined, and publishes it once the pause lifts', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-paused-scan-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      const publications: string[] = []
+      let inspections = 0
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () => ({
+          ...failingSourceControl(
+            () => true,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.succeed({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'recovered-head',
+                commitCreated: false,
+              })
+            },
+          ),
+          // Unreadable on the first pass, which is what leaves this workspace unexamined and gives
+          // an operator a pause to land before the scan looks again.
+          inspect: () => {
+            inspections += 1
+            return inspections === 1
+              ? Effect.fail(
+                  new SourceControlError({
+                    category: 'invalid_repository',
+                    message: 'the worktree could not be read',
+                    retryable: true,
+                    worktreePreserved: true,
+                  }),
+                )
+              : Effect.succeed(changedWorktree)
+          },
+        }),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (inspections === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          yield* control.setIssuePaused(167, true)
+          yield* control.refresh
+          yield* control.refresh
+
+          // Publishing from a paused issue's workspace would ignore the operator, and calling it
+          // examined would let the resume dispatch an agent into a workspace nobody looked at.
+          expect(publications).toEqual([])
+          expect(launched).toBe(0)
+
+          yield* control.setIssuePaused(167, false)
+          while (publications.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.refresh
+          }
+          expect(publications).toEqual(['sloppenheimer/issue-167'])
+        }),
+      )
+    }),
+  )
+
+  it.scoped('publishes a retained delivery through the credential a rotation installed', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-rotation-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const environment: Record<string, string> = { SLOPPENHEIMER_TEST_TOKEN: 'secret' }
+      const harness = makeHarness(isolated, () => [issue], undefined, environment)
+      let launched = 0
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        environment,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-167',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/167',
+              pullRequestNumber: 167,
+              created: true,
+            }),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return publications.length === 1
+                ? Effect.fail(deliveryFailure({ category: 'authentication_failed' }))
+                : Effect.succeed({
+                    _tag: 'Published',
+                    branchName: prepared.target.branchName,
+                    headSha: 'delivered-head',
+                    commitCreated: true,
+                  })
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // The retained work outlives the credential it was produced under, and a rotation is
+          // exactly what makes the next attempt worth having.
+          environment['SLOPPENHEIMER_TEST_TOKEN'] = 'rotated'
+          yield* control.refresh
+          yield* TestClock.adjust('30 seconds')
+          while (publications.length < 2) {
+            yield* Effect.yieldNow()
+          }
+        }),
+      )
+
+      // The delivery re-read its issue through the tracker the rotation installed, not the
+      // instance the orchestrator had already retired.
+      expect(harness.idFetchTokens().at(-1)).toBe('rotated')
+      expect(launched).toBe(1)
+    }),
+  )
+
+  it.scoped('hands the work back to the agent once the delivery attempts are spent', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-spent-')
+      const isolated: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          // Small enough that the whole budget fits inside one TestClock advance per attempt.
+          agent: { ...workflow.config.agent, maxRetryBackoffMs: 10_000 },
+        },
+      }
+      const rooted: Workflow = { ...isolated, config: { ...isolated.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(rooted, () => [issue])
+      let launched = 0
+      const publications: string[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications.push(prepared.target.branchName)
+              return Effect.fail(deliveryFailure())
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            // One step per delivery backoff, so the run that follows the spent budget cannot start
+            // inside the same advance and add publications of its own.
+            yield* TestClock.adjust('11 seconds')
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+
+          // Five publications in total, the turn's own included, and then the work goes back to
+          // the coding agent rather than being retried forever or dropped.
+          expect(publications).toHaveLength(deliveryAttemptLimit)
+          expect(snapshot.delivering).toEqual([])
+          expect(snapshot.retrying[0]?.error).toContain('delivery failed')
         }),
       )
     }),

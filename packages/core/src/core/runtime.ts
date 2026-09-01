@@ -45,6 +45,8 @@ import type {
  * - `runtime/control.ts` — the handle the composition root holds.
  */
 
+export { type DeliveryEntry, type PostflightOutcome } from './postflight.js'
+
 export {
   publishedCompletedWork,
   type AgentDetailLookup,
@@ -68,7 +70,6 @@ export {
   completionWindowMs,
   retainedCompletedDetails,
   type CompletedEntry,
-  type DeliveryEntry,
   type EffectiveWorkflow,
   type ExecutionSnapshot,
   type HandoffEntry,

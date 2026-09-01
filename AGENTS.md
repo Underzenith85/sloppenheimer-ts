@@ -564,7 +564,10 @@ repair agent that had achieved nothing.
   the issue's claim with no worker behind it, and what comes due is one more `publish` of the same
   preparation. It is bounded by `deliveryAttemptLimit` in `core/retry.ts`; when the failure did not
   preserve the worktree, or those attempts are spent, the work goes back to the coding agent as an
-  ordinary retry.
+  ordinary retry. `deliveryAttemptLimit` counts publications, the turn's own included. A retained
+  delivery keeps calling the tracker and the code-review port after the run that produced it has
+  ended, so a workflow reload or a credential rotation adopts it exactly as it adopts a running run
+  and a handoff.
 - "Repair agent completed without changing the pull request head" is reachable only when the
   inspected worktree was clean. The repair identity carries the postflight verdict for exactly this
   reason: an unchanged head alone cannot tell a no-op turn from a push that failed.
@@ -574,8 +577,10 @@ repair agent that had achieved nothing.
   published. `core/delivery-recovery.ts` publishes it once, before anything can put an agent on the
   issue, and it is never counted as a repair attempt. It is not filtered by dispatch eligibility: a
   routing label removed between the failed publication and the restart says nothing about the diff
-  on disk. A workspace it could not read leaves the scan unfinished rather than concluding there
-  was nothing there.
+  on disk. A workspace it could not read — or was not allowed to act on, because the issue is
+  paused — is recorded in `unexaminedWorkspaces`, and `dispatchAdmission` refuses that issue until a
+  later pass manages to look: an agent dispatched into an unread workspace would carry whatever a
+  previous process left there as its own work.
 
 ### Cancellation and shutdown policy for unpublished work
 

@@ -61,6 +61,10 @@ export const handoffSnapshots = (state: RuntimeState): readonly HandoffSnapshot[
       onNone: () => 'pending' as const,
       onSome: (repair) => repair.publication,
     }),
+    repairPublishedHeadSha: Option.match(handoff.repair, {
+      onNone: () => null,
+      onSome: (repair) => repair.publishedHeadSha,
+    }),
     reviewRequestedHeadSha: handoff.reviewRequestedHeadSha,
     reviewCompletedHeadSha: handoff.reviewCompletedHeadSha,
     observedAt: handoff.observedAt.toISOString(),
@@ -94,10 +98,21 @@ export const finishStartupRecovery = (state: RuntimeState): RuntimeState => ({
   startupRecoveryFinished: true,
 })
 
-/** This process has finished looking for work a previous one left unpublished. */
-export const finishDeliveryRecovery = (state: RuntimeState): RuntimeState => ({
+/**
+ * This process has run its scan for work a previous one left unpublished, and these are the
+ * workspaces it could not read or was not allowed to act on.
+ *
+ * The flag and the set answer different questions: the flag says the scan has happened at all, and
+ * the set says which issues are still owed one. Dispatch consults the set, so a workspace nobody
+ * has looked at never receives an agent, and a later pass clears it by looking again.
+ */
+export const finishDeliveryRecovery = (
+  state: RuntimeState,
+  unexamined: ReadonlySet<IssueId>,
+): RuntimeState => ({
   ...state,
   deliveryRecoveryFinished: true,
+  unexaminedWorkspaces: unexamined,
 })
 
 export const setHandoffStoreError = (

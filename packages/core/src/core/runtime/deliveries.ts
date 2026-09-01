@@ -6,7 +6,7 @@ import { logInfo, logWarning } from '../../support/logging.js'
 import { recordPublication } from '../../telemetry.js'
 import { logContext } from '../policy.js'
 import { agentRetryDelay, deliveryAttemptLimit } from '../retry.js'
-import type { DeliveryEntry } from '../state.js'
+import type { DeliveryEntry } from '../postflight.js'
 import * as Transitions from '../transitions.js'
 import type { DeliveryRequest, RuntimeCells } from './types.js'
 
@@ -36,7 +36,9 @@ export const scheduleDelivery = (
       ? 'the failure did not preserve the worktree'
       : !request.failure.retryable
         ? 'the failure is not retryable'
-        : request.attempt > deliveryAttemptLimit
+        : // `attempt` counts the publications that have already failed, the turn's own included,
+          // so the budget is spent when it reaches the limit rather than when it passes it.
+          request.attempt >= deliveryAttemptLimit
           ? `the delivery attempt limit of ${String(deliveryAttemptLimit)} is spent`
           : null
     if (refusal !== null) {

@@ -8,7 +8,8 @@ import { settlePostflight } from '../delivery.js'
 import { identifierIssueNumber, issueIsActive, logContext, stateIsIn } from '../policy.js'
 import { runPostflight } from '../postflight.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
-import type { DeliveryEntry, RuntimeState } from '../state.js'
+import type { DeliveryEntry } from '../postflight.js'
+import type { RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
 
 type DeliveryDue = Extract<OrchestratorEvent, { _tag: 'DeliveryDue' }>

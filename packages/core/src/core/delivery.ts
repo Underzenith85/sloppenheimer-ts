@@ -72,7 +72,11 @@ const recordOutcome = (
     if (handoff === undefined) {
       return
     }
-    const noted = notePublication(handoff, repairPublicationOf(outcome))
+    const noted = notePublication(
+      handoff,
+      repairPublicationOf(outcome),
+      outcome._tag === 'Published' ? outcome.headSha : null,
+    )
     // A pull request whose latest work never reached it is in a state of its own. Saying so on the
     // handoff is what keeps the console from reporting the unchanged head as a repair that
     // achieved nothing, and what an operator reads while the delivery retries.

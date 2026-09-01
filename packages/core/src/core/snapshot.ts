@@ -11,7 +11,8 @@ import {
   type RetrySnapshot,
   type RunningSnapshot,
 } from './runtime.js'
-import type { DeliveryEntry, RetryEntry, RunningEntry, RuntimeState } from './state.js'
+import type { DeliveryEntry } from './postflight.js'
+import type { RetryEntry, RunningEntry, RuntimeState } from './state.js'
 import { handoffSnapshots, publishedCompletions } from './transitions.js'
 
 /**

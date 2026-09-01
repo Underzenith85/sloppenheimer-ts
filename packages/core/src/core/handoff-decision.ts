@@ -129,6 +129,17 @@ const attributeRepair = (
     const attribution = attributeRepairHead(handoff, repairedHeadSha)
     return attribution._tag === 'Cycled' ? decided(attribution.handoff) : attribution.handoff
   }
+  if (repair.publication === 'published' && repair.publishedHeadSha !== repairedHeadSha) {
+    // The host pushed a head the provider is still not reporting. Waiting for the observation to
+    // catch up costs a poll; releasing the repair here — which a restored one, whose `inFlight` is
+    // always false, would otherwise do — lets the stale head buy another repair.
+    return decided({
+      ...handoff,
+      state: 'awaiting_checks',
+      headSha: repairedHeadSha,
+      reason: 'Published the repair; waiting for the pull request to report the new head.',
+    })
+  }
   if (!repair.inFlight) {
     // The baseline outlived whatever was driving the repair, so an unchanged head is an interrupted
     // repair, not a completed no-op. Drop the baseline and let the normal repair path retry; no
@@ -145,17 +156,6 @@ const attributeRepair = (
       headSha: repairedHeadSha,
       reason:
         'Repair agent produced changes that have not reached the pull request; delivery is being retried.',
-    })
-  }
-  if (repair.publication === 'published') {
-    // The host pushed a new head and the provider is still reporting the old one. Waiting for the
-    // observation to catch up costs a poll; calling this a repair that changed nothing would spend
-    // an intervention on a race.
-    return decided({
-      ...handoff,
-      state: 'awaiting_checks',
-      headSha: repairedHeadSha,
-      reason: 'Published the repair; waiting for the pull request to report the new head.',
     })
   }
   const unchanged = classifyPullRequest(observation)
@@ -415,6 +415,7 @@ export const afterRepairDispatched = (
     inFlight: true,
     workerStarted: started,
     publication: 'pending',
+    publishedHeadSha: null,
   }),
   repairObservedHeadShas: handoff.repairObservedHeadShas.includes(headSha)
     ? handoff.repairObservedHeadShas
@@ -448,10 +449,20 @@ export const settleRepair = (handoff: HandoffEntry): HandoffEntry =>
 export const notePublication = (
   handoff: HandoffEntry,
   publication: RepairPublication,
+  publishedHeadSha: string | null = null,
 ): HandoffEntry =>
   Option.match(handoff.repair, {
     onNone: () => handoff,
-    onSome: (repair) => ({ ...handoff, repair: Option.some({ ...repair, publication }) }),
+    onSome: (repair) => ({
+      ...handoff,
+      repair: Option.some({
+        ...repair,
+        publication,
+        // Kept from the last publication that produced one: a delivery that fails after a
+        // successful push has not un-pushed it.
+        publishedHeadSha: publishedHeadSha ?? repair.publishedHeadSha,
+      }),
+    }),
   })
 
 /** The repair is over: whatever it was carrying goes with it. */

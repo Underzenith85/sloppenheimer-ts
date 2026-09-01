@@ -59,6 +59,7 @@ const repairing = (
     inFlight: true,
     workerStarted: true,
     publication: 'no_changes',
+    publishedHeadSha: null,
     ...overrides,
   })
 
@@ -385,6 +386,7 @@ describe('repair attribution', (): void => {
         workerStarted: false,
         // Nothing has run, so nothing is known about the worktree yet.
         publication: 'pending',
+        publishedHeadSha: null,
       }),
     )
     expect(refused.repairHeadShas).toEqual([])
@@ -397,6 +399,7 @@ describe('repair attribution', (): void => {
         inFlight: true,
         workerStarted: true,
         publication: 'pending',
+        publishedHeadSha: null,
       }),
     )
     expect(started.repairObservedHeadShas).toEqual(['head-1'])

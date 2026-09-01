@@ -2,7 +2,8 @@ import { Option } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
 import { withEntry, withoutEntry } from '../../support/collections.js'
-import type { DeliveryEntry, RuntimeState } from '../state.js'
+import type { DeliveryEntry } from '../postflight.js'
+import type { RuntimeState } from '../state.js'
 import { claimIssue } from './claims.js'
 
 /**

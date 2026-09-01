@@ -5,8 +5,8 @@ import type { TrackerError } from '../domain/errors.js'
 const baseRetryDelayMs = 10_000
 
 /**
- * How many publication attempts one retained delivery gets before the work is handed back to the
- * coding agent.
+ * How many publication attempts one piece of retained work gets before it is handed back to the
+ * coding agent, counting the turn's own postflight as the first.
  *
  * A delivery retry costs a fetch and a push rather than a whole turn, so it is worth more attempts
  * than an agent retry — but not unbounded ones: a lease conflict that keeps recurring means the

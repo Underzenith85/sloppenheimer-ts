@@ -110,6 +110,11 @@ export const dispatchAdmission = (
   if (state.claimed.has(issue.id)) {
     return { _tag: 'Refuse', reason: 'claimed' }
   }
+  // A workspace startup recovery could not read may hold work a previous process never published.
+  // An agent dispatched into it would carry that change as its own.
+  if (state.unexaminedWorkspaces.has(issue.id)) {
+    return { _tag: 'Refuse', reason: 'recovering' }
+  }
   if (
     Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
       state.pausedIssueNumbers.has(issueNumber),

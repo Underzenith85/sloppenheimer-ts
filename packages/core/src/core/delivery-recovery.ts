@@ -19,7 +19,7 @@
 
 import { Effect, Option, Ref, type Scope } from 'effect'
 
-import type { Issue } from '../domain/domain.js'
+import type { Issue, IssueId } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { asSettled } from '../support/settled.js'
@@ -49,15 +49,22 @@ const targetFor = (issue: Issue, handoff: HandoffEntry | undefined): SourceContr
 }
 
 /**
- * Whether something is already acting on this issue, and so this scan has nothing to examine.
+ * Whether something is already acting on this issue, and so this scan has nothing left to examine.
  *
  * Deliberately not the claim: an issue with an open handoff is claimed for as long as its pull
- * request lives, and that pull request is exactly what unpublished work is owed.
+ * request lives, and that pull request is exactly what unpublished work is owed. A running worker,
+ * a queued retry and a retained delivery each end in a postflight of their own, which is what makes
+ * them an answer rather than a gap.
  */
 const alreadyHandled = (state: RuntimeState, issue: Issue): boolean =>
-  state.running.has(issue.id) ||
-  state.retries.has(issue.id) ||
-  state.deliveries.has(issue.id) ||
+  state.running.has(issue.id) || state.retries.has(issue.id) || state.deliveries.has(issue.id)
+
+/**
+ * Whether an operator has stopped this issue. A paused workspace is left unexamined rather than
+ * counted as handled: publishing from it would ignore the pause, and calling it examined would let
+ * the resume put an agent into a workspace nobody has looked at.
+ */
+const operatorPaused = (state: RuntimeState, issue: Issue): boolean =>
   Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
     state.pausedIssueNumbers.has(issueNumber),
   )
@@ -113,6 +120,9 @@ const recoverIssue = (
       // Something is already acting on this issue, or nothing here can publish: either way this
       // pass has nothing to examine, and neither is a failure to look.
       return true
+    }
+    if (operatorPaused(current, issue)) {
+      return false
     }
     const exists = yield* effective.workspaces.exists(issue.identifier).pipe(asSettled)
     if (exists._tag === 'Failed') {
@@ -198,12 +208,15 @@ export const recoverRetainedDeliveries = (
 ): Effect.Effect<boolean, never, Scope.Scope> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(context.state)
-    if (opening.deliveryRecoveryFinished || !opening.startupRecoveryFinished) {
+    const outstanding = opening.deliveryRecoveryFinished && opening.unexaminedWorkspaces.size === 0
+    if (outstanding || !opening.startupRecoveryFinished) {
       return false
     }
     const effective = opening.lastKnownGood
     if (effective.sourceControl === null) {
-      yield* Ref.update(context.state, Transitions.finishDeliveryRecovery)
+      yield* Ref.update(context.state, (current) =>
+        Transitions.finishDeliveryRecovery(current, new Set()),
+      )
       return true
     }
     const candidates = yield* effective.tracker
@@ -224,15 +237,17 @@ export const recoverRetainedDeliveries = (
     // Deliberately not filtered by dispatch eligibility. A change that already exists is owed a
     // publication whether or not the issue would be dispatched again: a routing label removed
     // between the failed publication and this restart says nothing about the diff on disk.
-    let examinedEverything = true
+    const unexamined = new Set<IssueId>()
     for (const issue of candidates.value) {
-      examinedEverything = (yield* recoverIssue(context, issue)) && examinedEverything
+      if (!(yield* recoverIssue(context, issue))) {
+        unexamined.add(issue.id)
+      }
     }
-    if (!examinedEverything) {
-      // The scan is not finished until every workspace has been looked at, so the next pass tries
-      // the ones this pass could not read.
-      return false
-    }
-    yield* Ref.update(context.state, Transitions.finishDeliveryRecovery)
+    // The scan has run either way. What it could not read is carried as the set dispatch refuses,
+    // so one unreadable workspace holds back its own issue rather than every issue — and the next
+    // pass looks at it again.
+    yield* Ref.update(context.state, (current) =>
+      Transitions.finishDeliveryRecovery(current, unexamined),
+    )
     return true
   })

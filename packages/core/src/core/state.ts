@@ -9,7 +9,6 @@ import type {
   AgentRunnerPort,
   CodeReviewCell,
   CodeReviewPort,
-  PreparedRepository,
   SourceControlCell,
   SourceControlPort,
   TrackerCell,
@@ -19,7 +18,7 @@ import type {
   WorkspaceManagerPort,
 } from '../ports/index.js'
 import type { AgentDetailContext, AgentDetailRecord, AgentEvent } from '../telemetry.js'
-import type { DeliveryFailure } from './postflight.js'
+import type { DeliveryEntry } from './postflight.js'
 
 /**
  * The scheduler's whole world, as one immutable value.
@@ -122,11 +121,18 @@ export type RuntimeState = Readonly<{
 
   startupRecoveryFinished: boolean
   /**
-   * Whether this process has looked for work a previous one left unpublished. It runs once, after
-   * handoff recovery, because it needs the restored pull requests to know which branch a retained
-   * worktree belongs to.
+   * Whether this process has run its scan for work a previous one left unpublished. It runs once,
+   * after handoff recovery, because it needs the restored pull requests to know which branch a
+   * retained worktree belongs to.
    */
   deliveryRecoveryFinished: boolean
+  /**
+   * Issues whose workspace that scan could not read, or was not allowed to act on. Dispatch is
+   * refused for them: putting an agent into a workspace nobody has looked at is how work a previous
+   * process left there gets attributed to the run that happened to find it. The next pass tries
+   * them again.
+   */
+  unexaminedWorkspaces: ReadonlySet<IssueId>
   storeReadFailed: boolean
   handoffStoreError: HandoffStoreError | null
   recoveryCounts: HandoffRecoveryCounts
@@ -222,39 +228,6 @@ export type RetryEntry = Readonly<{
 }>
 
 /**
- * One agent's work waiting to reach the remote, and the failure that left it here.
- *
- * The preparation is retained rather than rebuilt, because it is what makes the retry a
- * publication rather than a second agent run: the same worktree, the same baseline, and the same
- * expected remote head the turn was launched against.
- */
-export type DeliveryEntry = Readonly<{
-  issue: Issue
-  execution: ExecutionSnapshot
-  prepared: PreparedRepository
-  /** How many publication attempts have failed for this retained work. */
-  attempt: number
-  /**
-   * The worker attempt that produced the work. Carried so that giving up on the delivery continues
-   * the agent's own attempt numbering rather than starting it over.
-   */
-  workerAttempt: number | null
-  dueAt: number
-  failure: DeliveryFailure
-  /** Paths the inspection found, or `null` when the inspection itself is what failed. */
-  changedFileCount: number | null
-  /** Whether the run that produced this work was repairing a pull request. */
-  repairRun: boolean
-  observedAt: Date
-  /**
-   * The timer the next attempt is waiting on, or `null` while an operator pause has suspended it.
-   * A pause stops agents; it does not throw away a change that already exists, so the entry
-   * outlives the timer and a resume arms a new one.
-   */
-  fiber: Fiber.Fiber<void> | null
-}>
-
-/**
  * A repair that owns a pull request head, from the decision to repair until the head it produced
  * has been attributed. It outlives a refused dispatch and the retry that follows one, so the
  * retry renders the same repair rather than the bare tracker issue.
@@ -275,6 +248,13 @@ export type RepairEntry = Readonly<{
    * defect this field exists to make impossible.
    */
   publication: RepairPublication
+  /**
+   * The commit that publication produced, when it produced one. It is what tells a stale
+   * pull-request observation from a publication that genuinely changed nothing: an unchanged head
+   * beside a different published head is the provider catching up, not a repair that achieved
+   * nothing.
+   */
+  publishedHeadSha: string | null
 }>
 
 /**
@@ -474,6 +454,7 @@ export const initialState = (
   workflowReloadError: null,
   startupRecoveryFinished: false,
   deliveryRecoveryFinished: false,
+  unexaminedWorkspaces: new Set(),
   storeReadFailed: restored.storeReadFailed,
   handoffStoreError: restored.storeError,
   recoveryCounts: {

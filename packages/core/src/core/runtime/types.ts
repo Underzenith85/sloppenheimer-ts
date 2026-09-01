@@ -15,7 +15,6 @@ import type {
 } from '../../ports/index.js'
 import type {
   CompletedSnapshot,
-  DeliveryEntry,
   EffectiveWorkflow,
   HandoffEntry,
   RefreshOperation,
@@ -23,7 +22,7 @@ import type {
   RuntimePorts,
   RuntimeState,
 } from '../state.js'
-import type { PostflightOutcome } from '../postflight.js'
+import type { DeliveryEntry, PostflightOutcome } from '../postflight.js'
 import type { TickSource } from '../transitions.js'
 
 /**

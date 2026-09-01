@@ -13,12 +13,13 @@
  * agent's own account of what it did is never consulted.
  */
 
-import { Effect } from 'effect'
+import { Effect, type Fiber } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import type { SourceControlError } from '../domain/errors.js'
 import type { PreparedRepository, SourceControlPort } from '../ports/index.js'
 import { asSettled } from '../support/settled.js'
+import type { ExecutionSnapshot } from './state.js'
 
 /** A publication that did not happen, in the terms a retry and an operator both need. */
 export type DeliveryFailure = Readonly<{
@@ -171,3 +172,36 @@ export const runPostflight = (
           commitCreated: published.value.commitCreated,
         }
   })
+
+/**
+ * One agent's work waiting to reach the remote, and the failure that left it here.
+ *
+ * The preparation is retained rather than rebuilt, because it is what makes the retry a
+ * publication rather than a second agent run: the same worktree, the same baseline, and the same
+ * expected remote head the turn was launched against.
+ */
+export type DeliveryEntry = Readonly<{
+  issue: Issue
+  execution: ExecutionSnapshot
+  prepared: PreparedRepository
+  /** How many publication attempts have failed for this retained work. */
+  attempt: number
+  /**
+   * The worker attempt that produced the work. Carried so that giving up on the delivery continues
+   * the agent's own attempt numbering rather than starting it over.
+   */
+  workerAttempt: number | null
+  dueAt: number
+  failure: DeliveryFailure
+  /** Paths the inspection found, or `null` when the inspection itself is what failed. */
+  changedFileCount: number | null
+  /** Whether the run that produced this work was repairing a pull request. */
+  repairRun: boolean
+  observedAt: Date
+  /**
+   * The timer the next attempt is waiting on, or `null` while an operator pause has suspended it.
+   * A pause stops agents; it does not throw away a change that already exists, so the entry
+   * outlives the timer and a resume arms a new one.
+   */
+  fiber: Fiber.Fiber<void> | null
+}>
