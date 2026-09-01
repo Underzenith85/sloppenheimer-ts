@@ -296,10 +296,17 @@ recurrence condition of the schedule, rather than a decision each call site repe
 
 ### Logging and telemetry
 
-Structured logging goes through `packages/core/src/support/logging.ts`, which sanitizes fields,
-redacts secret-named keys, and bounds strings before anything is emitted. Every record carries an
-`action` and an `outcome`. Telemetry events state their own `lifecycle`; nothing infers a session
-transition by matching a runner's event names.
+Structured logging goes through `logInfo`, `logWarning`, and `logError` in
+`packages/core/src/support/logging.ts`, which sanitize fields, redact secret-named keys, and bound
+strings before anything is emitted, and default every record to an `action` and an `outcome`. New
+logging uses those. One caller predates the rule and logs through Effect's own
+`Effect.logInfo` / `Effect.logWarning` directly — the hook lifecycle in
+`packages/adapter-node/src/workspace-hooks.ts`, whose records therefore carry neither the defaults
+nor the sanitizing, including the `stderr` excerpt it reports on a failed hook. Read it as the
+exception it is rather than as a pattern to copy.
+
+Telemetry events state their own `lifecycle`; nothing infers a session transition by matching a
+runner's event names.
 
 ### Where the runtime is entered
 
@@ -485,9 +492,11 @@ Tests live in the root `test/` tree, mirroring the source they cover, and run ag
 sources rather than builds.
 
 - `@effect/vitest` supplies the test constructors. `it.effect` is the default and runs on
-  `TestClock`, so a test advances time instead of waiting on it. `it.scoped` is for a test that
-  acquires scoped resources — the orchestrator suites are all `it.scoped`. `it.live` is reserved for
-  what genuinely needs the wall clock or a real subprocess, and choosing it should be a considered
+  `TestClock`, so a test advances time instead of waiting on it. `it.scoped` is for a test whose own
+  effect requires `Scope.Scope`; where only part of a test owns a resource, the established pattern
+  is to stay on `it.effect` and wrap that part in `Effect.scoped`, and `test/orchestrator.test.ts`
+  runs roughly half its cases each way on exactly that distinction. `it.live` is reserved for what
+  genuinely needs the wall clock or a real subprocess, and choosing it should be a considered
   decision rather than a way past a hanging test.
 - Fakes live in `test/harness/` and are ports implemented honestly — a fake tracker, a fake App
   Server, a real temporary Git repository. Prefer one of those to a mocked module; a stubbed global
