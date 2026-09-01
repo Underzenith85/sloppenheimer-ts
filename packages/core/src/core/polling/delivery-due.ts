@@ -137,12 +137,7 @@ const retryDiscard = (
             : `The issue no longer wants this work, and the workspace holding it could not be removed: ${error}`,
         }),
       )
-      return retrying
-        ? noted
-        : Transitions.releaseClaim(
-            Transitions.noteWorkspaceExamined(noted, entry.issue.id, false),
-            entry.issue.id,
-          )
+      return retrying ? noted : Transitions.releaseClaim(noted, entry.issue.id)
     })
   })
 
@@ -336,13 +331,10 @@ export const onDeliveryAttempted = (
       return
     }
     if (event.result._tag === 'Abandoned') {
-      // Nothing the host holds can publish this. The work stays on disk and the claim goes, so a
-      // workflow that composes source control again finds it where the recovery sweep looks.
+      // Nothing the host holds can publish this. The claim goes; the work stays on disk as the
+      // run's retained workspace, which is what the workspace lifecycle keeps such artifacts as.
       yield* Ref.update(context.state, (current) =>
-        Transitions.releaseClaim(
-          Transitions.noteWorkspaceExamined(current, entry.issue.id, false),
-          entry.issue.id,
-        ),
+        Transitions.releaseClaim(current, entry.issue.id),
       )
       return
     }

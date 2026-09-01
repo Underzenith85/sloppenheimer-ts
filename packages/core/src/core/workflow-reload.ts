@@ -371,11 +371,7 @@ export const installEffectiveWorkflow = (
     Effect.zipRight(
       previous.workflow.config.workspaceRoot === next.workflow.config.workspaceRoot
         ? Effect.void
-        : context.persistCompletions.pipe(
-            // The same move invalidates every answer about what a workspace holds: those answers
-            // are about directories under the root being left behind.
-            Effect.zipRight(Ref.update(context.state, Transitions.forgetWorkspaceExaminations)),
-          ),
+        : context.persistCompletions,
     ),
   )
 

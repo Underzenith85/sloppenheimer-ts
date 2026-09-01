@@ -39,7 +39,6 @@ import type { DeliveryEntry } from './postflight.js'
 export type RefreshOperation =
   | 'credential_revalidation'
   | 'handoff_recovery'
-  | 'delivery_recovery'
   | 'workflow_reload'
   | 'handoff_reconciliation'
   | 'issue_reconciliation'
@@ -120,28 +119,6 @@ export type RuntimeState = Readonly<{
   workflowReloadError: WorkflowReloadError | null
 
   startupRecoveryFinished: boolean
-  /**
-   * Whether the sweep that runs before the first reconciliation has happened. It exists so a
-   * restored handoff's repair cannot be dispatched into a workspace nobody has looked at; every
-   * issue that becomes a candidate later is examined by the dispatch pass instead, which already
-   * holds the candidate list and so costs no further tracker call.
-   */
-  startupSweepFinished: boolean
-  /**
-   * Issues whose workspace this process has looked at for work a previous one left unpublished.
-   *
-   * Per issue rather than one flag for the whole scan: an issue that is not a candidate at startup
-   * — inactive then, or not yet reported — becomes one later, and a scan that had declared itself
-   * finished would never look at the workspace it arrives with.
-   */
-  examinedWorkspaces: ReadonlySet<IssueId>
-  /**
-   * Issues whose workspace the scan could not read, or was not allowed to act on. Dispatch is
-   * refused for them: putting an agent into a workspace nobody has looked at is how work a previous
-   * process left there gets attributed to the run that happened to find it. The next pass tries
-   * them again.
-   */
-  unexaminedWorkspaces: ReadonlySet<IssueId>
   storeReadFailed: boolean
   handoffStoreError: HandoffStoreError | null
   recoveryCounts: HandoffRecoveryCounts
@@ -471,9 +448,6 @@ export const initialState = (
   lastKnownGood,
   workflowReloadError: null,
   startupRecoveryFinished: false,
-  startupSweepFinished: false,
-  examinedWorkspaces: new Set(),
-  unexaminedWorkspaces: new Set(),
   storeReadFailed: restored.storeReadFailed,
   handoffStoreError: restored.storeError,
   recoveryCounts: {

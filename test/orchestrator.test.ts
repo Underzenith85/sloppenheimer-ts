@@ -35,6 +35,7 @@ import {
   type Issue,
   type IssueId,
   type JsonObject,
+  type Workspace,
 } from '@sloppenheimer/core/domain/domain.js'
 import {
   AgentError,
@@ -96,6 +97,7 @@ import {
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
@@ -645,8 +647,20 @@ const makeHarness = (
     makeWorkspaces: (settings) => {
       workspaceSettings.push(settings)
       return {
-        create: () =>
-          Effect.succeed({ path: '/tmp/sloppenheimer-test', key: 'test', createdNow: false }),
+        // A real bracket, like the Node manager's: the release runs however the use ended, so a
+        // test can observe what a run's workspace was released as.
+        withLeasedWorkspace: (run, use, disposition) =>
+          Effect.acquireUseRelease(
+            Effect.succeed({
+              path: `/tmp/sloppenheimer-test/run-${String(run.runId)}`,
+              key: 'test',
+            }),
+            (workspace) => use(workspace),
+            (_workspace, exit) =>
+              Effect.sync(() => {
+                disposition(exit)
+              }),
+          ),
         exists: () => Effect.succeed(true),
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
@@ -1149,607 +1163,6 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
-  it.scoped('publishes what an interrupted postflight left, rather than dispatching over it', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-postflight-cancelled-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('167'),
-      }
-      const harness = makeHarness(isolated, () => [issue])
-      let launched = 0
-      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          handoffCompletedWork: () =>
-            Effect.succeed({
-              _tag: 'PullRequest' as const,
-              branchName: 'sloppenheimer/issue-167',
-              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/167',
-              pullRequestNumber: 167,
-              created: true,
-            }),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => launched > 0,
-            (_candidate, prepared) => {
-              publications.push({
-                branchName: prepared.target.branchName,
-                launchedSoFar: launched,
-              })
-              // The first publication never returns: the turn has succeeded and its change is in
-              // the worktree, and this is the window the cancellation lands in.
-              return publications.length === 1
-                ? Effect.never
-                : Effect.succeed({
-                    _tag: 'Published',
-                    branchName: prepared.target.branchName,
-                    headSha: 'recovered-head',
-                    commitCreated: false,
-                  })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-          }
-
-          // The pause interrupts the fiber the postflight is running on. Nothing settles it: there
-          // is no delivery, and the worker never reports how it ended.
-          yield* control.setIssuePaused(167, true)
-          yield* control.setIssuePaused(167, false)
-          while (publications.length < 2) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-
-          // The change is published by the examination the resume owed this workspace, rather than
-          // inherited by a second agent as work of its own.
-          expect(publications[1]).toEqual({
-            branchName: 'sloppenheimer/issue-167',
-            launchedSoFar: 1,
-          })
-        }),
-      )
-    }),
-  )
-
-  it.scoped('examines a workspace again when a reload moves the workspace root', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-reload-root-')
-      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-reload-root-other-')
-      const initial: Workflow = {
-        ...changedWorkflow({ fingerprint: 'initial' }),
-        config: { ...workflow.config, workspaceRoot },
-      }
-      const reloaded: Workflow = {
-        ...changedWorkflow({ fingerprint: 'reloaded' }),
-        config: { ...initial.config, workspaceRoot: reloadedRoot },
-      }
-      // Active and unroutable, so nothing dispatches into it and the examination is the only
-      // thing that ever looks at either root.
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer']),
-        id: issueId('167'),
-      }
-      const harness = makeHarness(initial, () => [issue])
-      // The root this reload switches to already holds work a previous process never published.
-      let retained = false
-      const publications: string[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => retained,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => Effect.die('an unroutable issue must never be dispatched'),
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let snapshot = yield* control.snapshot
-          yield* control.refresh
-          // Looked at under the first root and found empty.
-          expect(publications).toEqual([])
-
-          retained = true
-          harness.setWorkflow(reloaded)
-          harness.notifyChanged()
-          while (snapshot.effectiveWorkflow.fingerprint !== 'reloaded') {
-            yield* control.refresh
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-
-          // What that answer was about is a directory under the root being left behind. Keeping it
-          // would have the dispatch pass skip an issue whose new workspace nobody has read.
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-          expect(publications).toEqual(['sloppenheimer/issue-167'])
-        }),
-      )
-    }),
-  )
-
-  it.scoped("discards a closed handoff issue's retained work rather than publishing it", () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-terminal-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      // Closed while the host was down. The persisted handoff still holds the record as it was,
-      // and the active-state fetch no longer returns it at all.
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-        state: 'closed',
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      const harness = makeHarness(
-        isolated,
-        () => [issue],
-        () => Effect.succeed([]),
-      )
-      const removed: string[] = []
-      const publications: string[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeWorkspaces: (settings) => ({
-          ...harness.ports.makeWorkspaces(settings),
-          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
-        }),
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => Effect.die('a closed issue must never be dispatched'),
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (removed.length === 0 && publications.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-        }),
-      )
-
-      // Pushing a branch and moving a pull request's head for work nobody asked for any more is
-      // the one case the policy calls a discard, and the record the handoff persisted is too old
-      // to know that on its own.
-      expect(publications).toEqual([])
-      expect(removed).toEqual([issue.identifier])
-    }),
-  )
-
-  it.scoped('settles a recovered delivery through the manager that opened its workspace', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-recovered-manager-')
-      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-recovered-manager-other-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const initial: Workflow = {
-        ...changedWorkflow({ fingerprint: 'initial' }),
-        config: { ...workflow.config, workspaceRoot },
-      }
-      const reloaded: Workflow = {
-        ...changedWorkflow({ fingerprint: 'reloaded' }),
-        config: { ...initial.config, workspaceRoot: reloadedRoot },
-      }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      // The handoff is created under the first root, so the execution it keeps names that manager.
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      let reported = issue
-      const harness = makeHarness(initial, () => [reported])
-      // Nothing to recover until the root has moved, so the work this publishes is the work the
-      // new root holds.
-      let retained = false
-      const removals: string[] = []
-      const publications: string[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeWorkspaces: (settings) => ({
-          ...harness.ports.makeWorkspaces(settings),
-          remove: () => Effect.sync(() => removals.push(settings.root)).pipe(Effect.asVoid),
-        }),
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => retained,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.fail(deliveryFailure())
-            },
-          ),
-        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          // The repair the restored handoff dispatches has to have settled before the workspace is
-          // made to hold anything: what this covers is what a delivery recovery rediscovers, and a
-          // run still in its own postflight would publish the same workspace as its own work.
-          let started = yield* control.snapshot
-          while (started.running.length > 0 || started.delivering.length > 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-            started = yield* control.snapshot
-          }
-          expect(publications).toEqual([])
-
-          retained = true
-          harness.setWorkflow(reloaded)
-          let snapshot = yield* control.snapshot
-          while (snapshot.delivering.length === 0) {
-            yield* control.refresh
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-
-          // Closed, so the delivery due next discards the work with the workspace holding it.
-          reported = { ...issue, state: 'closed' }
-          // Waited for the delivery's own removal, not merely the first one: the terminal paths
-          // that clean up through the handoff's manager also fire here, and which lands first is
-          // not what this asserts.
-          while (!removals.includes(reloadedRoot)) {
-            yield* TestClock.adjust('5 minutes')
-            yield* Effect.yieldNow()
-          }
-        }),
-      )
-
-      // Through the manager that opened the workspace, which is this process's — not the one the
-      // handoff was created with, whose root the recovered files are not under.
-      expect(removals).toContain(reloadedRoot)
-    }),
-  )
-
-  it.scoped('keeps a handoff workspace the current workflow alone would call finished', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-retained-rules-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      // The workflow the handoff was created under counts this state as active; the one in force
-      // no longer does. A repair is judged against the former, so the workspace is not finished.
-      const initial: Workflow = {
-        ...changedWorkflow({ fingerprint: 'initial' }),
-        config: {
-          ...workflow.config,
-          workspaceRoot,
-          tracker: { ...workflow.config.tracker, activeStates: ['open', 'in progress'] },
-        },
-      }
-      const narrowedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-retained-other-')
-      // The root moves with it, which is what makes the sweep look at these workspaces again.
-      const narrowed: Workflow = {
-        ...changedWorkflow({ fingerprint: 'narrowed' }),
-        config: {
-          ...initial.config,
-          workspaceRoot: narrowedRoot,
-          tracker: { ...initial.config.tracker, activeStates: ['open'] },
-        },
-      }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-        state: 'in progress',
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      const harness = makeHarness(
-        initial,
-        () => [issue],
-        () => Effect.succeed([]),
-      )
-      const removed: string[] = []
-      const publications: string[] = []
-      // Nothing under the first root, so the work this finds is the work the second root holds.
-      let retained = false
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeWorkspaces: (settings) => ({
-          ...harness.ports.makeWorkspaces(settings),
-          remove: (identifier) => Effect.sync(() => removed.push(identifier)).pipe(Effect.asVoid),
-        }),
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => retained,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          expect(publications).toEqual([])
-          retained = true
-          harness.setWorkflow(narrowed)
-          while (publications.length === 0 && removed.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-        }),
-      )
-
-      // Narrowing the active states does not finish a pull request's issue. Deleting its workspace
-      // would take a diff whose repair the same pass still considers eligible.
-      expect(removed).toEqual([])
-      expect(publications).toEqual(['sloppenheimer/issue-20'])
-    }),
-  )
-
-  it.scoped("refuses dispatch when a finished issue's workspace could not be removed", () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-cleanup-failed-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      // Closed when the host starts, so only the sweep looks at it — and the removal that would
-      // settle the discard fails.
-      let reported = { ...issue, state: 'closed' }
-      const harness = makeHarness(isolated, () => [reported])
-      let launched = 0
-      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeWorkspaces: (settings) => ({
-          ...harness.ports.makeWorkspaces(settings),
-          remove: () =>
-            Effect.fail(
-              new WorkspaceError({
-                category: 'remove_failed',
-                message: 'the workspace directory is busy',
-              }),
-            ),
-        }),
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push({
-                branchName: prepared.target.branchName,
-                launchedSoFar: launched,
-              })
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          expect(publications).toEqual([])
-
-          // Reopened. The files the failed discard left are still there, so the pass that admits
-          // this issue owes the workspace a look first.
-          reported = issue
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-        }),
-      )
-
-      // Published by the examination the failed removal left owing, rather than inherited by an
-      // agent that never produced it.
-      expect(publications[0]).toEqual({
-        branchName: 'sloppenheimer/issue-20',
-        launchedSoFar: 0,
-      })
-    }),
-  )
-
-  it.scoped('sweeps a handoff workspace the active-state fetch leaves out', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-sweep-handoff-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      // The state list returns nothing for this issue — a reload that narrowed the active states
-      // out from under an open handoff looks exactly like this to the sweep. Its repair is still
-      // judged against the workflow the handoff kept, so reconciliation can still run one.
-      const harness = makeHarness(
-        isolated,
-        () => [issue],
-        () => Effect.succeed([]),
-      )
-      let launched = 0
-      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push({
-                branchName: prepared.target.branchName,
-                launchedSoFar: launched,
-              })
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-        }),
-      )
-
-      // A handoff's workspace is owed a look for as long as the handoff lives, whatever the
-      // current workflow makes of its issue — otherwise its repair is the first thing into it.
-      expect(publications[0]).toEqual({
-        branchName: 'sloppenheimer/issue-20',
-        launchedSoFar: 0,
-      })
-    }),
-  )
-
-  it.scoped('sweeps for retained work again when a reload moves the workspace root', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-reload-root-')
-      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-reload-other-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const initial: Workflow = {
-        ...changedWorkflow({ fingerprint: 'initial' }),
-        config: { ...workflow.config, workspaceRoot },
-      }
-      const reloaded: Workflow = {
-        ...changedWorkflow({ fingerprint: 'reloaded' }),
-        config: { ...initial.config, workspaceRoot: reloadedRoot },
-      }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      const harness = makeHarness(
-        initial,
-        () => [issue],
-        () => Effect.succeed([]),
-      )
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => false,
-            () => Effect.never,
-          ),
-        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          // The sweep runs once and stays finished, so a settled pass costs one issue fetch.
-          const settled = harness.stateFetches()
-          yield* control.refresh
-          const perPass = harness.stateFetches() - settled
-          expect(perPass).toBeGreaterThan(0)
-
-          // The reload lands after the sweep in its own pass, so what that sweep established is
-          // about the root being left behind. Reconciliation is the next thing that can put an
-          // agent into a workspace, and it does not go through dispatch admission — so the sweep
-          // is owed again before it runs.
-          const beforeReload = harness.stateFetches()
-          harness.setWorkflow(reloaded)
-          yield* control.refresh
-          const snapshot = yield* control.snapshot
-          expect(snapshot.effectiveWorkflow.fingerprint).toBe('reloaded')
-
-          yield* control.refresh
-          expect(harness.stateFetches() - beforeReload).toBeGreaterThan(perPass * 2)
-        }),
-      )
-    }),
-  )
-
   it.scoped('does not retire a slow publication as a stalled agent', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-postflight-stall-')
@@ -2044,84 +1457,6 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
-  it.scoped('rediscovers unpublished work in a workspace a previous process left behind', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-recovery-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      const harness = makeHarness(isolated, () => [issue])
-      let launched = 0
-      const publications: Readonly<{ branchName: string; launchedFirst: boolean }>[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-          handoffCompletedWork: () =>
-            Effect.succeed({
-              _tag: 'PullRequest' as const,
-              branchName: 'sloppenheimer/issue-20',
-              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
-              pullRequestNumber: 65,
-              created: false,
-            }),
-        }),
-        // The workspace this host starts with already holds a change no process published: the
-        // worktree reads as changed before any agent of this process has run in it.
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push({
-                branchName: prepared.target.branchName,
-                launchedFirst: launched > 0,
-              })
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let current = yield* control.snapshot
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            current = yield* control.snapshot
-          }
-          return current
-        }),
-      )
-
-      // Published by the recovery rather than by a run: no agent had started when it happened, and
-      // the repair budget an operator's intervention threshold is measured against is untouched.
-      expect(publications[0]).toEqual({
-        branchName: 'sloppenheimer/issue-20',
-        launchedFirst: false,
-      })
-      expect(snapshot.handoffs[0]).toMatchObject({
-        issueId: issue.id,
-        repairAttempts: 0,
-        repairStartedHeadSha: null,
-      })
-    }),
-  )
-
   it.scoped('holds retained work while an operator pause stands, and delivers it on resume', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-paused-')
@@ -2197,236 +1532,6 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(publications).toHaveLength(2)
           expect(launched).toBe(1)
           expect(snapshot.delivering).toEqual([])
-        }),
-      )
-    }),
-  )
-
-  it.scoped('recovers unpublished work for an issue that has since lost its routing label', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-unlabelled-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      // Active, and no longer dispatchable: the label that routes new work says nothing about a
-      // change that already exists in a workspace.
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer']),
-        id: issueId('167'),
-      }
-      const harness = makeHarness(isolated, () => [issue])
-      const publications: string[] = []
-      let launched = 0
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-          }
-        }),
-      )
-
-      expect(publications).toEqual(['sloppenheimer/issue-167'])
-      expect(launched).toBe(0)
-    }),
-  )
-
-  it.scoped('leaves delivery recovery unfinished when a workspace could not be read', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-unreadable-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      // Not dispatchable, so no worker takes the issue over and the recovery scan is the only
-      // thing that ever looks at this workspace.
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer']),
-        id: issueId('167'),
-      }
-      const harness = makeHarness(isolated, () => [issue])
-      let inspections = 0
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeSourceControl: () => ({
-          ...failingSourceControl(
-            () => true,
-            () => Effect.die('the inspection failed, so nothing should be published'),
-          ),
-          inspect: () => {
-            inspections += 1
-            return Effect.fail(
-              new SourceControlError({
-                category: 'invalid_repository',
-                message: 'the worktree could not be read',
-                retryable: true,
-                worktreePreserved: true,
-              }),
-            )
-          },
-        }),
-        runAgent: () => Effect.die('an unroutable issue must never be dispatched'),
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (inspections === 0) {
-            yield* Effect.yieldNow()
-          }
-          // Deciding there is no retained work on the strength of not having looked is exactly the
-          // reading this scan exists to avoid, so the next pass looks again.
-          yield* control.refresh
-          expect(inspections).toBeGreaterThan(1)
-        }),
-      )
-    }),
-  )
-
-  it.scoped('refuses to dispatch into a workspace the recovery scan could not read', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-unread-gate-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      // Routable, so nothing but the unread workspace stands between it and a dispatch.
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('167'),
-      }
-      const harness = makeHarness(isolated, () => [issue])
-      let inspections = 0
-      let launched = 0
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeSourceControl: () => ({
-          ...failingSourceControl(
-            () => true,
-            () => Effect.die('the inspection failed, so nothing should be published'),
-          ),
-          inspect: () => {
-            inspections += 1
-            return Effect.fail(
-              new SourceControlError({
-                category: 'invalid_repository',
-                message: 'the worktree could not be read',
-                retryable: true,
-                worktreePreserved: true,
-              }),
-            )
-          },
-        }),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (inspections === 0) {
-            yield* Effect.yieldNow()
-          }
-          yield* control.refresh
-
-          // An agent put into this workspace would carry whatever a previous process left in it as
-          // its own work, so the issue waits until a pass manages to look.
-          expect(launched).toBe(0)
-          // And the scan keeps looking rather than concluding there was nothing there.
-          expect(inspections).toBeGreaterThan(1)
-        }),
-      )
-    }),
-  )
-
-  it.scoped('leaves a paused workspace unexamined, and publishes it once the pause lifts', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-paused-scan-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('167'),
-      }
-      const harness = makeHarness(isolated, () => [issue])
-      const publications: string[] = []
-      let inspections = 0
-      let launched = 0
-      let readable = false
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeSourceControl: () => ({
-          ...failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-          // Unreadable until the test says otherwise, which is what leaves this workspace
-          // unexamined and gives an operator's pause somewhere to land before it is looked at.
-          inspect: () => {
-            inspections += 1
-            return readable
-              ? Effect.succeed(changedWorktree)
-              : Effect.fail(
-                  new SourceControlError({
-                    category: 'invalid_repository',
-                    message: 'the worktree could not be read',
-                    retryable: true,
-                    worktreePreserved: true,
-                  }),
-                )
-          },
-        }),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          while (inspections === 0) {
-            yield* Effect.yieldNow()
-          }
-
-          yield* control.setIssuePaused(167, true)
-          readable = true
-          yield* control.refresh
-          yield* control.refresh
-
-          // Publishing from a paused issue's workspace would ignore the operator, and calling it
-          // examined would let the resume dispatch an agent into a workspace nobody looked at.
-          expect(publications).toEqual([])
-          expect(launched).toBe(0)
-
-          yield* control.setIssuePaused(167, false)
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-          expect(publications).toEqual(['sloppenheimer/issue-167'])
         }),
       )
     }),
@@ -2558,415 +1663,6 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(publications).toHaveLength(deliveryAttemptLimit)
           expect(snapshot.delivering).toEqual([])
           expect(snapshot.retrying[0]?.error).toContain('delivery failed')
-        }),
-      )
-    }),
-  )
-
-  it.scoped('examines the workspace of an issue that becomes a candidate after startup', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-late-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('167'),
-      }
-      // Not active when the host starts — the startup sweep never sees it — and a candidate later,
-      // arriving with whatever a previous process left in its workspace.
-      let candidates: readonly Issue[] = []
-      const harness = makeHarness(isolated, () => candidates)
-      let launched = 0
-      const publications: Readonly<{ branchName: string; launchedFirst: boolean }>[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push({
-                branchName: prepared.target.branchName,
-                launchedFirst: launched > 0,
-              })
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          expect(publications).toEqual([])
-
-          candidates = [issue]
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-        }),
-      )
-
-      // Published by the examination the dispatch pass performs, before that same pass could put an
-      // agent into the workspace holding it.
-      expect(publications[0]).toEqual({
-        branchName: 'sloppenheimer/issue-167',
-        launchedFirst: false,
-      })
-    }),
-  )
-
-  it.scoped('holds a repair back while its workspace has not been read', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-repair-unread-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      yield* saveRepairHandoff(handoffStorePath, issue, head)
-      const harness = makeHarness(isolated, () => [issue])
-      let launched = 0
-      let readable = false
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () => ({
-          ...failingSourceControl(
-            () => true,
-            (_candidate, prepared) =>
-              Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              }),
-          ),
-          inspect: () =>
-            readable
-              ? Effect.succeed(cleanWorktree('protected-main'))
-              : Effect.fail(
-                  new SourceControlError({
-                    category: 'invalid_repository',
-                    message: 'the worktree could not be read',
-                    retryable: true,
-                    worktreePreserved: true,
-                  }),
-                ),
-        }),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          yield* control.refresh
-          yield* control.refresh
-
-          // A repair is an agent put into a workspace, and it does not go through
-          // `dispatchAdmission`. Until something has read this one, the pull request waits.
-          expect(launched).toBe(0)
-          const held = yield* control.snapshot
-          expect(held.handoffs[0]?.reason).toContain('Waiting to inspect the workspace')
-
-          readable = true
-          while (launched === 0) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-        }),
-      )
-    }),
-  )
-
-  it.scoped('retries a rediscovered repair as a repair when its delivery cannot be retried', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-repair-fallback-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      // A repair a previous process was driving. It is restored with nothing behind it, because
-      // whatever was driving it is gone — which is exactly the state this test is about.
-      yield* saveHandoffs(handoffStorePath, [
-        {
-          issueId: issue.id,
-          identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
-          branchName: 'sloppenheimer/issue-20',
-          state: 'repair_needed',
-          headSha: head,
-          reason: 'The pull request conflicts with protected main',
-          repairAttempts: 0,
-          repairHeadShas: [],
-          repairStartedHeadSha: head,
-          repairWorkerStarted: true,
-          reviewRequestedHeadSha: head,
-          reviewCompletedHeadSha: head,
-          observedAt: new Date(0).toISOString(),
-        },
-      ])
-      const harness = makeHarness(isolated, () => [issue])
-      const targets: SourceControlTarget[] = []
-      const launchedDescriptions: (string | null)[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-        }),
-        makeSourceControl: () => {
-          const host = failingSourceControl(
-            () => true,
-            // The worktree survives and nothing more can be published from it, so the work goes
-            // back to the agent rather than to another delivery attempt.
-            () => Effect.fail(deliveryFailure({ retryable: false })),
-          )
-          return {
-            ...host,
-            prepare: (candidate, workspace, target) => {
-              targets.push(target)
-              return host.prepare(candidate, workspace, target)
-            },
-          }
-        },
-        runAgent: ({ issue: launchedIssue }) => {
-          launchedDescriptions.push(launchedIssue.description)
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let snapshot = yield* control.snapshot
-          while (snapshot.retrying.length === 0) {
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-          // Nothing is waiting to publish: the retry the fallback queued is the agent's.
-          expect(snapshot.delivering).toEqual([])
-
-          yield* TestClock.adjust('5 minutes')
-          while (launchedDescriptions.length === 0) {
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-        }),
-      )
-
-      // The queued retry was marked a repair, so it has to arrive as one: against the pull
-      // request's exact head, carrying its repair prompt. A bare continuation would edit the
-      // branch with no lease and leave the stale repair identity attached to the handoff.
-      expect(targets.filter((target) => target._tag === 'Normal')).toEqual([])
-      expect(targets).toContainEqual({
-        _tag: 'Repair',
-        branchName: 'sloppenheimer/issue-20',
-        expectedHeadSha: head,
-      })
-      expect(launchedDescriptions[0]).toContain('## Pull request repair')
-      expect(launchedDescriptions[0]).toContain(`Head: ${head}`)
-    }),
-  )
-
-  it.scoped('continues the session when the work it recovered was not a repair', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-continuation-')
-      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('20'),
-      }
-      const head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      // An ordinary continuation's handoff: a pull request is open, and nothing is repairing it.
-      yield* saveHandoffs(handoffStorePath, [
-        {
-          issueId: issue.id,
-          identifier: issue.identifier,
-          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
-          branchName: 'sloppenheimer/issue-20',
-          state: 'awaiting_checks',
-          headSha: head,
-          reason: 'Awaiting the protected-branch observation',
-          repairAttempts: 0,
-          repairHeadShas: [],
-          repairStartedHeadSha: null,
-          reviewRequestedHeadSha: head,
-          reviewCompletedHeadSha: head,
-          observedAt: new Date(0).toISOString(),
-        },
-      ])
-      const harness = makeHarness(isolated, () => [issue])
-      let launched = 0
-      const publications: string[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeCodeReview: (provider) => ({
-          ...requireCodeReview(harness.ports, provider),
-          inspectPullRequest: (number) => Effect.succeed(repairObservation(number, head)),
-          handoffCompletedWork: () =>
-            Effect.succeed({
-              _tag: 'PullRequest' as const,
-              branchName: 'sloppenheimer/issue-20',
-              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
-              pullRequestNumber: 65,
-              created: false,
-            }),
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => true,
-            (_candidate, prepared) => {
-              publications.push(prepared.target.branchName)
-              return Effect.succeed({
-                _tag: 'Published',
-                branchName: prepared.target.branchName,
-                headSha: 'recovered-head',
-                commitCreated: false,
-              })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let snapshot = yield* control.snapshot
-          while (publications.length === 0) {
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-          yield* control.refresh
-          snapshot = yield* control.snapshot
-
-          // The change this recovered was an ordinary continuation's, not a repair's. Handing the
-          // pull request over continues the session; giving the claim up is what a delivered
-          // repair does, and reading an open pull request as one ends the run early.
-          expect(snapshot.retrying).toHaveLength(1)
-          expect(launched).toBe(0)
-        }),
-      )
-    }),
-  )
-
-  it.scoped('keeps a discarded workspace unexamined when its removal failed', () =>
-    Effect.gen(function* () {
-      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-discard-')
-      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
-      const issue = {
-        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
-        id: issueId('167'),
-      }
-      let reported = issue
-      const harness = makeHarness(isolated, () => [reported])
-      let launched = 0
-      let removals = 0
-      const publications: Readonly<{ branchName: string; launchedSoFar: number }>[] = []
-      const ports: TestPorts = {
-        ...harness.ports,
-        makeWorkspaces: (settings) => ({
-          ...harness.ports.makeWorkspaces(settings),
-          remove: () => {
-            removals += 1
-            return Effect.fail(
-              new WorkspaceError({
-                category: 'remove_failed',
-                message: 'the workspace directory is busy',
-              }),
-            )
-          },
-        }),
-        makeSourceControl: () =>
-          failingSourceControl(
-            () => launched > 0,
-            (_candidate, prepared) => {
-              publications.push({
-                branchName: prepared.target.branchName,
-                launchedSoFar: launched,
-              })
-              return publications.length === 1
-                ? Effect.fail(deliveryFailure())
-                : Effect.succeed({
-                    _tag: 'Published',
-                    branchName: prepared.target.branchName,
-                    headSha: 'recovered-head',
-                    commitCreated: false,
-                  })
-            },
-          ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
-      }
-
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let snapshot = yield* control.snapshot
-          while (snapshot.delivering.length === 0) {
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-
-          // Closed, so the delivery due next discards the work with the workspace holding it —
-          // and the removal that would make that true fails, every time.
-          reported = { ...issue, state: 'closed' }
-          while (snapshot.delivering.length > 0) {
-            yield* TestClock.adjust('5 minutes')
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-
-          // Retried while the delivery was retained: the manager that opened that workspace is the
-          // only thing that can remove it, and dropping the delivery on the first failure would
-          // have let a reload retire that manager with the files still under it.
-          expect(removals).toBeGreaterThan(1)
-
-          const lookup = yield* control.agentDetail(issue.identifier)
-          expect(lookup._tag).toBe('Found')
-          if (lookup._tag === 'Found') {
-            // Not `not_performed`: the files are where they were, and reporting them gone is what
-            // would let the next agent on this issue inherit them as its own work.
-            expect(lookup.detail.handoff.publication).toMatchObject({ status: 'failed' })
-            expect(lookup.detail.handoff.publication.reason).toContain('could not be removed')
-          }
-
-          // Reopened. The workspace still holds the change, so it is examined and published rather
-          // than handed to an agent that never produced it.
-          reported = issue
-          while (publications.length < 2) {
-            yield* Effect.yieldNow()
-            yield* control.refresh
-          }
-          expect(publications[1]).toEqual({
-            branchName: 'sloppenheimer/issue-167',
-            launchedSoFar: 1,
-          })
         }),
       )
     }),
@@ -5250,14 +3946,10 @@ describe('restored pull request handoffs', (): void => {
         }),
         makeWorkspaces: (settings) => ({
           ...harness.ports.makeWorkspaces(settings),
-          // No workspace survives from a previous process, so startup delivery recovery has none
-          // to open and every creation counted below belongs to a dispatched repair.
-          exists: () => Effect.succeed(false),
-          create: () =>
+          withLeasedWorkspace: (_run, use) =>
             Effect.sync(() => {
               workspacesCreated += 1
-              return { path: '/tmp/sloppenheimer-test', key: 'test', createdNow: true }
-            }),
+            }).pipe(Effect.zipRight(use({ path: '/tmp/sloppenheimer-test', key: 'test' }))),
         }),
         // The repair pushes nothing and fails, so a retry is queued behind it.
         runAgent: () =>
@@ -7304,6 +5996,205 @@ describe('workflow hot reload', (): void => {
       )
 
       expect(snapshot.counts.running).toBe(0)
+    }),
+  )
+})
+
+describe('per-run workspace leases', (): void => {
+  /** Records what the orchestrator asked the workspace manager for, in the order it asked. */
+  const recordingWorkspaces =
+    (
+      harness: TestHarness,
+      acquired: Workspace[],
+      released: Readonly<{ path: string; release: WorkspaceRelease }>[],
+    ): TestPorts['makeWorkspaces'] =>
+    (settings) => {
+      const base = harness.ports.makeWorkspaces(settings)
+      return {
+        ...base,
+        withLeasedWorkspace: (run, use, disposition) => {
+          let leasedPath = ''
+          return base.withLeasedWorkspace(
+            run,
+            (workspace) => {
+              leasedPath = workspace.path
+              acquired.push(workspace)
+              return use(workspace)
+            },
+            (exit) => {
+              const release = disposition(exit)
+              released.push({ path: leasedPath, release })
+              return release
+            },
+          )
+        },
+      }
+    }
+
+  it.effect('leases four concurrent runs four distinct workspaces', () =>
+    Effect.gen(function* () {
+      const issues = [1, 2, 3, 4].map((number) =>
+        makeIssue(`example/sloppenheimer#${String(number)}`, 1, null, ['sloppenheimer', 'ready']),
+      )
+      const concurrent: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          agent: { ...workflow.config.agent, maxConcurrentAgents: 4 },
+        },
+      }
+      const harness = makeHarness(concurrent, () => issues)
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+      }
+
+      const running = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.counts.running < 4) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return { counts: current.counts, releasedWhileRunning: [...released] }
+        }),
+      )
+
+      // Four sessions running at once are four run identities, and so four workspaces: nothing is
+      // shared, and no lease is let go of while its run is still live.
+      expect(running.counts.running).toBe(4)
+      expect(new Set(acquired.map((workspace) => workspace.path)).size).toBe(4)
+      expect(running.releasedWhileRunning).toEqual([])
+      // Closing the host interrupts all four, and every one of them gives its lease back.
+      expect(new Set(released.map((each) => each.path))).toEqual(
+        new Set(acquired.map((workspace) => workspace.path)),
+      )
+    }),
+  )
+
+  it.effect('keeps a cancelled run workspace for recovery', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          yield* control.setIssuePaused(1, true)
+        }),
+      )
+
+      // The pause interrupts the worker, and an interrupted run has published nothing: its
+      // workspace is kept, under the reason it is being kept for.
+      expect(released).toEqual([
+        {
+          path: acquired[0]?.path,
+          release: { _tag: 'Retained', reason: 'run cancelled before publication' },
+        },
+      ])
+    }),
+  )
+
+  it.effect('keeps the workspace of a run that had no source control to publish through', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      // Composing no code-review services is what disables handoff, and this composition supplies
+      // no source control either: the run reaches its end having published nothing, so what the
+      // agent wrote is still only in the workspace.
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (released.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      expect(released[0]).toMatchObject({
+        path: acquired[0]?.path,
+        release: { _tag: 'Retained', reason: 'run ended without publishing its work' },
+      })
+    }),
+  )
+
+  it.effect('leases a retry its own workspace and keeps the failed attempt', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      let launches = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: recordingWorkspaces(harness, acquired, released),
+        // The first attempt fails, which is what queues the retry; the second one stays running.
+        runAgent: (launch) =>
+          Effect.suspend(() => {
+            launches += 1
+            return launches === 1
+              ? Effect.fail(
+                  new AgentError({ category: 'process_exited', message: 'worker failed' }),
+                )
+              : harness.ports.runAgent(launch)
+          }),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          yield* TestClock.adjust('20 seconds')
+          while (current.counts.running === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+        }),
+      )
+
+      // The retry starts in a workspace of its own, and the attempt that failed keeps its own
+      // rather than handing its leftovers to the run that follows it.
+      expect(acquired).toHaveLength(2)
+      expect(acquired[1]?.path).not.toBe(acquired[0]?.path)
+      expect(released[0]).toMatchObject({
+        path: acquired[0]?.path,
+        // The reason names what failed, not what it said: a failure message can carry an excerpt
+        // of what an agent or hook wrote, and the lease record is a file rather than a log.
+        release: {
+          _tag: 'Retained',
+          reason: 'run failed before publication: AgentError process_exited',
+        },
+      })
     }),
   )
 })

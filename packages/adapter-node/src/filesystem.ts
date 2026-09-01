@@ -1,9 +1,18 @@
-import type { FileSystem } from '@effect/platform'
-import type { PlatformError } from '@effect/platform/Error'
-import { Effect } from 'effect'
+import { type FileSystem } from '@effect/platform'
+import { SystemError, type PlatformError } from '@effect/platform/Error'
+import { rmdir } from 'node:fs/promises'
+import { Effect, Option, type Scope } from 'effect'
+
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import {
+  rejectWorkspace,
+  sameIdentity,
+  type DirectoryIdentity,
+} from '@sloppenheimer/core/domain/workspace-containment.js'
 
 /**
- * The filesystem questions the workspace adapters ask that `FileSystem` does not answer directly.
+ * The filesystem questions the workspace adapters ask that `FileSystem` does not answer directly,
+ * and the shape they report a host's refusal in.
  */
 
 /**
@@ -28,3 +37,155 @@ export const isSymbolicLink = (
         : Effect.succeed(false),
     ),
   )
+
+/**
+ * Removes a directory only while it is empty, and reports whether it went.
+ *
+ * `FileSystem.remove` cannot ask this question: without `recursive` it refuses a directory outright,
+ * and with it, a directory that stopped being empty between the check and the call is deleted along
+ * with whatever appeared inside it. `rmdir` makes emptiness and removal one decision the kernel
+ * takes, so a workspace created while cleanup was scanning survives instead of being swept up with
+ * the container it was created in. A directory already gone is reported the same way, because the
+ * caller wanted it gone either way.
+ */
+export const removeDirectoryIfEmpty = (path: string): Effect.Effect<boolean, PlatformError> =>
+  Effect.tryPromise({
+    try: () => rmdir(path).then(() => true),
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll((cause) => {
+      const code = (cause as NodeJS.ErrnoException).code
+      return code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'ENOENT'
+        ? Effect.succeed(false)
+        : Effect.fail(
+            new SystemError({
+              reason: 'Unknown',
+              module: 'FileSystem',
+              method: 'remove',
+              pathOrDescriptor: path,
+              description: `could not remove the empty directory: ${path}`,
+              cause,
+            }),
+          )
+    }),
+  )
+
+/**
+ * Whether a path holds a real directory: absent is `false`, and anything that is not a directory —
+ * a file, or a symbolic link pointing somewhere else — is a rejection rather than an answer, so
+ * nothing the workspace adapters enumerate, write into or remove can be a substituted path.
+ *
+ * The absent case is named by the platform error's `reason` rather than by matching an `ENOENT`
+ * code on an unknown cause; every other platform failure is left for the calling operation to
+ * report under its own category.
+ */
+export const realDirectoryExists = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (yield* isSymbolicLink(fileSystem, path)) {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          category: 'invalid_path',
+          message: `path exists and is not a directory: ${path}`,
+        }),
+      )
+    }
+    const info = yield* fileSystem.stat(path)
+    if (info.type !== 'Directory') {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          category: 'invalid_path',
+          message: `path exists and is not a directory: ${path}`,
+        }),
+      )
+    }
+    return true
+  }).pipe(
+    Effect.catchIf(
+      (error) => error._tag === 'SystemError' && error.reason === 'NotFound',
+      () => Effect.succeed(false),
+    ),
+  )
+
+/**
+ * The one shape every operation reports through: a containment or lease rejection is already the
+ * answer and travels unchanged, and anything else becomes this operation's own category.
+ */
+const workspaceFailure =
+  (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
+  (cause: WorkspaceError | PlatformError): WorkspaceError =>
+    cause instanceof WorkspaceError ? cause : new WorkspaceError({ category, message, cause })
+
+/**
+ * What a directory is, as the kernel names it: the device it lives on and its inode.
+ *
+ * A pathname is not a directory. Anything this host is about to act on destructively is read as an
+ * identity first and re-read at each step after, so a directory renamed away and replaced under the
+ * same name — by a link, or by another directory — is not followed there.
+ */
+export const directoryIdentity = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+  what: string,
+): Effect.Effect<DirectoryIdentity, WorkspaceError | PlatformError> =>
+  Effect.gen(function* () {
+    if (yield* isSymbolicLink(fileSystem, path)) {
+      return yield* Effect.fail(rejectWorkspace(`${what} is a link: ${path}`))
+    }
+    const info = yield* fileSystem.stat(path)
+    if (info.type !== 'Directory') {
+      return yield* Effect.fail(rejectWorkspace(`${what} is not a directory: ${path}`))
+    }
+    return yield* Option.match(info.ino, {
+      onNone: () => Effect.fail(rejectWorkspace(`${what} has no identity: ${path}`)),
+      onSome: (inode) => Effect.succeed({ deviceId: info.dev, inode }),
+    })
+  })
+
+/**
+ * Holds a directory still for the length of a scope, and hands back the check that says it is still
+ * the one that was held.
+ *
+ * Every removal and every creation below names a path, and a path resolves through whatever its
+ * parents are at that instant. Opening the directory pins its inode, so one removed and recreated
+ * under that name cannot be followed; the check re-reads device and inode, so one moved aside and
+ * replaced — by a link, or by another directory — stops the caller rather than being followed
+ * there. Node offers no `openat`, so the last instant before each step cannot be closed by identity
+ * alone: what bounds it is that no path outside the configured root is ever named, and that a step
+ * whose ground has moved does not run.
+ */
+export const pinDirectory = (
+  fileSystem: FileSystem.FileSystem,
+  path: string,
+  what: string,
+): Effect.Effect<
+  Effect.Effect<void, WorkspaceError | PlatformError>,
+  WorkspaceError | PlatformError,
+  Scope.Scope
+> =>
+  Effect.gen(function* () {
+    const verified = yield* directoryIdentity(fileSystem, path, what)
+    const handle = yield* fileSystem.open(path, { flag: 'r' })
+    const held = yield* handle.stat
+    const pinned = Option.exists(held.ino, (inode) =>
+      sameIdentity(verified, { deviceId: held.dev, inode }),
+    )
+    if (!pinned) {
+      return yield* Effect.fail(rejectWorkspace(`${what} could not be held still: ${path}`))
+    }
+    return Effect.flatMap(directoryIdentity(fileSystem, path, what), (current) =>
+      sameIdentity(verified, current)
+        ? Effect.void
+        : Effect.fail(rejectWorkspace(`${what} was replaced while it was in use: ${path}`)),
+    )
+  })
+
+/** Applies that shape to an operation's error channel. */
+export const reportedAs =
+  (category: 'create_failed' | 'inspect_failed' | 'remove_failed', message: string) =>
+  <Value>(
+    effect: Effect.Effect<Value, WorkspaceError | PlatformError>,
+  ): Effect.Effect<Value, WorkspaceError> =>
+    Effect.mapError(effect, workspaceFailure(category, message))

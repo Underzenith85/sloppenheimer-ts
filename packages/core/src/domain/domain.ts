@@ -40,10 +40,14 @@ export type Issue = Readonly<{
   updatedAt: Date | null
 }>
 
+/**
+ * One run's working directory. A workspace is allocated for a single dispatched run or repair
+ * attempt and is never entered by a second one, so it carries no reuse flag: every workspace a
+ * caller holds was created for the run holding it.
+ */
 export type Workspace = Readonly<{
   path: string
   key: string
-  createdNow: boolean
 }>
 
 export type TokenTotals = Readonly<{

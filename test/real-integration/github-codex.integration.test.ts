@@ -112,7 +112,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
       })
       const result = yield* runAgentOnHost({
         issue,
-        workspace: { path: workspacePath, key: identifier, createdNow: true },
+        workspace: { path: workspacePath, key: identifier },
         workspaceRoot,
         config,
         prompt: 'This is an integration smoke test. Reply briefly without changing files.',

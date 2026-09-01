@@ -31,7 +31,7 @@ describe('host Git source control', (): void => {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
       const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const workspace = { path: fixture.workspace, key: 'issue-165' }
       const prepared = yield* sourceControl.prepare(issue, workspace, {
         _tag: 'Normal',
         branchName: 'sloppenheimer/issue-165',
@@ -66,7 +66,7 @@ describe('host Git source control', (): void => {
       const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { path: fixture.workspace, key: 'issue-165' },
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
 
@@ -94,7 +94,7 @@ describe('host Git source control', (): void => {
       const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { path: fixture.workspace, key: 'issue-165' },
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
       // The shape a publication that committed and then failed to push leaves behind: nothing is
@@ -113,108 +113,12 @@ describe('host Git source control', (): void => {
     }),
   )
 
-  it.live('reads an already-published workspace as clean on a later preparation', () =>
-    Effect.gen(function* () {
-      const fixture = yield* host(makeGitRepository)
-      roots.push(fixture.root)
-      const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
-      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
-      const first = yield* sourceControl.prepare(issue, workspace, target)
-      yield* host(() =>
-        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
-      )
-      yield* sourceControl.publish(issue, first)
-
-      // What a restart does: a fresh preparation of the same workspace. The commit is on the
-      // remote now, so there is nothing retained — reading it as retained work would have every
-      // restart republishing what the last process already delivered.
-      const second = yield* sourceControl.prepare(issue, workspace, target)
-
-      expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
-    }),
-  )
-
-  it.live('reads a workspace the branch has moved past as clean, not as work to deliver', () =>
-    Effect.gen(function* () {
-      const fixture = yield* host(makeGitRepository)
-      roots.push(fixture.root)
-      const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
-      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
-      const first = yield* sourceControl.prepare(issue, workspace, target)
-      yield* host(() =>
-        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
-      )
-      yield* sourceControl.publish(issue, first)
-
-      // The host is down while the branch advances: somebody else pushes on top of what it
-      // delivered, and its workspace is left holding the older commit.
-      yield* host(() => git(fixture.seed, ['fetch', 'origin', 'sloppenheimer/issue-165']))
-      yield* host(() =>
-        git(fixture.seed, ['checkout', '-B', 'sloppenheimer/issue-165', 'FETCH_HEAD']),
-      )
-      yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
-      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
-
-      // Reading that as unpublished work would republish it under a lease that matches the newer
-      // remote head, and the intervening commit would be gone.
-      const second = yield* sourceControl.prepare(issue, workspace, target)
-
-      expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
-      expect(
-        yield* host(() =>
-          git(fixture.remote, ['log', '-1', '--pretty=%s', 'sloppenheimer/issue-165']),
-        ),
-      ).toBe('somebody else')
-    }),
-  )
-
-  it.live('keeps an earlier publication when a normal continuation publishes again', () =>
-    Effect.gen(function* () {
-      const fixture = yield* host(makeGitRepository)
-      roots.push(fixture.root)
-      const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
-      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
-      const first = yield* sourceControl.prepare(issue, workspace, target)
-      yield* host(() =>
-        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
-      )
-      const published = yield* sourceControl.publish(issue, first)
-
-      // The next turn of the same session, against a branch that now exists. Starting it from the
-      // protected base would drop the commit above, and publishing from there force-pushes that
-      // loss to the remote under a lease that matches the head it is about to delete.
-      const second = yield* sourceControl.prepare(issue, workspace, target)
-      yield* host(() => writeFile(join(fixture.workspace, 'follow-up.ts'), 'more\n'))
-      yield* sourceControl.publish(issue, second)
-
-      const firstHead = published._tag === 'Published' ? published.headSha : ''
-      expect(second.baselineSha).toBe(firstHead)
-      // The earlier publication is still on the branch, with the new one built on top of it rather
-      // than in place of it.
-      const branchHead = yield* host(() =>
-        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
-      )
-      expect(branchHead).not.toBe(firstHead)
-      expect(
-        yield* host(() =>
-          git(fixture.workspace, ['merge-base', '--is-ancestor', firstHead, 'HEAD']),
-        ),
-      ).toBe('')
-      expect(yield* host(() => git(fixture.workspace, ['log', '--pretty=%s']))).toContain(
-        'Host-owned publication',
-      )
-    }),
-  )
-
   it.live('settles a retry whose push the remote already accepted', () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
       const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const workspace = { path: fixture.workspace, key: 'issue-165' }
       const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
       const prepared = yield* sourceControl.prepare(issue, workspace, target)
       yield* host(() =>
@@ -243,7 +147,7 @@ describe('host Git source control', (): void => {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
       const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
+      const workspace = { path: fixture.workspace, key: 'issue-165' }
       const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
       const prepared = yield* sourceControl.prepare(issue, workspace, target)
       yield* host(() =>
@@ -274,91 +178,50 @@ describe('host Git source control', (): void => {
     }),
   )
 
-  it.live('refuses a branch that has diverged from the retained work, keeping both sides', () =>
+  it.live("continues a fresh workspace from the branch's published head", () =>
     Effect.gen(function* () {
       const fixture = yield* host(makeGitRepository)
       roots.push(fixture.root)
-      const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
-      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
-      yield* sourceControl.prepare(issue, workspace, target)
-      // A turn that committed and could not push: the work is in the workspace and on no remote.
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
       yield* host(() =>
-        commitFile(
-          fixture.workspace,
-          'implementation.ts',
-          'export const done = true\n',
-          'retained',
-        ),
+        commitFile(fixture.seed, 'attempt-one.ts', 'first attempt\n', 'first attempt'),
       )
-
-      // Meanwhile the branch is created from the same base and advanced by somebody else, so the
-      // two sides now hold commits neither has.
-      yield* host(() => git(fixture.seed, ['checkout', '-B', 'sloppenheimer/issue-165', 'main']))
-      yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
       yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
-
-      // Preserving this and refreshing the lease to the head just read would force-push the
-      // retained commit over the other one under a lease that trivially matches.
-      const failure = yield* Effect.flip(sourceControl.prepare(issue, workspace, target))
-
-      expect(failure).toMatchObject({
-        _tag: 'SourceControlError',
-        category: 'lease_conflict',
-        retryable: true,
-        worktreePreserved: true,
-      })
-      // Neither side is thrown away to make the other publishable.
-      expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
-        'retained',
+      const publishedHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
       )
-      expect(
-        yield* host(() =>
-          git(fixture.remote, ['log', '-1', '--pretty=%s', 'sloppenheimer/issue-165']),
-        ),
-      ).toBe('somebody else')
-    }),
-  )
-
-  it.live('resets a workspace the branch has moved past, rather than preserving a stale head', () =>
-    Effect.gen(function* () {
-      const fixture = yield* host(makeGitRepository)
-      roots.push(fixture.root)
       const sourceControl = sourceControlFor(fixture)
-      const workspace = { path: fixture.workspace, key: 'issue-165', createdNow: true }
-      const target = { _tag: 'Normal' as const, branchName: 'sloppenheimer/issue-165' }
-      const first = yield* sourceControl.prepare(issue, workspace, target)
-      yield* host(() =>
-        writeFile(join(fixture.workspace, 'implementation.ts'), 'export const done = true\n'),
-      )
-      yield* sourceControl.publish(issue, first)
-      yield* host(() => git(fixture.seed, ['fetch', 'origin', 'sloppenheimer/issue-165']))
-      yield* host(() =>
-        git(fixture.seed, ['checkout', '-B', 'sloppenheimer/issue-165', 'FETCH_HEAD']),
-      )
-      yield* host(() => commitFile(fixture.seed, 'later.ts', 'later\n', 'somebody else'))
-      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
 
-      // What the next agent receives: the branch as it now stands, not the commit the workspace
-      // was left on. Preserving the stale head would republish it as though it were new work;
-      // resetting to the protected base instead would drop the branch's own commits, and the next
-      // publication would force-push that back over them under a lease that matches.
-      const second = yield* sourceControl.prepare(issue, workspace, target)
+      // The workspace is empty, as every run's own workspace is. What carries the issue forward is
+      // therefore the published branch, not what a previous attempt left in a shared worktree.
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
+      )
+      expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(publishedHead)
+      expect(prepared.baselineSha).toBe(publishedHead)
+      expect(yield* host(() => readFile(join(fixture.workspace, 'attempt-one.ts'), 'utf8'))).toBe(
+        'first attempt\n',
+      )
 
+      yield* host(() => writeFile(join(fixture.workspace, 'attempt-two.ts'), 'second attempt\n'))
+      const published = yield* sourceControl.publish(issue, prepared)
+
+      // The second attempt builds on the first rather than resetting the branch over it. The
+      // published head is a rebase of both commits onto the protected base, so what is asserted is
+      // the work the branch carries, not the identity of a commit rebasing rewrites.
+      expect(published._tag).toBe('Published')
       const remoteHead = yield* host(() =>
         git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
       )
-      expect(second.baselineSha).toBe(remoteHead)
       expect(yield* host(() => git(fixture.workspace, ['rev-parse', 'HEAD']))).toBe(remoteHead)
-      // Both commits the branch carries are there — this run's own earlier publication, and the one
-      // that landed on top of it while the host was away.
-      expect(yield* host(() => readFile(join(fixture.workspace, 'later.ts'), 'utf8'))).toBe(
-        'later\n',
-      )
       expect(
-        yield* host(() => readFile(join(fixture.workspace, 'implementation.ts'), 'utf8')),
-      ).toBe('export const done = true\n')
-      expect(yield* sourceControl.inspect(second)).toMatchObject({ _tag: 'Clean' })
+        yield* host(() => git(fixture.workspace, ['show', `${remoteHead}:attempt-one.ts`])),
+      ).toBe('first attempt')
+      expect(
+        yield* host(() => git(fixture.workspace, ['show', `${remoteHead}:attempt-two.ts`])),
+      ).toBe('second attempt')
     }),
   )
 
@@ -369,7 +232,7 @@ describe('host Git source control', (): void => {
       const sourceControl = sourceControlFor(fixture)
       const prepared = yield* sourceControl.prepare(
         issue,
-        { path: fixture.workspace, key: 'issue-165', createdNow: true },
+        { path: fixture.workspace, key: 'issue-165' },
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
 

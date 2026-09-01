@@ -163,16 +163,6 @@ export const cancelRunning = (
         error: null,
       })
     }
-    if (!cleanupWorkspace) {
-      // The run was interrupted, so what is in the worktree is whatever it had reached: an edit it
-      // had not committed, a commit it had not pushed, or a publication cut off midway. Nothing
-      // here can tell which, and the fiber that would have settled the postflight is gone — so the
-      // workspace goes back to being unexamined rather than being handed to the next agent as if
-      // it were empty. The examination the next pass performs publishes what it finds.
-      yield* Ref.update(cells.state, (current) =>
-        Transitions.noteWorkspaceExamined(current, id, false),
-      )
-    }
     if (cleanupWorkspace) {
       // Removing the workspace destroys anything unpublished in it, so the delivery that would
       // have republished it goes in the same step rather than coming due against a directory that

@@ -5,7 +5,6 @@ import type { Workflow } from '../../config/workflow.js'
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
-import { examineWorkspaces, sweepRetainedDeliveries } from '../delivery-recovery.js'
 import { dispatch } from '../dispatch.js'
 import { reconcileHandoffs } from '../handoff-reconciliation.js'
 import { dispatchAdmission, sortIssues } from '../policy.js'
@@ -140,9 +139,6 @@ const dispatchCandidates = (
           ),
         ),
       )
-    // Every candidate this pass could dispatch is looked at first, which is what covers an issue
-    // that became active after the startup sweep: it arrives with whatever its workspace holds.
-    yield* examineWorkspaces(context, candidates)
     for (const issue of sortIssues(candidates)) {
       // Read afresh: a dispatch earlier in this pass may have taken the slot this one wanted.
       const current = yield* Ref.get(context.state)
@@ -170,24 +166,9 @@ export const poll = (
     yield* context.hydrateRestoredHandoffs
     yield* context.recoverMissingHandoffs
     performed.push('handoff_recovery')
-    // Before anything can put an agent on an issue: a workspace holding work a previous process
-    // never published is published from here, rather than being handed to a repair that would
-    // spend a turn and one of the repair budget rediscovering it. A workspace it could not read is
-    // recorded, and dispatch refuses that issue until a later pass manages to look.
-    const sweep = yield* sweepRetainedDeliveries(context)
-    if (sweep !== 'skipped') {
-      performed.push('delivery_recovery')
-    }
     dispatchValidationFailed = (yield* reloadWorkflow(context)) || dispatchValidationFailed
     performed.push('workflow_reload')
-    // A sweep that could not look at anything refuses repair dispatch as well: a repair is an agent
-    // put into a workspace, and this pass cannot say which workspaces hold work nobody published.
-    //
-    // Read after the reload rather than from the sweep's own answer: a reload that moved the
-    // workspace root has just invalidated everything the sweep above established and re-armed it,
-    // and reconciliation is the next thing that can put an agent into a workspace.
-    const swept = (yield* Ref.get(context.state)).startupSweepFinished
-    yield* reconcileHandoffs(context, !dispatchValidationFailed && sweep !== 'failed' && swept)
+    yield* reconcileHandoffs(context, !dispatchValidationFailed)
     performed.push('handoff_reconciliation')
     yield* context.reconcile(!dispatchValidationFailed)
     performed.push('issue_reconciliation')

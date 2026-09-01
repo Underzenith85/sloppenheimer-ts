@@ -19,7 +19,6 @@ import {
   refreshHandoffIssues,
   repairPermission,
   skipped,
-  workspaceUnexamined,
   type IssueRefresh,
   type RepairPermission,
 } from './handoff-eligibility.js'
@@ -155,17 +154,6 @@ const performRepair = (
     }
     const issue = repairIssue(handoff, permission.issue, baselineHeadSha, action.reason)
     const current = yield* Ref.get(context.state)
-    // A repair is an agent put into a workspace, and this path does not go through
-    // `dispatchAdmission`. A workspace nobody has conclusively looked at may hold work a previous
-    // process never published; the repair would carry it as its own and spend one of the budget
-    // rediscovering it, so it waits for a pass that manages to look.
-    if (workspaceUnexamined(current, id)) {
-      yield* stageHandoff(context, id, {
-        ...handoff,
-        reason: `Waiting to inspect the workspace for unpublished changes. ${action.reason}`,
-      })
-      return
-    }
     if (!hasSlot(current, issue, handoff.execution.workflow)) {
       if (Option.isNone(executionAttempt)) {
         yield* stageHandoff(context, id, awaitingSlot(handoff, action.reason))

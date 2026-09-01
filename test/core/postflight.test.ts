@@ -26,7 +26,7 @@ const issue: Issue = anIssue({
 })
 
 const prepared: PreparedRepository = {
-  workspace: { path: '/workspaces/issue-167', key: 'issue-167', createdNow: false },
+  workspace: { path: '/workspaces/issue-167', key: 'issue-167' },
   target: { _tag: 'Normal', branchName: 'sloppenheimer/issue-167' },
   baseBranch: 'main',
   baseSha: 'base-sha',

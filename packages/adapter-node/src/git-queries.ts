@@ -43,25 +43,6 @@ export const revParse = (
     value.trim(),
   )
 
-export const currentBranch = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(
-    Effect.map(
-      runGit(settings, operation, workspace.path, ['symbolic-ref', '--short', 'HEAD']),
-      (value) => value.trim(),
-    ),
-  )
-
-export const currentHead = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(revParse(settings, operation, workspace, 'HEAD'))
-
 export const status = (
   settings: GitSourceControlSettings,
   operation: GitOperation,

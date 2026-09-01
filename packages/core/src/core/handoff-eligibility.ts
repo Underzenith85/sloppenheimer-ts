@@ -13,17 +13,6 @@ import type { Issue, IssueId } from '../domain/domain.js'
 import { identifierIssueNumber, issueIsActive, issueIsRoutable, stateIsIn } from './policy.js'
 import type { HandoffEntry, RuntimeState } from './state.js'
 
-/**
- * Whether something looked at this issue's workspace for unpublished work and could not say.
- *
- * Deliberately not "has never been looked at": a handoff outlives its issue's presence in the
- * candidate fetch, and a repair that waited for an examination that will never come would never
- * happen. A pass that could not look at all refuses repair dispatch wholesale instead, through the
- * permission the poll already carries.
- */
-export const workspaceUnexamined = (state: RuntimeState, id: IssueId): boolean =>
-  state.unexaminedWorkspaces.has(id)
-
 /** Whether this handoff is the orchestrator's to act on at all in this pass. */
 export const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry): boolean => {
   // A retained delivery is work this pull request has not seen yet. Observing the head while it
