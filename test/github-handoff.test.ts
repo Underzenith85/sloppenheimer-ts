@@ -568,6 +568,62 @@ describe('GitHub pull request monitor', (): void => {
     }),
   )
 
+  it.effect(
+    'reports a mutation GitHub answered with an error rather than counting it resolved',
+    () =>
+      Effect.gen(function* () {
+        const mutations: string[] = []
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+            if (requestUrl(input).endsWith('/pulls/41')) {
+              return Response.json({ head: { sha: 'head-1' } })
+            }
+            if (typeof init?.body === 'string') {
+              mutations.push(init.body)
+            }
+            // GraphQL refuses with HTTP 200 and an errors array, which the transport reports as a
+            // perfectly good response.
+            return Response.json({ data: null, errors: [{ message: 'Resource not accessible' }] })
+          }),
+        )
+
+        const failure = yield* Effect.flip(
+          makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
+            'thread-1',
+            'thread-2',
+          ]),
+        )
+
+        expect(failure.message).toBe(
+          'GitHub did not resolve review thread thread-1: Resource not accessible',
+        )
+        // The first refusal stops the rest rather than reporting the whole batch as resolved.
+        expect(mutations).toHaveLength(1)
+      }),
+  )
+
+  it.effect('reports a mutation that resolved nothing', () =>
+    Effect.gen(function* () {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request): Promise<Response> =>
+          requestUrl(input).endsWith('/pulls/41')
+            ? Response.json({ head: { sha: 'head-1' } })
+            : Response.json({ data: { resolveReviewThread: null } }),
+        ),
+      )
+
+      const failure = yield* Effect.flip(
+        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', ['thread-1']),
+      )
+
+      expect(failure.message).toBe(
+        'GitHub did not resolve review thread thread-1: the mutation reported no resolved thread',
+      )
+    }),
+  )
+
   it.effect('refuses to resolve threads once the head has moved past the verdict', () =>
     Effect.gen(function* () {
       const bodies: string[] = []

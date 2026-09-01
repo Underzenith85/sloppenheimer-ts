@@ -24,6 +24,7 @@ import {
   decode,
   decodeChecks,
   decodeCodexReview,
+  decodeThreadResolution,
   decodeThreads,
   field,
   openPullRequestFields,
@@ -310,14 +311,17 @@ const resolveReviewThreads = (
     yield* Effect.forEach(
       threadIds,
       (threadId) =>
-        json(provider, graphqlUrl(provider), {
-          method: 'POST',
-          body: JSON.stringify({
-            query:
-              'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
-            variables: { threadId },
+        Effect.flatMap(
+          json(provider, graphqlUrl(provider), {
+            method: 'POST',
+            body: JSON.stringify({
+              query:
+                'mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}',
+              variables: { threadId },
+            }),
           }),
-        }),
+          (value) => decodeThreadResolution(threadId, value),
+        ),
       { concurrency: 1, discard: true },
     )
   })
