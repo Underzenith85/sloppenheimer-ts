@@ -49,6 +49,33 @@
   // a package-root module for never rejecting a compliant one.  Prefer flat layers.
   "overrides": [
     {
+      // Module and function size limits.  #211 chose these thresholds — 500 lines a file, 100 a
+      // function, counting blank lines and comments — and owns turning them on for the composition
+      // root and `packages/core`, where several modules are still over the bar and each takes an
+      // exemption naming the issue that removes it.
+      //
+      // This entry is the part that needs no exemption: #224 brought the three adapter packages
+      // under both limits by extraction, so the rule is on for them now and nothing there can drift
+      // back over without failing `pnpm check`.
+      //
+      // 100 rather than ESLint's 50, because `Effect.gen` pipelines are vertically expensive: each
+      // `Effect.matchEffect` branch costs six to eight lines of structure, so a 50-line bar flags
+      // idiomatic Effect code that is not complex.  Scoped to sources, never to `test/`, where
+      // `max-lines-per-function` would count a `describe` callback and flag suite structure.
+      "files": [
+        "packages/adapter-codex/src/**",
+        "packages/adapter-github/src/**",
+        "packages/adapter-node/src/**"
+      ],
+      "rules": {
+        "max-lines": ["error", { "max": 500, "skipBlankLines": false, "skipComments": false }],
+        "max-lines-per-function": [
+          "error",
+          { "max": 100, "skipBlankLines": false, "skipComments": false }
+        ]
+      }
+    },
+    {
       // The console's browser sources are classic scripts, not modules: they share one global
       // scope, and `tsconfig.browser.json` typechecks them as a single program.  A declaration
       // that another of those files uses is therefore not unused, but oxlint reads one file at a
