@@ -870,6 +870,39 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('lets go of a workspace whose provisioning failed and could not be retained', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const staging = join(root, '#lease-writes')
+      // The hook takes the staging directory away and leaves a file in its place before failing, so
+      // the retention write that follows cannot land and the record is left saying `held`.
+      const manager = yield* workspaceManager(
+        root,
+        hooks({
+          afterCreate: `rm -rf ${JSON.stringify(staging)} && printf x > ${JSON.stringify(staging)} && exit 1`,
+        }),
+      )
+      const identifier = 'GH-196'
+      const issuePath = join(root, workspaceKey(issueIdentifier(identifier)))
+
+      const failed = yield* Effect.either(retained(manager, identifier))
+
+      expect(Either.isLeft(failed)).toBe(true)
+      const record = readdirSync(issuePath).filter((entry) => entry.endsWith('.lease'))
+      expect(
+        JSON.parse(readFileSync(join(issuePath, record[0] ?? ''), 'utf8')) as WorkspaceLeaseRecord,
+      ).toMatchObject({ status: 'held' })
+
+      yield* host(() => rm(staging))
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // The record still names this process and still says `held`, and nothing observable about the
+      // owner contradicts it. What lets cleanup take it is that the acquisition let go of the hold
+      // on its way out, rather than leaving the workspace kept for the life of the host.
+      expect(existsSync(issuePath)).toBe(false)
+    }),
+  )
+
   it.live('leaves a claim that appeared while cleanup held the record aside', () =>
     Effect.gen(function* () {
       const root = makeRoot()

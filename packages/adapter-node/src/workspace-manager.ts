@@ -123,8 +123,12 @@ const retainLease = (
   paths: RunWorkspacePaths,
   run: WorkspaceRun,
   reason: string,
+  stillTheIssueDirectory: Effect.Effect<void, WorkspaceError | PlatformError>,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
+    // This runs after something unbounded — a provisioning hook that failed, or a run that ended —
+    // and the record is published by a rename, so the ground is confirmed again first.
+    yield* stillTheIssueDirectory
     const releasedAt = yield* currentInstant
     const existing = yield* readLease(fileSystem, paths.leasePath)
     const ours = Option.filter(existing, (lease) =>
@@ -187,7 +191,7 @@ const disposeOfWorkspace = (
       // inside it; cleanup takes it when the issue is finished with.
       return
     }
-    yield* retainLease(fileSystem, owner, paths, run, reason)
+    yield* retainLease(fileSystem, owner, paths, run, reason, stillTheIssueDirectory)
   })
 
 /** Releasing reports to nobody: the run it followed has already ended, so a failure is logged. */
@@ -281,13 +285,15 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
           )
           yield* stillTheIssueDirectory
           yield* publishRunClaim(fileSystem, paths, staged)
+          yield* stillTheIssueDirectory
           // From here this process has the lease, which is something it knows rather than something
           // it reads back: a release whose write does not land must not leave a record every later
-          // reading in this process takes for a live run.
+          // reading in this process takes for a live run. Only the acquisition that published the
+          // claim holds it — a duplicate dispatch that lost the link never had it to let go.
           holdLease(paths.leasePath)
           // Provisioning that does not finish keeps the workspace under the reason it failed for,
-          // rather than leaving a lease nobody holds.
-          yield* stillTheIssueDirectory
+          // rather than leaving a lease nobody holds. It also lets the hold go, because the release
+          // that would otherwise do it is only installed once the workspace has been handed over.
           yield* restore(
             provisionRunWorkspace(fileSystem, hooks, workspace, stillTheIssueDirectory),
           ).pipe(
@@ -295,8 +301,15 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
               Exit.isSuccess(exit)
                 ? Effect.void
                 : Effect.ignore(
-                    retainLease(fileSystem, owner, paths, run, provisioningReason(exit.cause)),
-                  ),
+                    retainLease(
+                      fileSystem,
+                      owner,
+                      paths,
+                      run,
+                      provisioningReason(exit.cause),
+                      stillTheIssueDirectory,
+                    ),
+                  ).pipe(Effect.zipRight(Effect.sync(() => dropLease(paths.leasePath)))),
             ),
           )
         }),

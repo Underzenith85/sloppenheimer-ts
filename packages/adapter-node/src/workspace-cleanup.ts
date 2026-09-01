@@ -103,44 +103,54 @@ const removeFreeRunWorkspace = (
   stagingPath: string,
   stillTheIssueDirectory: Effect.Effect<void, WorkspaceError | PlatformError>,
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
-  Effect.gen(function* () {
-    const leasePath = leasePathFor(runPath)
-    // Taking the record is a rename, which is as destructive as the rest: a name enumerated under
-    // one directory would otherwise be moved out of another.
-    yield* stillTheIssueDirectory
-    const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
-    // What was decided on and what was taken are two reads of one name, so the decision is made
-    // again on the record actually in hand.
-    if (Option.exists(taken, (record) => leaseIsLive(record.lease, leasePath))) {
-      const restored = yield* Option.match(taken, {
-        onNone: () => Effect.succeed(true),
-        onSome: (record) => returnLease(fileSystem, record, leasePath),
-      })
-      if (!restored) {
-        // An acquisition found the name free while it was aside and claimed it. Its record stands,
-        // and this one is gone: the workspace belongs to the run that took the name.
-        yield* logWarning('workspace lease was claimed while cleanup held it aside', {
-          action: 'workspace_cleanup',
-          outcome: 'skipped',
-          path: runPath,
+  Effect.scoped(
+    Effect.gen(function* () {
+      const leasePath = leasePathFor(runPath)
+      // Taking the record is a rename, which is as destructive as the rest: a name enumerated under
+      // one directory would otherwise be moved out of another.
+      yield* stillTheIssueDirectory
+      const taken = yield* takeLease(fileSystem, leasePath, stagingPath)
+      // What was decided on and what was taken are two reads of one name, so the decision is made
+      // again on the record actually in hand.
+      if (Option.exists(taken, (record) => leaseIsLive(record.lease, leasePath))) {
+        const restored = yield* Option.match(taken, {
+          onNone: () => Effect.succeed(true),
+          onSome: (record) => returnLease(fileSystem, record, leasePath),
         })
+        if (!restored) {
+          // An acquisition found the name free while it was aside and claimed it. Its record stands,
+          // and this one is gone: the workspace belongs to the run that took the name.
+          yield* logWarning('workspace lease was claimed while cleanup held it aside', {
+            action: 'workspace_cleanup',
+            outcome: 'skipped',
+            path: runPath,
+          })
+        }
+        return false
       }
-      return false
-    }
-    // Only the directory: the record was taken aside above, so this name is no longer this
-    // removal's to touch, and anything at it now was published by somebody else. Both steps resolve
-    // `runPath` afresh, so the directory it is under is confirmed to be the one that was inspected
-    // before each of them.
-    yield* stillTheIssueDirectory
-    yield* runBeforeRemove(fileSystem, hooks, runPath)
-    yield* stillTheIssueDirectory
-    yield* removeRunDirectory(fileSystem, runPath)
-    yield* Option.match(taken, {
-      onNone: () => Effect.void,
-      onSome: (record) => discardStagedLease(fileSystem, record.path),
-    })
-    return true
-  })
+      // Only the directory: the record was taken aside above, so this name is no longer this
+      // removal's to touch, and anything at it now was published by somebody else. Both steps resolve
+      // `runPath` afresh, so the directory it is under is confirmed to be the one that was inspected
+      // before each of them.
+      // The record now sits in staging, and the hook below is unbounded: what it could move aside is
+      // that directory as well as this one, so it is held still for as long as the record is there.
+      const stillTheStagingDirectory = yield* Option.match(taken, {
+        onNone: () =>
+          Effect.succeed(Effect.void as Effect.Effect<void, WorkspaceError | PlatformError>),
+        onSome: () => pinDirectory(fileSystem, stagingPath, 'lease staging path'),
+      })
+      yield* stillTheIssueDirectory
+      yield* runBeforeRemove(fileSystem, hooks, runPath)
+      yield* stillTheIssueDirectory
+      yield* removeRunDirectory(fileSystem, runPath)
+      yield* stillTheStagingDirectory
+      yield* Option.match(taken, {
+        onNone: () => Effect.void,
+        onSome: (record) => discardStagedLease(fileSystem, record.path),
+      })
+      return true
+    }),
+  )
 
 /**
  * Every run workspace of one issue that no live owner holds, removed; the run keys that were left
