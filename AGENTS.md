@@ -46,10 +46,12 @@ the design, not a starting point to negotiate down: `exactOptionalPropertyTypes`
   _subpath_ — `@sloppenheimer/core/support/logging.js` — because `verbatimModuleSyntax` and NodeNext
   resolution both require it. A package-root import is the bare specifier, `@sloppenheimer/core`,
   which is the `.` entry each manifest exports; appending `.js` there names nothing.
-- Prefer `type` aliases of `Readonly<{ ... }>` over `interface`. Classes appear only as
-  `Data.TaggedError` subclasses, `Context.Tag` subclasses, and two documented carve-outs
+- Prefer `type` aliases of `Readonly<{ ... }>` over `interface`. In the sources, classes appear
+  only as `Data.TaggedError` subclasses, `Context.Tag` subclasses, and two documented carve-outs
   (`CodexConnection`, which is a session's identity, and `JsonConversionError`, which is thrown and
-  caught inside one module). A new class needs a reason of that kind.
+  caught inside one module); a new one there needs a reason of that kind. `test/harness/` is not
+  under that rule — `FakeTracker` and `FakeWorkspaceProcess` are plain stateful classes
+  implementing a port, which is the harness pattern to follow.
 - Formatting is Oxfmt's: no semicolons, single quotes, 100-column width, trailing commas. Numeric
   literals over four digits take separators (`10_000`).
 - Names are whole words. `argumentsValue`, `secretEnvironmentNames`, `retirePrevious` — not `args`,
@@ -84,12 +86,14 @@ another effect.
 
 The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.TaggedError` classes —
 `WorkflowError`, `TrackerError`, `WorkspaceError`, `SourceControlError`, `AgentError`,
-`HandoffStoreError`, `ServerError`. Each carries a `category` union, a human `message`, an optional
-`cause`, and whatever the callers must branch on (`retryable` and `retryAfterMs` on `TrackerError`,
-`worktreePreserved` on `SourceControlError`).
+`HandoffStoreError`, `ServerError`. Each carries a human `message`, an optional `cause`, a
+discriminator its callers branch on, and whatever else they need to decide — `retryable` and
+`retryAfterMs` on `TrackerError`, `worktreePreserved` on `SourceControlError`. The discriminator is
+a `category` union in every one of them except `HandoffStoreError`, which distinguishes only the
+`operation: 'read' | 'write'` that failed.
 
-- Extend a `category` union before adding an error class. A new class is warranted only when a new
-  port needs a failure that no existing port's callers can handle.
+- Extend an existing discriminator before adding an error class. A new class is warranted only when
+  a new port needs a failure that no existing port's callers can handle.
 - In Effect-returning code the failure channel is how a function reports failure. Do not throw to
   signal one, do not reject a promise to signal one, and do not return a sentinel value (`null`,
   `-1`, an empty string) that a caller has to know to check.
@@ -179,9 +183,19 @@ below follows from that shape.
 - Records are `Readonly<{ ... }>`; collections are `readonly T[]`, `ReadonlyMap`, `ReadonlySet`. A
   mutable container in a state or domain record is a defect, not a shortcut.
 - Never mutate an argument. Persistent edits go through `packages/core/src/support/collections.ts`
-  (`withEntry`, `withoutEntry`, `withMember`, `withoutMember`, and the bounded variants), which
-  answer with a new collection and return the _original_ when nothing changed, so a no-op transition
-  preserves reference equality.
+  — `withEntry`, `withoutEntry`, `withMember`, `withoutMember`, and the bounded variants — each of
+  which answers with a new collection and leaves its argument untouched. The removal and membership
+  helpers go one step further and return the _original_ collection when there was nothing to remove
+  or the member was already there, so a no-op transition preserves reference equality and a caller
+  may compare by identity. `withEntry` does not: it always copies, because a write of the same value
+  is still a write.
+- Every write is one atomic `Ref.modify` or `Ref.update` of a transition function — never a read,
+  then a decision, then a write spread across several effects. Most of them happen in the mailbox
+  loop, which is what orders event-driven work, but the loop is not the only writer: a runner
+  callback buffers telemetry through `runFromCallback` in `core/dispatch.ts`, and `requestRefresh`
+  in `core/runtime.ts` registers its waiter before offering the tick. Each of those is a single
+  atomic transition, which is what lets it run beside the loop. (The doc comment on `RuntimeState`
+  still calls the loop the single writer; this section is the accurate one.)
 - Transitions are pure functions of the state and what happened, living in
   `packages/core/src/core/transitions/`. They take no fibers, ports, or clock. A transition whose
   caller must then act returns `[value, nextState]`, in the order `Ref.modify` consumes — which is
@@ -200,9 +214,9 @@ below follows from that shape.
   reload replaced under it, and the alternative is threading a `Ref` read through every callback. A
   new `MutableRef` needs that kind of justification in a comment.
 
-The single-writer mailbox is what makes this affordable, not a defence against a second writer that
-does not exist. Immutability is what makes the writes expressible as pure functions and lets a
-reader — the snapshot path above all — observe one coherent instant.
+Immutability is what makes those writes expressible as pure functions, and what lets a reader — the
+snapshot path above all — observe one coherent instant rather than a set of containers mid-edit.
+Adding a writer therefore means adding a transition, not reaching into the record.
 
 ### Time: read the clock, do not read the ambient one
 
@@ -217,12 +231,14 @@ never through `Date.now()` or `new Date()`.
   none of them acquires a `Clock` dependency.
 - `new Date(value)` stays where the instant comes from a value already in hand: a parsed wire
   timestamp, a restored snapshot, or a deadline derived from a recorded instant.
-- Delays and repetition are `Effect.sleep` and `Schedule`. A native timer appears only in
-  process-lifecycle code, where the thing being timed is a real child process or the host itself and
-  a test clock would not advance it: a hook deadline and its kill grace period in
-  `packages/adapter-node/src/workspace-hooks.ts` — inside `Effect.async`, which is the shape that
-  bridges such a callback — and the CLI's shutdown watchdog. Each says why. Nothing else schedules
-  with `setTimeout`.
+- Delays and repetition in orchestration are `Effect.sleep` and `Schedule`. Process-lifecycle code
+  is the standing exception, wrapped in an effect or not: where the thing being timed is a real
+  child process or the host itself, a test clock would never advance it, so a native timer is
+  correct there. That covers the hook deadline and its kill grace period in
+  `packages/adapter-node/src/workspace-hooks.ts` (inside `Effect.async`, the shape that bridges such
+  a callback), the force, bound, and reap timers of `terminateChildProcess` in
+  `packages/core/src/support/subprocess.ts`, and the CLI's shutdown watchdog. Each says why. Reach
+  for one only when a real process is what you are waiting on.
 - `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
 
 Tests therefore drive the whole orchestrator from `TestClock` — the clock `Effect.sleep` and
@@ -282,8 +298,10 @@ failure. There is no third option and no cast.
 - The orchestrator is a mailbox actor: an unbounded `Queue` of events, one loop applying pure
   transitions. Anything that wants to change state offers an event; a callback that cannot be an
   effect enqueues rather than writing.
-- Mutual exclusion is `Effect.Semaphore` (the cell takes one so two rebuilds cannot drop an
-  instance unreleased), not a boolean flag.
+- Mutual exclusion between fibers is `Effect.Semaphore` — the adapter cells and the Codex session's
+  lifecycle each take one, so two rebuilds cannot drop an instance unreleased. The scheduler's `tickQueued`
+  and `pollRunning` are not that: they are fields of the state record that coalesce work, reached
+  only through transitions.
 - Byte and line streams are `Stream`, so backpressure and interruption are the runtime's problem.
 - Write interruption-safe code: assume any effect can be interrupted between two steps, and put the
   cleanup in a finalizer.
