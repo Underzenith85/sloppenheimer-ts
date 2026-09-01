@@ -816,6 +816,51 @@ describe('run workspace allocation and leases', (): void => {
     }),
   )
 
+  it.live('leaves a claim that appeared while cleanup held the record aside', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const identifier = 'GH-193'
+      // A workspace whose owner is gone, so cleanup takes its record — and a hook that stands in
+      // for an acquisition arriving in that instant, publishing its own claim at the vacated name.
+      const claimed = encodeLease(
+        heldLease(
+          { identifier: issueIdentifier(identifier), runId: 9 },
+          'run-9-previoushost',
+          {
+            ...hostOwner,
+            hostId: 'the run that claimed the name',
+          },
+          new Date(),
+        ),
+      )
+      const published = join(root, 'the-claim')
+      const manager = yield* workspaceManager(
+        root,
+        hooks({
+          beforeRemove: `cp ${JSON.stringify(published)} "../$(basename "$PWD").lease"`,
+        }),
+      )
+      yield* host(() => mkdir(root, { recursive: true }))
+      yield* host(() => writeFile(published, claimed))
+      const workspace = yield* host(async () =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'a host that is gone',
+          processId: await exitedProcessId(),
+          startMarker: null,
+          namespace: hostOwner.namespace,
+        }),
+      )
+
+      yield* manager.remove(issueIdentifier(identifier))
+
+      // The record cleanup took is not the record at that name any more, and putting one back or
+      // taking one away would be acting on somebody else's claim. Only the directory it decided on
+      // goes; the claim stands.
+      expect(existsSync(workspace)).toBe(false)
+      expect(readFileSync(`${workspace}.lease`, 'utf8')).toBe(claimed)
+    }),
+  )
+
   it.live('takes the lease record before anything runs against the workspace', () =>
     Effect.gen(function* () {
       const root = makeRoot()

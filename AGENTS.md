@@ -604,8 +604,10 @@ lifecycle. This section is the architecture record for it; do not create a separ
   clock it introduced was a way for one host to delete another's work.
   Cleanup still fences what it does take. Deciding a workspace is free and removing it are two
   steps with an operator's `before_remove` hook between them, so the record is moved aside in one
-  rename first and the decision made again on what was actually taken; a lease that turns out to
-  still be held goes back where it was.
+  rename first and the decision made again on what was actually taken. Moving it aside frees the
+  name, so an acquisition may claim it in that instant: a record goes back by `link`, which refuses
+  an occupied name, and cleanup removes only the directory it decided on and the record it took —
+  never whatever now sits at that name.
 - **Retry continuity is (b): unpublished work does not carry over.** A run that published leaves
   nothing behind; every other ending — including a composition with no `SourceControlPort` to
   publish through — keeps its workspace as a retained recovery artifact naming why, which no later

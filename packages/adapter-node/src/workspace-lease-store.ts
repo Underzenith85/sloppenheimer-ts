@@ -273,9 +273,25 @@ export const takeLease = (
     return Option.map(record, (lease) => ({ lease, path: taken }))
   })
 
-/** Puts a taken record back, for a run that said its lease still stands while cleanup decided. */
+/**
+ * Puts a taken record back where it came from, and answers whether it went.
+ *
+ * The name was vacated to take it, so it may have been claimed since — by an acquisition that found
+ * it free, published its own record and started work. Putting this one back with a rename would
+ * replace that claim and leave two runs holding one workspace, so it goes back the way a claim is
+ * published: one `link`, which refuses a name that already exists. A record that cannot go back is
+ * discarded, because the workspace now belongs to whoever took the name.
+ */
 export const returnLease = (
   fileSystem: FileSystem.FileSystem,
   taken: TakenLease,
   leasePath: string,
-): Effect.Effect<void, PlatformError> => fileSystem.rename(taken.path, leasePath)
+): Effect.Effect<boolean, PlatformError> =>
+  fileSystem.link(taken.path, leasePath).pipe(
+    Effect.as(true),
+    Effect.catchIf(
+      (error) => error._tag === 'SystemError' && error.reason === 'AlreadyExists',
+      () => Effect.succeed(false),
+    ),
+    Effect.ensuring(discardStagedLease(fileSystem, taken.path)),
+  )

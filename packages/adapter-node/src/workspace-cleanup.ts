@@ -52,25 +52,30 @@ const runBeforeRemove = (
   })
 
 /** Takes away one run's directory and the lease record beside it, and nothing else. */
-const removeRunWorkspaceFiles = (
+const removeRunDirectory = (
   fileSystem: FileSystem.FileSystem,
   runPath: string,
 ): Effect.Effect<void, PlatformError> =>
-  Effect.gen(function* () {
-    yield* fileSystem.remove(runPath, { force: true, recursive: true })
-    yield* fileSystem.remove(leasePathFor(runPath), { force: true })
-  })
+  fileSystem.remove(runPath, { force: true, recursive: true })
 
-/** Removes one run's directory and the lease record beside it, hook first. */
+/**
+ * Removes one run's directory and the lease record beside it, hook first.
+ *
+ * This is the shape a run's own release takes, where the record at that name is still the run's
+ * own: nothing else can claim the name while it is there, and it is taken away last. Cleanup does
+ * not go through here — it has already moved the record aside, so the name is no longer its to
+ * remove.
+ */
 export const removeRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   runPath: string,
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
-  Effect.zipRight(
-    runBeforeRemove(fileSystem, hooks, runPath),
-    removeRunWorkspaceFiles(fileSystem, runPath),
-  )
+  Effect.gen(function* () {
+    yield* runBeforeRemove(fileSystem, hooks, runPath)
+    yield* removeRunDirectory(fileSystem, runPath)
+    yield* fileSystem.remove(leasePathFor(runPath), { force: true })
+  })
 
 /**
  * Removes one run workspace that no live owner holds, unless taking its record shows otherwise.
@@ -94,13 +99,25 @@ const removeFreeRunWorkspace = (
     // What was decided on and what was taken are two reads of one name, so the decision is made
     // again on the record actually in hand.
     if (Option.exists(taken, (record) => leaseIsLive(record.lease))) {
-      yield* Option.match(taken, {
-        onNone: () => Effect.void,
+      const restored = yield* Option.match(taken, {
+        onNone: () => Effect.succeed(true),
         onSome: (record) => returnLease(fileSystem, record, leasePath),
       })
+      if (!restored) {
+        // An acquisition found the name free while it was aside and claimed it. Its record stands,
+        // and this one is gone: the workspace belongs to the run that took the name.
+        yield* logWarning('workspace lease was claimed while cleanup held it aside', {
+          action: 'workspace_cleanup',
+          outcome: 'skipped',
+          path: runPath,
+        })
+      }
       return false
     }
-    yield* removeRunWorkspace(fileSystem, hooks, runPath)
+    // Only the directory: the record was taken aside above, so this name is no longer this
+    // removal's to touch, and anything at it now was published by somebody else.
+    yield* runBeforeRemove(fileSystem, hooks, runPath)
+    yield* removeRunDirectory(fileSystem, runPath)
     yield* Option.match(taken, {
       onNone: () => Effect.void,
       onSome: (record) => discardStagedLease(fileSystem, record.path),
