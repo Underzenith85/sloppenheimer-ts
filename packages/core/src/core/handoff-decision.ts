@@ -52,9 +52,19 @@ const decided = (
 })
 
 /**
+ * The merge states in which GitHub has finished deciding. `clean` is merge-ready, and `blocked` is
+ * a decided answer too: something the repository requires -- a review, or resolved conversations
+ * -- is outstanding, which is exactly the case retiring a thread has to be able to clear. Every
+ * other state is GitHub still working the answer out or reporting a signal against this head, and
+ * resolving on the strength of one would retire feedback ahead of the verdict.
+ */
+const settledMergeStates = new Set(['clean', 'blocked'])
+
+/**
  * Whether the head in hand has come back clean enough to retire the feedback the provider has
  * already marked outdated against it. The review gate has passed by the time this is asked, so
- * this states the rest of the condition: no conflict, no stale base, every check green.
+ * this states the rest of the condition: GitHub has settled, there is no conflict, and every check
+ * is green.
  *
  * It does not ask whether Sloppenheimer performed the repair. A pull request restored from the
  * store, or one a human pushed the fix for, carries retired threads that nobody else will clear,
@@ -62,8 +72,8 @@ const decided = (
  */
 const headIsVerified = (observation: PullRequestObservation): boolean =>
   observation.mergeable === true &&
-  observation.mergeState !== 'dirty' &&
-  observation.mergeState !== 'behind' &&
+  observation.mergeState !== null &&
+  settledMergeStates.has(observation.mergeState) &&
   observation.checks.every(
     (check) =>
       check.status === 'completed' &&

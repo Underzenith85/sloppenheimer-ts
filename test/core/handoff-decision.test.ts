@@ -499,6 +499,21 @@ describe('retiring feedback a head has superseded', (): void => {
     expect(decision.action).toMatchObject({ _tag: 'Repair' })
   })
 
+  it('waits while GitHub is still deciding, or reporting against the head', (): void => {
+    for (const mergeState of ['unknown', 'unstable']) {
+      const decision = observeHandoff(
+        clean({ repairHeadShas: ['head-1'] }),
+        // Every check run fetched is green, but GitHub has not settled: a signal it can see and
+        // this observation cannot must not cost a thread its resolution.
+        open({ codexReview: reviewed, reviewThreads: [retiredThread], mergeState }),
+        observedAt,
+      )
+
+      expect(decision.action).toEqual({ _tag: 'None' })
+      expect(decision.handoff.state).toBe('awaiting_checks')
+    }
+  })
+
   it('waits for a head that has not come back clean', (): void => {
     const decision = observeHandoff(
       clean({ repairHeadShas: ['head-1'] }),
