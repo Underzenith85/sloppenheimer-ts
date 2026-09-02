@@ -521,10 +521,97 @@ bounded per issue — 200 timeline events, 50 changed paths, 10 errors, 20 attem
 every retained string is cut to 240 characters. Truncation and dropped events are reported
 explicitly rather than being silent.
 
+## Durable high-fidelity agent trace
+
+The inspection above is a **compressed activity summary**, and everything about it is chosen for the
+question "is this host healthy": reasoning is a bare fact, messages are collapsed and cut, a command
+is its program word and an argument count, a tool call is a name and two byte counts, and only the
+last 200 events of an issue are kept, in memory.
+
+That shape cannot answer a different question — "what did this agent actually do" — so a second,
+optional record answers it. **It is off unless a workflow turns it on**, because of what it costs:
+
+```yaml
+trace:
+  enabled: true
+  field_limit_bytes: 16384
+  event_limit_bytes: 65536
+  session_limit_bytes: 8388608
+  total_limit_bytes: 268435456
+  retention_hours: 168
+```
+
+With it off, retention is exactly what it was before the trace existed: nothing is built, nothing is
+redacted, and nothing is written to disk.
+
+### The privacy line
+
+**Private chain-of-thought is never retained.** A runner that emits a _human-readable reasoning
+summary_ has that summary retained and labeled as a summary, so nothing downstream can present it as
+the model's reasoning. Encrypted or otherwise private reasoning content is not decoded, is not
+requested as a way of obtaining a disclosure, and has no representation in the record at all: an
+item that carries only private reasoning is recorded as the fact that reasoning happened, which is
+what the bounded timeline has always retained.
+
+### The privacy risk you are accepting
+
+Enabling this retains complete assistant and user messages, complete command lines with their stdout
+and stderr, complete tool arguments and results, and the patch text a runner supplied — on disk, for
+as long as retention keeps it.
+
+What guards it is the same redactor the timeline uses, applied at ingest rather than at
+serialization, so a retained value never held the secret: the configured secret environment values
+removed literally, credential shapes removed on sight (provider tokens, AWS key ids, JWTs, URL and
+query-string credentials), and every value under a secret-named key replaced without being read.
+
+**That redaction is heuristic, and it cannot guarantee removal of an arbitrary secret embedded in
+ordinary source text an agent happened to print.** A passphrase in a diff, a token pasted into a
+comment, a credential with no recognizable shape and no telling key: those survive. This is why
+capture is an explicit operator choice rather than a default, and the repository asserts the limit
+rather than only describing it — see `test/support/high-fidelity.test.ts`.
+
+### Bounds, and where the gaps are named
+
+Nothing is unbounded, and no cut is silent. Every field is subject to `field_limit_bytes` and every
+event to `event_limit_bytes`; a cut is reported as a truncation naming the field, what was kept and
+what there was. A run's segment stops at `session_limit_bytes` and records that it did so before it
+goes quiet. Retention evicts whole segments — oldest first, by age and then by total size — and
+records every eviction, so a gap is an answer rather than an absence. A line an interrupted write
+tore is counted as `malformed_records` and costs nothing that came before it.
+
+Traces live under `<workspace root>/.sloppenheimer/traces/`, beside the handoff and completion
+stores — inside the host's own data directory, never inside an agent worktree. A run appends to one
+JSON Lines segment, so an interrupted write can damage only the line it was writing.
+
+### Reading it
+
+Two resources, both **requiring the console token** (`X-Sloppenheimer-CSRF`) even though they are
+reads. Every other `GET` on this server is guarded by the loopback host check alone, which is right
+for a health summary and wrong for a session's complete output: requiring a token the console holds
+and no other origin can read is what stops a page the operator merely visited from fetching an
+agent's transcript from a host on their own machine.
+
+| Resource                                       | What it answers                                     |
+| ---------------------------------------------- | --------------------------------------------------- |
+| `GET /api/v1/agents/<identifier>/trace`        | one page of history, filtered and paged by sequence |
+| `GET /api/v1/agents/<identifier>/trace/stream` | the live tail, as server-sent events                |
+
+Paging is by sequence (`?after=`), not by offset: sequence is assigned at append and is monotonic
+per issue across runs and across restarts, so a page taken while the agent is still writing cannot
+skip or repeat a record. `?category=`, `?outcome=`, `?attempt=` and `?turn_id=` filter, and a value
+this host does not understand is refused by name rather than quietly narrowing the result. Every
+page carries the limits in force, the recorded evictions, and the count of unreadable records.
+
+The console renders it under the timeline, in a disclosure that fetches nothing until it is opened.
+Filters are sent to the host rather than applied in the browser; payloads — output, patches, tool
+arguments — reach the DOM only when their disclosure is expanded; redacted and truncated fields are
+marked on the record they belong to; and every value is written through `textContent`, so a
+`<script>` an agent printed renders as the characters it is.
+
 ## Configuration
 
 `WORKFLOW.md` has YAML front matter followed by a strict Liquid template. Supported sections are
-`tracker`, `polling`, `workspace`, `hooks`, `agent`, `codex`, `server`, and `handoff`. The current
+`tracker`, `polling`, `workspace`, `hooks`, `agent`, `codex`, `server`, `handoff`, and `trace`. The current
 tracker profile is GitHub Issues; the orchestration interfaces keep tracker and workspace concerns
 separate so additional profiles can be implemented without weakening the domain types.
 
@@ -558,6 +645,12 @@ rather than as the first exception a decoder happened to throw.
 | `runner.settings`             | `{}` (validated by the selected adapter) |
 | `server.port`                 | unset (no operator console)              |
 | `handoff.enabled`             | `true` (pull-request handoff composed)   |
+| `trace.enabled`               | `false` (no durable trace retained)      |
+| `trace.field_limit_bytes`     | `16384`                                  |
+| `trace.event_limit_bytes`     | `65536`                                  |
+| `trace.session_limit_bytes`   | `8388608`                                |
+| `trace.total_limit_bytes`     | `268435456`                              |
+| `trace.retention_hours`       | `168` (`0` retains until size evicts)    |
 
 ### Selecting an agent runner
 

@@ -88,12 +88,14 @@ another effect.
 
 The error vocabulary lives in `packages/core/src/domain/errors.ts` as `Data.TaggedError` classes —
 `WorkflowError`, `TrackerError`, `WorkspaceError`, `SourceControlError`, `AgentError`,
-`HandoffStoreError`, `CompletionStoreError`, `ServerError`. Each carries a human `message`, an
-optional `cause`, a
+`HandoffStoreError`, `CompletionStoreError`, `TraceStoreError`, `ServerError`. Each carries a human
+`message`, an optional `cause`, a
 discriminator its callers branch on, and whatever else they need to decide — `retryable` and
 `retryAfterMs` on `TrackerError`, `worktreePreserved` on `SourceControlError`. The discriminator is
-a `category` union in every one of them except the two store errors, `HandoffStoreError` and
-`CompletionStoreError`, which distinguish only the `operation: 'read' | 'write'` that failed.
+a `category` union in every one of them except the three store errors, `HandoffStoreError`,
+`CompletionStoreError` and `TraceStoreError`, which distinguish only the operation that failed —
+`'read' | 'write'` for the first two, and `'read' | 'write' | 'prune'` for the trace, where evicting
+a segment is neither reading a document nor writing one.
 
 - Extend an existing discriminator before adding an error class. A new class is warranted only when
   a new port needs a failure that no existing port's callers can handle.
@@ -683,6 +685,86 @@ repair agent that had achieved nothing.
 - The run entry is the claim, the phase and the agent session in one record, which is why the stall
   timer has had to be taught about the postflight. Splitting it is
   [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
+
+## Architecture record: the durable agent trace
+
+Accepted 2026-09-02, implementing [#254](https://github.com/Underzenith85/sloppenheimer-ts/issues/254).
+This section is the architecture record for it; do not create a separate ADR.
+
+The operator timeline in `telemetry/` is a **compressed activity summary**, and every one of its
+reductions is deliberate: reasoning is a bare fact, a message is collapsed and cut to 240
+characters, a command is its program word and an argument count, a tool call is a name and two byte
+counts, a patch is a path and two line counts, and only the last 200 events of an issue are kept, in
+memory. That is the right shape for "is this host healthy". It cannot answer "what did this agent
+actually do", and #254 is the record that the second question deserves a second answer rather than a
+loosening of the first.
+
+- **Two readings, one pass.** The runner's adapter produces both from one decoded message: the
+  bounded `AgentEventPayload` the timeline retains, and the complete `TraceObservation` the trace
+  records, and both travel on one `AgentEvent`. Two passes over one message could disagree about
+  what it said, and a consumer would have no way to tell which was right.
+- **The trace is not in the snapshot.** `RuntimeState` is the value every reader copies, and its
+  boundedness is what the snapshot promises. A session's complete messages, command output and tool
+  payloads go to disk instead, and the store keeps one small record per live run in a `Ref` beside
+  the two persisted stores. Do not move a trace into the state to make a reader simpler.
+- **Capture is off unless a workflow turns it on**, and with it off nothing is built, redacted or
+  written — retention is exactly what it was before the trace existed. The `TraceCapture` travels on
+  the launch rather than being read from configuration by an adapter, so a runner cannot capture at
+  a fidelity the operator did not ask for.
+- **Observable only, and reasoning summaries are labeled.** A human-readable reasoning summary a
+  runner emits is retained as `reasoning_summary`. Encrypted or otherwise private reasoning content
+  is never decoded, never requested as a disclosure mechanism, and has no representation in the
+  vocabulary; an item carrying only private reasoning records the _fact_ that reasoning happened.
+  The Codex schema does not name the encrypted field, which is what makes retaining it impossible
+  rather than merely forbidden. Keep it that way.
+- **Bounded, never summarized.** Whitespace, arguments, stdout, stderr and tool payloads survive as
+  they arrived; what bounds them is a byte ceiling per field and per event, plus a per-run segment
+  ceiling and a total retention bound. Every cut is a `FieldTruncation` on the event that carries
+  it, every eviction is recorded beside the segments, and every unreadable line is counted. A gap an
+  operator cannot name is worse than no trace, because it reads as complete.
+- **Redaction at ingest, as everywhere else.** `support/high-fidelity.ts` is
+  `support/redaction.ts` with the summarizing removed and byte ceilings put in its place. It is
+  heuristic by construction: it removes the configured secret values and the credential shapes it
+  recognizes, and it cannot remove an arbitrary secret sitting in ordinary source text the agent
+  printed. `README.md` states that limit to operators and
+  `test/support/high-fidelity.test.ts` asserts it, so the statement cannot quietly stop being true.
+- **Append-only JSON Lines, one segment per run.** A store rewritten whole would make the cost of an
+  event grow with the session and would lose everything before an interrupted rewrite. Appending one
+  line means an interruption can damage only the line it was writing; a torn tail is counted on read
+  rather than failing the page that found it. A segment is named `<startedAt>-<runId>.jsonl` so
+  retention can order and age it from the name alone, with no foreign mtime compared against this
+  host's clock.
+- **A segment stays writable after its worker exits.** The retry the host schedules, the
+  cancellation it records and the pull-request outcome reconciliation observes are facts about
+  _that_ run and arrive after it. Closing on exit put them in no segment at all. The map is bounded
+  by issue instead (`retainedTraceRuns`), and an entry is replaced when the issue's next run opens.
+- **Sequence is monotonic per issue, across runs and across restarts.** A run opening a segment
+  reads the last sequence this host wrote for the issue, which is what makes "reconstructable in
+  order" true of a host that was restarted in the middle. Paging is by sequence rather than by
+  offset for the same reason: a page taken while the run is still writing cannot skip or repeat.
+- **Every path is derived, never taken.** Both segments of a trace path go through `workspaceKey`
+  and `containedWorkspacePath` — the workspace manager's own containment — because an identifier is
+  a tracker's spelling and reaches this host from a place an agent can influence.
+- **A trace never disturbs a run.** Every failure in the store is logged and dropped. A trace is
+  evidence about work, never part of it, and a disk that filled must not fail the agent that filled
+  it.
+- **The trace resources require the console token, on a read.** Every other `GET` on the operator
+  API is guarded by the loopback host check alone, which is right for a health summary and wrong for
+  a session's complete output. This is a deliberate departure from the CSRF convention: what it buys
+  is that a page the operator merely visited cannot fetch an agent's transcript from a host running
+  on their own machine. It is also why the live tail is read off a `fetch` body rather than through
+  `EventSource`, which cannot send a header — moving the token into a query string would put it in
+  every log and history the browser keeps.
+- **Runner-neutral vocabulary in `packages/core`, protocol decoding in the adapter.** `domain/trace.ts`
+  names no backend; `packages/adapter-codex/src/trace.ts` and `trace-file-changes.ts` decode Codex's
+  wire shapes, sharing the entry walk and the change-kind vocabulary with the bounded reading so the
+  two cannot disagree about which files an item named.
+
+This is independent of [#248](https://github.com/Underzenith85/sloppenheimer-ts/issues/248): that
+owns host operational observability — spans, metrics, propagated log context, telemetry-export
+health — and this owns product-visible agent activity. The trace carries stable session, thread,
+turn, attempt and sequence identifiers for #248 to correlate against, and requires no Effect logger
+or tracing exporter to work.
 
 ## Architecture record: agent runners
 
