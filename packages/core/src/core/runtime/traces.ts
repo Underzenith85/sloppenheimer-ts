@@ -20,7 +20,7 @@ import {
   traceRoot,
   type TraceSegment,
 } from '../trace-store.js'
-import type { EffectiveWorkflow } from '../state.js'
+import type { TraceConfig } from '../../config/workflow.js'
 import { readTracePage } from './trace-reader.js'
 import type { TraceIdentity, TraceOpenRun, TraceRecorder, TraceStore } from './trace-types.js'
 
@@ -47,17 +47,19 @@ import type { TraceIdentity, TraceOpenRun, TraceRecorder, TraceStore } from './t
  */
 
 /**
- * Binds the trace store to the workflow the orchestrator adopted.
+ * Binds the trace store to the configuration the orchestrator adopted.
+ *
+ * It takes the trace section rather than the whole workflow because that is all it reads, which
+ * also lets the store be exercised without standing up an effective workflow around it.
  *
  * The filesystem is bound once, as it is for the other two stores: the runtime hands its own
  * operations out as effects for a callback to run, and those carry no context of their own.
  */
 export const openTraceStore = (
-  bootstrap: EffectiveWorkflow,
+  trace: TraceConfig,
 ): Effect.Effect<TraceStore, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem
-    const trace = bootstrap.workflow.config.trace
     return {
       enabled: trace.enabled,
       limits: trace.limits,
@@ -159,7 +161,7 @@ export const openTraceRun = (
         bytes: 0,
         limitReached: false,
       })
-      return next
+      return withinRetention(next)
     })
     const active = yield* Ref.get(store.open)
     yield* dropped<readonly TraceEviction[]>(
@@ -176,16 +178,33 @@ export const openTraceRun = (
     )
   })
 
-/** Forgets a run's segment. The file stays; only the in-memory bookkeeping goes. */
-export const closeTraceRun = (store: TraceStore, issueId: IssueId): Effect.Effect<void> =>
-  Ref.update(store.open, (current) => {
-    if (!current.has(issueId)) {
-      return current
-    }
-    const next = new Map(current)
-    next.delete(issueId)
-    return next
-  })
+/**
+ * How many issues' segments stay writable at once.
+ *
+ * A segment is not closed when its run ends, because the run's story is not over when the worker
+ * exits: the retry the host schedules, the cancellation it records and the pull-request outcome it
+ * observes are all facts about *that* run, and they arrive afterwards. Closing on exit put them in
+ * no segment at all.
+ *
+ * What bounds the map instead is this: an issue's entry is replaced when its next run opens, and
+ * the oldest entries fall off beyond this many issues. An issue evicted that way loses only the
+ * host facts that arrive after it — everything already written stays on disk and still pages.
+ */
+export const retainedTraceRuns = 64
+
+/** The entries to keep, newest run first, so an old issue cannot hold a segment open forever. */
+const withinRetention = (
+  current: ReadonlyMap<IssueId, TraceOpenRun>,
+): ReadonlyMap<IssueId, TraceOpenRun> => {
+  if (current.size <= retainedTraceRuns) {
+    return current
+  }
+  return new Map(
+    [...current.entries()]
+      .sort(([, left], [, right]) => right.segment.startedAtMs - left.segment.startedAtMs)
+      .slice(0, retainedTraceRuns),
+  )
+}
 
 /**
  * The event a run's next record becomes, and the bookkeeping it advances — as one atomic step, so
@@ -308,7 +327,6 @@ export const traceRecorder = (
       Effect.flatMap((root) => openTraceRun(store, root, issue, runId, attempt)),
     ),
   lifecycle: (issueId, phase, detail) => traceRunLifecycle(store, issueId, phase, detail),
-  closeRun: (issueId) => closeTraceRun(store, issueId),
   record: (issueId, event, observation, identity) =>
     recordTrace(store, issueId, event, observation, identity),
   page: (identifier, query) =>

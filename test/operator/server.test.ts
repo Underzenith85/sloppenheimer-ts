@@ -897,6 +897,149 @@ describe('operator server', (): void => {
     )
   })
 
+  /**
+   * The trace resources, and the one place this API departs from its own CSRF convention.
+   *
+   * Every other GET here is guarded by the loopback host check alone. A trace is not a health
+   * summary — it carries complete agent output — so it is served only to a caller that can present
+   * the token this server issued into its own HTML.
+   */
+  it.live('refuses a trace read that cannot present the console token', () =>
+    withServer(makeBackend(), async (url) => {
+      const identifier = encodeURIComponent('example/sloppenheimer#18')
+      const page = await fetch(url)
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(await page.text())?.[1] ?? ''
+
+      const anonymous = await fetch(`${url}/api/v1/agents/${identifier}/trace`)
+      expect(anonymous.status).toBe(403)
+      expect(await anonymous.json()).toMatchObject({ error: { code: 'invalid_csrf_token' } })
+
+      const wrongToken = await fetch(`${url}/api/v1/agents/${identifier}/trace`, {
+        headers: { 'X-Sloppenheimer-CSRF': `${token}x` },
+      })
+      expect(wrongToken.status).toBe(403)
+
+      const streamed = await fetch(`${url}/api/v1/agents/${identifier}/trace/stream`)
+      expect(streamed.status).toBe(403)
+
+      const allowed = await fetch(`${url}/api/v1/agents/${identifier}/trace`, {
+        headers: { 'X-Sloppenheimer-CSRF': token },
+      })
+      expect(allowed.status).toBe(200)
+    }),
+  )
+
+  it.live('pages the trace by sequence and publishes the limits beside it', () =>
+    withServer(makeBackend(), async (url) => {
+      const identifier = encodeURIComponent('example/sloppenheimer#18')
+      const page = await fetch(url)
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(await page.text())?.[1] ?? ''
+      const headers = { 'X-Sloppenheimer-CSRF': token }
+
+      const first = await fetch(`${url}/api/v1/agents/${identifier}/trace?limit=2`, { headers })
+      const firstBody = (await first.json()) as {
+        version: string
+        enabled: boolean
+        events: readonly { sequence: number }[]
+        next_after: number
+        has_more: boolean
+        limits: Record<string, number>
+      }
+      expect(first.status).toBe(200)
+      expect(firstBody.version).toBe('v1')
+      expect(firstBody.enabled).toBe(true)
+      expect(firstBody.events.map((event) => event.sequence)).toEqual([1, 2])
+      expect(firstBody.has_more).toBe(true)
+      expect(firstBody.limits['field_limit_bytes']).toBeGreaterThan(0)
+
+      const second = await fetch(
+        `${url}/api/v1/agents/${identifier}/trace?after=${String(firstBody.next_after)}`,
+        { headers },
+      )
+      const secondBody = (await second.json()) as { events: readonly { sequence: number }[] }
+      expect(secondBody.events.map((event) => event.sequence)).toEqual([3])
+    }),
+  )
+
+  it.live('filters by category and refuses a filter it does not understand', () =>
+    withServer(makeBackend(), async (url) => {
+      const identifier = encodeURIComponent('example/sloppenheimer#18')
+      const page = await fetch(url)
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(await page.text())?.[1] ?? ''
+      const headers = { 'X-Sloppenheimer-CSRF': token }
+
+      const filtered = await fetch(`${url}/api/v1/agents/${identifier}/trace?category=command`, {
+        headers,
+      })
+      const body = (await filtered.json()) as { events: readonly { category: string }[] }
+      expect(body.events.map((event) => event.category)).toEqual(['command'])
+
+      const refused = await fetch(`${url}/api/v1/agents/${identifier}/trace?category=telepathy`, {
+        headers,
+      })
+      expect(refused.status).toBe(400)
+      expect(await refused.json()).toMatchObject({ error: { code: 'invalid_trace_query' } })
+
+      const badCursor = await fetch(`${url}/api/v1/agents/${identifier}/trace?after=soon`, {
+        headers,
+      })
+      expect(badCursor.status).toBe(400)
+    }),
+  )
+
+  it.live('publishes agent-authored payloads as data, never as markup', () =>
+    withServer(makeBackend(), async (url) => {
+      const identifier = encodeURIComponent('example/sloppenheimer#18')
+      const page = await fetch(url)
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(await page.text())?.[1] ?? ''
+      const response = await fetch(`${url}/api/v1/agents/${identifier}/trace`, {
+        headers: { 'X-Sloppenheimer-CSRF': token },
+      })
+
+      expect(response.headers.get('content-type')).toContain('application/json')
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+      const body = await response.text()
+      // The script tag survives verbatim, which is what a faithful trace owes an operator. What
+      // makes it inert is the two headers above — a JSON document a browser will not sniff into
+      // markup — and the console, which puts every value in through `textContent`.
+      expect(JSON.parse(body)).toMatchObject({
+        events: [{}, { body: { stdout: '<script>alert(1)</script>' } }, {}],
+      })
+    }),
+  )
+
+  it.live('answers the live tail as an event stream that opens before anything happens', () =>
+    withServer(makeBackend(), async (url) => {
+      const identifier = encodeURIComponent('example/sloppenheimer#18')
+      const page = await fetch(url)
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(await page.text())?.[1] ?? ''
+      const response = await fetch(`${url}/api/v1/agents/${identifier}/trace/stream`, {
+        headers: { 'X-Sloppenheimer-CSRF': token },
+      })
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toContain('text/event-stream')
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      // The fake backend's tail carries no records, so the whole body is the opening comment.
+      expect(await response.text()).toBe(': open\n\n')
+    }),
+  )
+
+  it.live('refuses a write method on a trace resource', () =>
+    withServer(makeBackend(), async (url) => {
+      const identifier = encodeURIComponent('example/sloppenheimer#18')
+      const page = await fetch(url)
+      const token = /name="csrf-token" content="([^"]+)"/u.exec(await page.text())?.[1] ?? ''
+      const response = await fetch(`${url}/api/v1/agents/${identifier}/trace`, {
+        method: 'POST',
+        headers: { 'X-Sloppenheimer-CSRF': token },
+      })
+
+      expect(response.status).toBe(405)
+      expect(response.headers.get('allow')).toBe('GET')
+    }),
+  )
+
   it.live('stops accepting connections when its scope closes', () =>
     Effect.gen(function* () {
       let url = ''

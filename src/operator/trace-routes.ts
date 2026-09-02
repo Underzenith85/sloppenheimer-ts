@@ -40,12 +40,8 @@ const eventFrame = (id: number, payload: unknown): Uint8Array =>
  */
 const openFrame = encoder.encode(': open\n\n')
 
-const streamHeaders = {
-  'Content-Type': 'text/event-stream; charset=utf-8',
-  'Cache-Control': 'no-store',
-  // The stream is chunked and incremental; a proxy that buffered it would defeat the point.
-  'X-Accel-Buffering': 'no',
-} as const
+// The stream is chunked and incremental; a proxy that buffered it would defeat the point.
+const streamHeaders = { 'X-Accel-Buffering': 'no' } as const
 
 export type TraceRouteContext = HttpRouter.RouteContext | HttpServerRequest.HttpServerRequest
 
@@ -113,8 +109,8 @@ export const traceStreamRoute = (
       const records = Stream.map(backend.agentTraceStream(identifier), (event) =>
         eventFrame(event.sequence, publishTraceEvent(event)),
       )
-      return HttpServerResponse.stream(Stream.concat(Stream.make(openFrame), records)).pipe(
-        HttpServerResponse.setHeaders(streamHeaders),
-      )
+      return HttpServerResponse.stream(Stream.concat(Stream.make(openFrame), records), {
+        contentType: 'text/event-stream; charset=utf-8',
+      }).pipe(HttpServerResponse.setHeaders(streamHeaders))
     }),
   )

@@ -35,14 +35,14 @@ export const onWorkerExited = (
     yield* Ref.update(context.state, (current) =>
       Transitions.accountEndedRun(current, settled, endedAt),
     )
-    // The last record of the run's own segment, and then the segment is forgotten. A retry that
-    // follows opens its own, and the sequence continues rather than restarting.
+    // The run's own end, recorded before the decisions that follow it. The segment stays writable:
+    // the retry this handler may schedule, and the pull-request outcome reconciliation observes
+    // later, are facts about this run and belong in its trace rather than nowhere.
     yield* context.traces.lifecycle(
       event.issueId,
       'run_ended',
       event.outcome === 'normal' ? null : event.error,
     )
-    yield* context.traces.closeRun(event.issueId)
     if (settled.sessionId !== null) {
       yield* (event.outcome === 'normal' ? logInfo : logError)(
         event.outcome === 'normal'

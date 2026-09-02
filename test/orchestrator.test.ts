@@ -1,5 +1,5 @@
 import type { FileSystem } from '@effect/platform'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
@@ -65,6 +65,7 @@ import {
   retainedCompletedDetails,
   sortIssues,
   startOrchestrator,
+  traceQuery,
   type AgentDetailLookup,
   type CompletedSnapshot,
   type OrchestratorControl,
@@ -99,6 +100,7 @@ import {
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
 import { workflowDefaults, type Workflow } from '@sloppenheimer/core/config/workflow.js'
+import type { TraceObservation } from '@sloppenheimer/core/domain/trace.js'
 import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
@@ -8464,6 +8466,152 @@ describe('session telemetry accounting', (): void => {
           })
         }),
       )
+    }),
+  )
+})
+
+/**
+ * The durable trace, from the orchestrator's own wiring rather than from the recorder directly.
+ *
+ * What is asserted is the acceptance criterion the recorder alone cannot answer: that everything an
+ * operator has to reconstruct — the run starting, what the agent reported, and the host's own facts
+ * about the retry that followed — reaches one ordered trace for the issue, through the handlers that
+ * actually run.
+ */
+const tracedMessage = (text: string): TraceObservation => ({
+  category: 'message',
+  outcome: 'succeeded',
+  body: { kind: 'message', role: 'assistant', text },
+  redacted: false,
+  truncations: [],
+})
+
+describe('the durable agent trace', (): void => {
+  it.scoped('records a run, what it reported, and the retry that followed, in order', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-trace-')
+      const traced: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          trace: { enabled: true, limits: workflowDefaults.trace.limits },
+        },
+      }
+      const issue = makeIssue('example/sloppenheimer#77', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(traced, () => [issue])
+      const launched = yield* Deferred.make<void>()
+      const proceed = yield* Deferred.make<void>()
+      const finish = yield* Deferred.make<void>()
+      const ports: TestPorts = {
+        ...harness.ports,
+        // One turn that reports and then fails, which is what puts a host-recorded retry into the
+        // same trace as the agent's own records. The retry itself never comes due: its timer is on
+        // the test clock, and nothing here advances it. Reporting waits for `proceed`, because a
+        // report that raced the run being recorded belongs to no attempt and is dropped — the same
+        // rule the bounded timeline follows.
+        runAgent: (launch) =>
+          Deferred.succeed(launched, undefined).pipe(
+            Effect.zipRight(Deferred.await(proceed)),
+            Effect.zipRight(
+              Effect.sync(() => {
+                launch.onEvent(
+                  makeAgentEvent({
+                    event: auroraEvents.bootstrap,
+                    lifecycle: { phase: 'session_started' },
+                    trace: tracedMessage('opening'),
+                  }),
+                )
+                launch.onEvent(
+                  makeAgentEvent({ event: 'item/completed', trace: tracedMessage('working') }),
+                )
+              }),
+            ),
+            Effect.zipRight(Deferred.await(finish)),
+            Effect.zipRight(
+              Effect.fail(new AgentError({ category: 'turn_failed', message: 'turn failed' })),
+            ),
+          ),
+      }
+
+      const page = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* Deferred.await(launched)
+          while ((yield* control.snapshot).running.length === 0) {
+            yield* Effect.yieldNow()
+          }
+          yield* Deferred.succeed(proceed, undefined)
+          // Both reports are recorded before the turn is allowed to fail. A report and a worker
+          // exit are separate fibers, and a report the exit overtook belongs to a run the
+          // orchestrator has already ended — which is the rule, not the thing under test here.
+          for (let round = 0; round < 200; round += 1) {
+            const recorded = yield* control.agentTrace(issue.identifier, traceQuery())
+            if (recorded.events.filter((event) => event.category === 'message').length === 2) {
+              break
+            }
+            yield* Effect.yieldNow()
+          }
+          yield* Deferred.succeed(finish, undefined)
+          // The retry is waited for in the trace rather than in the snapshot: the entry is in the
+          // state before its record has reached the disk, so a snapshot that shows the retry is not
+          // yet evidence that the trace carries it.
+          for (let round = 0; round < 400; round += 1) {
+            const recorded = yield* control.agentTrace(issue.identifier, traceQuery())
+            if (recorded.events.some((event) => event.category === 'retry')) {
+              return recorded
+            }
+            yield* Effect.yieldNow()
+          }
+          return yield* control.agentTrace(issue.identifier, traceQuery())
+        }),
+      )
+
+      expect(page.enabled).toBe(true)
+      // Dense and ascending: nothing is missing between the run opening and the retry.
+      expect(page.events.map((event) => event.sequence)).toEqual(
+        page.events.map((_event, index) => index + 1),
+      )
+      const categories = page.events.map((event) => event.category)
+      expect(categories[0]).toBe('lifecycle')
+      expect(page.events[0]?.body).toMatchObject({ kind: 'lifecycle', phase: 'run_started' })
+      expect(page.events.filter((event) => event.category === 'message')).toHaveLength(2)
+      const retry = page.events.find((event) => event.category === 'retry')
+      expect(retry?.body).toMatchObject({ kind: 'retry', attempt: 1 })
+      // The host's own facts carry no thread or turn: they are not messages on the agent protocol.
+      expect(retry?.turnId).toBeNull()
+      expect(categories.at(-1)).toBe('retry')
+      expect(page.malformedRecords).toBe(0)
+    }),
+  )
+
+  it.scoped('retains nothing at all while capture is off, which is the default', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-trace-off-')
+      const untraced: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = makeIssue('example/sloppenheimer#78', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(untraced, () => [issue])
+
+      const page = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+          yield* harness.awaitAgentRun
+          harness.emitAgentEvent(makeAgentEvent({ trace: tracedMessage('ignored') }))
+          yield* Effect.yieldNow()
+          yield* Effect.yieldNow()
+          return yield* control.agentTrace(issue.identifier, traceQuery())
+        }),
+      )
+
+      expect(page.enabled).toBe(false)
+      expect(page.events).toEqual([])
+      const traces = yield* Effect.promise(() =>
+        readdir(join(workspaceRoot, '.sloppenheimer', 'traces')).then(
+          (entries: readonly string[]) => entries,
+          () => null,
+        ),
+      )
+      expect(traces).toBeNull()
     }),
   )
 })

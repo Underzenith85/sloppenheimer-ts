@@ -124,7 +124,7 @@ export const startOrchestratorRuntime = (
     yield* cleanupTerminalWorkspaces(bootstrapWorkflow)
 
     const opened = yield* openStores(bootstrapWorkflow)
-    const traces = yield* openTraceStore(bootstrapWorkflow)
+    const traces = yield* openTraceStore(bootstrapWorkflow.workflow.config.trace)
     const cells: RuntimeCells = {
       state: yield* Ref.make(
         Transitions.holdRetirements(

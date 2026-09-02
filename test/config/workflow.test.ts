@@ -330,6 +330,11 @@ describe('workflow defaults and extension keys', (): void => {
       expect(workflow.config.serverPort).toBeNull()
       expect(workflow.config.handoffEnabled).toBe(workflowDefaults.handoffEnabled)
       expect(workflow.config.handoffEnabled).toBe(true)
+      // High-fidelity tracing is off unless a workflow asks for it: it retains complete agent
+      // output, and the redaction guarding that is heuristic, so it is an operator's explicit
+      // choice rather than a default.
+      expect(workflow.config.trace).toEqual(workflowDefaults.trace)
+      expect(workflow.config.trace.enabled).toBe(false)
       expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://api.github.com')
     }),
   )
@@ -581,6 +586,20 @@ describe('front-matter decoding messages', (): void => {
     [`${minimalTracker}\nhandoff: 5`, 'handoff must be a map'],
     [`${minimalTracker}\nhandoff:\n  enabled: 5`, 'handoff.enabled must be a boolean'],
     [`${minimalTracker}\nhandoff:\n  enabled: "false"`, 'handoff.enabled must be a boolean'],
+    [`${minimalTracker}\ntrace: 5`, 'trace must be a map'],
+    [`${minimalTracker}\ntrace:\n  enabled: yes please`, 'trace.enabled must be a boolean'],
+    [
+      `${minimalTracker}\ntrace:\n  field_limit_bytes: 0`,
+      'trace.field_limit_bytes must be a positive integer',
+    ],
+    [
+      `${minimalTracker}\ntrace:\n  session_limit_bytes: -1`,
+      'trace.session_limit_bytes must be a positive integer',
+    ],
+    [
+      `${minimalTracker}\ntrace:\n  retention_hours: -1`,
+      'trace.retention_hours must not be negative',
+    ],
     [`${minimalTracker}\nserver:\n  port: 70000`, 'server.port must be between 0 and 65535'],
     [`${minimalTracker}\nserver:\n  port: -1`, 'server.port must be between 0 and 65535'],
     // An extension key is passed through rather than decoded, so the only thing it can be wrong
@@ -632,7 +651,14 @@ codex:
 server:
   port: 8080
 handoff:
-  enabled: false`)
+  enabled: false
+trace:
+  enabled: true
+  field_limit_bytes: 2048
+  event_limit_bytes: 8192
+  session_limit_bytes: 131072
+  total_limit_bytes: 1048576
+  retention_hours: 0`)
 
       const workflow = yield* withEnvironment(loadHostWorkflow(path, trackerProviders), {
         TEST_TRACKER_TOKEN: 'secret',
@@ -669,6 +695,18 @@ handoff:
       })
       expect(workflow.config.serverPort).toBe(8_080)
       expect(workflow.config.handoffEnabled).toBe(false)
+      // Retention is authored in hours and compared in milliseconds; zero hours is "retain until
+      // the size ceiling evicts it" rather than "retain nothing".
+      expect(workflow.config.trace).toEqual({
+        enabled: true,
+        limits: {
+          fieldLimitBytes: 2_048,
+          eventLimitBytes: 8_192,
+          sessionLimitBytes: 131_072,
+          totalLimitBytes: 1_048_576,
+          retentionMs: 0,
+        },
+      })
       // The extension owns a section of its own now, so it is configuration rather than an unknown
       // key the loader carries through.
       expect(workflow.config.extensions).toEqual({})

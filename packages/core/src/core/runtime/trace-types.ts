@@ -101,7 +101,6 @@ export type TraceRecorder = Readonly<{
   openRun: (issue: Issue, runId: number, attempt: number) => Effect.Effect<void>
   /** A run beginning or ending, as the host sees it rather than as the runner reports it. */
   lifecycle: (issueId: IssueId, phase: string, detail: string | null) => Effect.Effect<void>
-  closeRun: (issueId: IssueId) => Effect.Effect<void>
   record: (
     issueId: IssueId,
     event: string,

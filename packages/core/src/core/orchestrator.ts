@@ -27,6 +27,7 @@ export {
   type TraceQuery,
   type TraceRecorder,
   tracePageLimit,
+  traceQuery,
 } from './runtime.js'
 
 export const startOrchestrator = (

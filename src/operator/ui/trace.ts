@@ -41,6 +41,8 @@ let traceHasMore = false
 let traceEnabled = true
 let traceNotice = ''
 let traceLoading = false
+/** Whether a page has come back at all, so "nothing loaded" reads differently from "nothing matched". */
+let traceLoaded = false
 /** Categories the operator has switched off. Empty means everything, which is the default. */
 const hiddenCategories = new Set<TraceCategory>()
 let traceOutcome: TraceOutcome | 'all' = 'all'
@@ -247,7 +249,13 @@ const renderTrace = (): void => {
     return
   }
   if (traceEvents.length === 0) {
-    traceEmpty(traceLoading ? 'Loading trace…' : 'No trace records match the selected filters.')
+    traceEmpty(
+      traceLoading
+        ? 'Loading trace…'
+        : traceLoaded
+          ? 'No trace records match the selected filters.'
+          : 'No trace records loaded.',
+    )
     renderTraceStatus(null)
     return
   }
@@ -286,6 +294,7 @@ const loadTracePage = async (after: number): Promise<void> => {
       return
     }
     traceNotice = ''
+    traceLoaded = true
     traceEnabled = payload.enabled
     traceEvents = after === 0 ? [...payload.events] : [...traceEvents, ...payload.events]
     traceNextAfter = payload.next_after
@@ -359,6 +368,7 @@ const resetTrace = (identifier: string | null): void => {
   traceHasMore = false
   traceEnabled = true
   traceNotice = ''
+  traceLoaded = false
   if (tracePanel.open && identifier !== null) {
     void loadTracePage(0)
     openTraceStream(identifier)
