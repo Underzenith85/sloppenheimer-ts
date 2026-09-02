@@ -156,6 +156,9 @@ const renderDetailDiagnostics = (): void => {
       : `${detail.workspace.qualityPhase} · ${detail.workspace.qualityCommandState ?? 'unknown'}`,
   )
   fact(list, 'Expected branch', detail.handoff.expectedBranch ?? '—')
+  // Above the remote branch, because it is what decides whether there is one: a publication that
+  // failed leaves work in the workspace and no branch to find.
+  fact(list, 'Publication', publicationSummary(detail.handoff.publication))
   fact(
     list,
     'Remote branch',
@@ -179,6 +182,25 @@ const renderDetailDiagnostics = (): void => {
   )
   fact(list, 'Handoff outcome', detail.handoff.outcome.replaceAll('_', ' '))
   detailDiagnostics.replaceChildren(list)
+}
+
+/**
+ * The postflight in one line: what the host found in the workspace, and what became of it. A
+ * failure names its typed category and how many attempts it has cost, so an operator can tell a
+ * lease conflict that the next attempt may clear from an authentication failure that it will not.
+ */
+const publicationSummary = (publication: AgentDetailSnapshot['handoff']['publication']): string => {
+  const status = publication.status.replaceAll('_', ' ')
+  const where = publication.branch === null ? '' : ` · ${publication.branch}`
+  if (publication.status === 'published') {
+    return `${status}${where}${publication.headSha === null ? '' : ` · ${publication.headSha}`}`
+  }
+  if (publication.status === 'failed') {
+    const category = publication.category === null ? '' : ` · ${publication.category}`
+    const attempts = publication.attempts === 0 ? '' : ` · attempt ${publication.attempts}`
+    return `${status}${where}${category}${attempts}${publication.reason === null ? '' : ` · ${publication.reason}`}`
+  }
+  return `${status}${where}`
 }
 
 const renderDetail = (): void => {

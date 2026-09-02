@@ -25,7 +25,7 @@ const snapshot: OrchestratorSnapshot = {
   },
   pollingIntervalMs: 30_000,
   maxConcurrentAgents: 1,
-  counts: { running: 1, retrying: 1, completed: 0 },
+  counts: { running: 1, retrying: 1, delivering: 0, completed: 0 },
   completed: [],
   saturatedStates: [],
   inspectableAgents: [],
@@ -67,6 +67,7 @@ const snapshot: OrchestratorSnapshot = {
       detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2317',
     },
   ],
+  delivering: [],
   retrying: [
     {
       issueId: issueId('18'),

@@ -77,6 +77,14 @@ const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void, never, Scop
     for (const [id, entry] of stalling.running) {
       const stallTimeout = entry.execution.stallTimeoutMs
       const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
+      // A postflight is silent on the agent protocol by construction, because no agent is running.
+      // Retiring one as a stalled agent would turn a slow inspection or push into another coding
+      // turn — a publication problem read as an agent failure, which is what the postflight exists
+      // to stop. A publication that cannot finish is the source control's to fail, and it fails as
+      // a delivery.
+      if (entry.postflightStartedAt !== null) {
+        continue
+      }
       if (stallTimeout <= 0 || now - activeAt <= stallTimeout) {
         continue
       }

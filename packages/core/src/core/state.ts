@@ -18,6 +18,7 @@ import type {
   WorkspaceManagerPort,
 } from '../ports/index.js'
 import type { AgentDetailContext, AgentDetailRecord, AgentEvent } from '../telemetry.js'
+import type { DeliveryEntry } from './postflight.js'
 
 /**
  * The scheduler's whole world, as one immutable value.
@@ -49,6 +50,11 @@ export type RuntimeState = Readonly<{
   /** Issues this orchestrator has taken responsibility for, in any phase. */
   claimed: ReadonlySet<IssueId>
   retries: ReadonlyMap<IssueId, RetryEntry>
+  /**
+   * Work an agent produced that is not on the remote yet, keyed by issue. A delivery is a claim
+   * held without a running worker: the agent is finished with, and only the publication is owed.
+   */
+  deliveries: ReadonlyMap<IssueId, DeliveryEntry>
   /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
   /**
@@ -154,6 +160,15 @@ export type RunningEntry = Readonly<{
   /** Whether this worker was dispatched to repair an existing pull request. */
   repairRun: boolean
   startedAt: Date
+  /**
+   * When the host's own postflight took over from the agent, if it has.
+   *
+   * The stall timer measures silence on the agent protocol, and a postflight is silent on it by
+   * construction: no agent is running. Without this, an inspection or a push that outlasts the
+   * timeout reads as a stalled agent and is retired as one — turning a slow delivery into another
+   * coding turn, which is the exact confusion the postflight exists to end.
+   */
+  postflightStartedAt: Date | null
   lastEventAt: Date | null
   lastEvent: string | null
   lastMessage: string | null
@@ -221,7 +236,28 @@ export type RepairEntry = Readonly<{
   inFlight: boolean
   /** Whether a worker actually started, as opposed to a dispatch refused before launch. */
   workerStarted: boolean
+  /**
+   * What the host made of this repair's workspace once its turn settled. An unchanged pull-request
+   * head means the repair achieved nothing only when this says the worktree was clean; a delivery
+   * that failed left work behind, and reading that as "completed without changing the head" is the
+   * defect this field exists to make impossible.
+   */
+  publication: RepairPublication
+  /**
+   * The commit that publication produced, when it produced one. It is what tells a stale
+   * pull-request observation from a publication that genuinely changed nothing: an unchanged head
+   * beside a different published head is the provider catching up, not a repair that achieved
+   * nothing.
+   */
+  publishedHeadSha: string | null
 }>
+
+/**
+ * The postflight verdict a repair carries, as the handoff state machine needs it.
+ *
+ * `pending` is a repair whose turn has not settled yet — including one dispatched but not started.
+ */
+export type RepairPublication = 'pending' | 'published' | 'no_changes' | 'delivery_failed'
 
 /**
  * What a cancelled run does with the repair identity it was carrying.
@@ -387,6 +423,7 @@ export const initialState = (
   // A persisted handoff is a claim this orchestrator already holds, before its issue is hydrated.
   claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
+  deliveries: new Map(),
   completed: new Map(),
   restoredCompletions: restored.completions,
   pausedIssueNumbers: new Set(),

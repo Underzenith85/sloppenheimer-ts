@@ -281,7 +281,7 @@ const launchFor = (root: string, workspace: Workspace): AgentLaunch => ({
   onEvent: () => undefined,
 })
 
-const workspaceAt = (path: string, key: string): Workspace => ({ path, key, createdNow: false })
+const workspaceAt = (path: string, key: string): Workspace => ({ path, key })
 
 describe('workspace containment at the agent launch boundary', (): void => {
   it.live('rejects a workspace that is the configured root itself', () =>

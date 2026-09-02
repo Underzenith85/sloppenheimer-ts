@@ -1,9 +1,21 @@
-import { Effect, Fiber, MutableRef, Option, Queue, Ref, type Scope } from 'effect'
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  MutableRef,
+  Option,
+  Queue,
+  Ref,
+  type Scope,
+} from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
-import { AgentError, type WorkspaceError } from '../domain/errors.js'
+import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
+import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, withLogAnnotations } from '../support/logging.js'
@@ -17,6 +29,7 @@ import {
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
+import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, SessionPorts } from './state.js'
 import type { SourceControlTarget } from '../ports/index.js'
@@ -166,61 +179,145 @@ const runSession = (
 }
 
 /**
- * The whole of one run as a fiber body: a workspace, the source-control preparation and publication
- * that bracket the session when the host owns the repository, and the `WorkerExited` that reports
- * how it ended. Every exit path offers that event, so a run can never end unobserved.
+/**
+ * The postflight-bracketed body of one run, inside the workspace the run leases.
+ *
+ * The postflight is reported rather than raised. A turn that ended and a change that reached the
+ * remote are separate outcomes, so a publication that failed leaves the body succeeding with a
+ * `DeliveryFailed` postflight, and only the agent protocol itself can fail a run.
  */
-const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
-  const { context, issue, attempt, runId, execution, sessionPorts, target } = launch
-  const worker = execution.workspaces.create(issue.identifier).pipe(
-    Effect.flatMap((workspace) => {
-      const sourceControl = MutableRef.get(sessionPorts).sourceControl
-      if (sourceControl === null) {
-        return runSession(launch, workspace)
-      }
-      return sourceControl.prepare(issue, workspace, target).pipe(
-        Effect.flatMap((prepared) =>
-          runSession(launch, workspace).pipe(
-            Effect.zipRight(
-              Effect.suspend(() => {
-                const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                return publisher.publish(issue, prepared)
-              }),
-            ),
-            Effect.tap((outcome) =>
-              logInfo('host source-control publication completed', {
-                ...logContext(issue),
-                action: 'source_control_publish',
-                outcome: outcome._tag === 'Published' ? 'published' : 'no_changes',
-                branch: outcome.branchName,
-              }),
-            ),
-            Effect.asVoid,
+const runWithSourceControl = (
+  launch: SessionLaunch,
+  workspace: Workspace,
+): Effect.Effect<PostflightOutcome, AgentError | WorkspaceError | SourceControlError> => {
+  const { context, issue, runId, sessionPorts, target } = launch
+  const sourceControl = MutableRef.get(sessionPorts).sourceControl
+  if (sourceControl === null) {
+    return runSession(launch, workspace).pipe(
+      Effect.as<PostflightOutcome>({ _tag: 'NotPerformed' }),
+    )
+  }
+  return sourceControl.prepare(issue, workspace, target).pipe(
+    Effect.flatMap((prepared) =>
+      runSession(launch, workspace).pipe(
+        Effect.zipRight(
+          Effect.gen(function* () {
+            const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
+            // Announced *and applied* before the first git call: from here the run is the host's
+            // work, and the silence on the agent protocol that follows is not a stalled agent.
+            // Offering alone would only enqueue it — a poll already in flight would still read a
+            // run nothing had marked and retire the publication as a stalled agent, which is the
+            // one thing this marker exists to prevent.
+            const applied = yield* Deferred.make<void>()
+            yield* Queue.offer(context.mailbox, {
+              _tag: 'PostflightStarted' as const,
+              issueId: issue.id,
+              runId,
+              applied,
+            })
+            yield* Deferred.await(applied)
+            return yield* runPostflight(publisher, issue, prepared)
+          }),
+        ),
+        Effect.tap((outcome) =>
+          (outcome._tag === 'DeliveryFailed' ? logError : logInfo)(
+            'host source-control postflight settled',
+            {
+              ...logContext(issue),
+              action: 'source_control_postflight',
+              outcome: postflightLogOutcome(outcome),
+              branch: target.branchName,
+              error: outcome._tag === 'DeliveryFailed' ? outcome.failure.message : null,
+            },
           ),
         ),
-      )
-    }),
-    Effect.matchEffect({
-      onFailure: (error) =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'failed',
-          error: error.message,
-        }).pipe(Effect.asVoid),
-      onSuccess: () =>
-        Queue.offer(context.mailbox, {
-          _tag: 'WorkerExited',
-          issueId: issue.id,
-          runId,
-          attempt,
-          outcome: 'normal',
-          error: null,
-        }).pipe(Effect.asVoid),
-    }),
+      ),
+    ),
   )
+}
+
+/**
+ * What becomes of the run's workspace once the run has ended.
+ *
+ * A postflight that published, or that found nothing to publish, has read the whole worktree and
+ * put everything it found into the repository, so the directory holds nothing that is not in it.
+ * Every other ending — a delivery that failed, a composition with no source control to publish
+ * through, a failure, a cancellation, an interrupted shutdown — leaves work that only the directory
+ * holds, so the workspace stays as a recovery artifact under the reason it is being kept for. A
+ * retained delivery republishes from exactly that directory, which is why a failed delivery's
+ * reason names the failure.
+ */
+const workspaceRelease = (
+  exit: Exit.Exit<PostflightOutcome, AgentError | WorkspaceError | SourceControlError>,
+): WorkspaceRelease =>
+  Exit.match(exit, {
+    onSuccess: (postflight): WorkspaceRelease => {
+      switch (postflight._tag) {
+        case 'Published':
+        case 'NoChanges':
+          return { _tag: 'Completed' }
+        case 'DeliveryFailed':
+          // The category, never the message: a lease record is a file on disk rather than a log
+          // the redaction rules pass over.
+          return { _tag: 'Retained', reason: `delivery failed: ${postflight.failure.category}` }
+        case 'NotPerformed':
+          return { _tag: 'Retained', reason: 'run ended without publishing its work' }
+      }
+    },
+    onFailure: (cause): WorkspaceRelease => ({
+      _tag: 'Retained',
+      reason: Option.match(Cause.failureOption(cause), {
+        onNone: () =>
+          Cause.isInterrupted(cause)
+            ? 'run cancelled before publication'
+            : 'run ended abnormally before publication',
+        // What failed, never what the failure said: an agent or hook failure carries an excerpt of
+        // what the process wrote, and a lease record is a file on disk rather than a log the
+        // redaction rules pass over.
+        onSome: (error) => `run failed before publication: ${error._tag} ${error.category}`,
+      }),
+    }),
+  })
+
+/**
+ * The whole of one run as a fiber body: the workspace this run leases for itself, the host-owned
+ * preparation and postflight that bracket the session when the host owns the repository, and the
+ * `WorkerExited` that reports how it ended. Every exit path offers that event, so a run can never
+ * end unobserved, and every exit path releases the lease — including the interruption that a
+ * cancellation or a shutdown ends the run with.
+ */
+const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
+  const { context, issue, attempt, runId, execution } = launch
+  const worker = execution.workspaces
+    .withLeasedWorkspace(
+      { identifier: issue.identifier, runId },
+      (workspace) => runWithSourceControl(launch, workspace),
+      workspaceRelease,
+    )
+    .pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Queue.offer(context.mailbox, {
+            _tag: 'WorkerExited',
+            issueId: issue.id,
+            runId,
+            attempt,
+            outcome: 'failed',
+            error: error.message,
+            postflight: { _tag: 'NotPerformed' },
+          }).pipe(Effect.asVoid),
+        onSuccess: (postflight) =>
+          Queue.offer(context.mailbox, {
+            _tag: 'WorkerExited',
+            issueId: issue.id,
+            runId,
+            attempt,
+            outcome: 'normal',
+            error: null,
+            postflight,
+          }).pipe(Effect.asVoid),
+      }),
+    )
   return observeDuration(agentDuration, worker).pipe(
     withOperationalSpan('agent.run', { run_id: runId }),
     withLogAnnotations({
@@ -247,6 +344,7 @@ const startingRun = (
   attempt: launch.attempt,
   repairRun: launch.repairRun,
   startedAt,
+  postflightStartedAt: null,
   lastEventAt: null,
   lastEvent: null,
   lastMessage: null,

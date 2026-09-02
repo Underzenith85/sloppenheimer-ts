@@ -298,20 +298,30 @@ const waitForRunning = async (port: number, expected: number): Promise<void> => 
   throw new Error('the host did not reach the expected agent count in time')
 }
 
-/** Every descendant pid the fake App Servers recorded in their workspaces. */
+/**
+ * Every descendant pid the fake App Servers recorded in their workspaces. A workspace belongs to
+ * one run, so the recorded file sits one level below the issue's own directory.
+ */
 const recordedDescendants = async (directory: string): Promise<readonly number[]> => {
   const root = join(directory, 'workspaces')
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
+  const issues = await readdir(root, { withFileTypes: true }).catch(() => [])
   const pids: number[] = []
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
+  for (const issue of issues) {
+    if (!issue.isDirectory()) {
       continue
     }
-    const recorded = await readFile(join(root, entry.name, 'grandchild.pid'), 'utf8').catch(
-      () => null,
-    )
-    if (recorded !== null) {
-      pids.push(Number(recorded.trim()))
+    const issuePath = join(root, issue.name)
+    const runs = await readdir(issuePath, { withFileTypes: true }).catch(() => [])
+    for (const run of runs) {
+      if (!run.isDirectory()) {
+        continue
+      }
+      const recorded = await readFile(join(issuePath, run.name, 'grandchild.pid'), 'utf8').catch(
+        () => null,
+      )
+      if (recorded !== null) {
+        pids.push(Number(recorded.trim()))
+      }
     }
   }
   return pids

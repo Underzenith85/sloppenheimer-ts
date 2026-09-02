@@ -128,6 +128,15 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   workspacePathKey: input.workspacePathKey,
   handoff: Object.freeze({
     expectedBranch: input.expectedBranch,
+    publication: Object.freeze({
+      status: 'not_performed' as const,
+      branch: null,
+      headSha: null,
+      baselineSha: null,
+      category: null,
+      attempts: 0,
+      reason: null,
+    }),
     remoteBranch: Object.freeze({ status: 'pending' as const, name: null }),
     pullRequest: Object.freeze({
       status: 'pending' as const,

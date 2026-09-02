@@ -64,7 +64,7 @@ const runScenario = (
       }
       return runAgentOnHost({
         issue,
-        workspace: { path: join(workspaceRoot, 'fake'), key: 'fake', createdNow: true },
+        workspace: { path: join(workspaceRoot, 'fake'), key: 'fake' },
         workspaceRoot,
         config,
         prompt: 'conformance prompt',

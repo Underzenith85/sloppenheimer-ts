@@ -21,7 +21,8 @@ import {
 } from '../../telemetry.js'
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
-import { releaseRepair, settleRepair } from '../handoff-decision.js'
+import { abandonDelivery } from './deliveries.js'
+import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { persistHandoffs } from './store.js'
@@ -170,6 +171,10 @@ export const cancelRunning = (
       })
     }
     if (cleanupWorkspace) {
+      // Removing the workspace destroys anything unpublished in it, so the delivery that would
+      // have republished it goes in the same step rather than coming due against a directory that
+      // no longer exists.
+      yield* abandonDelivery(cells, id, reason)
       yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
         Effect.catchAll((error) =>
           logWarning('terminal workspace cleanup failed', {

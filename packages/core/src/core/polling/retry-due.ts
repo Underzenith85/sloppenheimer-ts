@@ -6,12 +6,9 @@ import { logContext, hasSlot, issueIsActive, issueIsRoutable, stateIsIn } from '
 import { logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
-import { settleRepair } from '../handoff-decision.js'
-import {
-  applyHandoffObservation,
-  reconcileHandoffs,
-  repairPermission,
-} from '../handoff-reconciliation.js'
+import { settleRepair } from '../repair.js'
+import { repairPermission } from '../handoff-eligibility.js'
+import { applyHandoffObservation, reconcileHandoffs } from '../handoff-reconciliation.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { EffectiveWorkflow, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'

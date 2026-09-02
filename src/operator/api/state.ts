@@ -13,6 +13,7 @@ export type RunningRow = Snapshot['running'][number]
 export type RetryingRow = Snapshot['retrying'][number]
 export type CompletedRow = Snapshot['completed'][number]
 export type HandoffRow = Snapshot['handoffs'][number]
+export type DeliveringRow = Snapshot['delivering'][number]
 
 export type PublishedRunning = Readonly<{
   issue_id: string
@@ -46,6 +47,29 @@ export type PublishedRetrying = Readonly<{
   attempt: number
   due_at: string
   error: string | null
+  worker_host: 'local'
+  detail_url: string
+}>
+
+/**
+ * Work an agent finished that has not reached the remote. Published as a row of its own because
+ * neither `running` nor `retrying` can say it: no agent is running, and what is queued is a
+ * publication of a workspace that already holds the change.
+ */
+export type PublishedDelivering = Readonly<{
+  issue_id: string
+  issue_identifier: string
+  issue_url: string | null
+  title: string
+  branch_name: string
+  attempt: number
+  due_at: string
+  /** The typed source-control category, so an operator can tell a lease conflict from an auth failure. */
+  category: string
+  reason: string
+  changed_file_count: number | null
+  repair_run: boolean
+  observed_at: string
   worker_host: 'local'
   detail_url: string
 }>
@@ -91,11 +115,12 @@ export type PublishedState = Readonly<{
   }>
   polling_interval_ms: number
   max_concurrent_agents: number
-  counts: Readonly<{ running: number; retrying: number; completed: number }>
+  counts: Readonly<{ running: number; retrying: number; delivering: number; completed: number }>
   paused_issue_numbers: readonly number[]
   handoffs: readonly PublishedHandoff[]
   running: readonly PublishedRunning[]
   retrying: readonly PublishedRetrying[]
+  delivering: readonly PublishedDelivering[]
   completed: readonly PublishedCompleted[]
   saturated_states: readonly string[]
   inspectable_agents: readonly string[]
@@ -150,6 +175,23 @@ const publishRetrying = (entry: RetryingRow): PublishedRetrying => ({
   attempt: entry.attempt,
   due_at: entry.dueAt,
   error: entry.error,
+  worker_host: entry.workerHost,
+  detail_url: entry.detailUrl,
+})
+
+const publishDelivering = (entry: DeliveringRow): PublishedDelivering => ({
+  issue_id: entry.issueId,
+  issue_identifier: entry.identifier,
+  issue_url: entry.url,
+  title: entry.title,
+  branch_name: entry.branchName,
+  attempt: entry.attempt,
+  due_at: entry.dueAt,
+  category: entry.category,
+  reason: entry.reason,
+  changed_file_count: entry.changedFileCount,
+  repair_run: entry.repairRun,
+  observed_at: entry.observedAt,
   worker_host: entry.workerHost,
   detail_url: entry.detailUrl,
 })
@@ -212,6 +254,7 @@ export const publishState = (snapshot: Snapshot): PublishedState => ({
   handoffs: snapshot.handoffs.map(publishHandoff),
   running: snapshot.running.map(publishRunning),
   retrying: snapshot.retrying.map(publishRetrying),
+  delivering: snapshot.delivering.map(publishDelivering),
   completed: snapshot.completed.map(publishCompleted),
   saturated_states: snapshot.saturatedStates,
   inspectable_agents: snapshot.inspectableAgents,

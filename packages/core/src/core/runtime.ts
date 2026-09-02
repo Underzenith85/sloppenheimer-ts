@@ -39,15 +39,21 @@ import type {
  * - `runtime/handoff-recovery.ts` — restoring persisted handoffs and adopting unrecorded ones.
  * - `runtime/runs.ts` — opening a detail record, applying a protocol event, cancelling a run.
  * - `runtime/scheduling.ts` — ticks, refresh requests, the poll timer and retry scheduling.
+ * - `runtime/deliveries.ts` — queueing and abandoning work that is waiting to reach the remote.
  * - `runtime/reconcile.ts` — bringing the live runs back into agreement with the tracker.
  * - `runtime/context.ts` — binding all of them to the cells, as the context the event loop reads.
  * - `runtime/control.ts` — the handle the composition root holds.
  */
 
+export { type DeliveryEntry, type PostflightOutcome } from './postflight.js'
+
 export {
   publishedCompletedWork,
   type AgentDetailLookup,
   type CompletedSnapshot,
+  type DeliveryAttemptResult,
+  type DeliveryRequest,
+  type DeliverySnapshot,
   type OrchestratorContext,
   type OrchestratorControl,
   type OrchestratorEvent,

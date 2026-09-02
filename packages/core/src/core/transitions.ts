@@ -15,16 +15,18 @@
  * - `transitions/claims.ts` — taking responsibility for an issue, and giving it up.
  * - `transitions/runs.ts` — the live runs and the telemetry their callbacks buffer.
  * - `transitions/retries.ts` — the queued retries, and the operator's pause list.
+ * - `transitions/deliveries.ts` — work waiting to reach the remote, and the retries queued for it.
  * - `transitions/handoffs.ts` — the pull requests being followed, and startup recovery's counters.
  * - `transitions/details.ts` — the detail records and the index consumers read them through.
  * - `transitions/scheduling.ts` — the tick debounce, refresh waiters, and the workflow in force.
  * - `transitions/ports.ts` — retiring replaced port instances and adopting live work onto new ones.
  *
- * The groups are a reading order rather than a layering: `retries` and `handoffs` claim through
- * `claims`, and nothing else here imports a sibling.
+ * The groups are a reading order rather than a layering: `retries`, `deliveries` and `handoffs`
+ * claim through `claims`, and nothing else here imports a sibling.
  */
 
 export * from './transitions/claims.js'
+export * from './transitions/deliveries.js'
 export * from './transitions/details.js'
 export * from './transitions/handoffs.js'
 export * from './transitions/ports.js'

@@ -145,6 +145,52 @@ const retryingItem = (
   action: 'pause',
 })
 
+/**
+ * Work an agent finished that has not reached the remote. It is progress rather than attention:
+ * the change exists, the host is retrying the publication, and an operator has nothing to do until
+ * those attempts are spent — at which point the issue goes back to the agent as an ordinary retry.
+ */
+const deliveringItem = (
+  entry: DeliveringEntry,
+  issue: BacklogIssue | undefined,
+  paused: ReadonlySet<number>,
+  inspectable: ReadonlySet<string>,
+): WorkItem => {
+  const issueNumber = issue?.number ?? issueNumberOf(entry.issue_identifier)
+  // Read from the row's own issue number when the backlog no longer carries the issue. A delivery
+  // outlives its issue's presence there — an issue that closes while its work is held leaves the
+  // backlog, and asking the backlog whether it is paused would answer only that it is gone, which
+  // is what left the row offering a pause that had already happened and no way back.
+  const eligibility =
+    issue === undefined && issueNumber !== null && paused.has(issueNumber)
+      ? 'paused'
+      : eligibilityOf(issue, paused)
+  return {
+    identifier: entry.issue_identifier,
+    issueNumber,
+    title: entry.title,
+    url: entry.issue_url,
+    state: 'progress',
+    attention: null,
+    phase: 'delivering',
+    eligibility,
+    priority: issue?.priority ?? null,
+    labels: issue?.labels ?? [],
+    reason: `Publishing to ${entry.branch_name} failed (${entry.category}) · ${entry.reason}`,
+    ranking: null,
+    blockers: [],
+    unlocks: issue?.unlocks ?? 0,
+    hasDetail: inspectable.has(entry.issue_identifier),
+    queueReason: null,
+    finishedAt: null,
+    pullRequestUrl: null,
+    // A pause suspends a delivery rather than dropping it, so the row an operator sees while one is
+    // held has to offer the way back: without a resume here the timer is never re-armed and the
+    // retained change waits on an API call by hand.
+    action: eligibility === 'paused' ? 'start' : 'pause',
+  }
+}
+
 const handoffAttention = (phase: PipelinePhase): AttentionKind | null => {
   if (phase === 'repair_needed') {
     return 'repair_needed'

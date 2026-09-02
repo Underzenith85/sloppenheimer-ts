@@ -273,11 +273,16 @@ const heldInstances = (
 ): readonly unknown[] => [
   ...[...state.running.values()].map((entry) => select(entry.execution)),
   ...[...state.handoffs.values()].map((entry) => select(entry.execution)),
+  // A retained delivery holds a workspace it has not published yet and the ports it will publish
+  // through, and it outlives the run that produced it. Leaving it out would let a reload release
+  // the workspace manager the delivery is still going to open, and the diff with it.
+  ...[...state.deliveries.values()].map((entry) => select(entry.execution)),
 ]
 
 const heldCodeReviewInstances = (state: RuntimeState): readonly CodeReviewPort[] => [
   ...[...state.running.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
   ...[...state.handoffs.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
+  ...[...state.deliveries.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
 ]
 
 /**

@@ -5,6 +5,17 @@ import type { TrackerError } from '../domain/errors.js'
 const baseRetryDelayMs = 10_000
 
 /**
+ * How many publication attempts one piece of retained work gets before it is handed back to the
+ * coding agent, counting the turn's own postflight as the first.
+ *
+ * A delivery retry costs a fetch and a push rather than a whole turn, so it is worth more attempts
+ * than an agent retry — but not unbounded ones: a lease conflict that keeps recurring means the
+ * remote has moved on from the baseline this work was written against, and only a new turn can
+ * reconcile that.
+ */
+export const deliveryAttemptLimit = 5
+
+/**
  * Agent backoff as a value: ten seconds, doubling for every attempt, capped by workflow config.
  */
 export const agentRetrySchedule = (maximumMs: number): Schedule.Schedule<number, number> =>

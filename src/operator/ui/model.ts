@@ -13,6 +13,7 @@ type BacklogSnapshot = import('../operator.js').BacklogSnapshot
 type BacklogIssue = BacklogSnapshot['issues'][number]
 type RunningEntry = PublishedState['running'][number]
 type RetryingEntry = PublishedState['retrying'][number]
+type DeliveringEntry = PublishedState['delivering'][number]
 type HandoffEntry = PublishedState['handoffs'][number]
 type CompletedEntry = PublishedState['completed'][number]
 
@@ -38,6 +39,8 @@ type PipelinePhase =
   | 'starting'
   | 'running'
   | 'retrying'
+  /** The agent is finished and its work has not reached the remote yet. */
+  | 'delivering'
   | 'handing_off'
   | 'awaiting_checks'
   | 'ready_to_merge'
@@ -156,6 +159,7 @@ const phaseLabels: Readonly<Record<PipelinePhase, string>> = {
   starting: 'Starting',
   running: 'Running',
   retrying: 'Retrying',
+  delivering: 'Delivering',
   handing_off: 'Handing off',
   awaiting_checks: 'Awaiting checks',
   ready_to_merge: 'Ready to merge',
@@ -187,6 +191,7 @@ const attentionOrder: readonly AttentionKind[] = [
 
 const handoffPhases: Readonly<Record<string, PipelinePhase>> = {
   awaiting_checks: 'awaiting_checks',
+  delivery_failed: 'delivering',
   repair_needed: 'repair_needed',
   ready_to_merge: 'ready_to_merge',
   merging: 'merging',
@@ -292,6 +297,7 @@ const progressOrder: readonly PipelinePhase[] = [
   'starting',
   'running',
   'retrying',
+  'delivering',
   'handing_off',
   'awaiting_checks',
   'ready_to_merge',
@@ -355,6 +361,11 @@ const buildWorkModel = (
   }
   for (const entry of state?.retrying ?? []) {
     claim(retryingItem(entry, issues.get(entry.issue_identifier), paused, inspectable))
+  }
+  // Before the handoffs, so a repair whose work never reached the pull request is reported as the
+  // delivery it is waiting on rather than as the pull request it has not changed.
+  for (const entry of state?.delivering ?? []) {
+    claim(deliveringItem(entry, issues.get(entry.issue_identifier), paused, inspectable))
   }
   for (const entry of state?.handoffs ?? []) {
     claim(handoffItem(entry, issues.get(entry.issue_identifier), paused, inspectable, now))

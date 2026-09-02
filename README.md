@@ -83,8 +83,8 @@ provenance, without making another plaintext token copy, and removes that name p
 fallback aliases `GITHUB_TOKEN` and `GH_TOKEN` from Codex subprocess environments. Codex's own
 `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` authentication sources are always preserved, and tracker
 configuration may not reuse those names. Each eligible issue must carry the `sloppenheimer` label.
-Workspaces live under `.sloppenheimer/workspaces` and are never treated as trusted paths until
-containment checks pass. Containment is re-verified immediately before every agent launch, not only
+Workspaces live under `.sloppenheimer/workspaces`, one directory per issue holding one directory
+per dispatched run, and are never treated as trusted paths until containment checks pass. Containment is re-verified immediately before every agent launch, not only
 at creation: the path must be a strict descendant of the configured root both as written and after
 symlink resolution, and must be a real directory that still exists. The verified real path — not
 the caller-supplied one — becomes the Codex subprocess cwd and the thread and turn `cwd`, so a
@@ -239,7 +239,7 @@ The console answers four questions, and its navigation is the four answers with 
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Needs attention** | Operator-actionable exceptions: a stalled agent, a handoff needing repair or intervention, exhausted or failed handoff recovery, a dependency cycle, and high-priority work that is blocked.                                                                                                                                                                                                                 |
 | **Ready**           | Dependency-cleared work that can be dispatched, ranked by priority, then by how many issues it unblocks, then by issue number.                                                                                                                                                                                                                                                                               |
-| **In progress**     | Starting, running, retrying, handing off, awaiting checks, ready to merge, and merging.                                                                                                                                                                                                                                                                                                                      |
+| **In progress**     | Starting, running, retrying, delivering, handing off, awaiting checks, ready to merge, and merging. _Delivering_ is an agent that finished and whose change has not reached the remote: the work is in its workspace and the host is retrying the publication, with no agent running.                                                                                                                        |
 | **Finished**        | Work merged and closed out in the last 24 hours. The scope is stated on the view, and it is the window alone: completions are persisted to `.sloppenheimer/completions.json`, so a restart inside the window no longer empties it. An item is dated by the provider's merge time rather than by when Sloppenheimer noticed it, so a pull request merged while the host was down does not reappear as recent. |
 
 Every issue and handoff has exactly one primary placement, so no row appears twice. An **Inspect
@@ -314,7 +314,13 @@ path read it too, and a published name has no business travelling back into the 
 | `generated_at`, `counts`, `codex_totals`                                       | `workflow_path`, `effective_workflow`, `polling_interval_ms`, `max_concurrent_agents`, `rate_limits`                                                                                                                      |
 | `running[]` with `issue_id`, `issue_identifier`, `issue_url`, `title`, `state` | `attempt`, `started_at`, `last_event_at`, `last_event`, `last_message`, `process_id`, `thread_id`, `turn_id`, `session_id`, `turn_count`, `tokens`, `last_reported_tokens`, `worker_host`, `stall_deadline`, `detail_url` |
 | `retrying[]` with `attempt`, `due_at`, `error`                                 | the same identity, `worker_host` and `detail_url` as a running row                                                                                                                                                        |
-| —                                                                              | `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                                |
+| —                                                                              | `delivering[]`, `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                |
+
+`counts` carries `delivering` beside `running`, `retrying` and `completed`, and a `delivering[]`
+row names the `branch_name` the work is owed to, the typed source-control `category` and `reason`
+that held it, the `attempt` and `due_at` of the next publication, and `changed_file_count`. A row
+here is Sloppenheimer saying the agent succeeded and the delivery did not — which neither a running
+nor a retrying row can say.
 
 The extension fields follow the baseline's convention, so a reader never has to know which half of
 the document they are in. `rate_limits` is the exception and is passed through exactly as the coding
@@ -613,19 +619,100 @@ which services to compose — the same point at which `server.port` is read. Edi
 host does not take effect on the reload; restart the host. Every other key in the workflow, and the
 handoff behaviour itself, continues to follow the reloaded definition.
 
+### Workspace allocation and leases
+
+Every dispatched run and repair attempt receives its own workspace: `<root>/<issue key>/<run key>`,
+where the run key names the run number and the host that allocated it. Two attempts on one issue
+therefore share no worktree, no index and no ref store, and two hosts pointed at one root can never
+name the same directory. The agent's cwd is the run directory; the host writes nothing inside it.
+
+Ownership is a lease file beside the run directory rather than orchestrator memory, held for exactly
+as long as the run it was allocated for: a workspace is handed out only inside the bracket that
+releases it, so no ending can leave a lease nobody holds. Publishing that lease is the exclusive
+claim: the record is written whole and hard-linked into place, and the kernel
+refuses a link whose name already exists, so a duplicate dispatch fails before any process is
+launched. The run directory is created only afterwards, so cleanup elsewhere never comes across a
+workspace that has no lease. The record names the issue, the run, the host, its process id and when
+that process started, and a run releases its lease on success, failure, cancellation and shutdown
+alike.
+
+A run that published its work leaves nothing behind. Every other ending — a failure, a cancellation,
+or a composition with no source control to publish through at all — keeps the workspace and rewrites
+its lease as a retained recovery artifact naming why it was kept, which is never adopted by a later
+run: retained workspaces go when the issue reaches a terminal state, and cleanup skips any workspace
+whose lease is still held by a running owner — this host, or a second one.
+
+A lease is given up by the run that holds it, or taken from a host that can be seen to be gone. It is
+never waited out. What this host holds is something it knows rather than something it reads back, so
+a release whose write fails does not leave a workspace held for the life of the process. A lease left by a departed host stops holding anything back, because its process is
+no longer there; so does one whose process id the kernel has since handed to a successor, which is
+why the record carries the owner's start as well as its id. A process id means nothing outside the
+namespace that issued it, so an owner is probed only when both sides name the same one — two
+containers can share a kernel and a root while each sees only its own ids — and an owner this host
+cannot place is left alone.
+
+Left alone for good, which is the deliberate limit of the rule: on a shared root, a crashed peer's
+workspaces stay as retained artifacts that cleanup reports and never takes, until an operator clears
+them. The alternative is an expiry, and an expiry is one host deleting another's work on the strength
+of a clock they do not share and a run length nothing bounds. A workspace left behind is untidy; a
+workspace deleted from under a live run is gone.
+
+Cleanup fences what it does take. Deciding a workspace is free and removing it are two steps with an
+operator's `before_remove` hook between them, so the record is moved aside in one rename first and
+the decision made again on what was actually taken — and put back if it turns out to still be held.
+
+Directories are held still while they are acted through: opened, which pins the inode, and confirmed
+by device and inode again before each step that creates, renames, executes in or removes. That
+guards against the substitutions a host can stumble into — a path that resolves outside the root, a
+symlink in the tree, a directory recreated under an inspected name — and not against a process with
+write access to the root that is racing this one, which no check-then-act sequence could. The
+workspace root is the host's own directory.
+
+Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
+normal run starts from its branch's own published head when the branch exists, and from the
+protected base when it does not, so an attempt that ran out of turns is continued by the branch it
+published; a repair still starts from the exact pull-request head it was dispatched against. Work an
+attempt never published survives only in that attempt's retained workspace.
+
+### After the turn: publication and delivery
+
+A successful agent turn says one thing — the protocol finished — and Sloppenheimer treats it as
+exactly that. After it, the host inspects the workspace against the baseline it recorded before the
+launch, and publishes what it finds. The agent's own account of what it did is never consulted.
+
+| The host found                             | What it reports                    | What happens next                                                                         |
+| ------------------------------------------ | ---------------------------------- | ----------------------------------------------------------------------------------------- |
+| Nothing: the worktree matches its baseline | `no_progress`                      | The handoff lifecycle continues; only this reading can conclude the agent changed nothing |
+| A change, published                        | `published`, with the new commit   | The pull request is asked about, now that there is something on the remote to ask about   |
+| A change it could not publish              | `delivery_failed`, with the reason | The workspace is retained and the publication alone is retried, with no agent running     |
+
+That last row is the point. A publication failure is not an agent failure: the change is real, it is
+still in the workspace, and repeating the turn would pay for it twice. Sloppenheimer retries the
+delivery on its own backoff, up to a small limit, and only hands the work back to the agent when the
+failure did not preserve the worktree or those attempts are spent. A restart does not carry the
+delivery over: the run's workspace stays behind as a retained recovery artifact, kept under the
+reason it was kept for, exactly as the workspace lifecycle above says — and it goes when the issue
+is finished with.
+
+Unpublished work is discarded in exactly one case: the issue is finished with. A cancellation that
+removes the workspace drops the retained delivery in the same step, and a delivery that comes due
+re-reads its issue first, so a closed issue never has a branch pushed for it after the fact.
+
 ### Workspace hooks
 
 Each hook runs `bash -lc <script>` in the workspace directory as its own process group.
 
 | Hook            | When                                                     | Failure                             |
 | --------------- | -------------------------------------------------------- | ----------------------------------- |
-| `after_create`  | Once, immediately after a workspace directory is created | Fatal — the workspace is not usable |
+| `after_create`  | Immediately after a run's workspace directory is created | Fatal — the workspace is not usable |
 | `before_run`    | Before every agent launch                                | Fatal — the issue is retried        |
 | `after_run`     | After every agent turn                                   | Best effort — logged and ignored    |
-| `before_remove` | Before removing an existing workspace                    | Best effort — removal continues     |
+| `before_remove` | Before removing a run's workspace                        | Best effort — removal continues     |
 
-`before_remove` runs only when the workspace directory is actually present, so a startup sweep over
-closed issues does not execute it for workspaces that were never created.
+A workspace belongs to one run, so `after_create` runs once per dispatched run rather than once per
+issue, and `before_remove` runs once for each workspace a removal actually takes. `before_remove`
+runs only when the workspace directory is actually present, so a startup sweep over closed issues
+does not execute it for workspaces that were never created.
 
 Both output streams are drained continuously, so a chatty hook cannot fill a pipe and hang; only a
 bounded head of each stream is kept for diagnostics and is marked truncated when it overflows. A

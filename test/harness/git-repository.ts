@@ -41,6 +41,14 @@ export const makeGitRepository = async (): Promise<GitRepositoryFixture> => {
   return { root, remote, seed, workspace }
 }
 
+/**
+ * Commits one file in any of the fixture's repositories.
+ *
+ * The identity is passed per invocation rather than relying on the repository's own configuration:
+ * only the seed clone is configured, the workspace is initialized by the host's own preparation,
+ * and a machine with no global git identity — CI — would otherwise fail the commit rather than the
+ * assertion the test is about.
+ */
 export const commitFile = async (
   repository: string,
   path: string,
@@ -49,6 +57,14 @@ export const commitFile = async (
 ): Promise<string> => {
   await writeFile(join(repository, path), contents)
   await git(repository, ['add', path])
-  await git(repository, ['commit', '-m', message])
+  await git(repository, [
+    '-c',
+    'user.name=Test Author',
+    '-c',
+    'user.email=test@example.test',
+    'commit',
+    '-m',
+    message,
+  ])
   return git(repository, ['rev-parse', 'HEAD'])
 }

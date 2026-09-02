@@ -7,78 +7,21 @@ import type {
   PublicationOutcome,
   SourceControlPort,
   SourceControlTarget,
+  WorktreeInspection,
 } from '@sloppenheimer/core/ports/source-control.js'
-import {
-  gitIdentity,
-  runGit,
-  type GitOperation,
-  type GitSourceControlSettings,
-} from './git-process.js'
+import { containedIn, remoteHead, revParse, status } from './git-queries.js'
+import { gitIdentity, runGit, type GitSourceControlSettings } from './git-process.js'
 
 export type { GitCredential, GitSourceControlSettings } from './git-process.js'
 
 /**
- * Host Git source control: preparing a workspace's repository from the protected base or from an
- * exact repair head, and publishing the agent's work back under an expected-head lease.
+ * Host Git source control: preparing a run's own workspace from the branch's published head, the
+ * exact head of a repair, or the protected base, and publishing the agent's work back under an
+ * expected-head lease.
  *
  * How a git invocation is run, authenticated, and read when it fails lives in `git-process.ts`;
  * this module decides only which invocations to make and what their output means.
  */
-
-const remoteHead = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-  branchName: string,
-): Effect.Effect<Option.Option<string>, SourceControlError> =>
-  Effect.map(
-    runGit(settings, operation, workspace.path, [
-      'ls-remote',
-      '--heads',
-      'origin',
-      `refs/heads/${branchName}`,
-    ]),
-    (output) => {
-      const sha = output.trim().split(/\s+/u)[0]
-      return sha === undefined || sha.length === 0 ? Option.none() : Option.some(sha)
-    },
-  )
-
-const revParse = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-  revision: string,
-): Effect.Effect<string, SourceControlError> =>
-  Effect.map(runGit(settings, operation, workspace.path, ['rev-parse', revision]), (value) =>
-    value.trim(),
-  )
-
-const currentBranch = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(
-    Effect.map(
-      runGit(settings, operation, workspace.path, ['symbolic-ref', '--short', 'HEAD']),
-      (value) => value.trim(),
-    ),
-  )
-
-const currentHead = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<Option.Option<string>> =>
-  Effect.option(revParse(settings, operation, workspace, 'HEAD'))
-
-const status = (
-  settings: GitSourceControlSettings,
-  operation: GitOperation,
-  workspace: Workspace,
-): Effect.Effect<string, SourceControlError> =>
-  runGit(settings, operation, workspace.path, ['status', '--porcelain=v1', '--untracked-files=all'])
 
 const initialize = (
   settings: GitSourceControlSettings,
@@ -109,9 +52,10 @@ const initialize = (
   )
 
 /**
- * The head a repair must start from, or `none` for normal work, which starts from the protected
- * base instead. Absence here chooses the next branch rather than crossing a data boundary, so it is
- * an `Option` and never leaves this module.
+ * The head a repair must start from, or `none` for normal work, which starts from the branch's own
+ * published head instead, or from the protected base when it has none. Absence here chooses the
+ * next branch rather than crossing a data boundary, so it is an `Option` and never leaves this
+ * module.
  */
 const expectedRepairHead = (
   target: SourceControlTarget,
@@ -138,9 +82,8 @@ const expectedRepairHead = (
  *
  * Uninterruptible as a pair. `checkout -B` carries a tracked edit across when the file is identical
  * in both commits, so an interruption between the two would leave the target branch checked out and
- * still dirty — and the next preparation reads exactly that as unfinished agent work to preserve,
- * publishing an edit no agent made. The two commands are local and bounded, so an interruption
- * waits them out rather than settling halfway through.
+ * still dirty, and the run that inherited it would publish an edit no agent made. The two commands
+ * are local and bounded, so an interruption waits them out rather than settling halfway through.
  */
 const resetToBaseline = (
   settings: GitSourceControlSettings,
@@ -156,6 +99,38 @@ const resetToBaseline = (
       Effect.asVoid,
     ),
   )
+
+/**
+ * The baseline a run starts from, and the fetch that makes it available locally.
+ *
+ * A repair starts from the exact pull-request head it was dispatched against. Normal work starts
+ * from the branch's own published head when the branch exists, and from the protected base when it
+ * does not: since [#166](https://github.com/Underzenith85/sloppenheimer-ts/issues/166) every run is
+ * given a workspace of its own, so what a previous attempt left in a shared worktree is no longer
+ * what carries an issue forward — the published branch is. Work that was never published survives
+ * only in that attempt's retained workspace, and is never silently adopted here.
+ */
+const fetchBaseline = (
+  settings: GitSourceControlSettings,
+  workspace: Workspace,
+  target: SourceControlTarget,
+  observedRemoteHead: Option.Option<string>,
+  baseSha: string,
+): Effect.Effect<string, SourceControlError> =>
+  Effect.gen(function* () {
+    const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
+    const publishedHead = Option.orElse(repairHead, () => observedRemoteHead)
+    if (Option.isNone(publishedHead)) {
+      return baseSha
+    }
+    yield* runGit(settings, 'prepare', workspace.path, [
+      'fetch',
+      '--no-tags',
+      'origin',
+      `+refs/heads/${target.branchName}:refs/remotes/origin/${target.branchName}`,
+    ])
+    return publishedHead.value
+  })
 
 const prepareRepository = (
   settings: GitSourceControlSettings,
@@ -179,25 +154,16 @@ const prepareRepository = (
       `refs/remotes/origin/${settings.baseBranch}`,
     )
     const observedRemoteHead = yield* remoteHead(settings, 'prepare', workspace, target.branchName)
-    const repairHead = yield* expectedRepairHead(target, observedRemoteHead)
-    if (Option.isSome(repairHead)) {
-      yield* runGit(settings, 'prepare', workspace.path, [
-        'fetch',
-        '--no-tags',
-        'origin',
-        `+refs/heads/${target.branchName}:refs/remotes/origin/${target.branchName}`,
-      ])
-    }
-
-    const branch = yield* currentBranch(settings, 'prepare', workspace)
-    const head = yield* currentHead(settings, 'prepare', workspace)
-    const dirty = (yield* status(settings, 'prepare', workspace)).length > 0
-    const baselineSha = Option.getOrElse(repairHead, () => baseSha)
-    const unpublishedCommit = Option.exists(head, (sha) => sha !== baselineSha)
-    const preserve = Option.contains(branch, target.branchName) && (dirty || unpublishedCommit)
-    if (!preserve) {
-      yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
-    }
+    const baselineSha = yield* fetchBaseline(
+      settings,
+      workspace,
+      target,
+      observedRemoteHead,
+      baseSha,
+    )
+    // The workspace belongs to this run alone, so there is never anything in it to keep: the branch
+    // is put at the baseline unconditionally rather than after asking what the directory holds.
+    yield* resetToBaseline(settings, workspace, target.branchName, baselineSha)
     const prepared: PreparedRepository = {
       workspace,
       target,
@@ -207,6 +173,36 @@ const prepareRepository = (
       expectedRemoteHead: observedRemoteHead,
     }
     return prepared
+  })
+
+/**
+ * Reads the worktree against what the preparation recorded, without changing anything.
+ *
+ * Both halves of "there is work here" are asked separately, because they fail differently: an
+ * uncommitted edit is what a turn normally leaves, while a commit the remote does not have is what
+ * a publication that failed after committing left behind, and the second must not read as an empty
+ * worktree just because the first is now clean.
+ *
+ * The commit is measured by containment rather than by equality: a workspace left behind by a host
+ * that was down while the branch advanced holds a commit the remote already has and has since
+ * built on, and reading that as unpublished work would republish it under a lease that matches —
+ * overwriting whatever arrived in the meantime. Ahead means the remote does not contain it.
+ */
+const inspectRepository = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<WorktreeInspection, SourceControlError> =>
+  Effect.gen(function* () {
+    const porcelain = yield* status(settings, 'publish', prepared.workspace)
+    const dirtyFileCount = porcelain.split('\n').filter((line) => line.trim().length > 0).length
+    const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    const delivered = Option.getOrElse(prepared.expectedRemoteHead, () => prepared.baselineSha)
+    const committedAhead =
+      headSha !== delivered &&
+      !(yield* containedIn(settings, 'publish', prepared.workspace, headSha, delivered))
+    return dirtyFileCount === 0 && !committedAhead
+      ? { _tag: 'Clean', headSha }
+      : { _tag: 'Changed', headSha, dirtyFileCount, committedAhead }
   })
 
 const sameHead = (left: Option.Option<string>, right: Option.Option<string>): boolean =>
@@ -285,6 +281,42 @@ const rebaseOntoBase = (
       ),
   )
 
+/**
+ * Whether the branch this would publish to already carries the commit in the workspace.
+ *
+ * Containment rather than equality, and against the branch as the remote has it now rather than as
+ * the preparation recorded it: a push that landed may since have had commits built on top of it,
+ * and the work is delivered either way. The branch ref is fetched first, because the question
+ * cannot be asked about a commit the workspace does not have.
+ */
+const alreadyOnRemote = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+  committedHead: string,
+): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const fetched = yield* Effect.either(
+      runGit(settings, 'publish', prepared.workspace.path, [
+        'fetch',
+        '--no-tags',
+        'origin',
+        `+refs/heads/${prepared.target.branchName}:refs/remotes/origin/${prepared.target.branchName}`,
+      ]),
+    )
+    if (fetched._tag === 'Left') {
+      // No such branch on the remote, or the remote could not be reached. Neither says the work is
+      // delivered, and assuming it was would discard a publication that never happened.
+      return false
+    }
+    return yield* containedIn(
+      settings,
+      'publish',
+      prepared.workspace,
+      committedHead,
+      `refs/remotes/origin/${prepared.target.branchName}`,
+    )
+  })
+
 const publishRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
@@ -322,6 +354,23 @@ const publishRepository = (
       return unchanged
     }
 
+    // Asked before the rebase, because the rebase is what would make the question unanswerable: the
+    // most likely way to arrive here twice is a push the remote accepted and the client did not see
+    // succeed, and a protected base that has moved since rewrites the very commit the branch is
+    // carrying. Answering `Published` makes the retry idempotent; leaving it to the lease check
+    // would reject every attempt against a tip that holds this work already, spend the delivery
+    // budget and hand the agent back what is on the remote.
+    const delivered = yield* alreadyOnRemote(settings, prepared, committedHead)
+    if (delivered) {
+      const already: PublicationOutcome = {
+        _tag: 'Published',
+        branchName: prepared.target.branchName,
+        headSha: committedHead,
+        commitCreated: dirty,
+      }
+      return already
+    }
+
     yield* runGit(settings, 'publish', prepared.workspace.path, [
       'fetch',
       '--no-tags',
@@ -357,5 +406,6 @@ const publishRepository = (
 
 export const makeGitSourceControl = (settings: GitSourceControlSettings): SourceControlPort => ({
   prepare: (issue, workspace, target) => prepareRepository(settings, issue, workspace, target),
+  inspect: (prepared) => inspectRepository(settings, prepared),
   publish: (issue, prepared) => publishRepository(settings, issue, prepared),
 })

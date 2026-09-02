@@ -1,7 +1,7 @@
 import { Effect, Option, Ref } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
-import { releaseRepair } from '../handoff-decision.js'
+import { releaseRepair } from '../repair.js'
 import type { OrchestratorContext } from '../runtime.js'
 import type { HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'

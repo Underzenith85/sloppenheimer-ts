@@ -1,7 +1,11 @@
-import { Effect, Queue, type Scope } from 'effect'
+import { Deferred, Effect, Queue, Ref, type Scope } from 'effect'
 
+import { currentInstant } from '../support/clock.js'
+import { recordPostflightStarted } from '../telemetry.js'
+import * as Transitions from './transitions.js'
 import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
+import { onDeliveryAttempted, onDeliveryDue } from './polling/delivery-due.js'
 import { onIssuePauseChanged } from './polling/issue-pause.js'
 import { onRetryDue } from './polling/retry-due.js'
 import { onTick } from './polling/tick.js'
@@ -20,6 +24,7 @@ import { onWorkerExited } from './polling/worker-exited.js'
  * - `polling/agent-update.ts` — one protocol event from a live run.
  * - `polling/worker-exited.ts` — a worker fiber ending, and the handoff that may follow.
  * - `polling/retry-due.ts` — a queued retry coming due, continuing work or resuming a repair.
+ * - `polling/delivery-due.ts` — a retained delivery's next publication attempt, with no agent.
  * - `polling/issue-pause.ts` — the operator pausing or resuming an issue number.
  *
  * `polling/pass.ts` holds the reconciliation pass itself, and `polling/repair-identity.ts` the
@@ -37,6 +42,26 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
           yield* onTick(context)
           break
         }
+        case 'PostflightStarted': {
+          const startedAt = yield* currentInstant
+          yield* Ref.update(context.state, (current) =>
+            // Both or neither, and neither when the run is gone. A cancellation can reach the loop
+            // while the worker is still waiting to be let past, and the worker it belonged to is
+            // interrupted rather than publishing — so a detail moved to `publishing` here would sit
+            // in a phase no settlement is ever coming to leave.
+            Transitions.postflightTakeoverApplies(current, event.issueId, event.runId)
+              ? Transitions.updateDetail(
+                  Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
+                  event.issueId,
+                  (record) => recordPostflightStarted(record, startedAt),
+                )
+              : current,
+          )
+          // Only now may the publication begin: the worker is waiting on this, and what it is
+          // waiting for is the state, not the message.
+          yield* Deferred.succeed(event.applied, undefined)
+          break
+        }
         case 'AgentUpdate': {
           yield* onAgentUpdate(context, event)
           break
@@ -47,6 +72,14 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, ne
         }
         case 'RetryDue': {
           yield* onRetryDue(context, event)
+          break
+        }
+        case 'DeliveryDue': {
+          yield* onDeliveryDue(context, event)
+          break
+        }
+        case 'DeliveryAttempted': {
+          yield* onDeliveryAttempted(context, event)
           break
         }
         case 'SetIssuePaused': {
