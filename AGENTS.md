@@ -321,8 +321,17 @@ narrows the parsed line with the `support/json.ts` predicates, reports an unusab
 
 ### Concurrency and interruption
 
-- Concurrent work is forked into a scope (`Effect.fork`, or `Runtime.runFork` with an explicit
-  scope at the callback boundaries named below), never left as a dangling promise.
+- Concurrent work is forked into a scope (`Effect.fork`, or a `FiberMap`/`FiberSet` opened in one),
+  never left as a dangling promise.
+- Every long-lived fiber the orchestrator forks is owned by one keyed collection,
+  `packages/core/src/core/runtime/execution.ts`, opened in the orchestrator's own scope. A fiber is
+  keyed by what it is doing and which issue it is doing it for — `worker`, `retry` and `delivery`
+  per issue, and the one poll timer — so replacement is the collection's job rather than a step
+  each call site remembers: arming a key interrupts what it held, a fiber that ends takes itself
+  out, and closing the scope interrupts everything left and waits for their finalizers. Ownership
+  is the collection's; what is running, retrying or waiting to be delivered stays `RuntimeState`'s
+  to say, and no fiber handle is stored in a state record. Add a long-lived fiber by giving it a
+  key there, never by keeping a `Fiber` in a transition's value.
 - The orchestrator is a mailbox actor: an unbounded `Queue` of events, one loop applying pure
   transitions to the state. Offering an event is how work gets ordered, and it is the default. A
   callback outside the runtime bridges in through `runFromCallback`, and may — as `runSession`'s
@@ -369,10 +378,14 @@ runner's event names.
 `Effect.runPromiseExit` in `src/cli.ts` is the process boundary, and there are three other runs in
 the whole repository, each with a stated reason. `Effect.runPromise` in
 `packages/adapter-github/src/tools.ts` serves the total host-tool boundary described under
-**Errors**. `Runtime.runFork` in `packages/adapter-codex/src/codex.ts` and in
-`packages/core/src/core/runtime.ts` starts long-lived work from a callback that is not itself an
-effect, and both pass an explicit scope so the fiber is still owned by something. Do not add
-another: a function that needs a runtime is a function that should have returned an `Effect`.
+**Errors**. `Runtime.runFork` in `packages/adapter-codex/src/codex.ts` starts long-lived work from
+a callback that is not itself an effect, and passes an explicit scope so the fiber is still owned
+by something. The orchestrator's own callback bridge — `runFromCallback` in
+`packages/core/src/core/runtime.ts`, which an agent runner's progress report enters through — is
+the run function `FiberSet.makeRuntime` hands back: it captures the runtime once and owns each
+fork in a set the orchestrator's scope closes, so a report in flight is interrupted with the
+orchestrator and a report that has landed leaves the set. Do not add another: a function that needs
+a runtime is a function that should have returned an `Effect`.
 
 ## Packaging
 

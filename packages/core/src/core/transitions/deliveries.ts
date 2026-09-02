@@ -1,4 +1,4 @@
-import { type Fiber, Option } from 'effect'
+import { Option } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
 import { withEntry, withoutEntry } from '../../support/collections.js'
@@ -16,19 +16,13 @@ import { claimIssue } from './claims.js'
  */
 
 /**
- * Queues a delivery, returning whatever it displaced so the caller can interrupt that timer. An
- * issue has at most one retained delivery: newer work supersedes older work in the same worktree.
+ * Queues a delivery. An issue has at most one retained delivery: newer work supersedes older work
+ * in the same worktree, and the attempt behind the work it supersedes is interrupted by the
+ * execution owner it is replaced under.
  */
-export const scheduleDelivery = (
-  state: RuntimeState,
-  entry: DeliveryEntry,
-): readonly [Option.Option<DeliveryEntry>, RuntimeState] => {
-  const existing = Option.fromNullable(state.deliveries.get(entry.issue.id))
+export const scheduleDelivery = (state: RuntimeState, entry: DeliveryEntry): RuntimeState => {
   const claimed = claimIssue(state, entry.issue)
-  return [
-    existing,
-    { ...claimed, deliveries: withEntry(claimed.deliveries, entry.issue.id, entry) },
-  ]
+  return { ...claimed, deliveries: withEntry(claimed.deliveries, entry.issue.id, entry) }
 }
 
 /**
@@ -67,20 +61,19 @@ export const takeAttemptedDelivery = (
 }
 
 /**
- * Hands over the delivery whose timer has come due, and records the fiber now publishing it.
+ * Hands over the delivery whose timer has come due, and records that a publication now has it.
  *
  * Deliberately not a removal. The publication runs off the event loop, so a poll can interleave
  * with it, and an entry taken out of the state for the duration would be an issue with a claim
  * nobody holds, no `delivering` row, and a workspace the recovery sweep counts as nobody's — with
  * an agent free to be sent into the very worktree the push is reading. The entry stays where it is
- * until the attempt reports back; what changes is what its fiber is, from a timer waiting to
+ * until the attempt reports back; what changes is what is behind it, from a timer waiting to
  * publish to the publication itself.
  */
 export const beginDeliveryAttempt = (
   state: RuntimeState,
   id: IssueId,
   attempt: number,
-  fiber: Fiber.Fiber<void>,
   at: Date,
 ): readonly [Option.Option<DeliveryEntry>, RuntimeState] => {
   const entry = state.deliveries.get(id)
@@ -91,7 +84,7 @@ export const beginDeliveryAttempt = (
     Option.some(entry),
     {
       ...state,
-      deliveries: withEntry(state.deliveries, id, { ...entry, fiber, publishingSince: at }),
+      deliveries: withEntry(state.deliveries, id, { ...entry, armed: true, publishingSince: at }),
     },
   ]
 }
@@ -107,7 +100,7 @@ export const holdDelivery = (state: RuntimeState, entry: DeliveryEntry): Runtime
     ...claimed,
     deliveries: withEntry(claimed.deliveries, entry.issue.id, {
       ...entry,
-      fiber: null,
+      armed: false,
       publishingSince: null,
     }),
   }
@@ -115,7 +108,7 @@ export const holdDelivery = (state: RuntimeState, entry: DeliveryEntry): Runtime
 
 /**
  * Retains a delivery with no timer behind it, returning the entry whose timer the caller must
- * interrupt. This is what an operator pause does to work that is already in a workspace: the
+ * release. This is what an operator pause does to work that is already in a workspace: the
  * change is kept, and only the attempt waiting to publish it is called off.
  */
 export const suspendDelivery = (
@@ -126,19 +119,19 @@ export const suspendDelivery = (
   // A publication already under way is deliberately left to finish. Interrupting a push mid-flight
   // is what leaves the remote in a state nobody can name, and the pause is not lost: the attempt
   // settles, and whatever it schedules next reads the pause before it publishes anything.
-  if (entry === undefined || entry.fiber === null || entry.publishingSince !== null) {
+  if (entry === undefined || !entry.armed || entry.publishingSince !== null) {
     return [Option.none(), state]
   }
   return [
     Option.some(entry),
-    { ...state, deliveries: withEntry(state.deliveries, id, { ...entry, fiber: null }) },
+    { ...state, deliveries: withEntry(state.deliveries, id, { ...entry, armed: false }) },
   ]
 }
 
 /**
- * Drops a retained delivery whatever attempt it is on, returning it so the caller can interrupt
- * its timer. This is how work is abandoned rather than published: only a cancellation that
- * discards the workspace, per the documented policy, takes a delivery this way.
+ * Drops a retained delivery whatever attempt it is on, returning it so the caller can release
+ * whatever was behind it. This is how work is abandoned rather than published: only a
+ * cancellation that discards the workspace, per the documented policy, takes a delivery this way.
  */
 export const takeDelivery = (
   state: RuntimeState,

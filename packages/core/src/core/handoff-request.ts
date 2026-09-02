@@ -7,7 +7,7 @@
  * handoff is stated once here, against a settled-work record rather than against a live run.
  */
 
-import { Effect, Option, Ref, type Scope } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
@@ -76,7 +76,7 @@ const adoptOpenedHandoff = (
   context: OrchestratorContext,
   work: SettledWork,
   result: OpenedPullRequest,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const observedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
@@ -159,7 +159,7 @@ const runHandoff = (
   context: OrchestratorContext,
   work: SettledWork,
   codeReview: CodeReviewPort,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     // Published before the tracker call, not after it: the worker is already out of the
     // running map, so an open detail panel would otherwise keep reading the previous
@@ -231,7 +231,7 @@ export const requestHandoff = (
   context: OrchestratorContext,
   work: SettledWork,
   codeReview: CodeReviewPort,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   runHandoff(context, work, codeReview).pipe(
     withOperationalSpan('handoff', {
       issue_id: work.issue.id,

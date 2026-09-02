@@ -1,4 +1,4 @@
-import { Effect, Ref, type Scope } from 'effect'
+import { Effect, Ref } from 'effect'
 
 import type { Issue } from '../../domain/domain.js'
 import type { Workflow } from '../../config/workflow.js'
@@ -132,9 +132,7 @@ const reloadWorkflow = (context: OrchestratorContext): Effect.Effect<boolean> =>
   })
 
 /** Dispatches every candidate the workflow in force still has room for, in priority order. */
-const dispatchCandidates = (
-  context: OrchestratorContext,
-): Effect.Effect<void, never, Scope.Scope> =>
+const dispatchCandidates = (context: OrchestratorContext): Effect.Effect<void> =>
   Effect.gen(function* () {
     const dispatching = yield* Ref.get(context.state)
     const effective = dispatching.lastKnownGood
@@ -168,9 +166,7 @@ const dispatchCandidates = (
  * — a refresh over the HTTP API — is told what it actually got: a pass whose validation failed
  * stops before dispatch, and saying otherwise would be reporting an intention rather than an event.
  */
-const runPoll = (
-  context: OrchestratorContext,
-): Effect.Effect<readonly RefreshOperation[], never, Scope.Scope> =>
+const runPoll = (context: OrchestratorContext): Effect.Effect<readonly RefreshOperation[]> =>
   Effect.gen(function* () {
     const performed: RefreshOperation[] = []
     // A worker that ended since the last pass may have been the last holder of a replaced instance.
@@ -205,7 +201,5 @@ const runPoll = (
   })
 
 /** A native parent span and duration enclose every child stage in one polling pass. */
-export const poll = (
-  context: OrchestratorContext,
-): Effect.Effect<readonly RefreshOperation[], never, Scope.Scope> =>
+export const poll = (context: OrchestratorContext): Effect.Effect<readonly RefreshOperation[]> =>
   observeDuration(pollDuration, runPoll(context)).pipe(withOperationalSpan('poll'))

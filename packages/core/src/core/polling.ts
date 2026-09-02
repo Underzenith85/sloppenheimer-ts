@@ -1,4 +1,4 @@
-import { Deferred, Effect, Queue, Ref, type Scope } from 'effect'
+import { Deferred, Effect, Queue, Ref } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
 import { recordPostflightStarted } from '../telemetry.js'
@@ -33,7 +33,7 @@ import { onWorkerExited } from './polling/worker-exited.js'
 
 export { poll } from './polling/pass.js'
 
-export const eventLoop = (context: OrchestratorContext): Effect.Effect<never, never, Scope.Scope> =>
+export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
   Effect.gen(function* () {
     for (;;) {
       const event = yield* Queue.take(context.mailbox)

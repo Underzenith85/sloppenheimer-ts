@@ -1,4 +1,4 @@
-import { Clock, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
+import { Clock, Effect, Option, Queue, Ref } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
 import { currentInstant } from '../../support/clock.js'
@@ -8,6 +8,7 @@ import { logContext } from '../policy.js'
 import { agentRetryDelay, deliveryAttemptLimit } from '../retry.js'
 import type { DeliveryEntry } from '../postflight.js'
 import * as Transitions from '../transitions.js'
+import { ownIssueFiber, releaseIssueFiber, releaseIssueFiberFork } from './execution.js'
 import type { DeliveryRequest, RuntimeCells } from './types.js'
 
 /**
@@ -20,19 +21,20 @@ import type { DeliveryRequest, RuntimeCells } from './types.js'
  */
 
 /**
- * Stops whatever a delivery was waiting on, without ever waiting for it.
+ * Stops whatever a delivery was waiting on.
  *
- * A timer dies at once, but a publication is git: it can be inside a push whose child process has
- * not closed, and awaiting that interrupt on the event loop would block every issue the host is
- * running — the very thing running the attempt off the loop exists to prevent. What the abandoned
- * attempt eventually reports is discarded, because the entry it was publishing is gone.
+ * A timer dies at once and is waited for. A publication is git: it can be inside a push whose
+ * child process has not closed, and awaiting that interrupt on the event loop would block every
+ * issue the host is running — the very thing running the attempt off the loop exists to prevent.
+ * What the abandoned attempt eventually reports is discarded, because the entry it was publishing
+ * is gone.
  */
-const stopDeliveryFiber = (entry: DeliveryEntry): Effect.Effect<void> =>
-  entry.fiber === null
+const stopDeliveryAttempt = (cells: RuntimeCells, entry: DeliveryEntry): Effect.Effect<void> =>
+  !entry.armed
     ? Effect.void
     : entry.publishingSince === null
-      ? Fiber.interrupt(entry.fiber)
-      : Fiber.interruptFork(entry.fiber)
+      ? releaseIssueFiber(cells.execution, 'delivery', entry.issue.id)
+      : releaseIssueFiberFork(cells.execution, 'delivery', entry.issue.id)
 
 /**
  * Queues another publication attempt for work an agent has already produced.
@@ -44,7 +46,7 @@ const stopDeliveryFiber = (entry: DeliveryEntry): Effect.Effect<void> =>
 export const scheduleDelivery = (
   cells: RuntimeCells,
   request: DeliveryRequest,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     const branchName = request.prepared.target.branchName
     const refusal = !request.failure.worktreePreserved
@@ -73,7 +75,13 @@ export const scheduleDelivery = (
       current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs,
     )
     const dueAt = (yield* Clock.currentTimeMillis) + delay
-    const fiber = yield* Effect.forkScoped(
+    // The issue owns one delivery attempt, so arming this timer is what calls off whatever it
+    // supersedes — and the owner signals that interruption rather than waiting on it, which is
+    // what keeps superseding a publication off the event loop's critical path.
+    yield* ownIssueFiber(
+      cells.execution,
+      'delivery',
+      request.issue.id,
       Effect.sleep(delay).pipe(
         Effect.zipRight(
           Queue.offer(cells.mailbox, {
@@ -86,18 +94,15 @@ export const scheduleDelivery = (
       ),
     )
     const observedAt = yield* currentInstant
-    const displaced = yield* Ref.modify(cells.state, (pending) =>
+    yield* Ref.update(cells.state, (pending) =>
       Transitions.scheduleDelivery(pending, {
         ...request,
         dueAt,
         observedAt,
         publishingSince: null,
-        fiber,
+        armed: true,
       }),
     )
-    if (Option.isSome(displaced) && displaced.value.fiber !== null) {
-      yield* stopDeliveryFiber(displaced.value)
-    }
     yield* Ref.update(cells.state, (pending) =>
       Transitions.updateDetail(pending, request.issue.id, (record) =>
         recordPublication(record, observedAt, {
@@ -142,10 +147,9 @@ export const suspendDelivery = (
     if (Option.isNone(suspended)) {
       return
     }
-    const armed = suspended.value.fiber
-    if (armed !== null) {
-      yield* Fiber.interrupt(armed)
-    }
+    // Only a timer is ever suspended — the transition refuses a publication already under way —
+    // so the interruption is waited for rather than signalled.
+    yield* releaseIssueFiber(cells.execution, 'delivery', id)
     const observedAt = yield* currentInstant
     yield* Ref.update(cells.state, (current) =>
       Transitions.updateDetail(current, id, (record) =>
@@ -173,10 +177,7 @@ export const suspendDelivery = (
  * Arms a suspended delivery again, from the attempt it was suspended on. No attempt is spent by
  * being paused.
  */
-export const resumeDelivery = (
-  cells: RuntimeCells,
-  entry: DeliveryEntry,
-): Effect.Effect<void, never, Scope.Scope> =>
+export const resumeDelivery = (cells: RuntimeCells, entry: DeliveryEntry): Effect.Effect<void> =>
   Effect.asVoid(
     scheduleDelivery(cells, {
       issue: entry.issue,
@@ -209,9 +210,7 @@ export const abandonDelivery = (
     if (Option.isNone(dropped)) {
       return
     }
-    if (dropped.value.fiber !== null) {
-      yield* stopDeliveryFiber(dropped.value)
-    }
+    yield* stopDeliveryAttempt(cells, dropped.value)
     const observedAt = yield* currentInstant
     yield* Ref.update(cells.state, (current) =>
       Transitions.updateDetail(current, id, (record) =>
