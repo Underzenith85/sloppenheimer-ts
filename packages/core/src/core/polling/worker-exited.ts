@@ -1,6 +1,7 @@
-import { Clock, Effect, Option, Ref, type Scope } from 'effect'
+import { Clock, Effect, Option, Ref } from 'effect'
 
 import { logError, logInfo } from '../../support/logging.js'
+import { agentOutcomes, recordOutcome } from '../../support/observability.js'
 import { settlePostflight } from '../delivery.js'
 import { sessionLogContext } from '../policy.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
@@ -20,7 +21,7 @@ type WorkerExited = Extract<OrchestratorEvent, { _tag: 'WorkerExited' }>
 export const onWorkerExited = (
   context: OrchestratorContext,
   event: WorkerExited,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const ended = yield* Ref.modify(context.state, (current) =>
       Transitions.endRun(current, event.issueId, event.runId),
@@ -28,6 +29,7 @@ export const onWorkerExited = (
     if (Option.isNone(ended)) {
       return
     }
+    yield* recordOutcome(agentOutcomes, event.outcome)
     const settled = yield* Ref.modify(context.state, (current) =>
       Transitions.applyPendingTelemetry(current, event.issueId, ended.value),
     )

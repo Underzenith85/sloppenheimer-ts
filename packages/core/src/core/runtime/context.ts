@@ -2,6 +2,7 @@ import { Effect, Ref } from 'effect'
 
 import type { WorkflowError } from '../../domain/errors.js'
 import type { Workflow } from '../../config/workflow.js'
+import { setRuntimeGauges } from '../../support/observability.js'
 import type { EffectiveWorkflow, RuntimePorts } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { rebuildEffectiveWorkflow } from '../workflow-reload.js'
@@ -18,6 +19,13 @@ import { requestTick, scheduleNextTick, scheduleRetry } from './scheduling.js'
 import { persistCompletions, persistHandoffs } from './store.js'
 import { traceRecorder } from './traces.js'
 import type { OrchestratorContext, RuntimeCells } from './types.js'
+
+/** Publishes operator detail and derives saturation gauges from the same authoritative state. */
+const publishRuntimeState = (cells: RuntimeCells): Effect.Effect<void> =>
+  Ref.update(cells.state, Transitions.publishDetails).pipe(
+    Effect.zipRight(Ref.get(cells.state)),
+    Effect.flatMap((state) => setRuntimeGauges(state.running.size, state.retries.size)),
+  )
 
 /**
  * Rebuilds the ports for a workflow and adopts it, recording the instances it displaced.
@@ -55,6 +63,7 @@ export const orchestratorContext = (
   ports,
   selectedWorkflowPath,
   mailbox: cells.mailbox,
+  execution: cells.execution,
   detailRecord: (issue, attempt, dispatchLabels) =>
     openDetailRecord(cells, issue, attempt, dispatchLabels),
   scheduleRetry: (issue, attempt, error, continuation, repairRun, trackerError) =>
@@ -85,5 +94,5 @@ export const orchestratorContext = (
       Effect.map((current) => current.lastKnownGood.workflow.config.workspaceRoot),
     ),
   ),
-  publish: Ref.update(cells.state, Transitions.publishDetails),
+  publish: publishRuntimeState(cells),
 })

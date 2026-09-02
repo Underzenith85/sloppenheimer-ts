@@ -1,15 +1,4 @@
-import {
-  Cause,
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  MutableRef,
-  Option,
-  Queue,
-  Ref,
-  type Scope,
-} from 'effect'
+import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -18,11 +7,19 @@ import { AgentError, type SourceControlError, type WorkspaceError } from '../dom
 import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
-import { logError, logInfo } from '../support/logging.js'
+import { logError, logInfo, withLogAnnotations } from '../support/logging.js'
+import {
+  agentDuration,
+  dispatchOutcomes,
+  observeDuration,
+  recordOutcome,
+  withOperationalSpan,
+} from '../support/observability.js'
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
 import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
+import { ownIssueFiber, releaseIssueFiber } from './runtime/execution.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, SessionPorts } from './state.js'
 import type { SourceControlTarget } from '../ports/index.js'
@@ -282,7 +279,7 @@ const workspaceRelease = (
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
-  return execution.workspaces
+  const worker = execution.workspaces
     .withLeasedWorkspace(
       { identifier: issue.identifier, runId },
       (workspace) => runWithSourceControl(launch, workspace),
@@ -312,17 +309,22 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
           }).pipe(Effect.asVoid),
       }),
     )
+  return observeDuration(agentDuration, worker).pipe(
+    withOperationalSpan('agent.run', { run_id: runId }),
+    withLogAnnotations({
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      run_id: runId,
+      handoff: launch.repairRun,
+    }),
+  )
 }
 
 /** What a started session is before it has reported anything: everything else arrives later. */
-const startingRun = (
-  launch: SessionLaunch,
-  fiber: Fiber.Fiber<void>,
-  startedAt: Date,
-): RunningEntry => ({
+const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
   runId: launch.runId,
   issue: launch.issue,
-  fiber,
   execution: launch.execution,
   sessionPorts: launch.sessionPorts,
   attempt: launch.attempt,
@@ -369,16 +371,17 @@ const openRunTrace = (
     )
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
-export const dispatch = (
+const runDispatch = (
   context: OrchestratorContext,
   issue: Issue,
   attempt: number | null,
   effectiveOverride?: EffectiveWorkflow,
   sourceTarget?: SourceControlTarget,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     const before = yield* Ref.get(context.state)
     if (before.running.has(issue.id)) {
+      yield* recordOutcome(dispatchOutcomes, 'already_running')
       return false
     }
     // Claiming and taking the queued retry are one transition: the issue must never be seen as
@@ -387,7 +390,7 @@ export const dispatch = (
       Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
     )
     if (Option.isSome(displacedRetry)) {
-      yield* Fiber.interrupt(displacedRetry.value.fiber)
+      yield* releaseIssueFiber(context.execution, 'retry', issue.id)
     }
 
     const base = effectiveOverride ?? before.lastKnownGood
@@ -402,6 +405,7 @@ export const dispatch = (
     yield* context.detailRecord(issue, attempt, base.workflow.config.tracker.requiredLabels)
     const preflight = yield* revalidateCredentials(context, base).pipe(asSettled)
     if (preflight._tag === 'Failed') {
+      yield* recordOutcome(dispatchOutcomes, 'preflight_failed')
       yield* logError('action=dispatch outcome=failed', {
         ...logContext(issue),
         action: 'dispatch',
@@ -423,6 +427,7 @@ export const dispatch = (
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(asSettled)
     if (renderedPrompt._tag === 'Failed') {
+      yield* recordOutcome(dispatchOutcomes, 'prompt_failed')
       yield* context.scheduleRetry(
         issue,
         (attempt ?? 0) + 1,
@@ -451,15 +456,41 @@ export const dispatch = (
       target,
       repairRun,
     }
-    const fiber = yield* Effect.forkScoped(makeWorker(launch))
+    // The issue owns one worker, so launching this one is what interrupts a worker the state has
+    // already let go of, and the fiber leaves the collection of its own accord when it ends.
+    yield* ownIssueFiber(context.execution, 'worker', issue.id, makeWorker(launch))
     const startedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
-      Transitions.beginRun(current, startingRun(launch, fiber, startedAt)),
+      Transitions.beginRun(current, startingRun(launch, startedAt)),
     )
     yield* logInfo('action=dispatch outcome=started', {
       ...logContext(issue),
       action: 'dispatch',
       outcome: 'started',
     })
+    yield* recordOutcome(dispatchOutcomes, 'started')
     return true
   })
+
+/** One dispatch span carries issue, attempt, and handoff context through every nested log. */
+export const dispatch = (
+  context: OrchestratorContext,
+  issue: Issue,
+  attempt: number | null,
+  effectiveOverride?: EffectiveWorkflow,
+  sourceTarget?: SourceControlTarget,
+): Effect.Effect<boolean> =>
+  runDispatch(context, issue, attempt, effectiveOverride, sourceTarget).pipe(
+    withOperationalSpan('dispatch', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      handoff: sourceTarget?._tag === 'Repair',
+    }),
+    withLogAnnotations({
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      handoff: sourceTarget?._tag === 'Repair',
+    }),
+  )

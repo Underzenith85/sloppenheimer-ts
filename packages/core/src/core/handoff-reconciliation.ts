@@ -1,4 +1,4 @@
-import { Effect, Option, Ref, type Scope } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import type { IssueId } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
@@ -131,7 +131,7 @@ const performRepair = (
   executionAttempt: Option.Option<number>,
   repairDispatchAllowed: boolean,
   codeReview: Option.Option<CodeReviewPort>,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     if (!repairDispatchAllowed) {
       yield* stageHandoff(context, id, handoff)
@@ -208,7 +208,7 @@ const perform = (
   permission: RepairPermission,
   executionAttempt: Option.Option<number>,
   repairDispatchAllowed: boolean,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const codeReview = handoff.execution.codeReview
     if (Option.isNone(codeReview)) {
@@ -290,7 +290,7 @@ export const applyHandoffObservation = (
   permission: RepairPermission,
   executionAttempt: Option.Option<number>,
   repairDispatchAllowed: boolean,
-): Effect.Effect<void, never, Scope.Scope> => {
+): Effect.Effect<void> => {
   const decision = observeHandoff(handoff, observation, observedAt)
   return perform(
     context,
@@ -307,7 +307,7 @@ export const reconcileHandoffs = (
   context: OrchestratorContext,
   repairDispatchAllowed: boolean,
   onlyIssueId: Option.Option<IssueId> = Option.none(),
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const selected = (id: IssueId): boolean =>
       Option.isNone(onlyIssueId) || onlyIssueId.value === id

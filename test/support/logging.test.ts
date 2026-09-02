@@ -2,7 +2,7 @@ import { it } from '@effect/vitest'
 import { Effect, Logger } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
-import { logInfo } from '@sloppenheimer/core/support/logging.js'
+import { logInfo, withLogAnnotations } from '@sloppenheimer/core/support/logging.js'
 import { redactSecretsInString } from '@sloppenheimer/core/support/redaction.js'
 
 describe('operator logging', (): void => {
@@ -89,6 +89,33 @@ Authorization=[REDACTED]`,
       expect(JSON.stringify(entries)).toContain('"action":"unspecified"')
       expect(JSON.stringify(entries)).toContain('"outcome":"unknown"')
       expect(JSON.stringify(entries)).toContain('"error":null')
+    }),
+  )
+
+  it.effect('redacts and bounds propagated operation annotations', () =>
+    Effect.gen(function* () {
+      const entries: unknown[] = []
+      const annotationKeys: string[] = []
+      const collectingLogger = Logger.replace(
+        Logger.defaultLogger,
+        Logger.make((entry) => {
+          entries.push(entry)
+          annotationKeys.push(...[...entry.annotations].map(([key]) => key))
+        }),
+      )
+      yield* logInfo('inside operation').pipe(
+        withLogAnnotations({ token: 'secret', issue_id: 'x'.repeat(2_000) }),
+        Effect.provide(collectingLogger),
+      )
+
+      const serialized = JSON.stringify(entries)
+      expect(serialized).not.toContain('secret')
+      expect(serialized).toContain('[REDACTED]')
+      expect(serialized).not.toContain('x'.repeat(1_025))
+      expect(annotationKeys).toContain('issue_id')
+      expect(annotationKeys).not.toContain('action')
+      expect(annotationKeys).not.toContain('outcome')
+      expect(annotationKeys).not.toContain('error')
     }),
   )
 })

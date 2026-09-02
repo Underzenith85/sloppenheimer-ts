@@ -11,6 +11,7 @@ import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
 import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { isJsonValue } from '@sloppenheimer/core/support/json.js'
 import type { GitHubProviderConfig } from './provider.js'
+import { observeGitHubRequest } from './observability.js'
 
 export const githubApiVersion = '2026-03-10'
 export const githubRequestTimeoutMs = 30_000
@@ -289,6 +290,7 @@ export const githubJson = (
         ),
     }),
     withGitHubHttpClient,
+    observeGitHubRequest(init?.method ?? 'GET'),
   )
 
 /** Reads the `rel="next"` target from a `Link` header, rejecting cross-origin or malformed links. */

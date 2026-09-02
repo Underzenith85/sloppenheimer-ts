@@ -3,8 +3,9 @@ import type { Deferred } from 'effect'
 import type { EffectiveWorkflow, RefreshOperation, RuntimeState } from '../state.js'
 
 /**
- * The polling cadence — the tick debounce, the callers waiting on a refresh, the interval timer —
- * and the workflow currently in force, which every pass may replace.
+ * The polling cadence — the tick debounce and the callers waiting on a refresh — and the workflow
+ * currently in force, which every pass may replace. The interval timer itself is a fiber, owned by
+ * `runtime/execution.ts` rather than recorded here.
  */
 
 export type TickSource = 'startup' | 'timer' | 'change'
@@ -77,11 +78,6 @@ export const promoteRefreshWaiters = (state: RuntimeState): RuntimeState => ({
   currentRefreshWaiters: [...state.currentRefreshWaiters, ...state.nextRefreshWaiters],
   nextRefreshWaiters: [],
 })
-
-export const setPollTimer = (
-  state: RuntimeState,
-  timer: RuntimeState['pollTimer'],
-): RuntimeState => ({ ...state, pollTimer: timer })
 
 /** The workflow the orchestrator is running under, and the reason a reload was refused. */
 export const adoptWorkflow = (state: RuntimeState, effective: EffectiveWorkflow): RuntimeState => ({

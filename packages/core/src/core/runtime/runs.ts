@@ -1,9 +1,15 @@
-import { Effect, Fiber, Option, Ref } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import type { Issue, IssueId } from '../../domain/domain.js'
 import { issueBranchName } from '../../domain/handoff.js'
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo, logWarning } from '../../support/logging.js'
+import {
+  agentOutcomes,
+  handoffOutcomes,
+  recordOutcome,
+  type AgentOutcome,
+} from '../../support/observability.js'
 import {
   createAgentDetailRecord,
   recordAttemptStarted,
@@ -16,6 +22,7 @@ import {
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
 import { abandonDelivery } from './deliveries.js'
+import { releaseIssueFiber } from './execution.js'
 import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -121,6 +128,7 @@ export const cancelRunning = (
   cleanupWorkspace: boolean,
   reason = 'the orchestrator cancelled the run',
   repairDisposition: RepairDisposition = 'release',
+  agentOutcome: AgentOutcome = 'cancelled',
 ): Effect.Effect<Option.Option<RunningEntry>> =>
   Effect.gen(function* () {
     const before = yield* Ref.get(cells.state)
@@ -129,7 +137,9 @@ export const cancelRunning = (
       return Option.none()
     }
     const queuedBeforeInterruption = before.pendingLifecycle.get(id)?.length ?? 0
-    yield* Fiber.interrupt(running.fiber)
+    // Awaited, not merely signalled: the worker's finalizers release its workspace lease, and what
+    // follows here settles the telemetry and may remove the very workspace it was holding.
+    yield* releaseIssueFiber(cells.execution, 'worker', id)
     const queuedLifecycle = yield* Ref.modify(cells.state, (current) =>
       Transitions.takePendingLifecycle(current, id),
     )
@@ -181,6 +191,7 @@ export const cancelRunning = (
         ),
       )
     }
+    yield* recordOutcome(agentOutcomes, agentOutcome)
     return Option.some(settled)
   })
 
@@ -224,27 +235,35 @@ export const noteHandoffOutcome = (
   outcome: 'pull_request_open' | 'merged' | 'intervention_required',
 ): Effect.Effect<void> => {
   const status = outcome === 'intervention_required' ? 'failed' : 'observed'
-  return traceHandoff(cells.traces, id, 'outcome', status, handoff.reason).pipe(
-    Effect.zipRight(
-      Ref.update(cells.state, (current) =>
-        Transitions.updateDetail(current, id, (record) =>
-          recordHandoff(record, handoff.observedAt, {
-            step: 'outcome',
-            status,
-            message: handoff.reason,
-            pullRequest: {
-              status:
-                record.handoff.pullRequest.status === 'pending'
-                  ? 'reused'
-                  : record.handoff.pullRequest.status,
-              number: handoff.pullRequestNumber,
-              url: handoff.pullRequestUrl,
-              state: handoff.state,
-            },
-            outcome,
-          }),
+  return traceHandoff(cells.traces, id, 'outcome', status, handoff.reason)
+    .pipe(
+      Effect.zipRight(
+        Ref.update(cells.state, (current) =>
+          Transitions.updateDetail(current, id, (record) =>
+            recordHandoff(record, handoff.observedAt, {
+              step: 'outcome',
+              status,
+              message: handoff.reason,
+              pullRequest: {
+                status:
+                  record.handoff.pullRequest.status === 'pending'
+                    ? 'reused'
+                    : record.handoff.pullRequest.status,
+                number: handoff.pullRequestNumber,
+                url: handoff.pullRequestUrl,
+                state: handoff.state,
+              },
+              outcome,
+            }),
+          ),
         ),
       ),
-    ),
-  )
+    )
+    .pipe(
+      Effect.zipRight(
+        outcome === 'pull_request_open'
+          ? Effect.void
+          : recordOutcome(handoffOutcomes, outcome === 'merged' ? 'merged' : 'intervention'),
+      ),
+    )
 }

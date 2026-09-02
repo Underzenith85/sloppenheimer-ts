@@ -1,5 +1,6 @@
 import { Effect, Ref } from 'effect'
 
+import { withLogAnnotations } from '../../support/logging.js'
 import { recordAgentEvent } from '../../telemetry.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import * as Transitions from '../transitions.js'
@@ -8,7 +9,7 @@ import * as Transitions from '../transitions.js'
  * One protocol event from a live run. The usage counters only ever rise, so a report that arrives
  * out of order cannot lower what the run already accounted for.
  */
-export const onAgentUpdate = (
+const applyAgentUpdate = (
   context: OrchestratorContext,
   event: Extract<OrchestratorEvent, { _tag: 'AgentUpdate' }>,
 ): Effect.Effect<void> =>
@@ -72,3 +73,17 @@ export const onAgentUpdate = (
       }
     }
   })
+
+/** Agent identity is attached once and inherited by lifecycle logs emitted while folding the event. */
+export const onAgentUpdate = (
+  context: OrchestratorContext,
+  event: Extract<OrchestratorEvent, { _tag: 'AgentUpdate' }>,
+): Effect.Effect<void> =>
+  applyAgentUpdate(context, event).pipe(
+    withLogAnnotations({
+      issue_id: event.issueId,
+      session_id: event.update.sessionId,
+      thread_id: event.update.threadId,
+      turn_id: event.update.turnId,
+    }),
+  )

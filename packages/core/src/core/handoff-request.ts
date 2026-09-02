@@ -7,11 +7,12 @@
  * handoff is stated once here, against a settled-work record rather than against a live run.
  */
 
-import { Effect, Option, Ref, type Scope } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
-import { logInfo } from '../support/logging.js'
+import { logInfo, withLogAnnotations } from '../support/logging.js'
+import { handoffOutcomes, recordOutcome, withOperationalSpan } from '../support/observability.js'
 import { asSettled } from '../support/settled.js'
 import { recordHandoff } from '../telemetry.js'
 import type { CodeReviewPort, HandoffResult } from '../ports/index.js'
@@ -75,7 +76,7 @@ const adoptOpenedHandoff = (
   context: OrchestratorContext,
   work: SettledWork,
   result: OpenedPullRequest,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const observedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
@@ -139,6 +140,7 @@ const adoptOpenedHandoff = (
       branch: result.branchName,
       pull_request_url: result.pullRequestUrl,
     })
+    yield* recordOutcome(handoffOutcomes, 'completed')
     if (completedRepair) {
       yield* Ref.update(context.state, (current) =>
         Transitions.releaseClaim(current, work.issue.id),
@@ -153,11 +155,11 @@ const adoptOpenedHandoff = (
  * the detail as it happens. A failed request or a branch that was never pushed schedules the
  * continuation the run would otherwise have had.
  */
-export const requestHandoff = (
+const runHandoff = (
   context: OrchestratorContext,
   work: SettledWork,
   codeReview: CodeReviewPort,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     // Published before the tracker call, not after it: the worker is already out of the
     // running map, so an open detail panel would otherwise keep reading the previous
@@ -176,6 +178,7 @@ export const requestHandoff = (
     yield* context.publish
     const handoff = yield* codeReview.handoffCompletedWork(work.issue).pipe(asSettled)
     if (handoff._tag === 'Failed') {
+      yield* recordOutcome(handoffOutcomes, 'failed')
       const failedAt = yield* currentInstant
       yield* Ref.update(context.state, (current) =>
         Transitions.updateDetail(current, work.issue.id, (record) =>
@@ -201,6 +204,7 @@ export const requestHandoff = (
     }
     const result = handoff.value
     if (result._tag === 'NoBranch') {
+      yield* recordOutcome(handoffOutcomes, 'no_branch')
       const absentAt = yield* currentInstant
       yield* Ref.update(context.state, (current) =>
         Transitions.updateDetail(current, work.issue.id, (record) =>
@@ -221,3 +225,23 @@ export const requestHandoff = (
     }
     yield* adoptOpenedHandoff(context, work, result)
   })
+
+/** A handoff can follow a worker or a retained delivery; both share one trace/log boundary. */
+export const requestHandoff = (
+  context: OrchestratorContext,
+  work: SettledWork,
+  codeReview: CodeReviewPort,
+): Effect.Effect<void> =>
+  runHandoff(context, work, codeReview).pipe(
+    withOperationalSpan('handoff', {
+      issue_id: work.issue.id,
+      attempt: work.attempt,
+      repair: work.repairRun,
+    }),
+    withLogAnnotations({
+      issue_id: work.issue.id,
+      issue_identifier: work.issue.identifier,
+      attempt: work.attempt,
+      handoff: true,
+    }),
+  )

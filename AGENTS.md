@@ -323,8 +323,17 @@ narrows the parsed line with the `support/json.ts` predicates, reports an unusab
 
 ### Concurrency and interruption
 
-- Concurrent work is forked into a scope (`Effect.fork`, or `Runtime.runFork` with an explicit
-  scope at the callback boundaries named below), never left as a dangling promise.
+- Concurrent work is forked into a scope (`Effect.fork`, or a `FiberMap`/`FiberSet` opened in one),
+  never left as a dangling promise.
+- Every long-lived fiber the orchestrator forks is owned by one keyed collection,
+  `packages/core/src/core/runtime/execution.ts`, opened in the orchestrator's own scope. A fiber is
+  keyed by what it is doing and which issue it is doing it for — `worker`, `retry` and `delivery`
+  per issue, and the one poll timer — so replacement is the collection's job rather than a step
+  each call site remembers: arming a key interrupts what it held, a fiber that ends takes itself
+  out, and closing the scope interrupts everything left and waits for their finalizers. Ownership
+  is the collection's; what is running, retrying or waiting to be delivered stays `RuntimeState`'s
+  to say, and no fiber handle is stored in a state record. Add a long-lived fiber by giving it a
+  key there, never by keeping a `Fiber` in a transition's value.
 - The orchestrator is a mailbox actor: an unbounded `Queue` of events, one loop applying pure
   transitions to the state. Offering an event is how work gets ordered, and it is the default. A
   callback outside the runtime bridges in through `runFromCallback`, and may — as `runSession`'s
@@ -371,10 +380,14 @@ runner's event names.
 `Effect.runPromiseExit` in `src/cli.ts` is the process boundary, and there are three other runs in
 the whole repository, each with a stated reason. `Effect.runPromise` in
 `packages/adapter-github/src/tools.ts` serves the total host-tool boundary described under
-**Errors**. `Runtime.runFork` in `packages/adapter-codex/src/codex.ts` and in
-`packages/core/src/core/runtime.ts` starts long-lived work from a callback that is not itself an
-effect, and both pass an explicit scope so the fiber is still owned by something. Do not add
-another: a function that needs a runtime is a function that should have returned an `Effect`.
+**Errors**. `Runtime.runFork` in `packages/adapter-codex/src/codex.ts` starts long-lived work from
+a callback that is not itself an effect, and passes an explicit scope so the fiber is still owned
+by something. The orchestrator's own callback bridge — `runFromCallback` in
+`packages/core/src/core/runtime.ts`, which an agent runner's progress report enters through — is
+the run function `FiberSet.makeRuntime` hands back: it captures the runtime once and owns each
+fork in a set the orchestrator's scope closes, so a report in flight is interrupted with the
+orchestrator and a report that has landed leaves the set. Do not add another: a function that needs
+a runtime is a function that should have returned an `Effect`.
 
 ## Packaging
 
@@ -760,11 +773,21 @@ loosening of the first.
   wire shapes, sharing the entry walk and the change-kind vocabulary with the bounded reading so the
   two cannot disagree about which files an item named.
 
-This is independent of [#248](https://github.com/Underzenith85/sloppenheimer-ts/issues/248): that
-owns host operational observability — spans, metrics, propagated log context, telemetry-export
-health — and this owns product-visible agent activity. The trace carries stable session, thread,
-turn, attempt and sequence identifiers for #248 to correlate against, and requires no Effect logger
-or tracing exporter to work.
+This is independent of the operational observability
+[#248](https://github.com/Underzenith85/sloppenheimer-ts/issues/248) landed in
+`docs/operational-observability.md`. That owns the _host's_ signals — spans, metrics, propagated log
+context, telemetry-export health — and answers "is this host healthy" from outside; this owns
+product-visible _agent activity_ and answers what one agent did. Neither is built on the other: the
+trace carries stable session, thread, turn, attempt and sequence identifiers for a span or a log
+annotation to correlate against, and requires no Effect logger or tracing exporter to work, so a
+host with no exporter configured still retains a complete trace.
+
+The two also bound differently, and deliberately. Log fields and span annotations are bounded to
+1,024 characters with the depth, array and field caps `docs/operational-observability.md` lists,
+because they exist to be read in aggregate. A trace field is bounded by the operator's own
+`trace.field_limit_bytes`, in kilobytes rather than characters, because it exists to be read in
+full. Do not unify them: a command's output cut to 1,024 characters is not the record this exists
+to keep.
 
 ## Architecture record: agent runners
 

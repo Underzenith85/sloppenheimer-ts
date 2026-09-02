@@ -1,4 +1,4 @@
-import { Clock, Effect, Option, Ref, type Scope } from 'effect'
+import { Clock, Effect, Option, Ref } from 'effect'
 
 import { logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
@@ -15,7 +15,7 @@ import type { RuntimeCells } from './types.js'
 export const reconcile = (
   cells: RuntimeCells,
   retryDispatchAllowed: boolean,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     if (retryDispatchAllowed) {
       yield* retireStalledRuns(cells)
@@ -67,7 +67,7 @@ export const reconcile = (
   })
 
 /** Cancels every run that has gone quiet past its stall timeout, and queues its continuation. */
-const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void, never, Scope.Scope> =>
+const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void> =>
   Effect.gen(function* () {
     const stalling = yield* Ref.get(cells.state)
     if (stalling.running.size === 0) {
@@ -95,6 +95,7 @@ const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void, never, Scop
         `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
         // The retry scheduled just below continues this repair from the same baseline.
         'retain',
+        'stalled',
       )
       if (Option.isSome(ended)) {
         yield* scheduleRetry(

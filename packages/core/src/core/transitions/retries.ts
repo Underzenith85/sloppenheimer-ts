@@ -11,19 +11,15 @@ import { claimIssue } from './claims.js'
  */
 
 /**
- * Queues a retry, returning whatever it displaced so the caller can interrupt that timer. An issue
- * has at most one pending retry: a newer schedule always wins.
+ * Queues a retry. An issue has at most one pending retry: a newer schedule always wins, and the
+ * timer it displaces is interrupted by the execution owner the new one is armed under.
  */
-export const scheduleRetry = (
-  state: RuntimeState,
-  entry: RetryEntry,
-): readonly [Option.Option<RetryEntry>, RuntimeState] => {
-  const existing = Option.fromNullable(state.retries.get(entry.issue.id))
+export const scheduleRetry = (state: RuntimeState, entry: RetryEntry): RuntimeState => {
   const claimed = claimIssue(state, entry.issue)
-  return [existing, { ...claimed, retries: withEntry(claimed.retries, entry.issue.id, entry) }]
+  return { ...claimed, retries: withEntry(claimed.retries, entry.issue.id, entry) }
 }
 
-/** Removes a queued retry, returning it so the caller can interrupt its timer. */
+/** Removes a queued retry, returning it so the caller can release its timer. */
 export const takeRetry = (
   state: RuntimeState,
   id: IssueId,

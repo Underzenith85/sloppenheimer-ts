@@ -1,5 +1,5 @@
 import { it } from '@effect/vitest'
-import { Exit, Fiber, MutableRef, Option } from 'effect'
+import { MutableRef, Option } from 'effect'
 import { describe, expect } from 'vitest'
 
 import { workflowDefaults, type Workflow } from '@sloppenheimer/core/config/workflow.js'
@@ -41,7 +41,6 @@ import { anIssue } from '../harness/fixtures.js'
  */
 
 /** A fiber that has already finished. The transitions only ever hand one back to be interrupted. */
-const settledFiber = Fiber.done(Exit.void)
 
 const workflow: Workflow = {
   path: '/tmp/WORKFLOW.md',
@@ -150,7 +149,6 @@ const emptyState = (): RuntimeState =>
 const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
   runId,
   issue,
-  fiber: settledFiber,
   execution,
   sessionPorts: MutableRef.make({
     tracker: execution.tracker,
@@ -180,7 +178,6 @@ const retryEntry = (issue: Issue, attempt: number, repairRun = false): RetryEntr
   repairRun,
   dueAt: 1_000,
   error: null,
-  fiber: settledFiber,
 })
 
 const finishedWork = (issue: Issue): CompletedEntry => ({
@@ -581,24 +578,22 @@ describe('retry scheduling', (): void => {
   const issue = makeIssue('example/sloppenheimer#1')
 
   it('claims the issue and queues the retry together', (): void => {
-    const [displaced, scheduled] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
+    const scheduled = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
 
-    expect(Option.isNone(displaced)).toBe(true)
     expect(scheduled.claimed.has(issue.id)).toBe(true)
     expect(scheduled.retries.get(issue.id)?.attempt).toBe(1)
   })
 
-  it('hands back the retry it displaced so its timer can be interrupted', (): void => {
-    const [, first] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
+  it('lets a newer schedule replace the attempt it supersedes', (): void => {
+    const first = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
 
-    const [displaced, second] = Transitions.scheduleRetry(first, retryEntry(issue, 2))
+    const second = Transitions.scheduleRetry(first, retryEntry(issue, 2))
 
-    expect(Option.getOrNull(displaced)?.attempt).toBe(1)
     expect(second.retries.get(issue.id)?.attempt).toBe(2)
   })
 
   it('takes a due retry only for the attempt that came due', (): void => {
-    const [, scheduled] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 2))
+    const scheduled = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 2))
 
     const [stale, unchanged] = Transitions.takeDueRetry(scheduled, issue.id, 1)
     const [due, drained] = Transitions.takeDueRetry(scheduled, issue.id, 2)
@@ -610,8 +605,8 @@ describe('retry scheduling', (): void => {
   })
 
   it('preserves repair identity independently of the worker attempt', (): void => {
-    const [, ordinary] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 3))
-    const [, repair] = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1, true))
+    const ordinary = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 3))
+    const repair = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1, true))
 
     expect(ordinary.retries.get(issue.id)).toMatchObject({ attempt: 3, repairRun: false })
     expect(repair.retries.get(issue.id)).toMatchObject({ attempt: 1, repairRun: true })

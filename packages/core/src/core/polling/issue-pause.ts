@@ -1,8 +1,9 @@
-import { Deferred, Effect, Fiber, Option, Ref, type Scope } from 'effect'
+import { Deferred, Effect, Option, Ref } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
 import { recordCancellation } from '../../telemetry.js'
 import { issuesForNumber } from '../policy.js'
+import { releaseIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import * as Transitions from '../transitions.js'
 import { releaseHandoffRepair } from './repair-identity.js'
@@ -19,7 +20,7 @@ import { releaseHandoffRepair } from './repair-identity.js'
 export const onIssuePauseChanged = (
   context: OrchestratorContext,
   event: Extract<OrchestratorEvent, { _tag: 'SetIssuePaused' }>,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     if (event.paused) {
       yield* Ref.update(context.state, (current) =>
@@ -41,7 +42,7 @@ export const onIssuePauseChanged = (
         if (Option.isNone(retry)) {
           continue
         }
-        yield* Fiber.interrupt(retry.value.fiber)
+        yield* releaseIssueFiber(context.execution, 'retry', id)
         // An operator pause is a decision to stop, not an interruption to recover from:
         // the repair identity goes with the run the operator ended.
         yield* releaseHandoffRepair(context, id, Option.fromNullable(retrying.handoffs.get(id)))
@@ -62,7 +63,7 @@ export const onIssuePauseChanged = (
       const resumed = yield* Ref.get(context.state)
       for (const id of issuesForNumber(resumed.deliveries, event.issueNumber)) {
         const entry = resumed.deliveries.get(id)
-        if (entry !== undefined && entry.fiber === null) {
+        if (entry !== undefined && !entry.armed) {
           yield* context.resumeDelivery(entry)
         }
       }

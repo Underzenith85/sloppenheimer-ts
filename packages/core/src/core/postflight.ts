@@ -13,7 +13,7 @@
  * agent's own account of what it did is never consulted.
  */
 
-import { Effect, type Fiber } from 'effect'
+import { Effect } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import type { SourceControlError } from '../domain/errors.js'
@@ -208,10 +208,13 @@ export type DeliveryEntry = Readonly<{
    */
   publishingSince: Date | null
   /**
-   * What the entry is waiting on: the timer until the next attempt, or the publication itself once
-   * {@link publishingSince} is set. `null` while an operator pause has suspended it — a pause stops
-   * agents; it does not throw away a change that already exists, so the entry outlives the timer
-   * and a resume arms a new one.
+   * Whether a fiber is behind this delivery: the timer until the next attempt, or the publication
+   * itself once {@link publishingSince} is set. False while an operator pause has suspended it — a
+   * pause stops agents; it does not throw away a change that already exists, so the entry outlives
+   * the timer and a resume arms a new one.
+   *
+   * The fiber itself is owned by `runtime/execution.ts` under this issue's delivery key. What is
+   * recorded here is the fact a handler branches on, never a handle it interrupts.
    */
-  fiber: Fiber.Fiber<void> | null
+  armed: boolean
 }>

@@ -1,5 +1,5 @@
 import type { FileSystem } from '@effect/platform'
-import type { Deferred, Effect, Option, Queue, Ref, Scope, Stream } from 'effect'
+import type { Deferred, Effect, Option, Queue, Ref, Stream } from 'effect'
 
 import type { Issue, IssueId, JsonObject, TokenTotals } from '../../domain/domain.js'
 import type { TrackerError, WorkflowError } from '../../domain/errors.js'
@@ -24,6 +24,7 @@ import type {
   RuntimeState,
 } from '../state.js'
 import type { DeliveryEntry, PostflightOutcome } from '../postflight.js'
+import type { ExecutionOwner } from './execution.js'
 import type { TickSource } from '../transitions.js'
 import type { TracePage, TraceQuery, TraceRecorder, TraceStore } from './trace-types.js'
 
@@ -347,15 +348,20 @@ export type RuntimeCells = Readonly<{
   stores: RuntimeStores
   /** The durable trace, kept beside the stores and deliberately outside `RuntimeState`. */
   traces: TraceStore
+  /**
+   * The fibers the host owns: workers, retry timers, delivery attempts and the polling timer, keyed
+   * by purpose and issue. Execution only — what is running is the state's to say.
+   */
+  execution: ExecutionOwner
 }>
 
 /**
  * A delivery as its caller states it: everything but the schedule, which `scheduleDelivery`
- * decides, and the timer it forks to keep.
+ * decides, and the attempt it forks to keep.
  */
 export type DeliveryRequest = Omit<
   DeliveryEntry,
-  'dueAt' | 'observedAt' | 'publishingSince' | 'fiber'
+  'dueAt' | 'observedAt' | 'publishingSince' | 'armed'
 >
 
 /**
@@ -367,6 +373,8 @@ export type OrchestratorContext = Readonly<{
   ports: RuntimePorts
   selectedWorkflowPath: string
   mailbox: Queue.Queue<OrchestratorEvent>
+  /** The scoped owner of every fiber the host forks. See `runtime/execution.ts`. */
+  execution: ExecutionOwner
   /** Opens or reuses the detail record for an issue that is about to be dispatched. */
   detailRecord: (
     issue: Issue,
@@ -380,12 +388,12 @@ export type OrchestratorContext = Readonly<{
     continuation: boolean,
     repairRun: boolean,
     trackerError?: TrackerError,
-  ) => Effect.Effect<boolean, never, Scope.Scope>
+  ) => Effect.Effect<boolean>
   /**
    * Queues another publication of work already in a workspace. Answers `false` when the work
    * cannot be delivered as it stands, which is the caller's signal to fall back to an agent retry.
    */
-  scheduleDelivery: (request: DeliveryRequest) => Effect.Effect<boolean, never, Scope.Scope>
+  scheduleDelivery: (request: DeliveryRequest) => Effect.Effect<boolean>
   /** Discards retained unpublished work, per the cancellation policy in `AGENTS.md`. */
   abandonDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
   /**
@@ -394,7 +402,7 @@ export type OrchestratorContext = Readonly<{
    */
   suspendDelivery: (id: IssueId, reason: string) => Effect.Effect<void>
   /** Arms a suspended delivery again, from the attempt it was suspended on. */
-  resumeDelivery: (entry: DeliveryEntry) => Effect.Effect<void, never, Scope.Scope>
+  resumeDelivery: (entry: DeliveryEntry) => Effect.Effect<void>
   /** Applies one protocol event to a run and says in the log what the event amounted to. */
   applyLifecycleUpdate: (entry: RunningEntry, update: AgentEvent) => Effect.Effect<RunningEntry>
   cancelRunning: (
@@ -412,10 +420,10 @@ export type OrchestratorContext = Readonly<{
   /** Records the finished work this host can still show, so a restart does not empty Finished. */
   persistCompletions: Effect.Effect<void>
   recoverMissingHandoffs: Effect.Effect<void>
-  reconcile: (retryDispatchAllowed: boolean) => Effect.Effect<void, never, Scope.Scope>
+  reconcile: (retryDispatchAllowed: boolean) => Effect.Effect<void>
   hydrateRestoredHandoffs: Effect.Effect<void>
   makeEffectiveWorkflow: (workflow: Workflow) => Effect.Effect<EffectiveWorkflow, WorkflowError>
-  scheduleNextTick: Effect.Effect<void, never, Scope.Scope>
+  scheduleNextTick: Effect.Effect<void>
   requestTick: (source: TickSource) => Effect.Effect<void>
   /**
    * Runs a settling effect from a plain callback, on the orchestrator's own runtime and inside its

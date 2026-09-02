@@ -1,13 +1,15 @@
-import { Clock, Deferred, Effect, Fiber, Option, Queue, Ref, type Scope } from 'effect'
+import { Clock, Deferred, Effect, Option, Queue, Ref } from 'effect'
 
 import type { Issue } from '../../domain/domain.js'
 import type { TrackerError } from '../../domain/errors.js'
 import { currentInstant } from '../../support/clock.js'
 import { logInfo, logWarning } from '../../support/logging.js'
+import { recordOutcome, retryOutcomes } from '../../support/observability.js'
 import { recordCancellation, recordRetryScheduled } from '../../telemetry.js'
 import { agentRetryDelay, trackerRetryDelay } from '../retry.js'
 import type { RefreshOperation } from '../state.js'
 import * as Transitions from '../transitions.js'
+import { ownIssueFiber, ownPollTimer } from './execution.js'
 import { traceRetryScheduled } from './traces.js'
 import type { RefreshOutcome, RuntimeCells } from './types.js'
 
@@ -42,18 +44,18 @@ export const requestRefresh = (cells: RuntimeCells): Effect.Effect<RefreshOutcom
     return { coalesced: !scheduled, requestedAt: requestedAt.toISOString(), operations }
   })
 
-/** Arms the polling timer, replacing whatever pass the previous interval had pending. */
-export const scheduleNextTick = (cells: RuntimeCells): Effect.Effect<void, never, Scope.Scope> =>
+/**
+ * Arms the polling timer. The execution owner holds one poll timer, so arming this pass interrupts
+ * whatever the previous interval had pending rather than leaving two ticks to race.
+ */
+export const scheduleNextTick = (cells: RuntimeCells): Effect.Effect<void> =>
   Effect.gen(function* () {
     const current = yield* Ref.get(cells.state)
-    if (current.pollTimer !== null) {
-      yield* Fiber.interrupt(current.pollTimer)
-    }
     const intervalMs = current.lastKnownGood.workflow.config.pollingIntervalMs
-    const timer = yield* Effect.forkScoped(
+    yield* ownPollTimer(
+      cells.execution,
       Effect.sleep(intervalMs).pipe(Effect.zipRight(requestTick(cells, 'timer')), Effect.asVoid),
     )
-    yield* Ref.update(cells.state, (next) => Transitions.setPollTimer(next, timer))
   })
 
 /**
@@ -69,7 +71,7 @@ export const scheduleRetry = (
   continuation: boolean,
   repairRun: boolean,
   trackerError?: TrackerError,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     const current = yield* Ref.get(cells.state)
     const maximumMs = current.lastKnownGood.workflow.config.agent.maxRetryBackoffMs
@@ -84,7 +86,12 @@ export const scheduleRetry = (
     }
     const delay = delayOption.value
     const dueAt = (yield* Clock.currentTimeMillis) + delay
-    const fiber = yield* Effect.forkScoped(
+    // The issue owns one retry timer, so arming this attempt is what interrupts the attempt it
+    // supersedes: there is no second registry a displaced timer could be left behind in.
+    yield* ownIssueFiber(
+      cells.execution,
+      'retry',
+      issue.id,
       Effect.sleep(delay).pipe(
         Effect.zipRight(
           Queue.offer(cells.mailbox, { _tag: 'RetryDue', issueId: issue.id, attempt }),
@@ -92,12 +99,9 @@ export const scheduleRetry = (
         Effect.asVoid,
       ),
     )
-    const displaced = yield* Ref.modify(cells.state, (pending) =>
-      Transitions.scheduleRetry(pending, { issue, attempt, repairRun, dueAt, error, fiber }),
+    yield* Ref.update(cells.state, (pending) =>
+      Transitions.scheduleRetry(pending, { issue, attempt, repairRun, dueAt, error }),
     )
-    if (Option.isSome(displaced)) {
-      yield* Fiber.interrupt(displaced.value.fiber)
-    }
     const scheduledAt = yield* currentInstant
     yield* Ref.update(cells.state, (pending) =>
       Transitions.updateDetail(pending, issue.id, (record) =>
@@ -120,6 +124,7 @@ export const scheduleRetry = (
       due_at: new Date(dueAt).toISOString(),
       error,
     })
+    yield* recordOutcome(retryOutcomes, 'scheduled')
     return true
   })
 
@@ -146,4 +151,5 @@ const abandonRetry = (
       attempt,
       error,
     })
+    yield* recordOutcome(retryOutcomes, 'not_retryable')
   })
