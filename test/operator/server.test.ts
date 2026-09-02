@@ -426,7 +426,7 @@ describe('operator server', (): void => {
         error: { code: 'issue_not_found' },
       })
       expect(wrongMethod.status).toBe(405)
-      expect(wrongMethod.headers.get('allow')).toBe('GET')
+      expect(wrongMethod.headers.get('allow')).toBe('GET, HEAD')
     }),
   )
 
@@ -674,14 +674,14 @@ describe('operator server', (): void => {
         // reporting the documented refresh method as unavailable.
         const wrongOnShared = await fetch(`${url}/api/v1/refresh`, { method: 'PUT' })
         expect(wrongOnShared.status).toBe(405)
-        expect(wrongOnShared.headers.get('allow')).toBe('GET, POST')
+        expect(wrongOnShared.headers.get('allow')).toBe('GET, HEAD, POST')
         expect(await wrongOnShared.json()).toMatchObject({
-          error: { message: 'Use GET or POST for this endpoint' },
+          error: { message: 'Use GET, HEAD or POST for this endpoint' },
         })
         // A path the per-issue resource has to itself still names only its own method.
         const wrongOnIssue = await fetch(`${url}/api/v1/agents`, { method: 'PUT' })
         expect(wrongOnIssue.status).toBe(405)
-        expect(wrongOnIssue.headers.get('allow')).toBe('GET')
+        expect(wrongOnIssue.headers.get('allow')).toBe('GET, HEAD')
 
         // The other two words the router uses are not reserved either: those routes carry a further
         // segment, so the wildcard still answers for an issue identified by the bare word.
@@ -851,7 +851,7 @@ describe('operator server', (): void => {
 
       expect(missing.status).toBe(404)
       expect(wrongMethod.status).toBe(405)
-      expect(wrongMethod.headers.get('allow')).toBe('GET')
+      expect(wrongMethod.headers.get('allow')).toBe('GET, HEAD')
       expect(invalidAction.status).toBe(404)
 
       // A `405` advertises what a URI serves, so it is only ever the answer for a URI that names
@@ -883,13 +883,23 @@ describe('operator server', (): void => {
 
       for (const refusal of [postedDocument, postedPage, postedScript]) {
         expect(refusal.status).toBe(405)
-        expect(refusal.headers.get('allow')).toBe('GET')
+        expect(refusal.headers.get('allow')).toBe('GET, HEAD')
       }
       expect(await postedDocument.json()).toMatchObject({
         error: { code: 'method_not_allowed' },
       })
       expect(headedState.status).toBe(200)
       expect(headedPage.status).toBe(200)
+
+      // `Allow` has to name what the URI actually answers, and only that. A refusal advertising a
+      // method that is itself refused describes a resource the host does not serve.
+      const refused = await fetch(`${url}/api/v1/state`, { method: 'DELETE' })
+      const advertised = (refused.headers.get('allow') ?? '').split(', ')
+      expect(advertised).toEqual(['GET', 'HEAD'])
+      for (const method of advertised) {
+        const answered = await fetch(`${url}/api/v1/state`, { method })
+        expect(answered.status).toBe(200)
+      }
     }),
   )
 

@@ -314,13 +314,13 @@ A request the console's files and the endpoint group both decline is answered la
 registered over the same paths — the same matcher, the same parameter decoding, the same bound on a
 parameter's length — so what the server says a URI serves is decided by the thing that decides what
 serves it. A `405` names every method the URI serves, including a method of a more general path that
-also answers there (`PUT /api/v1/refresh` is `Allow: GET, POST`); a URI that names nothing is `404`.
+also answers there (`PUT /api/v1/refresh` is `Allow: GET, HEAD, POST`), and `HEAD` wherever `GET` is
+served, because the router answers one with the other; a URI that names nothing is `404`.
 The one rule that matcher cannot know is which parameters this API can address, and
 `pathParameterShapes` in `src/operator/api/endpoints.ts` states it — `issueNumber` is digits, an
 identifier is unconstrained — so `GET /api/v1/issues/not-a-number/start` is `404` rather than a `405`
 advertising the POST of a resource that does not exist. The console's own files are registered there
-too, so `POST /openapi.json` reports `Allow: GET` rather than claiming the file is absent, and `HEAD`
-is answered wherever `GET` is.
+too, so `POST /openapi.json` reports `Allow: GET, HEAD` rather than claiming the file is absent.
 
 `GET /openapi.json` serves the OpenAPI description generated from those definitions. It sits outside
 the versioned namespace deliberately: a name under `/api/v1/` would shadow an issue identifier
@@ -450,7 +450,7 @@ registered for POST alone rather than for every method, so the method distinguis
 per-issue resource: `GET /api/v1/refresh` reads the issue identified that way, and `POST` refreshes.
 The consequence is that a GET of that path no longer reports `405`; it answers as the per-issue
 resource does, which for a host with no such issue is `404 issue_not_found`. A method neither route
-serves is `405` naming both — `Allow: GET, POST` — since `Allow` states what the URI serves rather
+serves is `405` naming both — `Allow: GET, HEAD, POST` — since `Allow` states what the URI serves rather
 than what one route does; the set is read from the registrations, so it stays true if another fixed
 route comes to share a path. `agents` and `issues`
 are addressable for a different reason — the routes that use those words carry a further segment.

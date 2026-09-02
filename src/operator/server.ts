@@ -124,9 +124,14 @@ const covers = (general: readonly string[], specific: readonly string[]): boolea
  * What each path serves, read from the registrations themselves rather than restated beside them.
  *
  * `Allow` states what a URI serves rather than what one route does, so a path takes the methods of
- * every route that answers at its URIs — its own, and those of any more general path above it. The
- * order is the methods' own, so what the header says does not depend on the order the endpoints
- * happen to be declared in.
+ * every route that answers at its URIs — its own, and those of any more general path above it.
+ *
+ * `HEAD` is served wherever `GET` is, because the router answers one with the other, so it is
+ * named here too: a resource that advertised only `GET` would be describing less than it serves.
+ * It is not declared on any endpoint, because it is not a thing an endpoint decides.
+ *
+ * The order is the methods' own, so what the header says does not depend on the order the
+ * endpoints happen to be declared in.
  */
 const servedMethods = (
   routes: readonly OperatorRoute[],
@@ -134,12 +139,23 @@ const servedMethods = (
   new Map(
     [...new Set(routes.map((route) => route.path))].map((path) => {
       const segments = path.split('/')
-      const methods = routes
-        .filter((route) => covers(route.path.split('/'), segments))
-        .map((route) => route.method)
-      return [path, [...new Set(methods)].sort((left, right) => left.localeCompare(right))]
+      const methods = new Set(
+        routes
+          .filter((route) => covers(route.path.split('/'), segments))
+          .map((route) => route.method),
+      )
+      if (methods.has('GET')) {
+        methods.add('HEAD')
+      }
+      return [path, [...methods].sort((left, right) => left.localeCompare(right))]
     }),
   )
+
+/** The methods as a refusal names them, which is a sentence rather than a header. */
+const spelled = (methods: readonly string[]): string =>
+  methods.length < 2
+    ? methods.join('')
+    : `${methods.slice(0, -1).join(', ')} or ${methods[methods.length - 1] ?? ''}`
 
 /**
  * Whether the parameters the router read name a resource this API can address.
@@ -166,7 +182,7 @@ const methodRefusal = (
     addressableParameters(params)
       ? failureResponse(
           methodNotAllowed,
-          methodNotAllowed.withMessage(`Use ${served.join(' or ')} for this endpoint`),
+          methodNotAllowed.withMessage(`Use ${spelled(served)} for this endpoint`),
         ).pipe(Effect.map(HttpServerResponse.setHeader('Allow', served.join(', '))))
       : failureResponse(notFound, notFound.failure),
   )
