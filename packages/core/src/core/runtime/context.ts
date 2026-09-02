@@ -62,6 +62,7 @@ export const orchestratorContext = (
   ports,
   selectedWorkflowPath,
   mailbox: cells.mailbox,
+  execution: cells.execution,
   detailRecord: (issue, attempt, dispatchLabels) =>
     openDetailRecord(cells, issue, attempt, dispatchLabels),
   scheduleRetry: (issue, attempt, error, continuation, repairRun, trackerError) =>

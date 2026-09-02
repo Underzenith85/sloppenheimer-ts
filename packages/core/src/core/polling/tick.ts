@@ -1,4 +1,4 @@
-import { Deferred, Effect, Queue, Ref, type Scope } from 'effect'
+import { Deferred, Effect, Queue, Ref } from 'effect'
 
 import { withLogAnnotations } from '../../support/logging.js'
 import type { OrchestratorContext } from '../runtime.js'
@@ -10,7 +10,7 @@ import { poll } from './pass.js'
  * with the stages the pass actually reached, and a change that landed while it ran turns straight
  * into the next tick rather than waiting out the interval.
  */
-const runTick = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
+const runTick = (context: OrchestratorContext): Effect.Effect<void> =>
   Effect.gen(function* () {
     yield* Ref.update(context.state, Transitions.beginPoll)
     const performed = yield* poll(context)
@@ -28,5 +28,5 @@ const runTick = (context: OrchestratorContext): Effect.Effect<void, never, Scope
   })
 
 /** Every log in a polling pass inherits its enclosing tick identity. */
-export const onTick = (context: OrchestratorContext): Effect.Effect<void, never, Scope.Scope> =>
+export const onTick = (context: OrchestratorContext): Effect.Effect<void> =>
   runTick(context).pipe(withLogAnnotations({ tick: 'poll' }))

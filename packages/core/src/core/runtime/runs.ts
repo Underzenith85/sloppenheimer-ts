@@ -1,4 +1,4 @@
-import { Effect, Fiber, Option, Ref } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import type { Issue, IssueId } from '../../domain/domain.js'
 import { issueBranchName } from '../../domain/handoff.js'
@@ -22,6 +22,7 @@ import {
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
 import { abandonDelivery } from './deliveries.js'
+import { releaseIssueFiber } from './execution.js'
 import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -135,7 +136,9 @@ export const cancelRunning = (
       return Option.none()
     }
     const queuedBeforeInterruption = before.pendingLifecycle.get(id)?.length ?? 0
-    yield* Fiber.interrupt(running.fiber)
+    // Awaited, not merely signalled: the worker's finalizers release its workspace lease, and what
+    // follows here settles the telemetry and may remove the very workspace it was holding.
+    yield* releaseIssueFiber(cells.execution, 'worker', id)
     const queuedLifecycle = yield* Ref.modify(cells.state, (current) =>
       Transitions.takePendingLifecycle(current, id),
     )

@@ -1,15 +1,4 @@
-import {
-  Cause,
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  MutableRef,
-  Option,
-  Queue,
-  Ref,
-  type Scope,
-} from 'effect'
+import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -30,6 +19,7 @@ import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
 import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
+import { ownIssueFiber, releaseIssueFiber } from './runtime/execution.js'
 import type { OrchestratorContext } from './runtime.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, SessionPorts } from './state.js'
 import type { SourceControlTarget } from '../ports/index.js'
@@ -331,14 +321,9 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
 }
 
 /** What a started session is before it has reported anything: everything else arrives later. */
-const startingRun = (
-  launch: SessionLaunch,
-  fiber: Fiber.Fiber<void>,
-  startedAt: Date,
-): RunningEntry => ({
+const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
   runId: launch.runId,
   issue: launch.issue,
-  fiber,
   execution: launch.execution,
   sessionPorts: launch.sessionPorts,
   attempt: launch.attempt,
@@ -365,7 +350,7 @@ const runDispatch = (
   attempt: number | null,
   effectiveOverride?: EffectiveWorkflow,
   sourceTarget?: SourceControlTarget,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     const before = yield* Ref.get(context.state)
     if (before.running.has(issue.id)) {
@@ -378,7 +363,7 @@ const runDispatch = (
       Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
     )
     if (Option.isSome(displacedRetry)) {
-      yield* Fiber.interrupt(displacedRetry.value.fiber)
+      yield* releaseIssueFiber(context.execution, 'retry', issue.id)
     }
 
     const base = effectiveOverride ?? before.lastKnownGood
@@ -443,10 +428,12 @@ const runDispatch = (
       target,
       repairRun,
     }
-    const fiber = yield* Effect.forkScoped(makeWorker(launch))
+    // The issue owns one worker, so launching this one is what interrupts a worker the state has
+    // already let go of, and the fiber leaves the collection of its own accord when it ends.
+    yield* ownIssueFiber(context.execution, 'worker', issue.id, makeWorker(launch))
     const startedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
-      Transitions.beginRun(current, startingRun(launch, fiber, startedAt)),
+      Transitions.beginRun(current, startingRun(launch, startedAt)),
     )
     yield* logInfo('action=dispatch outcome=started', {
       ...logContext(issue),
@@ -464,7 +451,7 @@ export const dispatch = (
   attempt: number | null,
   effectiveOverride?: EffectiveWorkflow,
   sourceTarget?: SourceControlTarget,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+): Effect.Effect<boolean> =>
   runDispatch(context, issue, attempt, effectiveOverride, sourceTarget).pipe(
     withOperationalSpan('dispatch', {
       issue_id: issue.id,
