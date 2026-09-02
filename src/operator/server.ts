@@ -1,6 +1,7 @@
 import * as HttpApiBuilder from '@effect/platform/HttpApiBuilder'
 import type * as HttpApp from '@effect/platform/HttpApp'
 import * as HttpRouter from '@effect/platform/HttpRouter'
+import * as HttpServerError from '@effect/platform/HttpServerError'
 import * as HttpServerRequest from '@effect/platform/HttpServerRequest'
 import * as HttpServerResponse from '@effect/platform/HttpServerResponse'
 import * as NodeHttpServer from '@effect/platform-node/NodeHttpServer'
@@ -11,7 +12,12 @@ import { Cause, Effect, Layer, type Scope } from 'effect'
 import { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import { logError } from '@sloppenheimer/core/support/logging.js'
 
-import { operatorApi, operatorRoutes, pathParameterShapes } from './api/endpoints.js'
+import {
+  operatorApi,
+  operatorRoutes,
+  pathParameterShapes,
+  type OperatorRoute,
+} from './api/endpoints.js'
 import {
   failureResponse,
   internalError,
@@ -63,130 +69,155 @@ const hostIsLoopback = (value: string | undefined): boolean => {
 }
 
 /**
- * The console itself: the page, its two assets, and the generated description of the API beside
- * them. These sit outside the endpoint group deliberately — they are files rather than resources
- * with a schema, and the API document is served here rather than under `/api/v1/` because a name
- * in that namespace shadows an issue identifier spelled the same way.
+ * The console's own files: the page, its two assets, and the generated description of the API
+ * beside them. They sit outside the endpoint group deliberately — they are files rather than
+ * resources with a schema — and the API document is served here rather than under `/api/v1/`
+ * because a name in that namespace shadows an issue identifier spelled the same way.
+ *
+ * They are listed rather than registered one by one because two things read them: the router that
+ * serves them, and the index below that says what each URI serves. A file added to one and not the
+ * other would answer a request and then deny its own method.
  */
-const consoleRoutes = (csrfToken: string): HttpRouter.HttpRouter<never, never> =>
-  HttpRouter.empty.pipe(
-    HttpRouter.get(
-      '/',
-      HttpServerResponse.text(appTemplate.replace('__CSRF_TOKEN__', csrfToken), {
-        contentType: 'text/html; charset=utf-8',
-      }),
-    ),
-    HttpRouter.get(
-      '/app.js',
-      HttpServerResponse.text(appJavaScript, {
-        contentType: 'text/javascript; charset=utf-8',
-      }),
-    ),
-    HttpRouter.get(
-      '/styles.css',
-      HttpServerResponse.text(appStyles, { contentType: 'text/css; charset=utf-8' }),
-    ),
-    HttpRouter.get(
-      '/openapi.json',
-      HttpServerResponse.unsafeJson(operatorOpenApiDocument(), {
-        contentType: jsonContentType,
-      }),
-    ),
+const consoleFiles = (
+  csrfToken: string,
+): readonly Readonly<{ path: `/${string}`; contentType: string; body: string }>[] => [
+  {
+    path: '/',
+    contentType: 'text/html; charset=utf-8',
+    body: appTemplate.replace('__CSRF_TOKEN__', csrfToken),
+  },
+  { path: '/app.js', contentType: 'text/javascript; charset=utf-8', body: appJavaScript },
+  { path: '/styles.css', contentType: 'text/css; charset=utf-8', body: appStyles },
+  {
+    path: '/openapi.json',
+    contentType: jsonContentType,
+    body: JSON.stringify(operatorOpenApiDocument()),
+  },
+]
+
+const consoleRouter = (
+  files: readonly Readonly<{ path: `/${string}`; contentType: string; body: string }>[],
+): HttpRouter.HttpRouter<never, never> =>
+  files.reduce(
+    (router, file) =>
+      HttpRouter.get(
+        router,
+        file.path,
+        HttpServerResponse.text(file.body, { contentType: file.contentType }),
+      ),
+    HttpRouter.empty,
   )
 
 /**
- * A path parameter as the router will hand it to a handler. A malformed escape has no such
- * reading, and a segment that has none names nothing.
+ * Whether one path also answers at another's URIs, which is true when a parameter stands where the
+ * other spells a segment. `POST /api/v1/refresh` and the per-issue `GET /api/v1/:identifier` share
+ * every URI the first one names.
+ *
+ * Both sides are path templates from the endpoint definitions, so this compares one statement of
+ * the contract with another and never reads a request.
  */
-const decodedSegment = (segment: string): string | undefined => {
-  try {
-    return decodeURIComponent(segment)
-  } catch {
-    return undefined
-  }
-}
+const covers = (general: readonly string[], specific: readonly string[]): boolean =>
+  general.length === specific.length &&
+  general.every((segment, index) => segment.startsWith(':') || segment === specific[index])
 
 /**
- * Whether one path parameter, spelled this way, names a resource this API can address.
+ * What each path serves, read from the registrations themselves rather than restated beside them.
  *
- * Every parameter has to have a reading at all: a segment carrying a malformed escape names
- * nothing, and the router will not match one either, so accepting it here would hand the API a
- * request it cannot route and turn an unaddressable URI into a failure rather than a `404`.
- *
- * The length is judged before decoding, because that is what the router itself bounds, and the
- * shape after, because the reading is the value the router hands the handler. A parameter with no
- * declared shape only has to have one — an identifier is a branded string a tracker is free to
- * spell `GH-7`, so a pattern would decide on GitHub's behalf which providers may reach a SPEC
- * resource.
+ * `Allow` states what a URI serves rather than what one route does, so a path takes the methods of
+ * every route that answers at its URIs — its own, and those of any more general path above it. The
+ * order is the methods' own, so what the header says does not depend on the order the endpoints
+ * happen to be declared in.
  */
-const addressableParameter = (name: string, segment: string): boolean => {
-  if (segment.length === 0 || segment.length > maxIdentifierParamLength) {
-    return false
-  }
-  const decoded = decodedSegment(segment)
-  if (decoded === undefined) {
-    return false
-  }
-  const shape = pathParameterShapes.get(name)
-  return shape === undefined || shape.test(decoded)
-}
+const servedMethods = (
+  routes: readonly OperatorRoute[],
+): ReadonlyMap<`/${string}`, readonly string[]> =>
+  new Map(
+    [...new Set(routes.map((route) => route.path))].map((path) => {
+      const segments = path.split('/')
+      const methods = routes
+        .filter((route) => covers(route.path.split('/'), segments))
+        .map((route) => route.method)
+      return [path, [...new Set(methods)].sort((left, right) => left.localeCompare(right))]
+    }),
+  )
 
 /**
- * Whether one endpoint claims a request path: the path has its shape, and every parameter it names
- * is addressable. An unaddressable parameter leaves the path unclaimed rather than claimed by the
- * method that would have served it, so a URI that names no resource is a `404` on every method
- * rather than a `405` advertising a resource that does not exist.
+ * Whether the parameters the router read name a resource this API can address.
+ *
+ * The router has already decided the rest: it decoded each parameter, refused a segment it could
+ * not read, and applied its own length bound, so what is left is the one thing only the contract
+ * knows — that the console's eligibility controls name an issue by number.
  */
-const claimsPath = (routeSegments: readonly string[], segments: readonly string[]): boolean =>
-  routeSegments.length === segments.length &&
-  routeSegments.every((routeSegment, index) => {
-    const segment = segments[index] ?? ''
-    return routeSegment.startsWith(':')
-      ? addressableParameter(routeSegment.slice(1), segment)
-      : routeSegment === segment
+const addressableParameters = (params: Readonly<Record<string, string | undefined>>): boolean =>
+  Object.entries(params).every(([name, value]) => {
+    const shape = pathParameterShapes.get(name)
+    return shape === undefined || (value !== undefined && shape.test(value))
   })
 
-const routeMatchers: readonly Readonly<{ segments: readonly string[]; method: string }>[] =
-  operatorRoutes.map((route) => ({ segments: route.path.split('/'), method: route.method }))
-
-const requestPath = (url: string): string => {
-  const query = url.indexOf('?')
-  return query === -1 ? url : url.slice(0, query)
-}
-
 /**
- * The methods a URI answers, read from the endpoint definitions rather than restated beside them.
- * Two endpoints can share a path when their methods differ — `POST /api/v1/refresh` and the
- * per-issue resource below it do — and a refusal that named only one of them would report the
- * other as unavailable. The order is the methods' own rather than the definitions', so what the
- * `Allow` header says does not depend on the order the endpoints happen to be declared in.
+ * What a URI that names a resource answers for a method it does not serve. A parameter the
+ * contract cannot address names no resource, so that is a `404` rather than a `405` advertising
+ * something that does not exist.
  */
-const answeredMethods = (path: string): readonly string[] => {
-  const segments = path.split('/')
-  return [
-    ...new Set(
-      routeMatchers
-        .filter((route) => claimsPath(route.segments, segments))
-        .map((route) => route.method),
-    ),
-  ].sort((left, right) => left.localeCompare(right))
-}
+const methodRefusal = (
+  served: readonly string[],
+): Effect.Effect<HttpServerResponse.HttpServerResponse, never, HttpRouter.RouteContext> =>
+  Effect.flatMap(HttpRouter.params, (params) =>
+    addressableParameters(params)
+      ? failureResponse(
+          methodNotAllowed,
+          methodNotAllowed.withMessage(`Use ${served.join(' or ')} for this endpoint`),
+        ).pipe(Effect.map(HttpServerResponse.setHeader('Allow', served.join(', '))))
+      : failureResponse(notFound, notFound.failure),
+  )
 
 /**
- * What a request no endpoint claims is answered with: a `404` when the URI names nothing, and a
- * `405` naming every method the URI does answer when it names a resource this method cannot reach.
+ * The answer for a request nothing served: a `405` naming what the URI does serve, or a `404` when
+ * it names nothing at all.
+ *
+ * This is a router over the same paths, so the question "what does this URI serve" is answered by
+ * the matcher that decides what serves it — the same segment matching, the same parameter
+ * decoding, the same bound on a parameter's length. A hand-written reading of the paths beside it
+ * could disagree with the real one; this cannot.
  */
 const unclaimedRequest = (
-  answered: readonly string[],
-): Effect.Effect<HttpServerResponse.HttpServerResponse> => {
-  if (answered.length === 0) {
-    return failureResponse(notFound, notFound.failure)
-  }
-  return failureResponse(
-    methodNotAllowed,
-    methodNotAllowed.withMessage(`Use ${answered.join(' or ')} for this endpoint`),
-  ).pipe(Effect.map(HttpServerResponse.setHeader('Allow', answered.join(', '))))
-}
+  routes: readonly OperatorRoute[],
+): Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  never,
+  HttpServerRequest.HttpServerRequest
+> =>
+  [...servedMethods(routes)]
+    .reduce(
+      (router, [path, served]) => HttpRouter.all(router, path, methodRefusal(served)),
+      HttpRouter.empty as HttpRouter.HttpRouter<never, never>,
+    )
+    .pipe(
+      HttpRouter.withRouterConfig({ maxParamLength: maxIdentifierParamLength }),
+      Effect.catchTag('RouteNotFound', () => failureResponse(notFound, notFound.failure)),
+    )
+
+/**
+ * The endpoint group's answer, or the fact that it had none.
+ *
+ * `HttpApiBuilder.httpApp` is typed as never failing, and it does encode every error its endpoints
+ * declare into a response. What it still puts on the failure channel is its router's own
+ * `RouteNotFound`, for a URI no endpoint claims — the one outcome that type does not describe — so
+ * that is what this reads it as. Anything else is a defect this host has no reading for, and is
+ * left to the cause handler above it. A defect is not caught here at all: `catchAll` takes the
+ * failure channel, and a died fiber keeps its cause.
+ */
+const servedOrUnclaimed = (
+  apiApp: HttpApp.Default<never, never>,
+  unclaimed: Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    never,
+    HttpServerRequest.HttpServerRequest
+  >,
+): HttpApp.Default<never, never> =>
+  Effect.catchAll(apiApp, (error: unknown) =>
+    error instanceof HttpServerError.RouteNotFound ? unclaimed : Effect.die(error),
+  )
 
 /**
  * The endpoint group as an application, with the router configured for the identifiers this API
@@ -238,17 +269,18 @@ const makeApp = (
   csrfToken: string,
 ): Effect.Effect<HttpApp.Default<never, never>, never, Scope.Scope> =>
   Effect.map(makeApiApp(backend, csrfToken), (apiApp) => {
-    // The console's own files answer first; everything else is the API's, and a URI the API does
-    // not claim is refused here rather than inside it, because what a URI answers is a property of
-    // the endpoint definitions rather than of any one endpoint.
-    const routed = consoleRoutes(csrfToken).pipe(
+    const files = consoleFiles(csrfToken)
+    const unclaimed = unclaimedRequest([
+      ...files.map((file): OperatorRoute => ({ method: 'GET', path: file.path })),
+      ...operatorRoutes,
+    ])
+
+    // The console's own files answer first, then the endpoint group, and a request neither served
+    // is refused last — because what a URI serves is a property of every registration together
+    // rather than of the one that happened to be asked.
+    const routed = consoleRouter(files).pipe(
       Effect.catchTag('RouteNotFound', () =>
-        Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
-          const answered = answeredMethods(requestPath(request.url))
-          return answered.includes(request.method)
-            ? Effect.flatMap(apiApp, publishableDocument)
-            : unclaimedRequest(answered)
-        }),
+        Effect.flatMap(servedOrUnclaimed(apiApp, unclaimed), publishableDocument),
       ),
       Effect.catchAllCause((cause) =>
         logError('operator request failed', { cause: Cause.pretty(cause) }).pipe(

@@ -306,14 +306,21 @@ The API is one executable contract. `src/operator/api/endpoints.ts` defines ever
 as an `@effect/platform` schema-backed `HttpApi` endpoint — its path, method, parameters, success
 document and the statuses it may refuse with — and nothing else describes them. The handlers in
 `src/operator/handlers.ts` are written against those definitions, each response is encoded through
-the schema its endpoint declared before it is sent, and the `404`/`405` the server answers for a URI
-no endpoint claims are derived from the same registrations. An endpoint claims a URI only when the
-parameters in it are addressable — `pathParameterShapes` in `src/operator/api/endpoints.ts` says
-which shapes those are, and the handlers decode against the same ones — so
-`GET /api/v1/issues/not-a-number/start` is `404` rather than a `405` advertising the POST of a
-resource that does not exist. The schemas are annotated with the published types beside them, so a
-mapping that stops agreeing with its own type fails the build rather than reshaping a document
-quietly.
+the schema its endpoint declared before it is sent. The schemas are annotated with the published
+types beside them, so a mapping that stops agreeing with its own type fails the build rather than
+reshaping a document quietly.
+
+A request the console's files and the endpoint group both decline is answered last, by a router
+registered over the same paths — the same matcher, the same parameter decoding, the same bound on a
+parameter's length — so what the server says a URI serves is decided by the thing that decides what
+serves it. A `405` names every method the URI serves, including a method of a more general path that
+also answers there (`PUT /api/v1/refresh` is `Allow: GET, POST`); a URI that names nothing is `404`.
+The one rule that matcher cannot know is which parameters this API can address, and
+`pathParameterShapes` in `src/operator/api/endpoints.ts` states it — `issueNumber` is digits, an
+identifier is unconstrained — so `GET /api/v1/issues/not-a-number/start` is `404` rather than a `405`
+advertising the POST of a resource that does not exist. The console's own files are registered there
+too, so `POST /openapi.json` reports `Allow: GET` rather than claiming the file is absent, and `HEAD`
+is answered wherever `GET` is.
 
 `GET /openapi.json` serves the OpenAPI description generated from those definitions. It sits outside
 the versioned namespace deliberately: a name under `/api/v1/` would shadow an issue identifier

@@ -868,6 +868,32 @@ describe('operator server', (): void => {
   )
 
   /*
+   * The console's own files are resources like any other: a URI that exists reports what it serves.
+   * They used to fall through to the unknown-path answer, which said a file the host is serving
+   * does not exist. `HEAD` is the same question from the other side — it is answered wherever `GET`
+   * is, which the page already did and the versioned resources did not.
+   */
+  it.live("reports what the console's own files serve, and answers HEAD wherever GET is", () =>
+    withServer(makeBackend(), async (url) => {
+      const postedDocument = await fetch(`${url}/openapi.json`, { method: 'POST' })
+      const postedPage = await fetch(url, { method: 'POST' })
+      const postedScript = await fetch(`${url}/app.js`, { method: 'POST' })
+      const headedState = await fetch(`${url}/api/v1/state`, { method: 'HEAD' })
+      const headedPage = await fetch(url, { method: 'HEAD' })
+
+      for (const refusal of [postedDocument, postedPage, postedScript]) {
+        expect(refusal.status).toBe(405)
+        expect(refusal.headers.get('allow')).toBe('GET')
+      }
+      expect(await postedDocument.json()).toMatchObject({
+        error: { code: 'method_not_allowed' },
+      })
+      expect(headedState.status).toBe(200)
+      expect(headedPage.status).toBe(200)
+    }),
+  )
+
+  /*
    * A URI whose parameter carries a malformed escape names nothing: there is no reading of it to
    * route on, and the router will not match one. It has to be refused as unaddressable rather than
    * dispatched — a request the API cannot route is a `404` like any other URI that names nothing,

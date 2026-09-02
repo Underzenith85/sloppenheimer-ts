@@ -216,8 +216,12 @@ export const operatorApi = HttpApi.make('operator')
   .annotate(OpenApi.Version, 'v1')
   .annotate(OpenApi.Transform, describedResponses)
 
-/** One endpoint's registration: the method and path it answers on. */
-export type OperatorRoute = Readonly<{ method: string; path: string }>
+/**
+ * One registration: the method and path it answers on. The path keeps the router's own shape, so a
+ * route read from here can be registered again — which is how the server asks the matcher what a
+ * URI serves rather than reading the paths itself.
+ */
+export type OperatorRoute = Readonly<{ method: string; path: `/${string}` }>
 
 /**
  * The registrations themselves, read from the definitions rather than restated beside them. The
