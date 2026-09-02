@@ -4,11 +4,13 @@ import { Effect } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
+import { isJsonObject, type JsonObject } from '@sloppenheimer/core/support/json.js'
 import type { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import type { HandoffSnapshot } from '@sloppenheimer/core/domain/handoff.js'
 import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { issueDetailPath } from '../../src/operator/api.js'
 import { operatorRoutes } from '../../src/operator/api/endpoints.js'
+import { operatorOpenApiDocument } from '../../src/operator/openapi.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '@sloppenheimer/core'
 import { startOperatorServer } from '../../src/operator/server.js'
@@ -209,6 +211,21 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
       setIssueEnabled(number, enabled)
     }),
 })
+
+/**
+ * One response body, read as the JSON object this API publishes rather than asserted to be one.
+ * `Response.json` answers `unknown`, and a cast would let a case inspect fields of a body whose
+ * shape was never established — which is the thing these cases exist to establish. `isJsonObject`
+ * is the repository's one structural record test; a body that is not a record fails here, with the
+ * body in the message, rather than as a confusing assertion further down.
+ */
+const jsonObjectBody = async (response: Response): Promise<JsonObject> => {
+  const payload: unknown = await response.json()
+  if (!isJsonObject(payload)) {
+    throw new Error(`expected a JSON object body, received ${JSON.stringify(payload)}`)
+  }
+  return payload
+}
 
 /**
  * Serves the console on a loopback socket for the length of the case. The callback stays
@@ -570,13 +587,11 @@ describe('operator server', (): void => {
         // The link a successful response advertises must be one its own target accepts. The agent
         // route answers for this identifier on its own terms — no session ran for it — rather than
         // refusing to read it at all.
-        const body: unknown = await (
-          await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`)
-        ).json()
-        const detailUrl =
-          typeof body === 'object' && body !== null && 'detail_url' in body
-            ? String((body as { detail_url: unknown }).detail_url)
-            : ''
+        const body = await jsonObjectBody(
+          await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`),
+        )
+        const published = body['detail_url']
+        const detailUrl = typeof published === 'string' ? published : ''
         expect(detailUrl).toBe('/api/v1/agents/GH-7')
         const followed = await fetch(`${url}${detailUrl}`)
         expect(followed.status).toBe(404)
@@ -623,14 +638,14 @@ describe('operator server', (): void => {
 
         const shadowedState = await fetch(`${url}/api/v1/state`)
         expect(shadowedState.status).toBe(200)
-        const stateBody = (await shadowedState.json()) as Record<string, unknown>
+        const stateBody = await jsonObjectBody(shadowedState)
         // The runtime state document, not the issue whose identifier is spelled that way.
         expect(stateBody).toMatchObject({ counts: { running: 0 } })
         expect(stateBody['issue_identifier']).toBeUndefined()
 
         const shadowedBacklog = await fetch(`${url}/api/v1/backlog`)
         expect(shadowedBacklog.status).toBe(200)
-        const backlogBody = (await shadowedBacklog.json()) as Record<string, unknown>
+        const backlogBody = await jsonObjectBody(shadowedBacklog)
         // The backlog document, in the internal vocabulary its own consumer reads.
         expect(backlogBody).toMatchObject({ controlLabel: 'sloppenheimer' })
         expect(Array.isArray(backlogBody['nodes'])).toBe(true)
@@ -720,7 +735,7 @@ describe('operator server', (): void => {
 
       yield* withServer(backend, async (url) => {
         const response = await fetch(`${url}/api/v1/backlog`)
-        const body = (await response.json()) as Record<string, unknown>
+        const body = await jsonObjectBody(response)
 
         expect(response.status).toBe(200)
         expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8')
@@ -738,14 +753,13 @@ describe('operator server', (): void => {
   it.live('serves an OpenAPI description generated from its own endpoint definitions', () =>
     withServer(makeBackend(), async (url) => {
       const response = await fetch(`${url}/openapi.json`)
-      const document = (await response.json()) as { paths: Record<string, unknown> }
 
       expect(response.status).toBe(200)
-      expect(Object.keys(document.paths).sort()).toEqual(
-        [
-          ...new Set(operatorRoutes.map((route) => route.path.replace(/:([^/]+)/gu, '{$1}'))),
-        ].sort(),
-      )
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8')
+      // What is served is the generated description itself, rather than something reshaped on the
+      // way out; what that description says is pinned against the endpoint definitions in
+      // `test/operator/api-contract.test.ts`.
+      expect(await response.json()).toEqual(operatorOpenApiDocument())
       // Serving it reserves no identifier, because it is not in the versioned namespace at all.
       expect(operatorRoutes.some((route) => route.path === '/openapi.json')).toBe(false)
     }),
