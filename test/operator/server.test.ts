@@ -867,6 +867,42 @@ describe('operator server', (): void => {
     }),
   )
 
+  /*
+   * A URI whose parameter carries a malformed escape names nothing: there is no reading of it to
+   * route on, and the router will not match one. It has to be refused as unaddressable rather than
+   * dispatched — a request the API cannot route is a `404` like any other URI that names nothing,
+   * not a failure to report.
+   */
+  it.live('refuses a parameter that has no reading rather than dispatching it', () =>
+    withServer(makeBackend(), async (url) => {
+      const refusals = await Promise.all(
+        [
+          `${url}/api/v1/%`,
+          `${url}/api/v1/%zz`,
+          `${url}/api/v1/%E0%A4%A`,
+          `${url}/api/v1/agents/%`,
+          `${url}/api/v1/issues/%/start`,
+        ].map(async (target) => {
+          const response = await fetch(target, {
+            method: target.endsWith('/start') ? 'POST' : 'GET',
+          })
+          const body = await jsonObjectBody(response)
+          return { status: response.status, body }
+        }),
+      )
+
+      for (const refusal of refusals) {
+        expect(refusal.status).toBe(404)
+        expect(refusal.body).toMatchObject({ error: { code: 'not_found' } })
+      }
+
+      // An escape that does have a reading is addressed on that reading, which is how every
+      // identifier this API publishes a link for reaches its resource.
+      const encoded = await fetch(`${url}/api/v1/${encodeURIComponent('example/sloppenheimer#17')}`)
+      expect(encoded.status).toBe(200)
+    }),
+  )
+
   it.live('rejects non-loopback host headers', () =>
     withServer(makeBackend(), async (url) => {
       const target = new URL(url)

@@ -109,9 +109,13 @@ const decodedSegment = (segment: string): string | undefined => {
 /**
  * Whether one path parameter, spelled this way, names a resource this API can address.
  *
- * The length is judged before decoding, because that is what the router itself bounds; the shape
- * is judged after, because that is the value the router hands the handler. A parameter with no
- * declared shape only has to be a segment — an identifier is a branded string a tracker is free to
+ * Every parameter has to have a reading at all: a segment carrying a malformed escape names
+ * nothing, and the router will not match one either, so accepting it here would hand the API a
+ * request it cannot route and turn an unaddressable URI into a failure rather than a `404`.
+ *
+ * The length is judged before decoding, because that is what the router itself bounds, and the
+ * shape after, because the reading is the value the router hands the handler. A parameter with no
+ * declared shape only has to have one — an identifier is a branded string a tracker is free to
  * spell `GH-7`, so a pattern would decide on GitHub's behalf which providers may reach a SPEC
  * resource.
  */
@@ -119,12 +123,12 @@ const addressableParameter = (name: string, segment: string): boolean => {
   if (segment.length === 0 || segment.length > maxIdentifierParamLength) {
     return false
   }
-  const shape = pathParameterShapes.get(name)
-  if (shape === undefined) {
-    return true
-  }
   const decoded = decodedSegment(segment)
-  return decoded !== undefined && shape.test(decoded)
+  if (decoded === undefined) {
+    return false
+  }
+  const shape = pathParameterShapes.get(name)
+  return shape === undefined || shape.test(decoded)
 }
 
 /**
