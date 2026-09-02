@@ -249,13 +249,8 @@ export const noteHandoffOutcome = (
     ),
   ).pipe(
     Effect.zipRight(
-      recordOutcome(
-        handoffOutcomes,
-        outcome === 'merged'
-          ? 'merged'
-          : outcome === 'intervention_required'
-            ? 'intervention'
-            : 'completed',
-      ),
+      outcome === 'pull_request_open'
+        ? Effect.void
+        : recordOutcome(handoffOutcomes, outcome === 'merged' ? 'merged' : 'intervention'),
     ),
   )
