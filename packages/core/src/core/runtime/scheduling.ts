@@ -4,6 +4,7 @@ import type { Issue } from '../../domain/domain.js'
 import type { TrackerError } from '../../domain/errors.js'
 import { currentInstant } from '../../support/clock.js'
 import { logInfo, logWarning } from '../../support/logging.js'
+import { recordOutcome, retryOutcomes } from '../../support/observability.js'
 import { recordCancellation, recordRetryScheduled } from '../../telemetry.js'
 import { agentRetryDelay, trackerRetryDelay } from '../retry.js'
 import type { RefreshOperation } from '../state.js'
@@ -112,6 +113,7 @@ export const scheduleRetry = (
       due_at: new Date(dueAt).toISOString(),
       error,
     })
+    yield* recordOutcome(retryOutcomes, 'scheduled')
     return true
   })
 
@@ -138,4 +140,5 @@ const abandonRetry = (
       attempt,
       error,
     })
+    yield* recordOutcome(retryOutcomes, 'not_retryable')
   })

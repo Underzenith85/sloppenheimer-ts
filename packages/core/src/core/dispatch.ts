@@ -18,7 +18,14 @@ import { AgentError, type SourceControlError, type WorkspaceError } from '../dom
 import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
-import { logError, logInfo } from '../support/logging.js'
+import { logError, logInfo, withLogAnnotations } from '../support/logging.js'
+import {
+  agentDuration,
+  dispatchOutcomes,
+  observeDuration,
+  recordOutcome,
+  withOperationalSpan,
+} from '../support/observability.js'
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
 import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
@@ -281,7 +288,7 @@ const workspaceRelease = (
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
-  return execution.workspaces
+  const worker = execution.workspaces
     .withLeasedWorkspace(
       { identifier: issue.identifier, runId },
       (workspace) => runWithSourceControl(launch, workspace),
@@ -311,6 +318,16 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
           }).pipe(Effect.asVoid),
       }),
     )
+  return observeDuration(agentDuration, worker).pipe(
+    withOperationalSpan('agent.run', { run_id: runId }),
+    withLogAnnotations({
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      run_id: runId,
+      handoff: launch.repairRun,
+    }),
+  )
 }
 
 /** What a started session is before it has reported anything: everything else arrives later. */
@@ -342,7 +359,7 @@ const startingRun = (
 })
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
-export const dispatch = (
+const runDispatch = (
   context: OrchestratorContext,
   issue: Issue,
   attempt: number | null,
@@ -352,6 +369,7 @@ export const dispatch = (
   Effect.gen(function* () {
     const before = yield* Ref.get(context.state)
     if (before.running.has(issue.id)) {
+      yield* recordOutcome(dispatchOutcomes, 'already_running')
       return false
     }
     // Claiming and taking the queued retry are one transition: the issue must never be seen as
@@ -375,6 +393,7 @@ export const dispatch = (
     yield* context.detailRecord(issue, attempt, base.workflow.config.tracker.requiredLabels)
     const preflight = yield* revalidateCredentials(context, base).pipe(asSettled)
     if (preflight._tag === 'Failed') {
+      yield* recordOutcome(dispatchOutcomes, 'preflight_failed')
       yield* logError('action=dispatch outcome=failed', {
         ...logContext(issue),
         action: 'dispatch',
@@ -396,6 +415,7 @@ export const dispatch = (
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(asSettled)
     if (renderedPrompt._tag === 'Failed') {
+      yield* recordOutcome(dispatchOutcomes, 'prompt_failed')
       yield* context.scheduleRetry(
         issue,
         (attempt ?? 0) + 1,
@@ -433,5 +453,29 @@ export const dispatch = (
       action: 'dispatch',
       outcome: 'started',
     })
+    yield* recordOutcome(dispatchOutcomes, 'started')
     return true
   })
+
+/** One dispatch span carries issue, attempt, and handoff context through every nested log. */
+export const dispatch = (
+  context: OrchestratorContext,
+  issue: Issue,
+  attempt: number | null,
+  effectiveOverride?: EffectiveWorkflow,
+  sourceTarget?: SourceControlTarget,
+): Effect.Effect<boolean, never, Scope.Scope> =>
+  runDispatch(context, issue, attempt, effectiveOverride, sourceTarget).pipe(
+    withOperationalSpan('dispatch', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      handoff: sourceTarget?._tag === 'Repair',
+    }),
+    withLogAnnotations({
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      handoff: sourceTarget?._tag === 'Repair',
+    }),
+  )

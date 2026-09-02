@@ -10,6 +10,7 @@ import { makeOperatorBackend } from './operator/operator.js'
 import { startOperatorServer } from './operator/server.js'
 import { startOrchestrator, WorkflowLoader } from '@sloppenheimer/core'
 import { logInfo } from '@sloppenheimer/core/support/logging.js'
+import { withProtectedTracer } from '@sloppenheimer/core/support/observability.js'
 
 /**
  * The CLI's last-resort bound. Cleanup is not allowed to depend on it: the host closes its scope
@@ -100,6 +101,8 @@ const main = async (): Promise<number> => {
     // environment as a `Config` against whatever provider the fiber carries, so this is the one
     // place that says "the process environment" — and the one line a test replaces.
     Effect.withConfigProvider(ConfigProvider.fromEnv()),
+    // Exporters are a composition-root concern. This guard keeps a broken one supplemental.
+    withProtectedTracer,
   )
 
   const exit = await Effect.runPromiseExit(program, {

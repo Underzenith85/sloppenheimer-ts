@@ -95,6 +95,7 @@ const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void, never, Scop
         `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
         // The retry scheduled just below continues this repair from the same baseline.
         'retain',
+        'stalled',
       )
       if (Option.isSome(ended)) {
         yield* scheduleRetry(

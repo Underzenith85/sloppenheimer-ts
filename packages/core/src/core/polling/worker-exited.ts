@@ -1,6 +1,7 @@
 import { Clock, Effect, Option, Ref, type Scope } from 'effect'
 
 import { logError, logInfo } from '../../support/logging.js'
+import { agentOutcomes, recordOutcome } from '../../support/observability.js'
 import { settlePostflight } from '../delivery.js'
 import { sessionLogContext } from '../policy.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
@@ -28,6 +29,7 @@ export const onWorkerExited = (
     if (Option.isNone(ended)) {
       return
     }
+    yield* recordOutcome(agentOutcomes, event.outcome)
     const settled = yield* Ref.modify(context.state, (current) =>
       Transitions.applyPendingTelemetry(current, event.issueId, ended.value),
     )

@@ -3,11 +3,12 @@ import * as HttpClientError from '@effect/platform/HttpClientError'
 import type * as HttpClientRequest from '@effect/platform/HttpClientRequest'
 import * as HttpClientResponse from '@effect/platform/HttpClientResponse'
 import { it } from '@effect/vitest'
-import { Clock, Effect, Fiber, Layer, Redacted, TestClock } from 'effect'
+import { Clock, Effect, Fiber, Layer, Metric, Redacted, TestClock } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
 import { githubJson, type GitHubHttpResult } from '@sloppenheimer/adapter-github/client.js'
 import { makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'
+import { githubRequestDuration } from '@sloppenheimer/adapter-github/observability.js'
 import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
 import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
 import type { TrackerError } from '@sloppenheimer/core/domain/errors.js'
@@ -58,6 +59,7 @@ describe('GitHub transport client injection', (): void => {
       })
       vi.stubGlobal('fetch', unusable)
       const requests: HttpClientRequest.HttpClientRequest[] = []
+      const beforeDurationCount = (yield* Metric.value(githubRequestDuration)).count
 
       const result = yield* run(
         githubJson(provider, issuesUrl),
@@ -69,6 +71,7 @@ describe('GitHub transport client injection', (): void => {
 
       expect(unusable).not.toHaveBeenCalled()
       expect(requests).toHaveLength(1)
+      expect((yield* Metric.value(githubRequestDuration)).count).toBe(beforeDurationCount + 1)
       expect(result).toEqual({
         status: 200,
         body: [],
