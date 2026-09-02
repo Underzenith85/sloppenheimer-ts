@@ -370,6 +370,7 @@ const installNavigation = (): void => {
 
 installNavigation()
 installDetailControls()
+bindTrace()
 selectView('ready', false)
 render()
 syncFromHash()

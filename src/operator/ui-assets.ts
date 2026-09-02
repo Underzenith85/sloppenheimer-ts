@@ -1,18 +1,26 @@
 import { readFileSync } from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
 
+import { traceCategories, traceOutcomes } from '@sloppenheimer/core/domain/trace.js'
 import { timelineCategories } from '@sloppenheimer/core/telemetry.js'
 
 const read = (name: string): string =>
   readFileSync(new URL(`./ui/${name}`, import.meta.url), 'utf8')
 
 /**
- * The browser script declares `timelineCategories` as an ambient binding so that the
- * console never restates the telemetry category list. The value is supplied here, from
- * the same module the server uses, rather than being baked in by the build.
+ * The browser script declares `timelineCategories`, `traceCategories` and `traceOutcomes` as
+ * ambient bindings so that the console never restates a vocabulary the runtime owns. The values are
+ * supplied here, from the same modules the server uses, rather than being baked in by the build.
  */
-const categories = JSON.stringify(timelineCategories)
-const categoryPrelude = `'use strict'\nconst timelineCategories = Object.freeze(${categories})\n`
+const vocabulary = (name: string, values: readonly string[]): string =>
+  `const ${name} = Object.freeze(${JSON.stringify(values)})\n`
+
+const categoryPrelude = [
+  "'use strict'\n",
+  vocabulary('timelineCategories', timelineCategories),
+  vocabulary('traceCategories', traceCategories),
+  vocabulary('traceOutcomes', traceOutcomes),
+].join('')
 
 /**
  * Type stripping is still flagged experimental, so Node prints a warning the first time it
@@ -47,6 +55,7 @@ const browserSources: readonly string[] = [
   'explain',
   'timeline',
   'detail',
+  'trace',
   'cards',
   'graph',
   'app',

@@ -7,6 +7,7 @@ import { parseCliArguments } from '../../src/config/cli-options.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { OrchestratorSnapshot } from '@sloppenheimer/core'
 import { startOperatorServer } from '../../src/operator/server.js'
+import { traceBackendFields } from '../harness/trace.js'
 
 const tokens = { inputTokens: 12, outputTokens: 8, totalTokens: 20 } as const
 
@@ -93,6 +94,7 @@ const backend: OperatorBackend = {
     operations: ['issue_reconciliation', 'dispatch'],
   }),
   agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
+  ...traceBackendFields(),
   backlog: Effect.succeed({
     controlLabel: 'sloppenheimer',
     issues: [],

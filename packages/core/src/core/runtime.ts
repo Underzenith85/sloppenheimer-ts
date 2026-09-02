@@ -73,6 +73,8 @@ export {
   type TraceRecorder,
 } from './runtime/types.js'
 
+export { tracePageLimit, traceQuery } from './runtime/trace-reader.js'
+
 export {
   completionWindowMs,
   retainedCompletedDetails,

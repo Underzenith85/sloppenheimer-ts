@@ -15,7 +15,12 @@
 // The per-issue resource 13.7.2 documents beside `/api/v1/state` is mapped here too, from the same
 // snapshot and from the agent detail record the runtime publishes for that issue.
 //
-// This module is the whole of that published surface and the only path anything imports; the two
+// The durable high-fidelity agent trace is published here too, from `api/trace.ts`. It is a
+// separate resource rather than a section of the per-issue document on purpose: a whole session's
+// messages, command output and tool payloads must be paged, and a document that carried them would
+// have to be built in full before any of it could be sent.
+//
+// This module is the whole of that published surface and the only path anything imports; the
 // documents it re-exports live beside it in `api/`, which is one module split for size rather than
 // a boundary of its own.
 
@@ -41,3 +46,16 @@ export {
   type PublishedState,
 } from './api/state.js'
 export { type PublishedTokens, type PublishedTotals } from './api/tokens.js'
+export {
+  publishTrace,
+  publishTraceEvent,
+  tracePath,
+  traceQueryFrom,
+  traceStreamPath,
+  type PublishedTrace,
+  type PublishedTraceEvent,
+  type PublishedTraceEviction,
+  type PublishedTraceLimits,
+  type PublishedTraceTruncation,
+  type TraceQueryResult,
+} from './api/trace.js'

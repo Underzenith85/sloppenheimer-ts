@@ -233,6 +233,22 @@
         <ol id="detail-timeline" class="detail-timeline" aria-labelledby="filter-label">
           <li class="empty">No events yet.</li>
         </ol>
+        <details id="detail-trace-panel" class="trace-panel">
+          <summary>High-fidelity trace</summary>
+          <p class="trace-lede">
+            The complete record of this agent's activity, as the host observed it: whole messages,
+            command lines and output, tool payloads, and any reasoning summaries the runner emitted.
+            Private reasoning is never retained. Redacted and truncated fields are marked.
+          </p>
+          <p id="detail-trace-status" class="trace-status" role="status" aria-live="polite"></p>
+          <div id="detail-trace-filters" role="group" aria-label="Trace filters"></div>
+          <ol id="detail-trace" class="detail-trace" aria-label="High-fidelity trace records">
+            <li class="empty">No trace records loaded.</li>
+          </ol>
+          <button id="detail-trace-more" class="refresh" type="button" hidden>
+            Load more records
+          </button>
+        </details>
         <details class="diagnostics">
           <summary>Diagnostics</summary>
           <div id="detail-diagnostics"></div>

@@ -223,8 +223,6 @@ export type OrchestratorControl = Readonly<{
   awaitTermination: Effect.Effect<never>
 }>
 
-
-
 /**
  * What one delivery attempt amounted to, decided off the event loop and settled on it.
  *

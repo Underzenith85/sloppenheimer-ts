@@ -721,6 +721,105 @@ button[aria-busy='true'] {
   font-size: 13px;
 }
 
+/* High-fidelity trace ----------------------------------------------------- */
+
+.trace-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.trace-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.trace-lede,
+.trace-status {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+#detail-trace-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 10px 0;
+}
+
+.detail-trace {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.trace-event {
+  display: grid;
+  gap: 4px;
+  border-left: 2px solid var(--line);
+  padding-left: 12px;
+  font-size: 13px;
+}
+
+.trace-event.outcome-failed {
+  border-left-color: var(--coral);
+}
+
+.trace-event.outcome-cancelled,
+.trace-event.outcome-withheld {
+  border-left-color: var(--amber);
+}
+
+.trace-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.trace-time,
+.trace-category,
+.trace-meta {
+  color: var(--muted);
+  font:
+    500 11px/1.4 ui-monospace,
+    monospace;
+}
+
+/* Agent-authored text. It is never interpolated as markup, and it is never allowed to widen the
+   overlay: a single long line would otherwise push the whole panel sideways. */
+.trace-body {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.trace-payload summary {
+  cursor: pointer;
+  color: var(--muted);
+  font:
+    500 11px/1.4 ui-monospace,
+    monospace;
+}
+
+.trace-pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  background: rgb(0 0 0 / 18%);
+  border-radius: 6px;
+  font:
+    500 12px/1.5 ui-monospace,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .notice {
   width: min(1480px, calc(100% - 48px));
   margin: 0 auto 60px;

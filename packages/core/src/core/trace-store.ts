@@ -205,9 +205,7 @@ export const segmentPath = (
   return containedWorkspacePath(traceRoot, identifierKey).pipe(
     Effect.flatMap((issueDirectory) =>
       containedWorkspacePath(issueDirectory, fileName).pipe(
-        Effect.map(
-          (path): TraceSegment => ({ identifierKey, fileName, path, runId, startedAtMs }),
-        ),
+        Effect.map((path): TraceSegment => ({ identifierKey, fileName, path, runId, startedAtMs })),
       ),
     ),
     Effect.mapError((error) =>

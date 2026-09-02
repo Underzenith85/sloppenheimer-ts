@@ -17,6 +17,7 @@ import {
   recordAgentEvent,
   type AgentDetailSnapshot,
 } from '@sloppenheimer/core/telemetry.js'
+import { traceEvent, traceBackendFields } from '../harness/trace.js'
 
 const snapshot: OrchestratorSnapshot = {
   generatedAt: '2026-08-29T12:00:00.000Z',
@@ -159,6 +160,28 @@ const detailLookups = new Map<string, AgentDetailLookup>([
   ],
 ])
 
+/** Three records, so paging by sequence and filtering by category both have something to do. */
+const traceEvents = [
+  traceEvent({
+    sequence: 1,
+    category: 'lifecycle',
+    body: { kind: 'lifecycle', phase: 'run_started', detail: null },
+  }),
+  traceEvent({
+    sequence: 2,
+    category: 'command',
+    body: {
+      kind: 'command',
+      commandLine: 'pnpm check',
+      stdout: '<script>alert(1)</script>',
+      stderr: null,
+      exitCode: 0,
+      durationMs: 12,
+    },
+  }),
+  traceEvent({ sequence: 3 }),
+]
+
 const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
   snapshot: Effect.succeed(snapshot),
   refresh: Effect.succeed({
@@ -168,6 +191,7 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
   }),
   agentDetail: (identifier) =>
     Effect.succeed(detailLookups.get(identifier) ?? { _tag: 'Unknown', identifier }),
+  ...traceBackendFields(traceEvents),
   backlog: Effect.succeed({
     controlLabel: 'sloppenheimer',
     issues: [

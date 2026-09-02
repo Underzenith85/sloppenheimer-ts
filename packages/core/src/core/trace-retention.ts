@@ -4,12 +4,7 @@ import { Effect, Schema } from 'effect'
 import { TraceStoreError } from '../domain/errors.js'
 import type { TraceEviction, TraceLimits } from '../domain/trace.js'
 import { loadStoreDocument, saveStoreDocument, type StoreFailure } from './json-store.js'
-import {
-  listSegments,
-  removeSegment,
-  segmentBytes,
-  type TraceSegment,
-} from './trace-store.js'
+import { listSegments, removeSegment, segmentBytes, type TraceSegment } from './trace-store.js'
 
 /**
  * Retention for the durable trace: which segments go, in what order, and the record of what went.

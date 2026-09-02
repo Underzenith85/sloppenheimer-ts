@@ -253,7 +253,13 @@ const commandBody = (
   kind: 'command',
   // The whole line, arguments included. The compressed timeline keeps the program word alone
   // because it is a health summary; a trace that dropped the arguments could not say what ran.
-  commandLine: text(build, 'commandLine', item.command ?? item.commandLine ?? '', capture, redactor),
+  commandLine: text(
+    build,
+    'commandLine',
+    item.command ?? item.commandLine ?? '',
+    capture,
+    redactor,
+  ),
   stdout: optionalText(build, 'stdout', item.stdout ?? item.aggregatedOutput, capture, redactor),
   stderr: optionalText(build, 'stderr', item.stderr, capture, redactor),
   exitCode: item.exitCode,
@@ -278,7 +284,13 @@ const bodyOf = (
       body: {
         kind: 'message',
         role: type.includes('user') ? 'user' : 'assistant',
-        text: text(build, 'text', item.text ?? item.content ?? item.message ?? '', capture, redactor),
+        text: text(
+          build,
+          'text',
+          item.text ?? item.content ?? item.message ?? '',
+          capture,
+          redactor,
+        ),
       },
     }
   }
@@ -296,8 +308,20 @@ const bodyOf = (
       category: 'tool',
       body: {
         kind: 'tool',
-        name: text(build, 'name', item.name ?? item.tool ?? item.server ?? 'tool', capture, redactor),
-        arguments: json(build, 'arguments', item.input ?? item.arguments ?? item.args, capture, redactor),
+        name: text(
+          build,
+          'name',
+          item.name ?? item.tool ?? item.server ?? 'tool',
+          capture,
+          redactor,
+        ),
+        arguments: json(
+          build,
+          'arguments',
+          item.input ?? item.arguments ?? item.args,
+          capture,
+          redactor,
+        ),
         result: json(build, 'result', item.output ?? item.result, capture, redactor),
         durationMs: item.durationMs,
       },

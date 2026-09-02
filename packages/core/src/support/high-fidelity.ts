@@ -23,7 +23,7 @@
  * remove an arbitrary secret embedded in ordinary source text that an agent happened to print.
  */
 
-import { isJsonObject, type JsonValue } from './json.js'
+import { isJsonArray, isJsonObject, type JsonValue } from './json.js'
 import { isSecretKey, redact, redactionMarker, type Redactor } from './redaction.js'
 
 /** One field that did not fit, named so that a reader can see exactly what was shortened. */
@@ -147,7 +147,7 @@ const walkJson = (
     walk.truncations.push({ field, reason: 'depth_limit', retainedBytes: 0, originalBytes: null })
     return truncationMarker
   }
-  if (Array.isArray(value)) {
+  if (isJsonArray(value)) {
     return value.map((entry, index) =>
       walkJson(`${field}[${String(index)}]`, entry, limit, redactor, depth + 1, walk),
     )

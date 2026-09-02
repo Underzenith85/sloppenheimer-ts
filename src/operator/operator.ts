@@ -1,4 +1,4 @@
-import { Effect } from 'effect'
+import { Effect, type Stream } from 'effect'
 
 import {
   findDependencyCycles,
@@ -11,7 +11,10 @@ import type {
   OrchestratorControl,
   OrchestratorSnapshot,
   RefreshOutcome,
+  TracePage,
+  TraceQuery,
 } from '@sloppenheimer/core'
+import type { TraceEvent } from '@sloppenheimer/core/domain/trace.js'
 import {
   CurrentIssueControl,
   type IssueControlPort,
@@ -81,6 +84,14 @@ export type OperatorBackend = Readonly<{
    * cannot queue behind — or interfere with — tracker polling.
    */
   agentDetail: (identifier: string) => Effect.Effect<AgentDetailLookup>
+  /**
+   * One page of the durable high-fidelity trace. It reads from disk rather than from the snapshot,
+   * so a console paging a finished session neither competes with tracker polling nor obliges the
+   * scheduler to hold the history in memory.
+   */
+  agentTrace: (identifier: string, query: TraceQuery) => Effect.Effect<TracePage>
+  /** Trace records for one issue as they are written, for the console's live tail. */
+  agentTraceStream: (identifier: string) => Stream.Stream<TraceEvent>
   backlog: Effect.Effect<BacklogSnapshot, OperatorBackendError>
   setIssueEnabled: (
     issueNumber: number,
@@ -348,6 +359,8 @@ export const makeOperatorBackend = (
         snapshot: orchestrator.snapshot,
         refresh: orchestrator.refresh,
         agentDetail: orchestrator.agentDetail,
+        agentTrace: orchestrator.agentTrace,
+        agentTraceStream: orchestrator.agentTraceStream,
         backlog: Effect.gen(function* () {
           const { label, issues, terminalStates } = yield* loadControl
           const openIssues = yield* issues.listOpenIssues()

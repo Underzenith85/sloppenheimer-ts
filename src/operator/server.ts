@@ -12,6 +12,7 @@ import { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import { logError } from '@sloppenheimer/core/support/logging.js'
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
+import { tracePageRoute, traceStreamRoute } from './trace-routes.js'
 import { appJavaScript, appStyles, appTemplate } from './ui-assets.js'
 
 const host = '127.0.0.1'
@@ -118,6 +119,34 @@ const withCsrf = <Error, Requirements>(
     tokenMatches(request.headers['x-sloppenheimer-csrf'], csrfToken)
       ? handler
       : errorResponse(403, 'invalid_csrf_token', 'The request token is missing or invalid'),
+  )
+
+/**
+ * The durable trace's own guard: GET, and the console token.
+ *
+ * Every other GET here is guarded by the loopback host check alone, which is right for a health
+ * summary. A trace is not a summary — it carries complete agent messages, command output and tool
+ * payloads, guarded by heuristic redaction — so it is served only to a caller that can read the
+ * token this server issued into its own HTML. Requiring it on a read is a departure from the CSRF
+ * convention and is deliberate: what it buys is that a page the operator merely visited cannot
+ * fetch a session's transcript from a host running on their own machine.
+ */
+const withTraceAccess =
+  (csrfToken: string) =>
+  <Error, Requirements>(
+    handler: Effect.Effect<HttpServerResponse.HttpServerResponse, Error, Requirements>,
+  ): Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    Error,
+    Requirements | HttpServerRequest.HttpServerRequest
+  > =>
+    withMethod('GET', withCsrf(csrfToken, handler))
+
+const invalidTraceQuery = (parameter: string): HttpServerResponse.HttpServerResponse =>
+  errorResponse(
+    400,
+    'invalid_trace_query',
+    `The ${parameter} parameter is not a value this host understands`,
   )
 
 /**
@@ -266,6 +295,15 @@ const fixedRoutes = (
       issueActionRoute(backend, csrfToken, false),
     ),
     HttpRouter.all('/api/v1/agents/:identifier', agentDetailRoute(backend)),
+    // Registered after the detail resource and at deeper paths, so neither shadows the other.
+    HttpRouter.all(
+      '/api/v1/agents/:identifier/trace',
+      tracePageRoute(backend, withTraceAccess(csrfToken), invalidTraceQuery),
+    ),
+    HttpRouter.all(
+      '/api/v1/agents/:identifier/trace/stream',
+      traceStreamRoute(backend, withTraceAccess(csrfToken)),
+    ),
   )
 
 /**

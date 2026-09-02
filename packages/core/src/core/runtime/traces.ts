@@ -111,9 +111,7 @@ const lastSequence = (
         const newest = owned.at(-1)
         return newest === undefined
           ? Effect.succeed(0)
-          : readSegment(newest.path).pipe(
-              Effect.map(({ events }) => events.at(-1)?.sequence ?? 0),
-            )
+          : readSegment(newest.path).pipe(Effect.map(({ events }) => events.at(-1)?.sequence ?? 0))
       }),
     ),
     0,
@@ -287,10 +285,7 @@ export const recordTrace = (
   })
 
 /** Live records for one issue, from the moment the subscriber attaches. */
-export const traceStream = (
-  store: TraceStore,
-  identifier: string,
-): Stream.Stream<TraceEvent> =>
+export const traceStream = (store: TraceStore, identifier: string): Stream.Stream<TraceEvent> =>
   Stream.filter(Stream.fromPubSub(store.live), (event) => event.identifier === identifier)
 
 /**
@@ -317,9 +312,7 @@ export const traceRecorder = (
   record: (issueId, event, observation, identity) =>
     recordTrace(store, issueId, event, observation, identity),
   page: (identifier, query) =>
-    workspaceRootOf.pipe(
-      Effect.flatMap((root) => readTracePage(store, root, identifier, query)),
-    ),
+    workspaceRootOf.pipe(Effect.flatMap((root) => readTracePage(store, root, identifier, query))),
   live: (identifier) => traceStream(store, identifier),
 })
 

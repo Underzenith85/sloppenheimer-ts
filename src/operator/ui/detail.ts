@@ -271,6 +271,11 @@ const openDetail = (identifier: string, trigger: HTMLElement | null): void => {
     window.location.hash = deepLink(identifier)
   }
   markExpandedTrigger(identifier)
+  if (changed) {
+    // The trace panel holds one issue's records; moving the overlay to another issue must not
+    // leave the previous agent's transcript under the new title.
+    resetTrace(identifier)
+  }
   renderDetail()
   if (changed) {
     detailTitle.focus()
@@ -279,6 +284,7 @@ const openDetail = (identifier: string, trigger: HTMLElement | null): void => {
 }
 
 const closeDetail = (): void => {
+  resetTrace(null)
   detailIdentifier = null
   detail = null
   detailNotice = ''

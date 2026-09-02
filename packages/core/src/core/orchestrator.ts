@@ -23,6 +23,10 @@ export {
   type RetrySnapshot,
   type RunningSnapshot,
   type RuntimePorts,
+  type TracePage,
+  type TraceQuery,
+  type TraceRecorder,
+  tracePageLimit,
 } from './runtime.js'
 
 export const startOrchestrator = (

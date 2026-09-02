@@ -342,6 +342,32 @@ const startingRun = (
   lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
 })
 
+/**
+ * Opens the run's durable trace segment and records that the run began.
+ *
+ * It happens before the worker is forked, so the first protocol message already has a segment to
+ * land in; it is a step of its own because a run start is two facts — where the trace goes, and
+ * that a run began — and only the first of them is bookkeeping.
+ */
+const openRunTrace = (
+  context: OrchestratorContext,
+  issue: Issue,
+  runId: number,
+  attempt: number | null,
+  repairRun: boolean,
+): Effect.Effect<void> =>
+  context.traces
+    .openRun(issue, runId, attempt ?? 0)
+    .pipe(
+      Effect.zipRight(
+        context.traces.lifecycle(
+          issue.id,
+          'run_started',
+          repairRun ? 'repairing an existing pull request' : null,
+        ),
+      ),
+    )
+
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 export const dispatch = (
   context: OrchestratorContext,
@@ -408,14 +434,7 @@ export const dispatch = (
     }
     const execution = captureExecutionSnapshot(effective, renderedPrompt.value)
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
-    // Opened before the worker is forked, so the first protocol message already has a segment to
-    // land in. Everything the run reports afterwards is appended to it in sequence.
-    yield* context.traces.openRun(issue, runId, attempt ?? 0)
-    yield* context.traces.lifecycle(
-      issue.id,
-      'run_started',
-      repairRun ? 'repairing an existing pull request' : null,
-    )
+    yield* openRunTrace(context, issue, runId, attempt, repairRun)
     const sessionPorts = MutableRef.make<SessionPorts>({
       tracker: execution.tracker,
       codeReview: execution.codeReview,

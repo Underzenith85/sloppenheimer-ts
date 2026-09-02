@@ -113,19 +113,17 @@ export const readTracePage = (
       }),
     )
     .pipe(
-      Effect.map(
-        ({ collected, evictions }): TracePage => ({
-          enabled: store.enabled,
-          identifier,
-          events: collected.events,
-          nextAfter: collected.events.at(-1)?.sequence ?? query.after,
-          hasMore: collected.hasMore,
-          malformedRecords: collected.malformed,
-          limits: store.limits,
-          evictions: evictions.evictions,
-          evictionsTotal: evictions.total,
-        }),
-      ),
+      Effect.map(({ collected, evictions }): TracePage => ({
+        enabled: store.enabled,
+        identifier,
+        events: collected.events,
+        nextAfter: collected.events.at(-1)?.sequence ?? query.after,
+        hasMore: collected.hasMore,
+        malformedRecords: collected.malformed,
+        limits: store.limits,
+        evictions: evictions.evictions,
+        evictionsTotal: evictions.total,
+      })),
       Effect.catchAll(() => Effect.succeed(emptyPage(store, identifier, query.after))),
     )
 }
