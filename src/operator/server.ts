@@ -11,7 +11,7 @@ import { Cause, Effect, Layer, type Scope } from 'effect'
 import { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import { logError } from '@sloppenheimer/core/support/logging.js'
 
-import { operatorApi, operatorRoutes } from './api/endpoints.js'
+import { operatorApi, operatorRoutes, pathParameterShapes } from './api/endpoints.js'
 import {
   failureResponse,
   internalError,
@@ -94,30 +94,56 @@ const consoleRoutes = (csrfToken: string): HttpRouter.HttpRouter<never, never> =
     ),
   )
 
-const escapedSegment = (segment: string): string => segment.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+/**
+ * A path parameter as the router will hand it to a handler. A malformed escape has no such
+ * reading, and a segment that has none names nothing.
+ */
+const decodedSegment = (segment: string): string | undefined => {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return undefined
+  }
+}
 
 /**
- * One endpoint path as a pattern over a request path. A parameter matches a single segment, bounded
- * the way the router itself bounds one, so an identifier too long for the router to match is
- * unclaimed here too rather than being reported as a method refusal for a route that would never
- * have run.
+ * Whether one path parameter, spelled this way, names a resource this API can address.
+ *
+ * The length is judged before decoding, because that is what the router itself bounds; the shape
+ * is judged after, because that is the value the router hands the handler. A parameter with no
+ * declared shape only has to be a segment — an identifier is a branded string a tracker is free to
+ * spell `GH-7`, so a pattern would decide on GitHub's behalf which providers may reach a SPEC
+ * resource.
  */
-const pathPattern = (path: string): RegExp =>
-  new RegExp(
-    `^${path
-      .split('/')
-      .map((segment) =>
-        segment.startsWith(':')
-          ? `[^/]{1,${String(maxIdentifierParamLength)}}`
-          : escapedSegment(segment),
-      )
-      .join('/')}$`,
-    'u',
-  )
+const addressableParameter = (name: string, segment: string): boolean => {
+  if (segment.length === 0 || segment.length > maxIdentifierParamLength) {
+    return false
+  }
+  const shape = pathParameterShapes.get(name)
+  if (shape === undefined) {
+    return true
+  }
+  const decoded = decodedSegment(segment)
+  return decoded !== undefined && shape.test(decoded)
+}
 
-const routePatterns: readonly Readonly<{ pattern: RegExp; method: string }>[] = operatorRoutes.map(
-  (route) => ({ pattern: pathPattern(route.path), method: route.method }),
-)
+/**
+ * Whether one endpoint claims a request path: the path has its shape, and every parameter it names
+ * is addressable. An unaddressable parameter leaves the path unclaimed rather than claimed by the
+ * method that would have served it, so a URI that names no resource is a `404` on every method
+ * rather than a `405` advertising a resource that does not exist.
+ */
+const claimsPath = (routeSegments: readonly string[], segments: readonly string[]): boolean =>
+  routeSegments.length === segments.length &&
+  routeSegments.every((routeSegment, index) => {
+    const segment = segments[index] ?? ''
+    return routeSegment.startsWith(':')
+      ? addressableParameter(routeSegment.slice(1), segment)
+      : routeSegment === segment
+  })
+
+const routeMatchers: readonly Readonly<{ segments: readonly string[]; method: string }>[] =
+  operatorRoutes.map((route) => ({ segments: route.path.split('/'), method: route.method }))
 
 const requestPath = (url: string): string => {
   const query = url.indexOf('?')
@@ -131,12 +157,16 @@ const requestPath = (url: string): string => {
  * other as unavailable. The order is the methods' own rather than the definitions', so what the
  * `Allow` header says does not depend on the order the endpoints happen to be declared in.
  */
-const answeredMethods = (path: string): readonly string[] =>
-  [
+const answeredMethods = (path: string): readonly string[] => {
+  const segments = path.split('/')
+  return [
     ...new Set(
-      routePatterns.filter((route) => route.pattern.test(path)).map((route) => route.method),
+      routeMatchers
+        .filter((route) => claimsPath(route.segments, segments))
+        .map((route) => route.method),
     ),
   ].sort((left, right) => left.localeCompare(right))
+}
 
 /**
  * What a request no endpoint claims is answered with: a `404` when the URI names nothing, and a

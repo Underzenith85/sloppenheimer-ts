@@ -59,10 +59,29 @@ const identifierPath = Schema.Struct({ identifier: Schema.String })
 
 /**
  * The issue number an eligibility change names. It is read as a string here and decoded against
- * the bounded rule in the handler, because a number this API cannot address is a resource that
- * does not exist — a `404` — rather than a malformed request.
+ * {@link issueNumberShape} in the handler, because a number this API cannot address is a resource
+ * that does not exist — a `404` — rather than a malformed request.
  */
 const issueNumberPath = Schema.Struct({ issueNumber: Schema.String })
+
+/** The shape an issue number takes in a path: digits, and nothing else. */
+export const issueNumberShape = /^\d+$/u
+
+/**
+ * The shape a path parameter must have for its path to name a resource at all.
+ *
+ * A parameter absent from here is unconstrained, which is the default and what
+ * {@link identifierPath} relies on. `issueNumber` is not like that: the console's eligibility
+ * controls name an issue by number, and a spelling this API cannot address names no resource on
+ * any method. Stating that here rather than in the handler alone is what keeps
+ * `GET /api/v1/issues/not-a-number/start` a `404` — the same answer the route has always given —
+ * rather than a `405` advertising the POST of a resource that does not exist. The server reads
+ * this to decide whether a URI is claimed at all, and the handler decodes the parameter against
+ * the same shape.
+ */
+export const pathParameterShapes: ReadonlyMap<string, RegExp> = new Map([
+  ['issueNumber', issueNumberShape],
+])
 
 /**
  * This API never answers `400`.

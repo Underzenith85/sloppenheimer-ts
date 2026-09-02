@@ -18,7 +18,7 @@ import type { AgentDetailLookup } from '@sloppenheimer/core'
 
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { PublishedAgentDetail } from './api/agent-detail-schema.js'
-import { operatorApi, type PublishedIssueAction } from './api/endpoints.js'
+import { issueNumberShape, operatorApi, type PublishedIssueAction } from './api/endpoints.js'
 import {
   agentDetailUnavailable,
   agentNotActive,
@@ -70,7 +70,7 @@ const requirePageToken = (
  * route has always answered in.
  */
 const issueNumberSchema: Schema.Schema<number, string> = Schema.String.pipe(
-  Schema.pattern(/^\d+$/u),
+  Schema.pattern(issueNumberShape),
   Schema.compose(Schema.NumberFromString),
 )
 

@@ -828,6 +828,15 @@ describe('operator server', (): void => {
           headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
         })
         expect(unaddressable.status).toBe(404)
+
+        // A parameter is judged as the router will hand it to the handler, which is decoded. An
+        // escaped spelling of a number this API can address still names that issue.
+        const escaped = await fetch(`${url}/api/v1/issues/%31%37/pause`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
+        })
+        expect(escaped.status).toBe(202)
+        expect(await escaped.json()).toMatchObject({ issueNumber: 17, enabled: false })
       })
     }),
   )
@@ -844,6 +853,17 @@ describe('operator server', (): void => {
       expect(wrongMethod.status).toBe(405)
       expect(wrongMethod.headers.get('allow')).toBe('GET')
       expect(invalidAction.status).toBe(404)
+
+      // A `405` advertises what a URI serves, so it is only ever the answer for a URI that names
+      // something. An issue number this API cannot address names no resource on any method, and
+      // reporting the eligibility POST for it would say a resource exists that does not.
+      const readableAction = await fetch(`${url}/api/v1/issues/17/start`)
+      const unaddressableAction = await fetch(`${url}/api/v1/issues/not-a-number/start`)
+
+      expect(readableAction.status).toBe(405)
+      expect(readableAction.headers.get('allow')).toBe('POST')
+      expect(unaddressableAction.status).toBe(404)
+      expect(await unaddressableAction.json()).toMatchObject({ error: { code: 'not_found' } })
     }),
   )
 

@@ -307,9 +307,13 @@ as an `@effect/platform` schema-backed `HttpApi` endpoint — its path, method, 
 document and the statuses it may refuse with — and nothing else describes them. The handlers in
 `src/operator/handlers.ts` are written against those definitions, each response is encoded through
 the schema its endpoint declared before it is sent, and the `404`/`405` the server answers for a URI
-no endpoint claims are derived from the same registrations. The schemas are annotated with the
-published types beside them, so a mapping that stops agreeing with its own type fails the build
-rather than reshaping a document quietly.
+no endpoint claims are derived from the same registrations. An endpoint claims a URI only when the
+parameters in it are addressable — `pathParameterShapes` in `src/operator/api/endpoints.ts` says
+which shapes those are, and the handlers decode against the same ones — so
+`GET /api/v1/issues/not-a-number/start` is `404` rather than a `405` advertising the POST of a
+resource that does not exist. The schemas are annotated with the published types beside them, so a
+mapping that stops agreeing with its own type fails the build rather than reshaping a document
+quietly.
 
 `GET /openapi.json` serves the OpenAPI description generated from those definitions. It sits outside
 the versioned namespace deliberately: a name under `/api/v1/` would shadow an issue identifier
