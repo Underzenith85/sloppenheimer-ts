@@ -1,4 +1,4 @@
-import type { Deferred, Effect, Fiber, MutableRef, Option } from 'effect'
+import type { Deferred, Effect, MutableRef, Option } from 'effect'
 
 import type { Workflow } from '../config/workflow.js'
 import { issueId } from '../domain/domain.js'
@@ -45,7 +45,10 @@ export type RefreshOperation =
   | 'dispatch'
 
 export type RuntimeState = Readonly<{
-  /** Sessions with a live worker fiber. */
+  /**
+   * Sessions with a live worker. The worker fiber itself is owned by `runtime/execution.ts`, keyed
+   * by issue: this map is what the host is running, not how it is running it.
+   */
   running: ReadonlyMap<IssueId, RunningEntry>
   /** Issues this orchestrator has taken responsibility for, in any phase. */
   claimed: ReadonlySet<IssueId>
@@ -104,7 +107,6 @@ export type RuntimeState = Readonly<{
   pollRunning: boolean
   /** A change observed during a poll, which owes the next poll a follow-up pass. */
   followUpRequested: boolean
-  pollTimer: Fiber.Fiber<void> | null
   nextRunId: number
   /**
    * Callers awaiting the poll now running, and callers awaiting the one after it. Each is answered
@@ -144,11 +146,6 @@ export type SessionPorts = Pick<ExecutionSnapshot, 'tracker' | 'codeReview' | 's
 export type RunningEntry = Readonly<{
   runId: number
   issue: Issue
-  /**
-   * The worker. Held as a plain `Fiber` because the only thing the scheduler ever does with it is
-   * interrupt it, which keeps a transition testable with a fiber value that never ran.
-   */
-  fiber: Fiber.Fiber<void>
   execution: ExecutionSnapshot
   /**
    * This run's ports, in a cell the non-Effect world can read. A host tool leaves Effect for a
@@ -219,7 +216,6 @@ export type RetryEntry = Readonly<{
   repairRun: boolean
   dueAt: number
   error: string | null
-  fiber: Fiber.Fiber<void>
 }>
 
 /**
@@ -441,7 +437,6 @@ export const initialState = (
   tickQueued: false,
   pollRunning: false,
   followUpRequested: false,
-  pollTimer: null,
   nextRunId: 1,
   currentRefreshWaiters: [],
   nextRefreshWaiters: [],

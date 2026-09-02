@@ -8,7 +8,7 @@
  * the pull request exactly what the first one would have.
  */
 
-import { Effect, Option, Ref, type Scope } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
 import { recordPublication } from '../telemetry.js'
@@ -110,7 +110,7 @@ export const settlePostflight = (
   work: SettledWork,
   outcome: PostflightOutcome,
   deliveryAttempt: number,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     yield* recordOutcome(context, work, outcome)
     if (outcome._tag === 'DeliveryFailed') {

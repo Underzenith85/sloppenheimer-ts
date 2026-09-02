@@ -1,4 +1,4 @@
-import { Clock, Effect, Option, Ref, type Scope } from 'effect'
+import { Clock, Effect, Option, Ref } from 'effect'
 
 import { logError, logInfo } from '../../support/logging.js'
 import { agentOutcomes, recordOutcome } from '../../support/observability.js'
@@ -21,7 +21,7 @@ type WorkerExited = Extract<OrchestratorEvent, { _tag: 'WorkerExited' }>
 export const onWorkerExited = (
   context: OrchestratorContext,
   event: WorkerExited,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const ended = yield* Ref.modify(context.state, (current) =>
       Transitions.endRun(current, event.issueId, event.runId),

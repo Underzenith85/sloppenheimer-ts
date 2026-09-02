@@ -1,4 +1,4 @@
-import { Effect, Option, Ref, type Scope } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import type { Issue, IssueId } from '../../domain/domain.js'
 import { currentInstant } from '../../support/clock.js'
@@ -21,10 +21,7 @@ type RetryDue = Extract<OrchestratorEvent, { _tag: 'RetryDue' }>
  * worker on the issue. Answers whether the handoff took the issue over, in which case the retry
  * this pass took is spent.
  */
-const handoffTookOver = (
-  context: OrchestratorContext,
-  issueId: IssueId,
-): Effect.Effect<boolean, never, Scope.Scope> =>
+const handoffTookOver = (context: OrchestratorContext, issueId: IssueId): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     const awaiting = yield* Ref.get(context.state)
     const awaitingHandoff = Option.fromNullable(awaiting.handoffs.get(issueId))
@@ -53,7 +50,7 @@ const resumeRepair = (
   event: RetryDue,
   entry: HandoffEntry,
   issue: Option.Option<Issue>,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const repair = entry.repair
     if (Option.isNone(repair)) {
@@ -120,7 +117,7 @@ const resumeContinuation = (
   event: RetryDue,
   effective: EffectiveWorkflow,
   issue: Option.Option<Issue>,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     if (Option.isNone(issue)) {
       yield* Ref.update(context.state, (pending) =>
@@ -171,10 +168,7 @@ const resumeContinuation = (
  * A queued retry coming due. Only the attempt that was scheduled may take it: a `RetryDue` for a
  * superseded attempt belongs to a timer that has since been replaced.
  */
-export const onRetryDue = (
-  context: OrchestratorContext,
-  event: RetryDue,
-): Effect.Effect<void, never, Scope.Scope> =>
+export const onRetryDue = (context: OrchestratorContext, event: RetryDue): Effect.Effect<void> =>
   Effect.gen(function* () {
     const due = yield* Ref.modify(context.state, (current) =>
       Transitions.takeDueRetry(current, event.issueId, event.attempt),

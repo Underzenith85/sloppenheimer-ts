@@ -1,4 +1,4 @@
-import { Effect, Option, Queue, Ref, type Scope } from 'effect'
+import { Effect, Option, Queue, Ref } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
 import { logInfo, logWarning } from '../../support/logging.js'
@@ -7,6 +7,7 @@ import { recordPublication } from '../../telemetry.js'
 import { settlePostflight } from '../delivery.js'
 import { identifierIssueNumber, issueIsActive, logContext, stateIsIn } from '../policy.js'
 import { runPostflight } from '../postflight.js'
+import { ownIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { DeliveryEntry } from '../postflight.js'
 import type { DeliveryAttemptResult } from '../runtime.js'
@@ -109,7 +110,7 @@ const retryDiscard = (
   context: OrchestratorContext,
   entry: DeliveryEntry,
   error: string,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const retrying = yield* context.scheduleDelivery({
       issue: entry.issue,
@@ -182,7 +183,7 @@ const recordDiscarded = (context: OrchestratorContext, entry: DeliveryEntry): Ef
 const runDeliveryAttempt = (
   context: OrchestratorContext,
   entry: DeliveryEntry,
-): Effect.Effect<DeliveryAttemptResult, never, Scope.Scope> =>
+): Effect.Effect<DeliveryAttemptResult> =>
   Effect.gen(function* () {
     const disposition = yield* dispositionOf(yield* Ref.get(context.state), entry)
     if (disposition === 'hold') {
@@ -237,7 +238,7 @@ const runDeliveryAttempt = (
 export const onDeliveryDue = (
   context: OrchestratorContext,
   event: DeliveryDue,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const pending = yield* Ref.get(context.state)
     const queued = pending.deliveries.get(event.issueId)
@@ -257,7 +258,12 @@ export const onDeliveryDue = (
       ),
     )
     yield* context.publish
-    const fiber = yield* Effect.forkScoped(
+    // The publication takes over the issue's delivery key from the timer that has just fired, so
+    // a pause or a discard arriving mid-attempt reaches the publication rather than a spent timer.
+    yield* ownIssueFiber(
+      context.execution,
+      'delivery',
+      event.issueId,
       Effect.flatMap(runDeliveryAttempt(context, queued), (result) =>
         Queue.offer(context.mailbox, {
           _tag: 'DeliveryAttempted' as const,
@@ -267,18 +273,10 @@ export const onDeliveryDue = (
         }),
       ).pipe(Effect.asVoid),
     )
-    // Recorded after the fork so the entry names the fiber actually publishing it: a pause or a
-    // discard arriving mid-attempt interrupts the publication rather than a timer that has fired.
     yield* Ref.update(
       context.state,
       (current) =>
-        Transitions.beginDeliveryAttempt(
-          current,
-          event.issueId,
-          event.attempt,
-          fiber,
-          startedAt,
-        )[1],
+        Transitions.beginDeliveryAttempt(current, event.issueId, event.attempt, startedAt)[1],
     )
   })
 
@@ -292,7 +290,7 @@ export const onDeliveryDue = (
 export const onDeliveryAttempted = (
   context: OrchestratorContext,
   event: DeliveryAttempted,
-): Effect.Effect<void, never, Scope.Scope> =>
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const due = yield* Ref.modify(context.state, (current) =>
       Transitions.takeAttemptedDelivery(current, event.issueId, event.attempt),
