@@ -10,10 +10,9 @@
 import * as HttpApiBuilder from '@effect/platform/HttpApiBuilder'
 import * as HttpApiGroup from '@effect/platform/HttpApiGroup'
 import * as HttpApp from '@effect/platform/HttpApp'
-import type * as HttpServerRequest from '@effect/platform/HttpServerRequest'
 import * as HttpServerResponse from '@effect/platform/HttpServerResponse'
 import { timingSafeEqual } from 'node:crypto'
-import { Effect, Layer, Schema } from 'effect'
+import { Effect, Layer, Redacted, Schema } from 'effect'
 
 import type { AgentDetailLookup } from '@sloppenheimer/core'
 
@@ -31,28 +30,38 @@ import {
   notFound,
   type OperatorApiError,
 } from './api/errors.js'
+import { PageToken, SubmittedPageToken } from './api/page-token.js'
 import type { OperatorBackend, OperatorBackendError } from './operator.js'
 
 /**
- * The page token, compared without leaking where two tokens first differ. A request that carries no
- * token at all is refused on the same terms as one that carries the wrong token.
+ * The page token, compared without leaking where two tokens first differ. A request that carried no
+ * token arrives as an empty one and is refused on the same terms as one that carries the wrong
+ * token.
  */
-const tokenMatches = (actual: string | undefined, expected: string): boolean => {
-  if (actual === undefined) {
-    return false
-  }
-  const actualBytes = Buffer.from(actual)
+const tokenMatches = (submitted: string, expected: string): boolean => {
+  const submittedBytes = Buffer.from(submitted)
   const expectedBytes = Buffer.from(expected)
-  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
+  return (
+    submittedBytes.length === expectedBytes.length && timingSafeEqual(submittedBytes, expectedBytes)
+  )
 }
 
+/**
+ * The token this request carried, judged against the one this process minted.
+ *
+ * The security scheme in `api/page-token.ts` decodes it and this compares it, rather than the
+ * scheme refusing the request itself: a refusal in the middleware would come before everything else
+ * an endpoint checks, and an issue number this API cannot address is a `404` whether or not a token
+ * came with the request.
+ */
 const requirePageToken = (
-  request: HttpServerRequest.HttpServerRequest,
   csrfToken: string,
-): Effect.Effect<void, OperatorApiError<'invalid_csrf_token'>> =>
-  tokenMatches(request.headers['x-sloppenheimer-csrf'], csrfToken)
-    ? Effect.void
-    : Effect.fail(invalidCsrfToken.failure)
+): Effect.Effect<void, OperatorApiError<'invalid_csrf_token'>, SubmittedPageToken> =>
+  Effect.flatMap(SubmittedPageToken, (submitted) =>
+    tokenMatches(Redacted.value(submitted), csrfToken)
+      ? Effect.void
+      : Effect.fail(invalidCsrfToken.failure),
+  )
 
 /**
  * The issue number an eligibility change names, on the bound the console has always applied. A
@@ -128,6 +137,15 @@ const agentDetailAnswer = (
 }
 
 /**
+ * The security scheme's implementation: what the request carried, handed on unjudged. The token is
+ * decoded here and compared in {@link requirePageToken}, for the ordering reason recorded there.
+ */
+const pageTokenLayer: Layer.Layer<PageToken> = Layer.succeed(
+  PageToken,
+  PageToken.of({ pageToken: (submitted) => Effect.succeed(submitted) }),
+)
+
+/**
  * The endpoint group, bound to one backend and one page token.
  *
  * The token is minted per process rather than configured, so the handlers take it as an argument
@@ -141,24 +159,21 @@ export const operatorHandlers = (
     handlers
       .handle('state', () => Effect.map(backend.snapshot, publishState))
       .handle('backlog', () => runBackend(backend.backlog))
-      .handle('refresh', ({ request }) =>
-        Effect.zipRight(
-          requirePageToken(request, csrfToken),
-          Effect.map(backend.refresh, publishRefresh),
-        ),
+      .handle('refresh', () =>
+        Effect.zipRight(requirePageToken(csrfToken), Effect.map(backend.refresh, publishRefresh)),
       )
-      .handle('startIssue', ({ path, request }) =>
+      .handle('startIssue', ({ path }) =>
         Effect.gen(function* () {
           const issueNumber = yield* decodeIssueNumber(path.issueNumber)
-          yield* requirePageToken(request, csrfToken)
+          yield* requirePageToken(csrfToken)
           yield* runBackend(backend.setIssueEnabled(issueNumber, true))
           return issueActionAccepted(issueNumber, true)
         }),
       )
-      .handle('pauseIssue', ({ path, request }) =>
+      .handle('pauseIssue', ({ path }) =>
         Effect.gen(function* () {
           const issueNumber = yield* decodeIssueNumber(path.issueNumber)
-          yield* requirePageToken(request, csrfToken)
+          yield* requirePageToken(csrfToken)
           yield* runBackend(backend.setIssueEnabled(issueNumber, false))
           return issueActionAccepted(issueNumber, false)
         }),
@@ -182,4 +197,4 @@ export const operatorHandlers = (
           return detail
         }),
       ),
-  )
+  ).pipe(Layer.provide(pageTokenLayer))

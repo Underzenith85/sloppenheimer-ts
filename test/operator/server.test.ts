@@ -781,6 +781,15 @@ describe('operator server', (): void => {
         const rejected = await fetch(`${url}/api/v1/issues/17/pause`, { method: 'POST' })
         expect(rejected.status).toBe(403)
 
+        // A token that arrived and does not match is refused on the same terms as one that never
+        // arrived at all.
+        const wrongToken = await fetch(`${url}/api/v1/issues/17/start`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': 'not-the-token-this-process-minted' },
+        })
+        expect(wrongToken.status).toBe(403)
+        expect(await wrongToken.json()).toMatchObject({ error: { code: 'invalid_csrf_token' } })
+
         const page = await (await fetch(url)).text()
         const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1]
         expect(token).toBeDefined()
@@ -788,9 +797,23 @@ describe('operator server', (): void => {
           method: 'POST',
           headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
         })
+        const started = await fetch(`${url}/api/v1/issues/17/start`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
+        })
 
         expect(accepted.status).toBe(202)
+        expect(started.status).toBe(202)
         expect(setIssueEnabled).toHaveBeenCalledWith(17, false)
+        expect(setIssueEnabled).toHaveBeenCalledWith(17, true)
+
+        // The token is what the endpoint declares, and an issue number this API cannot address
+        // names no resource whether or not one came with the request.
+        const unaddressable = await fetch(`${url}/api/v1/issues/not-a-number/start`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
+        })
+        expect(unaddressable.status).toBe(404)
       })
     }),
   )

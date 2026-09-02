@@ -313,9 +313,11 @@ rather than reshaping a document quietly.
 
 `GET /openapi.json` serves the OpenAPI description generated from those definitions. It sits outside
 the versioned namespace deliberately: a name under `/api/v1/` would shadow an issue identifier
-spelled the same way, and that namespace reserves exactly two (see below). The description carries no
-`400`, because nothing this API reads can fail to decode — there is no request body, no query
-parameter, and the one path parameter is an unconstrained string.
+spelled the same way, and that namespace reserves exactly two (see below). The console's page token
+is part of that contract rather than prose beside it — it is declared as an API-key security scheme,
+so the description names the header and marks the three mutations that require it. The description
+carries no `400`, because nothing this API reads can fail to decode — there is no request body, no
+query parameter, and the one path parameter is an unconstrained string.
 
 `GET /api/v1/state` publishes the SPEC 13.7.2 baseline document. That document is not the runtime's
 internal record: it is snake_case, and it names a running row's issue `issue_id`,
@@ -468,6 +470,13 @@ curl -s -X POST -H "X-Sloppenheimer-CSRF: $token" http://127.0.0.1:3000/api/v1/r
 The token is a forgery defence, not authentication: it proves the caller could read the console
 page, which a cross-origin page cannot do. Anything that needs authentication belongs behind the
 host, not behind this token.
+
+`src/operator/api/page-token.ts` declares the header as an API-key security scheme, which is what
+puts it in the generated description and marks the operations that require it. The scheme decodes
+the submitted token; it does not judge it. Judging it there would move the refusal ahead of
+everything else an endpoint checks, and an issue number this API cannot address is `404` whether or
+not a token came with the request. `requirePageToken` in `src/operator/handlers.ts` makes the
+comparison, in constant time, in the order the routes have always answered in.
 
 ## Live agent inspection
 

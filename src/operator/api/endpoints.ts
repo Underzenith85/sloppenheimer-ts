@@ -33,6 +33,7 @@ import {
   notFound,
 } from './errors.js'
 import { publishedIssueDetailSchema } from './issue-schema.js'
+import { PageToken } from './page-token.js'
 import { jsonDocument } from './media.js'
 import { publishedRefreshSchema, publishedStateSchema } from './state-schema.js'
 
@@ -123,34 +124,31 @@ const backlog = HttpApiEndpoint.get('backlog', '/api/v1/backlog')
   )
 
 const refresh = HttpApiEndpoint.post('refresh', '/api/v1/refresh')
+  .middleware(PageToken)
   .addSuccess(jsonDocument(publishedRefreshSchema), { status: 202 })
   .addError(invalidCsrfToken.schema, { status: invalidCsrfToken.status })
   .annotate(
     OpenApi.Description,
-    'Requests a poll pass and answers once the pass the request joined has finished. Requires the page token in `X-Sloppenheimer-CSRF`.',
+    'Requests a poll pass and answers once the pass the request joined has finished.',
   )
 
 const startIssue = HttpApiEndpoint.post('startIssue', '/api/v1/issues/:issueNumber/start')
+  .middleware(PageToken)
   .setPath(issueNumberPath)
   .addSuccess(jsonDocument(publishedIssueActionSchema), { status: 202 })
   .addError(notFound.schema, { status: notFound.status })
   .addError(invalidCsrfToken.schema, { status: invalidCsrfToken.status })
   .addError(backendError.schema, { status: backendError.status })
-  .annotate(
-    OpenApi.Description,
-    "Puts an issue back in the host's hands. Requires the page token in `X-Sloppenheimer-CSRF`.",
-  )
+  .annotate(OpenApi.Description, "Puts an issue back in the host's hands.")
 
 const pauseIssue = HttpApiEndpoint.post('pauseIssue', '/api/v1/issues/:issueNumber/pause')
+  .middleware(PageToken)
   .setPath(issueNumberPath)
   .addSuccess(jsonDocument(publishedIssueActionSchema), { status: 202 })
   .addError(notFound.schema, { status: notFound.status })
   .addError(invalidCsrfToken.schema, { status: invalidCsrfToken.status })
   .addError(backendError.schema, { status: backendError.status })
-  .annotate(
-    OpenApi.Description,
-    'Holds an issue back from dispatch. Requires the page token in `X-Sloppenheimer-CSRF`.',
-  )
+  .annotate(OpenApi.Description, 'Holds an issue back from dispatch.')
 
 const agentDetail = HttpApiEndpoint.get('agentDetail', '/api/v1/agents/:identifier')
   .setPath(identifierPath)
