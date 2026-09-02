@@ -141,9 +141,9 @@ const registered = makeTrackerPortFactories([
       }).pipe(Effect.flatMap((config) => makeGitHubTracker(config))),
     codeReview: (provider): ReturnType<CodeReviewFactoryPort['make']> =>
       Effect.try({
-        try: () => makeGitHubCodeReview(githubProviderOf(provider)),
+        try: () => githubProviderOf(provider),
         catch: (cause) => unsupportedCapability(provider, 'CodeReviewPort', cause),
-      }),
+      }).pipe(Effect.flatMap((config) => makeGitHubCodeReview(config))),
     issueControl: (provider): ReturnType<IssueControlFactoryPort['make']> =>
       Effect.try({
         try: () => githubProviderOf(provider),

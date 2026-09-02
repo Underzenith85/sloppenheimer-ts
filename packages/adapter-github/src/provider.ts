@@ -147,7 +147,15 @@ const isGitHubProviderConfig = (value: unknown): value is GitHubProviderConfig =
   )
 }
 
-const sameGitHubProvider = (left: GitHubProviderConfig, right: GitHubProviderConfig): boolean =>
+/**
+ * Whether two validated selections are the same credential generation. Exported because the
+ * transport's rate limiter is scoped to a generation and has to recognize one: a reload that
+ * revalidates an unchanged provider must go on pacing against the limiter already in force.
+ */
+export const sameGitHubProvider = (
+  left: GitHubProviderConfig,
+  right: GitHubProviderConfig,
+): boolean =>
   providerFields.every((field) => left[field] === right[field]) &&
   // A rotated credential is a different selection, so the values are compared rather than the
   // wrappers, which are distinct objects on every validation.

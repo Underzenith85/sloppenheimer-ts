@@ -21,7 +21,9 @@ Every poll creates a `poll` parent span. Its child stages are:
 - `poll.dispatch`
 
 Dispatches create `dispatch` spans, agent workers create `agent.run` spans, completed-work handoff
-requests create `handoff` spans, and adapter HTTP calls create `github.request` spans. Issue,
+requests create `handoff` spans, and adapter HTTP calls create `github.request` spans. A
+`github.request` span covers the request itself: a wait for local rate-limit capacity happens
+outside it, and is reported by `sloppenheimer_github_rate_limit_delay` instead. Issue,
 attempt, run/session, and handoff context is attached to spans or sanitized log annotations where it
 helps correlate one operation. It is never attached to metrics.
 
@@ -31,6 +33,7 @@ helps correlate one operation. It is never attached to metrics.
 | ----------------------------------------- | ------- | ---------------------------------------------------------- |
 | `sloppenheimer_poll_duration`             | timer   | Complete poll-pass latency                                 |
 | `sloppenheimer_github_request_duration`   | timer   | GitHub HTTP latency                                        |
+| `sloppenheimer_github_rate_limit_delay`   | timer   | Wait for GitHub rate-limit capacity before a request       |
 | `sloppenheimer_agent_duration`            | timer   | Agent worker latency                                       |
 | `sloppenheimer_dispatch_total`            | counter | Started, duplicate, and validation/render refusal outcomes |
 | `sloppenheimer_retry_total`               | counter | Scheduled and non-retryable decisions                      |
@@ -58,7 +61,10 @@ access controls to trace attributes.
 
 ## Useful alerts and dashboards
 
-- Poll or GitHub duration growth points to tracker or network degradation.
+- Poll or GitHub duration growth points to tracker or network degradation. A growing
+  `sloppenheimer_github_rate_limit_delay` separates the two readings: the host is holding requests
+  back against its own provider budget rather than GitHub answering slowly. A request the limiter
+  delayed by more than a second is also logged, by provider scope and never by credential.
 - A rising `preflight_failed`, workflow-validation failure, or `not_retryable` frequency indicates
   configuration or credential trouble.
 - Running agents pinned at the configured concurrency limit alongside retrying agents indicates
