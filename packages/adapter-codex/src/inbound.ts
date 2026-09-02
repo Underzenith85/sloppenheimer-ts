@@ -19,6 +19,7 @@ import {
 import { sessionEvent } from './events.js'
 import { notificationFacts, terminalSettlement } from './notifications.js'
 import { normalizePayload } from './payload.js'
+import { traceObservation } from './trace.js'
 import {
   notificationIdentity,
   protocolErrorMessage,
@@ -308,6 +309,14 @@ export const handleNotification = (
         turnId,
         turnStatus: Option.getOrNull(facts.terminalStatus),
         payload: normalizePayload(method, message['params'], session.redact),
+        // The same message at full fidelity, for the durable trace. Built in this pass rather than
+        // in a second one: two readings of one message must never be able to disagree.
+        trace: traceObservation(
+          method,
+          message['params'],
+          session.traceCapture,
+          session.redact,
+        ),
         // A turn settles when a terminal notification carries the status that says how. Reporting
         // the outcome here is what lets the runtime react without reading Codex's vocabulary.
         lifecycle: Option.match(facts.terminalStatus, {

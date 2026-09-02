@@ -13,6 +13,7 @@ import { githubProviderDefaults } from '@sloppenheimer/adapter-github/provider.j
 import { hostFileSystem } from '../harness/filesystem.js'
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 import { anIssue } from '../harness/fixtures.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -118,6 +119,7 @@ describe('Real GitHub/Codex Integration Profile', (): void => {
         prompt: 'This is an integration smoke test. Reply briefly without changing files.',
         maxTurns: 1,
         secretEnvironmentNames: ['GITHUB_TOKEN', 'GH_TOKEN'],
+        traceCapture: traceCaptureDisabled,
         refreshIssue: () => Effect.succeed(null),
         isRoutable: () => false,
         onEvent: () => {},

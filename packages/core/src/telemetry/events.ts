@@ -8,6 +8,7 @@
  */
 
 import type { JsonObject, JsonValue } from '../domain/domain.js'
+import type { TraceObservation } from '../domain/trace.js'
 import {
   decodeOrNull,
   finiteNumber,
@@ -142,6 +143,16 @@ export type AgentEvent = Readonly<{
   payload: AgentEventPayload
   /** What this event means for the session, or `null` when it reports no transition. */
   lifecycle: AgentLifecycle | null
+  /**
+   * The high-fidelity reading of the same message, when the operator asked for one.
+   *
+   * `payload` above and this field are two readings of one protocol message, produced by the same
+   * adapter in the same pass: `payload` is the compressed activity summary the bounded timeline
+   * retains, and this is the complete observation the durable trace records. It is `null` whenever
+   * capture is off, which is what makes a host with tracing disabled retain exactly what it
+   * retained before the trace existed.
+   */
+  trace: TraceObservation | null
 }>
 
 /**

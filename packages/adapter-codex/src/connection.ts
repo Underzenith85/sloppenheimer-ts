@@ -8,6 +8,7 @@ import type { HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
 import { isJsonObject } from '@sloppenheimer/core/support/json.js'
 import { makeRedactor } from '@sloppenheimer/core/support/redaction.js'
+import type { TraceCapture } from '@sloppenheimer/core/domain/trace.js'
 import type { AgentEvent } from '@sloppenheimer/core/telemetry.js'
 import {
   adoptRateLimitSnapshot,
@@ -26,6 +27,7 @@ import {
   type SessionRuntime,
 } from './session-runtime.js'
 import { receiveLine } from './inbound.js'
+import { clientTraceObservation } from './trace.js'
 import { makeCodexEnvironment } from './session.js'
 import { codexSettingsFrom } from './settings.js'
 import { stopSession } from './shutdown.js'
@@ -51,6 +53,7 @@ export class CodexConnection {
     config: AgentRunnerConfig,
     secretEnvironmentNames: readonly string[],
     knownSecretValues: readonly string[],
+    traceCapture: TraceCapture,
     hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
     fork: ForkReader,
@@ -74,6 +77,7 @@ export class CodexConnection {
       onEvent,
       knownSecretValues,
       redact: makeRedactor(knownSecretValues),
+      traceCapture,
       hostTools,
       fork,
       lifecycle,
@@ -158,6 +162,12 @@ export const initializeSession = (
       turnCount: 0,
       turnStatus: null,
       lifecycle: null,
+      trace: clientTraceObservation(
+        'account/rateLimits/read',
+        null,
+        session.traceCapture,
+        session.redact,
+      ),
     })
     const settings = codexSettingsFrom(config.settings)
     const baseThreadParams: JsonObject = {

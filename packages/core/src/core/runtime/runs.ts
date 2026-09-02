@@ -20,6 +20,7 @@ import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { persistHandoffs } from './store.js'
+import { closeTraceRun, traceCancellation, traceHandoff } from './traces.js'
 import type { RuntimeCells } from './types.js'
 
 /** Opens or reuses the detail record for an issue that is about to be dispatched. */
@@ -152,6 +153,10 @@ export const cancelRunning = (
     yield* Ref.update(cells.state, (current) =>
       endRunAt(current, id, settled, endedAt, reason, repairDisposition),
     )
+    // Recorded before the segment is closed, so the cancellation is the last thing in the run's
+    // own trace rather than the first thing missing from it.
+    yield* traceCancellation(cells.traces, id, reason)
+    yield* closeTraceRun(cells.traces, id)
     if (repairDisposition !== 'retain') {
       yield* persistHandoffs(cells)
     }
@@ -220,23 +225,29 @@ export const noteHandoffOutcome = (
   id: IssueId,
   handoff: HandoffEntry,
   outcome: 'pull_request_open' | 'merged' | 'intervention_required',
-): Effect.Effect<void> =>
-  Ref.update(cells.state, (current) =>
-    Transitions.updateDetail(current, id, (record) =>
-      recordHandoff(record, handoff.observedAt, {
-        step: 'outcome',
-        status: outcome === 'intervention_required' ? 'failed' : 'observed',
-        message: handoff.reason,
-        pullRequest: {
-          status:
-            record.handoff.pullRequest.status === 'pending'
-              ? 'reused'
-              : record.handoff.pullRequest.status,
-          number: handoff.pullRequestNumber,
-          url: handoff.pullRequestUrl,
-          state: handoff.state,
-        },
-        outcome,
-      }),
+): Effect.Effect<void> => {
+  const status = outcome === 'intervention_required' ? 'failed' : 'observed'
+  return traceHandoff(cells.traces, id, 'outcome', status, handoff.reason).pipe(
+    Effect.zipRight(
+      Ref.update(cells.state, (current) =>
+        Transitions.updateDetail(current, id, (record) =>
+          recordHandoff(record, handoff.observedAt, {
+            step: 'outcome',
+            status,
+            message: handoff.reason,
+            pullRequest: {
+              status:
+                record.handoff.pullRequest.status === 'pending'
+                  ? 'reused'
+                  : record.handoff.pullRequest.status,
+              number: handoff.pullRequestNumber,
+              url: handoff.pullRequestUrl,
+              state: handoff.state,
+            },
+            outcome,
+          }),
+        ),
+      ),
     ),
   )
+}

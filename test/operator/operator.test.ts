@@ -2,9 +2,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
-import { Effect, Layer, Redacted } from 'effect'
+import { Effect, Layer, Redacted, Stream } from 'effect'
 import { afterEach, describe, expect, vi } from 'vitest'
 
+import { workflowDefaults } from '@sloppenheimer/core/config/workflow.js'
 import type { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
 import {
   issueId,
@@ -137,6 +138,19 @@ const fakeOrchestrator = (
       operations: [],
     }),
     agentDetail: (identifier) => Effect.succeed({ _tag: 'Unknown', identifier }),
+    agentTrace: (identifier, query) =>
+      Effect.succeed({
+        enabled: false,
+        identifier,
+        events: [],
+        nextAfter: query.after,
+        hasMore: false,
+        malformedRecords: 0,
+        limits: workflowDefaults.trace.limits,
+        evictions: [],
+        evictionsTotal: 0,
+      }),
+    agentTraceStream: () => Stream.empty,
     setIssuePaused: (issueNumber, isPaused) =>
       Effect.sync(() => {
         if (isPaused) {

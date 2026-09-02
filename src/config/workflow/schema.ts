@@ -28,6 +28,7 @@ const knownSections = new Set([
   'codex',
   'server',
   'handoff',
+  'trace',
 ])
 
 /**
@@ -198,6 +199,24 @@ const handoffSection = Schema.Struct({
 }).annotations({ message: () => 'handoff must be a map' })
 
 /**
+ * High-fidelity agent tracing. Every field is a bound, and `enabled` is the operator's explicit
+ * choice to retain complete agent activity — `README.md` states what that costs and what the
+ * redaction heuristics can and cannot guarantee.
+ *
+ * The bounds are positive integers except `retention_hours`, which accepts zero: zero is how a
+ * workflow says "retain until the size ceiling evicts it" rather than "retain nothing", and a bound
+ * of zero on any of the others would silently retain nothing at all.
+ */
+const traceSection = Schema.Struct({
+  enabled: Schema.optional(booleanValue('trace.enabled')),
+  field_limit_bytes: Schema.optional(positiveInteger('trace.field_limit_bytes')),
+  event_limit_bytes: Schema.optional(positiveInteger('trace.event_limit_bytes')),
+  session_limit_bytes: Schema.optional(positiveInteger('trace.session_limit_bytes')),
+  total_limit_bytes: Schema.optional(positiveInteger('trace.total_limit_bytes')),
+  retention_hours: Schema.optional(nonNegativeInteger('trace.retention_hours')),
+}).annotations({ message: () => 'trace must be a map' })
+
+/**
  * The sections this core understands, keyed as the document spells them: the decoded record is the
  * authored one, and the names the rest of the program uses are given to it by {@link parseConfig}.
  * A section the document omits is absent rather than empty, so the defaults stay in one place
@@ -215,6 +234,7 @@ const workflowSections = Schema.Struct({
   codex: Schema.optional(codexSection),
   server: Schema.optional(serverSection),
   handoff: Schema.optional(handoffSection),
+  trace: Schema.optional(traceSection),
 }).annotations({ message: () => 'workflow front matter must be a map' })
 
 /**

@@ -73,6 +73,7 @@ import {
 import { deliveryAttemptLimit } from '@sloppenheimer/core/core/retry.js'
 import { makeRedactor } from '@sloppenheimer/core/support/redaction.js'
 import { normalizePayload } from '@sloppenheimer/adapter-codex/payload.js'
+import { traceObservation } from '@sloppenheimer/adapter-codex/trace.js'
 import type { AgentDetailSnapshot } from '@sloppenheimer/core/telemetry.js'
 import {
   CodeReviewFactory,
@@ -97,7 +98,7 @@ import {
   type WorkspaceManagerPort,
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
-import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import { workflowDefaults, type Workflow } from '@sloppenheimer/core/config/workflow.js'
 import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
@@ -223,6 +224,7 @@ const workflow: Workflow = {
       settings: { tempo: 'largo' },
     },
     serverPort: null,
+    trace: workflowDefaults.trace,
     // Stated rather than defaulted: these runs compose the code-review services explicitly, so the
     // workflow they run under says the pull-request handoff extension is enabled.
     handoffEnabled: true,
@@ -6814,6 +6816,12 @@ const makeAgentFactory = (): Readonly<{
               // Telemetry only: this helper drives usage and rate-limit accounting, not the
               // session lifecycle, which the tests that need it state explicitly.
               lifecycle: null,
+              trace: traceObservation(
+                method,
+                params as Parameters<typeof normalizePayload>[1],
+                launch.traceCapture,
+                secretRedactor,
+              ),
             })
           },
           settle: (outcome) => {
@@ -7537,6 +7545,7 @@ describe('aged-out agent detail', (): void => {
 
 const makeAgentEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
   lifecycle: null,
+  trace: null,
   event: 'thread/tokenUsage/updated',
   timestamp: new Date(),
   processId: 123,

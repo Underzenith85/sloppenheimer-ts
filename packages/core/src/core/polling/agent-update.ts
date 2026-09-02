@@ -59,5 +59,16 @@ export const onAgentUpdate = (
           recordAgentEvent(record, event.update),
         ),
       )
+      // The same message, at the fidelity the operator asked for. `trace` is `null` whenever
+      // capture is off, so a host with tracing disabled does no work here at all.
+      const observation = event.update.trace
+      if (observation !== null) {
+        yield* context.traces.record(event.issueId, event.update.event, observation, {
+          threadId: event.update.threadId,
+          turnId: event.update.turnId,
+          sessionId: event.update.sessionId,
+          turnCount: event.update.turnCount,
+        })
+      }
     }
   })

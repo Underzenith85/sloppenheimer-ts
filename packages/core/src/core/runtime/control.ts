@@ -20,6 +20,8 @@ export const orchestratorControl = (
   ),
   refresh: requestRefresh(cells),
   agentDetail: (identifier) => agentDetail(context, identifier),
+  agentTrace: (identifier, query) => context.traces.page(identifier, query),
+  agentTraceStream: (identifier) => context.traces.live(identifier),
   setIssuePaused: (issueNumber, paused) =>
     Effect.gen(function* () {
       const reply = yield* Deferred.make<void>()

@@ -3,6 +3,7 @@ import { Context, Layer, type Effect } from 'effect'
 import type { Issue, Workspace } from '../domain/domain.js'
 import type { AgentError } from '../domain/errors.js'
 import type { HostToolSession } from '../domain/host-tools.js'
+import type { TraceCapture } from '../domain/trace.js'
 import type { AgentEvent, AgentTurnOutcome } from '../telemetry.js'
 
 /**
@@ -36,6 +37,12 @@ export type AgentLaunch = Readonly<{
   prompt: string
   maxTurns: number
   secretEnvironmentNames: readonly string[]
+  /**
+   * Whether this session builds high-fidelity trace observations, and the ceilings it builds them
+   * to. It travels on the launch rather than being read from configuration by the adapter, so a
+   * runner cannot capture at a fidelity the operator did not ask for.
+   */
+  traceCapture: TraceCapture
   /** Immutable adapter/tool/context selection for this session. */
   hostTools?: HostToolSession
   refreshIssue: () => Effect.Effect<Issue | null, AgentError>

@@ -32,6 +32,7 @@ import {
 } from '@sloppenheimer/adapter-node/workspace-identity.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 import { anIssue } from '../../harness/fixtures.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 /**
  * Launch verification reads real directories through `FileSystem`, so each entry point is bound to
@@ -276,6 +277,7 @@ const launchFor = (root: string, workspace: Workspace): AgentLaunch => ({
   prompt: 'work',
   maxTurns: 1,
   secretEnvironmentNames: [],
+  traceCapture: traceCaptureDisabled,
   refreshIssue: () => Effect.succeed(null),
   isRoutable: () => false,
   onEvent: () => undefined,

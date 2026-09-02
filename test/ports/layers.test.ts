@@ -29,6 +29,7 @@ import {
 import { codexRunnerConfig } from '../harness/codex-runner-config.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
 import { anIssue } from '../harness/fixtures.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 const hooks: HooksConfig = {
   afterCreate: null,
@@ -50,6 +51,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
         toolSpecs: [],
         executeTool: () => Promise.resolve({ success: true, data: null }),
         secretEnvironmentNames: ['GITHUB_TOKEN'],
+        traceCapture: traceCaptureDisabled,
       }),
   }),
   Layer.succeed(WorkspaceManagerFactory, {
@@ -111,6 +113,7 @@ describe('port layer composition', (): void => {
           prompt: 'prompt',
           maxTurns: 1,
           secretEnvironmentNames: [],
+          traceCapture: traceCaptureDisabled,
           refreshIssue: () => Effect.succeed(null),
           isRoutable: () => true,
           onEvent: () => {},
@@ -119,6 +122,7 @@ describe('port layer composition', (): void => {
         const loadFailed = yield* Effect.isFailure(loader.load('WORKFLOW.md'))
         return {
           secretEnvironmentNames: currentTracker.secretEnvironmentNames,
+          traceCapture: traceCaptureDisabled,
           workspacePath: workspace.path,
           threadId: result.threadId,
           loadFailed,

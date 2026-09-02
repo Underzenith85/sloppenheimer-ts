@@ -1,6 +1,7 @@
 import { Option } from 'effect'
 
 import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
+import type { TraceObservation } from '@sloppenheimer/core/domain/trace.js'
 import type {
   AgentEvent,
   AgentEventPayload,
@@ -23,6 +24,8 @@ export type EventFields = Readonly<{
   turnStatus: string | null
   lifecycle: AgentLifecycle | null
   payload: AgentEventPayload
+  /** The high-fidelity reading of the same message, or `null` while capture is off. */
+  trace: TraceObservation | null
 }>
 
 /**
@@ -52,5 +55,6 @@ export const sessionEvent = (state: ConnectionState, fields: EventFields): Agent
     turnStatus: fields.turnStatus,
     lifecycle: fields.lifecycle,
     payload: fields.payload,
+    trace: fields.trace,
   }
 }

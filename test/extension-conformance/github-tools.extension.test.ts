@@ -32,6 +32,7 @@ import type { TrackerPort } from '@sloppenheimer/core/ports/tracker.js'
 import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
 import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.js'
 import { hostFileSystem } from '../harness/filesystem.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -351,6 +352,7 @@ describe('GitHub provider-native tool extension', (): void => {
           prompt: 'exercise host tool',
           maxTurns: 1,
           secretEnvironmentNames: ['SLOPPENHEIMER_HOST_TOOL_TOKEN'],
+          traceCapture: traceCaptureDisabled,
           hostTools,
           refreshIssue: () => Effect.succeed(null),
           isRoutable: () => false,
@@ -416,6 +418,7 @@ describe('GitHub provider-native tool extension', (): void => {
           prompt: 'exercise unsupported tool',
           maxTurns: 1,
           secretEnvironmentNames: [],
+          traceCapture: traceCaptureDisabled,
           hostTools,
           refreshIssue: () => Effect.succeed(null),
           isRoutable: () => false,

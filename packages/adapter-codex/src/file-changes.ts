@@ -75,10 +75,10 @@ const changeSource = protocolStruct({
  */
 const changeListSource = Schema.Union(Schema.Array(Schema.Unknown), unknownRecord)
 
-const decodeChange = decodeOrNull(changeSource)
+export const decodeChange = decodeOrNull(changeSource)
 const decodeChangeList = decodeOrNull(changeListSource)
 
-type ChangeSource = Schema.Schema.Type<typeof changeSource>
+export type ChangeSource = Schema.Schema.Type<typeof changeSource>
 
 const fileChangeKinds = new Map<string, FileChangeKind>([
   ['add', 'add'],
@@ -95,7 +95,7 @@ const fileChangeKinds = new Map<string, FileChangeKind>([
   ['modified', 'update'],
 ])
 
-const changeKind = (value: string | null): FileChangeKind =>
+export const changeKind = (value: string | null): FileChangeKind =>
   fileChangeKinds.get(value?.toLowerCase() ?? '') ?? 'unknown'
 
 /** The two halves of a file header, each the three characters and the separator that follows. */
@@ -160,7 +160,7 @@ const diffCounts = (diff: string): Readonly<{ addedLines: number; deletedLines: 
  * What one change did, in lines. A change that reports neither a count nor a diff reads as `null`
  * rather than as zero: a patch whose size is unknown is not a patch that changed nothing.
  */
-const countsOf = (
+export const countsOf = (
   change: ChangeSource,
 ): Readonly<{ addedLines: number | null; deletedLines: number | null }> => {
   const addedLines = change.addedLines ?? change.additions
@@ -195,8 +195,13 @@ const fileChangeOf = (
   })
 }
 
-/** The change list as entries, carrying the key that named each change where there was one. */
-const changeEntries = (changes: unknown): readonly (readonly [string | null, unknown])[] => {
+/**
+ * The change list as entries, carrying the key that named each change where there was one.
+ *
+ * Exported for `trace-file-changes.ts`, which reads the same list for the durable trace and differs
+ * only in what it keeps of each entry: the trace retains the patch text this module discards.
+ */
+export const changeEntries = (changes: unknown): readonly (readonly [string | null, unknown])[] => {
   const decoded = decodeChangeList(changes)
   if (decoded === null) {
     return []

@@ -22,6 +22,7 @@ import { processIsAlive } from '../../harness/processes.js'
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 import { anIssue } from '../../harness/fixtures.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -87,6 +88,7 @@ const runScenario = (
       prompt: 'do the work',
       maxTurns,
       secretEnvironmentNames: [],
+      traceCapture: traceCaptureDisabled,
       refreshIssue: launchOverrides.refreshIssue ?? (() => Effect.succeed(null)),
       isRoutable: launchOverrides.isRoutable ?? (() => false),
       onEvent: (event) => {
@@ -823,6 +825,7 @@ describe('App Server timeouts and shutdown', (): void => {
             prompt: 'do the work',
             maxTurns: 2,
             secretEnvironmentNames: [],
+            traceCapture: traceCaptureDisabled,
             refreshIssue: () =>
               Effect.sync(() => {
                 refreshStarted = true
@@ -886,6 +889,7 @@ describe('App Server timeouts and shutdown', (): void => {
             prompt: 'do the work',
             maxTurns: 1,
             secretEnvironmentNames: [],
+            traceCapture: traceCaptureDisabled,
             refreshIssue: () => Effect.succeed(null),
             isRoutable: () => false,
             onEvent: () => undefined,

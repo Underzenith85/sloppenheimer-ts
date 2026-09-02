@@ -1,7 +1,7 @@
 import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import { workflowDefaults, type Workflow } from '@sloppenheimer/core/config/workflow.js'
 import { issueId } from '@sloppenheimer/core/domain/domain.js'
 import { createSnapshot } from '@sloppenheimer/core/core/snapshot.js'
 import {
@@ -54,6 +54,7 @@ const workflow: Workflow = {
       settings: { tempo: 'largo' },
     },
     serverPort: null,
+    trace: workflowDefaults.trace,
     handoffEnabled: true,
     extensions: {},
   },

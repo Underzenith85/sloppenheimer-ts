@@ -7,6 +7,7 @@ import {
   workflowDefaults,
   type EffectiveConfig,
   type RunnerConfig,
+  type TraceConfig,
 } from '@sloppenheimer/core/config/workflow.js'
 import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
 import { WorkflowError } from '@sloppenheimer/core/domain/errors.js'
@@ -138,6 +139,26 @@ export const authoredRunner = (
   )
 }
 
+/** An hour is the unit an operator thinks retention in; milliseconds is the unit the pass compares. */
+const millisecondsPerHour = 3_600_000
+
+const parseTrace = (trace: RawWorkflowConfig['trace']): TraceConfig => {
+  const defaults = workflowDefaults.trace
+  return {
+    enabled: trace?.enabled ?? defaults.enabled,
+    limits: {
+      fieldLimitBytes: trace?.field_limit_bytes ?? defaults.limits.fieldLimitBytes,
+      eventLimitBytes: trace?.event_limit_bytes ?? defaults.limits.eventLimitBytes,
+      sessionLimitBytes: trace?.session_limit_bytes ?? defaults.limits.sessionLimitBytes,
+      totalLimitBytes: trace?.total_limit_bytes ?? defaults.limits.totalLimitBytes,
+      retentionMs:
+        trace?.retention_hours === undefined
+          ? defaults.limits.retentionMs
+          : trace.retention_hours * millisecondsPerHour,
+    },
+  }
+}
+
 /**
  * The rest of the configuration, once the one environment-dependent field is resolved. Every value
  * here has already been checked by the schema, so this only applies the documented defaults.
@@ -152,7 +173,7 @@ export const parseConfig = (
   runner: AuthoredRunner,
   defaultCommand: string,
 ): EffectiveConfig => {
-  const { tracker, polling, hooks, agent, codex, server, handoff } = raw
+  const { tracker, polling, hooks, agent, codex, server, handoff, trace } = raw
   const declared = raw.runner ?? codex
   const runnerConfig: RunnerConfig = {
     command: declared?.command ?? defaultCommand,
@@ -186,6 +207,7 @@ export const parseConfig = (
     },
     runner: runnerConfig,
     serverPort: server?.port ?? null,
+    trace: parseTrace(trace),
     handoffEnabled: handoff?.enabled ?? workflowDefaults.handoffEnabled,
     extensions: raw.extensions,
   }

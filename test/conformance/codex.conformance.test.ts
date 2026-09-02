@@ -17,6 +17,7 @@ import type { AgentRunnerConfig } from '@sloppenheimer/core/ports/agent-runner.j
 import { fakeAppServerCommand, type FakeAppServerScenario } from '../harness/fake-app-server.js'
 import { hostFileSystem } from '../harness/filesystem.js'
 import { anIssue } from '../harness/fixtures.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 /** Launch verification reads the workspace through `FileSystem`; the host's is bound here. */
 const runAgentOnHost = (launch: AgentLaunch): Effect.Effect<AgentResult, AgentError> =>
@@ -70,6 +71,7 @@ const runScenario = (
         prompt: 'conformance prompt',
         maxTurns: 1,
         secretEnvironmentNames: [],
+        traceCapture: traceCaptureDisabled,
         refreshIssue: () => Effect.succeed(null),
         isRoutable: () => false,
         onEvent: (event) => events.push(event),

@@ -5,6 +5,7 @@ import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js
 import { AgentError } from '@sloppenheimer/core/domain/errors.js'
 import type { HostToolSession } from '@sloppenheimer/core/domain/host-tools.js'
 import { currentInstant } from '@sloppenheimer/core/support/clock.js'
+import type { TraceCapture } from '@sloppenheimer/core/domain/trace.js'
 import type { Redactor } from '@sloppenheimer/core/support/redaction.js'
 import type { AgentEvent, AgentLifecycle } from '@sloppenheimer/core/telemetry.js'
 import {
@@ -16,6 +17,7 @@ import {
 } from './connection-state.js'
 import { sessionEvent } from './events.js'
 import { clientPayload } from './payload.js'
+import { clientTraceObservation } from './trace.js'
 import type { ProtocolIdentity } from './protocol.js'
 import { boundedMessage, codexTurnOutcome } from './session.js'
 
@@ -56,6 +58,12 @@ export type SessionRuntime = Readonly<{
    * retain it.
    */
   redact: Redactor
+  /**
+   * Whether this session builds high-fidelity trace observations, and to what ceilings. It arrives
+   * on the launch, so a session captures at exactly the fidelity the operator configured and a host
+   * with tracing off does no redaction work for it at all.
+   */
+  traceCapture: TraceCapture
   hostTools: HostToolSession | null
   fork: ForkReader
   /** Serializes response side effects with session-terminal failure. */
@@ -125,6 +133,7 @@ export const emitEvent = (
             turnStatus,
             lifecycle,
             payload: clientPayload(event, message, session.redact),
+            trace: clientTraceObservation(event, message, session.traceCapture, session.redact),
           }),
         )
       }),

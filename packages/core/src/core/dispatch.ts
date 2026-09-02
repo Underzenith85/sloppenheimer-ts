@@ -131,6 +131,7 @@ const runSession = (
         prompt: execution.prompt,
         maxTurns: execution.maxTurns,
         secretEnvironmentNames: execution.secretEnvironmentNames,
+        traceCapture: execution.traceCapture,
         hostTools: launch.hostTools,
         refreshIssue: refreshIssueThrough(launch),
         isRoutable: (refreshed) =>
@@ -407,6 +408,14 @@ export const dispatch = (
     }
     const execution = captureExecutionSnapshot(effective, renderedPrompt.value)
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
+    // Opened before the worker is forked, so the first protocol message already has a segment to
+    // land in. Everything the run reports afterwards is appended to it in sequence.
+    yield* context.traces.openRun(issue, runId, attempt ?? 0)
+    yield* context.traces.lifecycle(
+      issue.id,
+      'run_started',
+      repairRun ? 'repairing an existing pull request' : null,
+    )
     const sessionPorts = MutableRef.make<SessionPorts>({
       tracker: execution.tracker,
       codeReview: execution.codeReview,

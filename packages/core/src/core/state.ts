@@ -4,6 +4,7 @@ import type { Workflow } from '../config/workflow.js'
 import { issueId } from '../domain/domain.js'
 import type { Issue, IssueId, IssueIdentifier, JsonObject, TokenTotals } from '../domain/domain.js'
 import type { HandoffSnapshot } from '../domain/handoff.js'
+import type { TraceCapture } from '../domain/trace.js'
 import type {
   AgentRunnerConfig,
   AgentRunnerPort,
@@ -317,6 +318,8 @@ export type ExecutionSnapshot = Readonly<{
   workspaceRoot: string
   prompt: string
   agentRunner: AgentRunnerConfig
+  /** The trace ceilings this run's session builds observations to, captured with everything else. */
+  traceCapture: TraceCapture
   maxTurns: number
   stallTimeoutMs: number
 }>

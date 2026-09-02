@@ -52,6 +52,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     turnCount: 1,
     turnStatus: null,
     lifecycle: null,
+    trace: null,
     payload: {
       kind: 'message',
       role: 'assistant',
@@ -72,6 +73,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     turnCount: 1,
     turnStatus: null,
     lifecycle: null,
+    trace: null,
     payload: {
       kind: 'command',
       program: 'pnpm',
@@ -95,6 +97,7 @@ const populated = (withHandoff: boolean): AgentDetailRecord => {
     turnCount: 1,
     turnStatus: null,
     lifecycle: null,
+    trace: null,
     // One patch, two files: what the App Server reports as a single item, and what the console
     // has to render without pretending the second file was not touched.
     payload: {

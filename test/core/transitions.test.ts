@@ -2,7 +2,7 @@ import { it } from '@effect/vitest'
 import { Exit, Fiber, MutableRef, Option } from 'effect'
 import { describe, expect } from 'vitest'
 
-import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
+import { workflowDefaults, type Workflow } from '@sloppenheimer/core/config/workflow.js'
 import {
   issueId,
   issueIdentifier,
@@ -80,6 +80,7 @@ const workflow: Workflow = {
       settings: { tempo: 'largo' },
     },
     serverPort: null,
+    trace: workflowDefaults.trace,
     // The transitions under test are handoff transitions, so the workflow states the extension.
     handoffEnabled: true,
     extensions: {},
@@ -228,6 +229,7 @@ const agentEvent = (
   // A turn ends when the runner says so. Overrides that name a terminal event state it too, the
   // way an adapter does, rather than relying on the event name being recognized.
   lifecycle: null,
+  trace: null,
   message: null,
   usage: null,
   rateLimits: null,

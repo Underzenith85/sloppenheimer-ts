@@ -16,6 +16,7 @@ import {
 } from './runs.js'
 import { requestTick, scheduleNextTick, scheduleRetry } from './scheduling.js'
 import { persistCompletions, persistHandoffs } from './store.js'
+import { traceRecorder } from './traces.js'
 import type { OrchestratorContext, RuntimeCells } from './types.js'
 
 /**
@@ -75,5 +76,14 @@ export const orchestratorContext = (
   scheduleNextTick: scheduleNextTick(cells),
   requestTick: (source) => requestTick(cells, source),
   runFromCallback,
+  // The root is read through the state rather than captured, for the same reason the two stores
+  // resolve theirs at write time: a reload may move `workspaceRoot`, and a segment written beside a
+  // root the host has left is one the next startup would read nothing from.
+  traces: traceRecorder(
+    cells.traces,
+    Ref.get(cells.state).pipe(
+      Effect.map((current) => current.lastKnownGood.workflow.config.workspaceRoot),
+    ),
+  ),
   publish: Ref.update(cells.state, Transitions.publishDetails),
 })

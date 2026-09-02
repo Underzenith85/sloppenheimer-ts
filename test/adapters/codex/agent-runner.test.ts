@@ -12,6 +12,7 @@ import { AgentRunner, type AgentRunnerPort } from '@sloppenheimer/core/ports/age
 import { hostFileSystem } from '../../harness/filesystem.js'
 import { codexRunnerConfig } from '../../harness/codex-runner-config.js'
 import { anIssue } from '../../harness/fixtures.js'
+import { traceCaptureDisabled } from '@sloppenheimer/core/domain/trace.js'
 
 const codexConfig = codexRunnerConfig({
   command: 'codex app-server',
@@ -36,6 +37,7 @@ const uncontainedLaunch: AgentLaunch = {
   prompt: 'work',
   maxTurns: 1,
   secretEnvironmentNames: [],
+  traceCapture: traceCaptureDisabled,
   refreshIssue: () => Effect.succeed(null),
   isRoutable: () => false,
   onEvent: () => undefined,

@@ -1,7 +1,7 @@
 import { Option } from 'effect'
 
 import { normalizeState, type Issue, type IssueId } from '../domain/domain.js'
-import type { Workflow } from '../config/workflow.js'
+import { traceCaptureOf, type Workflow } from '../config/workflow.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, RuntimeState } from './state.js'
 
 /**
@@ -157,6 +157,7 @@ export const captureExecutionSnapshot = (
     ...effective.workflow.config.runner,
     settings: effective.workflow.runner.settings,
   },
+  traceCapture: traceCaptureOf(effective.workflow.config.trace),
   maxTurns: effective.workflow.config.agent.maxTurns,
   stallTimeoutMs: effective.workflow.config.runner.stallTimeoutMs,
 })

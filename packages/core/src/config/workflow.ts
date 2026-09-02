@@ -3,6 +3,7 @@ import { Liquid } from 'liquidjs'
 
 import type { Issue, JsonObject } from '../domain/domain.js'
 import { WorkflowError } from '../domain/errors.js'
+import type { TraceCapture, TraceLimits } from '../domain/trace.js'
 import type { ValidatedAgentRunner } from '../domain/agent-runner-provider.js'
 import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 
@@ -46,6 +47,21 @@ export type RunnerConfig = Readonly<{
   settings: JsonObject
 }>
 
+/**
+ * High-fidelity agent tracing, off unless a workflow turns it on.
+ *
+ * It is an explicit operator choice rather than a default because of what it costs: the trace
+ * retains complete messages, command output and tool payloads, and the redaction that guards them
+ * is heuristic — it removes the configured secrets and the credential shapes the host recognizes,
+ * and it cannot remove an arbitrary secret an agent printed out of ordinary source text. With it
+ * off, retention is exactly what it was before the trace existed: the bounded timeline and nothing
+ * on disk.
+ */
+export type TraceConfig = Readonly<{
+  enabled: boolean
+  limits: TraceLimits
+}>
+
 export type EffectiveConfig = Readonly<{
   tracker: TrackerConfig
   pollingIntervalMs: number
@@ -54,6 +70,7 @@ export type EffectiveConfig = Readonly<{
   agent: AgentConfig
   runner: RunnerConfig
   serverPort: number | null
+  trace: TraceConfig
   /**
    * Whether the pull-request handoff extension is composed. The composition root reads this once,
    * at startup, and composes the code-review services when it is set; nothing below it consults the
@@ -91,6 +108,25 @@ export const workflowDefaults = Object.freeze({
   handoffEnabled: true,
   activeStates: ['open'] as readonly string[],
   terminalStates: ['closed'] as readonly string[],
+  trace: {
+    enabled: false,
+    limits: {
+      // Large enough for a realistic command's output or a tool's arguments, small enough that one
+      // pathological field cannot become the whole segment.
+      fieldLimitBytes: 16_384,
+      eventLimitBytes: 65_536,
+      sessionLimitBytes: 8_388_608,
+      totalLimitBytes: 268_435_456,
+      retentionMs: 604_800_000,
+    },
+  } as const satisfies TraceConfig,
+})
+
+/** What a launch hands its runner: the ceilings, and whether to build observations at all. */
+export const traceCaptureOf = (trace: TraceConfig): TraceCapture => ({
+  enabled: trace.enabled,
+  fieldLimitBytes: trace.limits.fieldLimitBytes,
+  eventLimitBytes: trace.limits.eventLimitBytes,
 })
 
 const liquid = new Liquid({ strictFilters: true, strictVariables: true })

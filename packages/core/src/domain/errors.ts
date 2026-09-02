@@ -46,6 +46,22 @@ export class CompletionStoreError extends Data.TaggedError('CompletionStoreError
   readonly cause?: unknown
 }> {}
 
+/**
+ * Kept apart from the two above for the same reason they are kept apart from each other: an
+ * operator reading the message is entitled to be told which store failed. It carries `operation`
+ * alone, as they do, and it adds `prune` — evicting a segment is neither reading a document nor
+ * writing one, and a retention pass that could not delete is the failure most likely to go on
+ * quietly filling a disk.
+ *
+ * No caller recovers from one. A trace is evidence about a run, never part of it, so every
+ * failure here is logged and dropped rather than raised into work the agent is doing.
+ */
+export class TraceStoreError extends Data.TaggedError('TraceStoreError')<{
+  readonly operation: 'read' | 'write' | 'prune'
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
 export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
   readonly category:
     | 'invalid_path'

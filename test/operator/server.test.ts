@@ -109,6 +109,7 @@ const makeDetail = (identifier: string): AgentDetailSnapshot => {
     turnCount: 1,
     turnStatus: null,
     lifecycle: null,
+    trace: null,
     payload: {
       kind: 'command',
       program: 'pnpm',

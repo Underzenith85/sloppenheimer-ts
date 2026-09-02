@@ -20,6 +20,7 @@ import { hydrateRestoredHandoffs } from './runtime/handoff-recovery.js'
 import { requestTick } from './runtime/scheduling.js'
 import { cleanupTerminalWorkspaces } from './runtime/startup.js'
 import { openStores } from './runtime/store.js'
+import { openTraceStore } from './runtime/traces.js'
 import type {
   OrchestratorControl,
   OrchestratorEvent,
@@ -36,6 +37,8 @@ import type {
  * - `runtime/types.ts` — the wire and context types, and the cells the operations are handed.
  * - `runtime/startup.ts` — the terminal-workspace sweep that runs before any state exists.
  * - `runtime/store.ts` — binding, reading and writing the persisted handoff and completion stores.
+ * - `runtime/traces.ts` — the durable high-fidelity agent trace, and `runtime/trace-reader.ts` the
+ *   paged read of it.
  * - `runtime/handoff-recovery.ts` — restoring persisted handoffs and adopting unrecorded ones.
  * - `runtime/runs.ts` — opening a detail record, applying a protocol event, cancelling a run.
  * - `runtime/scheduling.ts` — ticks, refresh requests, the poll timer and retry scheduling.
@@ -65,6 +68,9 @@ export {
   type RuntimeCells,
   type RuntimeStore,
   type RuntimeStores,
+  type TracePage,
+  type TraceQuery,
+  type TraceRecorder,
 } from './runtime/types.js'
 
 export {
@@ -116,6 +122,7 @@ export const startOrchestratorRuntime = (
     yield* cleanupTerminalWorkspaces(bootstrapWorkflow)
 
     const opened = yield* openStores(bootstrapWorkflow)
+    const traces = yield* openTraceStore(bootstrapWorkflow)
     const cells: RuntimeCells = {
       state: yield* Ref.make(
         Transitions.holdRetirements(
@@ -125,6 +132,7 @@ export const startOrchestratorRuntime = (
       ),
       mailbox: yield* Queue.unbounded<OrchestratorEvent>(),
       stores: opened.stores,
+      traces,
     }
 
     /**

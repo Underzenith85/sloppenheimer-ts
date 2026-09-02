@@ -1,9 +1,10 @@
 import type { FileSystem } from '@effect/platform'
-import type { Deferred, Effect, Option, Queue, Ref, Scope } from 'effect'
+import type { Deferred, Effect, Option, Queue, Ref, Scope, Stream } from 'effect'
 
 import type { Issue, IssueId, JsonObject, TokenTotals } from '../../domain/domain.js'
 import type { TrackerError, WorkflowError } from '../../domain/errors.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
+import type { TraceEvent } from '../../domain/trace.js'
 import type { AgentDetailRecord, AgentDetailSnapshot, AgentEvent } from '../../telemetry.js'
 import type { Workflow } from '../../config/workflow.js'
 import type {
@@ -24,6 +25,7 @@ import type {
 } from '../state.js'
 import type { DeliveryEntry, PostflightOutcome } from '../postflight.js'
 import type { TickSource } from '../transitions.js'
+import type { TracePage, TraceQuery, TraceRecorder, TraceStore } from './trace-types.js'
 
 /**
  * The bound on published finished work, and the record it publishes, both live in `state.ts`: the
@@ -31,6 +33,20 @@ import type { TickSource } from '../transitions.js'
  * the state rather than with the wire types alone.
  */
 export { publishedCompletedWork, type CompletedSnapshot } from '../state.js'
+
+/**
+ * The durable trace's own wire and cell types live beside these rather than among them: they are a
+ * self-contained vocabulary, and keeping them here would push this module past the size limit
+ * `AGENTS.md` sets for every source file in the workspace.
+ */
+export type {
+  TraceIdentity,
+  TraceOpenRun,
+  TracePage,
+  TraceQuery,
+  TraceRecorder,
+  TraceStore,
+} from './trace-types.js'
 
 export type RunningSnapshot = Readonly<{
   issueId: IssueId
@@ -191,9 +207,23 @@ export type OrchestratorControl = Readonly<{
    * scheduler's mailbox: opening the panel can never delay polling.
    */
   agentDetail: (identifier: string) => Effect.Effect<AgentDetailLookup>
+  /**
+   * One page of the durable high-fidelity trace for an issue, read from disk rather than from the
+   * snapshot: a whole session's messages, command output and tool payloads must never become part
+   * of the value every snapshot reader copies.
+   */
+  agentTrace: (identifier: string, query: TraceQuery) => Effect.Effect<TracePage>
+  /**
+   * Trace records for one issue as they are written. It is a live tail rather than a replay — a
+   * subscriber sees what happens from the moment it attaches, and pages `agentTrace` for what came
+   * before, which is what keeps a subscription from having to carry a session's history.
+   */
+  agentTraceStream: (identifier: string) => Stream.Stream<TraceEvent>
   /** Completes only when the host event loop fails or is interrupted during shutdown. */
   awaitTermination: Effect.Effect<never>
 }>
+
+
 
 /**
  * What one delivery attempt amounted to, decided off the event loop and settled on it.
@@ -317,6 +347,8 @@ export type RuntimeCells = Readonly<{
   state: Ref.Ref<RuntimeState>
   mailbox: Queue.Queue<OrchestratorEvent>
   stores: RuntimeStores
+  /** The durable trace, kept beside the stores and deliberately outside `RuntimeState`. */
+  traces: TraceStore
 }>
 
 /**
@@ -392,6 +424,8 @@ export type OrchestratorContext = Readonly<{
    * scope. The effect must complete without suspending; see the bridge's definition.
    */
   runFromCallback: (effect: Effect.Effect<void>) => void
+  /** The durable high-fidelity trace, or a recorder that does nothing while capture is off. */
+  traces: TraceRecorder
   /** Rebuilds the published detail index. Runs after every transition the event loop makes. */
   publish: Effect.Effect<void>
 }>

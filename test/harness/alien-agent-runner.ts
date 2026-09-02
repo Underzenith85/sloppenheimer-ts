@@ -137,6 +137,7 @@ export const auroraEvent = (
   message: null,
   usage: null,
   rateLimits: null,
+  trace: null,
   threadId: 'aurora-thread',
   turnId: event === auroraEvents.bootstrap ? null : 'aurora-leg-1',
   sessionId: 'aurora-thread-aurora-leg-1',

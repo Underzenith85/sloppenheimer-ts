@@ -54,6 +54,7 @@ const event = (payload: AgentEventPayload, overrides: Partial<AgentEvent> = {}):
   turnCount: 1,
   turnStatus: null,
   lifecycle: null,
+  trace: null,
   payload,
   ...overrides,
 })

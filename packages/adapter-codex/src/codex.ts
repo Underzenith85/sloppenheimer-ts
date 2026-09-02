@@ -87,6 +87,7 @@ const openConnection = (
             launch.config,
             launch.secretEnvironmentNames,
             knownSecretValues,
+            launch.traceCapture,
             launch.hostTools ?? null,
             launch.onEvent,
             (reader) => Runtime.runFork(runtime)(reader, { scope }),

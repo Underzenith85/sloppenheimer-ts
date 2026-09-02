@@ -8,6 +8,7 @@ import { recordCancellation, recordRetryScheduled } from '../../telemetry.js'
 import { agentRetryDelay, trackerRetryDelay } from '../retry.js'
 import type { RefreshOperation } from '../state.js'
 import * as Transitions from '../transitions.js'
+import { traceRetryScheduled } from './traces.js'
 import type { RefreshOutcome, RuntimeCells } from './types.js'
 
 /** Requests a tick, and says whether this request is the one that scheduled the pass. */
@@ -102,6 +103,13 @@ export const scheduleRetry = (
       Transitions.updateDetail(pending, issue.id, (record) =>
         recordRetryScheduled(record, scheduledAt, attempt, new Date(dueAt), error),
       ),
+    )
+    yield* traceRetryScheduled(
+      cells.traces,
+      issue.id,
+      attempt,
+      new Date(dueAt).toISOString(),
+      error,
     )
     yield* logInfo('action=retry outcome=scheduled', {
       issue_id: issue.id,
