@@ -302,6 +302,21 @@ The console's own data comes from the same versioned API a script can call. Ever
 and every refusal is the envelope `{"version":"v1","error":{"code","message"}}` with no backend
 detail in it.
 
+The API is one executable contract. `src/operator/api/endpoints.ts` defines every versioned endpoint
+as an `@effect/platform` schema-backed `HttpApi` endpoint — its path, method, parameters, success
+document and the statuses it may refuse with — and nothing else describes them. The handlers in
+`src/operator/handlers.ts` are written against those definitions, each response is encoded through
+the schema its endpoint declared before it is sent, and the `404`/`405` the server answers for a URI
+no endpoint claims are derived from the same registrations. The schemas are annotated with the
+published types beside them, so a mapping that stops agreeing with its own type fails the build
+rather than reshaping a document quietly.
+
+`GET /openapi.json` serves the OpenAPI description generated from those definitions. It sits outside
+the versioned namespace deliberately: a name under `/api/v1/` would shadow an issue identifier
+spelled the same way, and that namespace reserves exactly two (see below). The description carries no
+`400`, because nothing this API reads can fail to decode — there is no request body, no query
+parameter, and the one path parameter is an unconstrained string.
+
 `GET /api/v1/state` publishes the SPEC 13.7.2 baseline document. That document is not the runtime's
 internal record: it is snake_case, and it names a running row's issue `issue_id`,
 `issue_identifier`, `issue_url` and `state`, and the aggregate counters `codex_totals` with
@@ -428,10 +443,10 @@ route comes to share a path. `agents` and `issues`
 are addressable for a different reason — the routes that use those words carry a further segment.
 
 `test/operator/server.test.ts` pins both halves — what each shadowed identifier answers, and that
-the set has not silently grown. The second reads the router's own registrations rather than the
-source that spells them, taking each route's method as well as its path, since what reserves a name
-is a fixed one-segment path reachable by GET. A third such route cannot be added without this
-decision being taken again.
+the set has not silently grown. The second reads the endpoint definitions rather than the source that
+spells them, taking each route's method as well as its path, since what reserves a name is a fixed
+one-segment path reachable by GET. A third such route cannot be added without this decision being
+taken again.
 
 ### Why a refresh needs the console's token
 

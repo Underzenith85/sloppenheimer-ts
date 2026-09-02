@@ -1,6 +1,6 @@
 import { createServer, request } from 'node:http'
 import { it } from '@effect/vitest'
-import { Chunk, Effect, Option } from 'effect'
+import { Effect } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
@@ -8,9 +8,10 @@ import type { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import type { HandoffSnapshot } from '@sloppenheimer/core/domain/handoff.js'
 import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { issueDetailPath } from '../../src/operator/api.js'
+import { operatorRoutes } from '../../src/operator/api/endpoints.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '@sloppenheimer/core'
-import { makeRouter, startOperatorServer } from '../../src/operator/server.js'
+import { startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
@@ -683,27 +684,72 @@ describe('operator server', (): void => {
   )
 
   /*
-   * The shadowed set is what the router's own registrations make it, so it is derived from them
-   * here rather than restated: a path assembled from a constant, a helper or a template literal, or
-   * contributed by a prefixed sub-router, shadows an identifier exactly as a literal does and would
-   * be invisible to a guard that read the source. A third shadowed name would arrive without
-   * anybody deciding to reserve one.
+   * The shadowed set is what the endpoint definitions make it, so it is derived from them here
+   * rather than restated: a path assembled from a constant, a helper or a template literal shadows
+   * an identifier exactly as a literal does and would be invisible to a guard that read the source.
+   * A third shadowed name would arrive without anybody deciding to reserve one.
    */
-  it('reserves no identifier beyond the two fixed v1 GET routes the router registers', (): void => {
-    const registered = Chunk.toReadonlyArray(makeRouter(makeBackend(), 'csrf').routes).flatMap(
-      (route) => {
-        const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
-        // Neither a parameter nor a further segment can collide: an identifier is one segment, and
-        // only a fixed one is spelled the same way twice. Nor can a route that answers some other
-        // method: the per-issue resource is a GET, so only a route reachable by GET hides it.
-        const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(path)?.[1]
-        const shadows = route.method === 'GET' || route.method === '*'
-        return reserved === undefined || !shadows ? [] : [reserved]
-      },
-    )
+  it('reserves no identifier beyond the two fixed v1 GET routes the API declares', (): void => {
+    const registered = operatorRoutes.flatMap((route) => {
+      // Neither a parameter nor a further segment can collide: an identifier is one segment, and
+      // only a fixed one is spelled the same way twice. Nor can a route that answers some other
+      // method: the per-issue resource is a GET, so only a route reachable by GET hides it.
+      const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(route.path)?.[1]
+      return reserved === undefined || route.method !== 'GET' ? [] : [reserved]
+    })
 
     expect([...new Set(registered)].sort()).toEqual(['backlog', 'state'])
   })
+
+  /*
+   * The documents are encoded through the schemas the endpoints declare, so what reaches a reader
+   * is what the contract describes rather than whatever the backend happened to be holding. A field
+   * no endpoint declares is the observable half of that: it does not reach the wire.
+   */
+  it.live('publishes the document its endpoint declares, and nothing beside it', () =>
+    Effect.gen(function* () {
+      const held = {
+        controlLabel: 'sloppenheimer',
+        issues: [],
+        nodes: [],
+        edges: [],
+        cycles: [],
+        internalNote: 'not part of the published contract',
+      }
+      const backend: OperatorBackend = { ...makeBackend(), backlog: Effect.succeed(held) }
+
+      yield* withServer(backend, async (url) => {
+        const response = await fetch(`${url}/api/v1/backlog`)
+        const body = (await response.json()) as Record<string, unknown>
+
+        expect(response.status).toBe(200)
+        expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8')
+        expect(body).toMatchObject({ controlLabel: 'sloppenheimer', issues: [], nodes: [] })
+        expect(body['internalNote']).toBeUndefined()
+      })
+    }),
+  )
+
+  /*
+   * The description is generated from the same endpoint definitions the server routes and encodes
+   * against, and it is served outside the versioned namespace: a name under `/api/v1/` would shadow
+   * an issue identifier spelled the same way, and that namespace reserves exactly two.
+   */
+  it.live('serves an OpenAPI description generated from its own endpoint definitions', () =>
+    withServer(makeBackend(), async (url) => {
+      const response = await fetch(`${url}/openapi.json`)
+      const document = (await response.json()) as { paths: Record<string, unknown> }
+
+      expect(response.status).toBe(200)
+      expect(Object.keys(document.paths).sort()).toEqual(
+        [
+          ...new Set(operatorRoutes.map((route) => route.path.replace(/:([^/]+)/gu, '{$1}'))),
+        ].sort(),
+      )
+      // Serving it reserves no identifier, because it is not in the versioned namespace at all.
+      expect(operatorRoutes.some((route) => route.path === '/openapi.json')).toBe(false)
+    }),
+  )
 
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {
