@@ -9,7 +9,6 @@ import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, withLogAnnotations } from '../support/logging.js'
 import {
   agentDuration,
-  agentOutcomes,
   dispatchOutcomes,
   observeDuration,
   recordOutcome,
@@ -203,33 +202,23 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
     }),
     Effect.matchEffect({
       onFailure: (error) =>
-        recordOutcome(agentOutcomes, 'failed').pipe(
-          Effect.zipRight(
-            Queue.offer(context.mailbox, {
-              _tag: 'WorkerExited',
-              issueId: issue.id,
-              runId,
-              attempt,
-              outcome: 'failed',
-              error: error.message,
-            }),
-          ),
-          Effect.asVoid,
-        ),
+        Queue.offer(context.mailbox, {
+          _tag: 'WorkerExited',
+          issueId: issue.id,
+          runId,
+          attempt,
+          outcome: 'failed',
+          error: error.message,
+        }).pipe(Effect.asVoid),
       onSuccess: () =>
-        recordOutcome(agentOutcomes, 'normal').pipe(
-          Effect.zipRight(
-            Queue.offer(context.mailbox, {
-              _tag: 'WorkerExited',
-              issueId: issue.id,
-              runId,
-              attempt,
-              outcome: 'normal',
-              error: null,
-            }),
-          ),
-          Effect.asVoid,
-        ),
+        Queue.offer(context.mailbox, {
+          _tag: 'WorkerExited',
+          issueId: issue.id,
+          runId,
+          attempt,
+          outcome: 'normal',
+          error: null,
+        }).pipe(Effect.asVoid),
     }),
   )
   return observeDuration(agentDuration, worker).pipe(

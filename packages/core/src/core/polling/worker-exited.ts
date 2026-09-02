@@ -2,7 +2,12 @@ import { Clock, Effect, Option, Ref, type Scope } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo } from '../../support/logging.js'
-import { handoffOutcomes, recordOutcome, withOperationalSpan } from '../../support/observability.js'
+import {
+  agentOutcomes,
+  handoffOutcomes,
+  recordOutcome,
+  withOperationalSpan,
+} from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { recordHandoff } from '../../telemetry.js'
 import type { CodeReviewPort, HandoffResult } from '../../ports/index.js'
@@ -185,6 +190,7 @@ export const onWorkerExited = (
     if (Option.isNone(ended)) {
       return
     }
+    yield* recordOutcome(agentOutcomes, event.outcome)
     const settled = yield* Ref.modify(context.state, (current) =>
       Transitions.applyPendingTelemetry(current, event.issueId, ended.value),
     )
