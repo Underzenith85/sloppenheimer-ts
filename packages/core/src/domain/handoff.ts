@@ -1,3 +1,5 @@
+import { Schema } from 'effect'
+
 import type { Issue } from './domain.js'
 
 export type PullRequestCheck = Readonly<{
@@ -186,39 +188,95 @@ export const classifyPullRequest = (observation: PullRequestObservation): Handof
   return { state: 'ready_to_merge', headSha: observation.headSha }
 }
 
-export type HandoffSnapshot = Readonly<{
-  issueId: string
-  identifier: string
-  pullRequestUrl: string
-  branchName: string
-  state: HandoffDisposition['state'] | 'merging' | 'intervention_required' | 'delivery_failed'
-  headSha: string | null
-  reason: string | null
-  repairAttempts: number
-  repairHeadShas?: readonly string[]
+/**
+ * Every state a handoff can be persisted in: the dispositions an inspection reaches, the two the
+ * host sets while it acts on one (`merging`, `intervention_required`), and `delivery_failed`, which
+ * a repair whose publication did not land is left in. The list is the persisted format's, so
+ * adding a state to `HandoffDisposition` or to a transition without adding it here fails to
+ * typecheck rather than failing the next start.
+ */
+const handoffState = Schema.Literal(
+  'merged',
+  'closed_without_merge',
+  'awaiting_checks',
+  'repair_needed',
+  'ready_to_merge',
+  'merging',
+  'intervention_required',
+  'delivery_failed',
+).annotations({ message: () => 'handoff state is not recognized' })
+
+export type HandoffState = typeof handoffState.Type
+
+/** The states in schema order, for anything that has to cover every one of them. */
+export const handoffStates: readonly HandoffState[] = handoffState.literals
+
+/**
+ * The postflight verdict a repair carries, as the handoff state machine needs it.
+ *
+ * `pending` is a repair whose turn has not settled yet — including one dispatched but not started.
+ */
+const repairPublication = Schema.Literal(
+  'pending',
+  'published',
+  'no_changes',
+  'delivery_failed',
+).annotations({ message: () => 'repair publication is not recognized' })
+
+export type RepairPublication = typeof repairPublication.Type
+
+const repairAttempts = Schema.Number.pipe(
+  Schema.filter((value) => Number.isSafeInteger(value) && value >= 0),
+).annotations({ message: () => 'repairAttempts must be a non-negative safe integer' })
+
+const observedAt = Schema.String.pipe(
+  Schema.filter((value) => !Number.isNaN(Date.parse(value))),
+).annotations({ message: () => 'observedAt must be a date string' })
+
+const nullableString = Schema.NullOr(Schema.String)
+
+/**
+ * A handoff as the store persists it. The schema is the one description of the format: the
+ * `HandoffSnapshot` type is derived from it, so a field the runtime writes is a field the next
+ * start reads back, and a snapshot the store cannot decode is one the type could not have
+ * expressed. Optional fields are the ones added since the first format was written; each reader
+ * says what its absence means.
+ */
+export const handoffSnapshotSchema = Schema.Struct({
+  issueId: Schema.String,
+  identifier: Schema.String,
+  pullRequestUrl: Schema.String,
+  branchName: Schema.String,
+  state: handoffState,
+  headSha: nullableString,
+  reason: nullableString,
+  repairAttempts,
+  repairHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
   /** Every head this handoff has been observed at, including repair baselines. */
-  repairObservedHeadShas?: readonly string[]
-  repairStartedHeadSha?: string | null
+  repairObservedHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
+  repairStartedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
   /**
    * Whether a worker actually started from `repairStartedHeadSha`. A dispatch refused before any
    * worker launched keeps its baseline while its retry is queued, and a head that changes in the
    * meantime is nobody's output. Absent in snapshots written before this was recorded, which only
    * ever persisted a baseline once a worker had started.
    */
-  repairWorkerStarted?: boolean
+  repairWorkerStarted: Schema.optionalWith(Schema.Boolean, { exact: true }),
   /**
    * What the host's postflight made of the repair's workspace. Absent in snapshots written before
    * turn completion and publication were separate outcomes, which is read as `pending`: those
    * runs recorded no publication either way, and assuming a clean worktree would revive exactly
    * the wrong verdict.
    */
-  repairPublication?: 'pending' | 'published' | 'no_changes' | 'delivery_failed'
+  repairPublication: Schema.optionalWith(repairPublication, { exact: true }),
   /** The commit that publication produced, so a restart can still tell a stale head from a no-op. */
-  repairPublishedHeadSha?: string | null
-  reviewRequestedHeadSha?: string | null
-  reviewCompletedHeadSha?: string | null
-  observedAt: string
-}>
+  repairPublishedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  reviewRequestedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  reviewCompletedHeadSha: Schema.optionalWith(nullableString, { exact: true }),
+  observedAt,
+}).annotations({ message: () => 'handoff snapshot is malformed' })
+
+export type HandoffSnapshot = typeof handoffSnapshotSchema.Type
 
 /**
  * The branch an issue's completed work is expected on. It is a Sloppenheimer naming convention rather
