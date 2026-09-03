@@ -119,8 +119,7 @@ const resumeRepair = (
 
 /**
  * The retry a normal continuation was waiting on: the issue is re-read, and the session continues
- * only while it is not paused and still active, routable, and inside the workflow's concurrency
- * limits.
+ * only while it is still active, routable, and inside the workflow's concurrency limits.
  */
 const resumeContinuation = (
   context: OrchestratorContext,
@@ -151,26 +150,6 @@ const resumeContinuation = (
       )
       return
     }
-    const admitting = yield* Ref.get(context.state)
-    // Read here, not only when the pause lands: this retry may have been queued after it, by the
-    // publication the pause deliberately left to finish, and a due retry that dispatched would put
-    // an agent on the very issue the operator stopped. It ends the way the pause ends a retry it
-    // finds queued, so the two orders of events leave the same state behind.
-    if (issueIsPaused(admitting, issue.value)) {
-      yield* endRetryForPause(
-        context,
-        event.issueId,
-        Option.fromNullable(admitting.handoffs.get(event.issueId)),
-      )
-      yield* logInfo('action=retry outcome=paused', {
-        ...logContext(issue.value),
-        action: 'retry',
-        outcome: 'paused',
-        attempt: event.attempt,
-      })
-      yield* recordOutcome(retryOutcomes, 'paused')
-      return
-    }
     if (
       !issueIsActive(issue.value, effective.workflow.config.tracker) ||
       !issueIsRoutable(issue.value, effective.workflow.config.tracker)
@@ -180,6 +159,7 @@ const resumeContinuation = (
       )
       return
     }
+    const admitting = yield* Ref.get(context.state)
     if (!hasSlot(admitting, issue.value, effective.workflow)) {
       yield* context.scheduleRetry(
         issue.value,
@@ -194,8 +174,40 @@ const resumeContinuation = (
   })
 
 /**
+ * A due retry the operator's pause has overtaken.
+ *
+ * The pause is read here, not only when it lands: this retry may have been queued after it, by the
+ * publication the pause deliberately left to finish or by any other settlement on the issue. It is
+ * read before the tracker refresh and before the repair split, so every retry queued behind a
+ * pause — a continuation, a repair, one whose refresh would have failed — ends the way the pause
+ * ends a retry it finds queued, rather than one path dispatching, one rescheduling, and one
+ * carrying on with handoff actions.
+ */
+const endOvertakenRetry = (
+  context: OrchestratorContext,
+  event: RetryDue,
+  issue: Issue,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const overtaken = yield* Ref.get(context.state)
+    yield* endRetryForPause(
+      context,
+      event.issueId,
+      Option.fromNullable(overtaken.handoffs.get(event.issueId)),
+    )
+    yield* logInfo('action=retry outcome=paused', {
+      ...logContext(issue),
+      action: 'retry',
+      outcome: 'paused',
+      attempt: event.attempt,
+    })
+    yield* recordOutcome(retryOutcomes, 'paused')
+  })
+
+/**
  * A queued retry coming due. Only the attempt that was scheduled may take it: a `RetryDue` for a
- * superseded attempt belongs to a timer that has since been replaced.
+ * superseded attempt belongs to a timer that has since been replaced — and a retry the operator's
+ * pause has overtaken is ended rather than resumed, whatever kind it was.
  */
 export const onRetryDue = (context: OrchestratorContext, event: RetryDue): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -203,6 +215,11 @@ export const onRetryDue = (context: OrchestratorContext, event: RetryDue): Effec
       Transitions.takeDueRetry(current, event.issueId, event.attempt),
     )
     if (Option.isNone(due)) {
+      return
+    }
+    const taken = yield* Ref.get(context.state)
+    if (issueIsPaused(taken, due.value.issue)) {
+      yield* endOvertakenRetry(context, event, due.value.issue)
       return
     }
     if (yield* handoffTookOver(context, event.issueId)) {
