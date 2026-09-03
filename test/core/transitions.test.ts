@@ -705,6 +705,21 @@ describe('retained workspaces', (): void => {
     expect(forgotten.retainedWorkspaces.has(issue.id)).toBe(false)
   })
 
+  it('bounds the removals it remembers, dropping the oldest', (): void => {
+    const limit = Transitions.recordedWorkspaceRemovals
+    const oldest = issueId('example/sloppenheimer#0')
+    const newest = issueId(`example/sloppenheimer#${String(limit)}`)
+    const removed = Array.from({ length: limit + 1 }, (_, index) =>
+      issueId(`example/sloppenheimer#${String(index)}`),
+    ).reduce(Transitions.forgetRetainedWorkspaces, emptyState())
+
+    // A record is worth keeping only while a pass that began before it could still report, and a
+    // host sees an unbounded number of terminal issues.
+    expect(removed.workspaceRemovals.size).toBe(limit)
+    expect(removed.workspaceRemovals.has(oldest)).toBe(false)
+    expect(removed.workspaceRemovals.has(newest)).toBe(true)
+  })
+
   it('refuses a count from a run a removal has overtaken, and takes one from a later run', (): void => {
     // Run 7 is the newest allocated when the removal happens; its count arrives afterwards.
     const [runId, allocated] = Transitions.takeRunId(emptyState())

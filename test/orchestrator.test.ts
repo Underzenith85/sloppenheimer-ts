@@ -99,6 +99,7 @@ import {
 } from '@sloppenheimer/core'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
 import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
+import type { WorkspacePruneReport } from '@sloppenheimer/core/domain/workspace-retention.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
@@ -6904,6 +6905,74 @@ describe('per-run workspace leases', (): void => {
           observedAt: snapshot.retainedWorkspaces[0]?.observedAt,
         },
       ])
+    }),
+  )
+
+  it.effect('keeps a pass running when the continuation it scheduled starts the next attempt', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      // The first pass is held open across the next dispatch, which is what used to interrupt it.
+      const release = yield* Deferred.make<void>()
+      let prunes = 0
+      let launches = 0
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          prune: (): Effect.Effect<WorkspacePruneReport> =>
+            Effect.suspend(() => {
+              prunes += 1
+              return prunes === 1
+                ? Deferred.await(release).pipe(
+                    Effect.as<WorkspacePruneReport>({ count: 2, bytes: 2_048, evicted: 1 }),
+                  )
+                : Effect.succeed<WorkspacePruneReport>({ count: 0, bytes: 0, evicted: 0 })
+            }),
+        }),
+        // The second attempt never ends, so the only pass that can report is the first one.
+        runAgent: () =>
+          Effect.suspend(() => {
+            launches += 1
+            return launches === 1
+              ? Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+              : Effect.never
+          }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (prunes === 0) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
+          // The continuation this turn scheduled comes due a second later and is dispatched under
+          // the issue's worker key; the pass is under its own, so it is still running.
+          while (launches < 2) {
+            yield* TestClock.adjust('1 second')
+            yield* Effect.yieldNow()
+          }
+          yield* Deferred.succeed(release, undefined)
+          let current = yield* control.snapshot
+          while (current.retainedWorkspaces.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      expect(snapshot.retainedWorkspaces[0]).toMatchObject({
+        identifier: issue.identifier,
+        count: 2,
+        bytes: 2_048,
+      })
     }),
   )
 

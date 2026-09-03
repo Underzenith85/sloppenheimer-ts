@@ -22,7 +22,7 @@ import {
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
 import { abandonDelivery } from './deliveries.js'
-import { releaseIssueFiber } from './execution.js'
+import { releaseIssueFiber, releaseIssueFiberFork } from './execution.js'
 import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -178,6 +178,10 @@ export const cancelRunning = (
       // have republished it goes in the same step rather than coming due against a directory that
       // no longer exists.
       yield* abandonDelivery(cells, id, reason)
+      // A pass bounding this issue is about to be beside the point, and its `before_remove` hook
+      // would run against the same directories this removal is taking. Signalled rather than
+      // waited for: a pass can be inside an operator's hook, and the loop must not wait on one.
+      yield* releaseIssueFiberFork(cells.execution, 'prune', id)
       yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
         Effect.zipRight(
           Ref.update(cells.state, (current) => Transitions.forgetRetainedWorkspaces(current, id)),

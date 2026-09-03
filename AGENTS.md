@@ -636,7 +636,11 @@ repair agent that had achieved nothing.
   since what follows it may be removing the issue's workspaces altogether. Every removal site
   forgets the issue's row and records the run counter, and the loop refuses an observation from a
   run older than that removal: the count is taken off the loop, so a terminal cleanup can overtake
-  it and the count would otherwise re-add a row for directories that are gone. There is no age-based sweep: a lease's reason is a string written for a human,
+  it and the count would otherwise re-add a row for directories that are gone; those records are
+  bounded oldest-first, because a removal is worth remembering only while a pass that began before
+  it could still report. The pass is owned under a `prune` key of its own rather than the worker's:
+  a continuation is dispatched a second after a turn ends, and a pass sharing that key would be
+  interrupted by it on every attempt — the very run of repeated attempts the cap exists for. There is no age-based sweep: a lease's reason is a string written for a human,
   and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
   rule that deletes.
 - A delivery's publication runs off the event loop. Everything else a handler does is memory and a

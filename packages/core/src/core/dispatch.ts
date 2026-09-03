@@ -279,9 +279,18 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
           }),
       }),
       // Once the exit is on its way: the run is over, and what the issue keeps of its earlier
-      // attempts is bounded on this fiber rather than on the loop. The run names itself, so the
-      // workspace it leased survives its own pass however the run ended.
-      Effect.zipRight(pruneRetainedWorkspaces(context, issue, execution, runId)),
+      // attempts is bounded off the loop. Under its own key, not this worker's: the continuation
+      // this exit schedules is dispatched a second later, and it would otherwise interrupt the
+      // pass every time. The run names itself, so the workspace it leased survives its own pass
+      // however the run ended.
+      Effect.zipRight(
+        ownIssueFiber(
+          context.execution,
+          'prune',
+          issue.id,
+          pruneRetainedWorkspaces(context, issue, execution, runId),
+        ),
+      ),
     )
   return observeDuration(agentDuration, worker).pipe(
     withOperationalSpan('agent.run', { run_id: runId }),
