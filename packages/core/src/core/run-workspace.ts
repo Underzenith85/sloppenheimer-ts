@@ -5,6 +5,7 @@ import type { AgentError, SourceControlError, WorkspaceError } from '../domain/e
 import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { logContext } from './policy.js'
+import * as Transitions from './transitions.js'
 import type { PostflightOutcome } from './postflight.js'
 import {
   issueFiberRunning,
@@ -96,7 +97,10 @@ export const pruneRetainedWorkspaces = (
 ): Effect.Effect<void> =>
   Effect.flatMap(issueFiberRunning(cells.execution, 'prune', issue.id), (running) =>
     running
-      ? Effect.void
+      ? // Owed, never dropped: the pass in flight read the issue directory before this run's
+        // workspace existed, so it can neither evict nor count it, and it runs again for this run
+        // when it finishes.
+        Ref.update(cells.state, (state) => Transitions.requestPrune(state, issue.id, runId))
       : ownIssueFiber(
           cells.execution,
           'prune',
@@ -118,8 +122,33 @@ export const pruneRetainedWorkspaces = (
 export const stopRetentionPass = (execution: ExecutionOwner, id: IssueId): Effect.Effect<void> =>
   releaseIssueFiberFork(execution, 'prune', id)
 
-/** The pass itself, as the fiber that key owns runs it. */
+/**
+ * The pass itself, as the fiber that key owns runs it, and again for every run that asked while it
+ * was running. Each round reads the issue directory afresh and protects the workspace of the run
+ * it is running for, so nothing a declined request would have covered is lost.
+ */
 const prunePass = (
+  cells: PruneCells,
+  issue: Issue,
+  execution: ExecutionSnapshot,
+  runId: number,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    let current = runId
+    for (;;) {
+      yield* pruneOnce(cells, issue, execution, current)
+      const owed = yield* Ref.modify(cells.state, (state) =>
+        Transitions.takePruneRequest(state, issue.id),
+      )
+      if (Option.isNone(owed)) {
+        return
+      }
+      current = owed.value
+    }
+  })
+
+/** One reading of the issue directory, and what it decided. */
+const pruneOnce = (
   cells: PruneCells,
   issue: Issue,
   execution: ExecutionSnapshot,

@@ -1359,6 +1359,36 @@ describe('retained workspace cap', (): void => {
       }),
   )
 
+  it.live('counts a workspace whose release could not rewrite its lease', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const identifier = 'GH-280'
+      const manager = yield* makeWorkspaceManager(root, hooks(), 2).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const [stale] = yield* retainAll(manager, identifier, [1])
+      // What a release whose rewrite failed leaves behind: the record still says `held`, and the
+      // host that wrote it has let go of it, so no live run stands over that workspace.
+      yield* host(async () => {
+        const lease = await leaseOf(stale?.path ?? '')
+        await writeFile(
+          `${stale?.path ?? ''}.lease`,
+          encodeLease({ ...lease, status: 'held', reason: null, releasedAt: null }),
+        )
+      })
+
+      const report = yield* manager.prune(
+        { identifier: issueIdentifier(identifier), runId: 2 },
+        new Set(),
+      )
+
+      // Filtering on the status alone would leave it outside the cap and outside the count until
+      // the issue reached a terminal state — one such workspace per failed release.
+      expect(report).toEqual({ count: 1, bytes: 16, evicted: 0 })
+      expect(existsSync(stale?.path ?? '')).toBe(true)
+    }),
+  )
+
   it.live('runs before_remove for each workspace it evicts', () =>
     Effect.gen(function* () {
       const root = makeRoot()

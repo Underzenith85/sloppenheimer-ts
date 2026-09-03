@@ -6995,7 +6995,9 @@ describe('per-run workspace leases', (): void => {
           prune: (): Effect.Effect<WorkspacePruneReport> =>
             Effect.suspend(() => {
               prunes += 1
-              return Deferred.await(release).pipe(
+              // Only the first round is held open, inside its hook; the round it is owed runs
+              // through.
+              return (prunes === 1 ? Deferred.await(release) : Effect.void).pipe(
                 Effect.as<WorkspacePruneReport>({ count: 1, bytes: 16, evicted: 0 }),
               )
             }),
@@ -7020,14 +7022,20 @@ describe('per-run workspace leases', (): void => {
             yield* Effect.yieldNow()
           }
           yield* Deferred.succeed(release, undefined)
-          yield* Effect.yieldNow()
+          // The declined requests are owed, so the pass runs again for the newest of them once it
+          // is out of its hook — a request dropped instead would leave that workspace outside the
+          // cap and the count until some later run of this issue happened to ask.
+          while (prunes < 2) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
         }),
       )
 
       // Replacing it would only signal the interruption, and a pass holds an eviction candidate's
       // lease aside while its hook runs: a replacement enumerating in that window would neither
-      // evict nor count that workspace. The pass in flight enforces the same cap regardless.
-      expect(prunes).toBe(1)
+      // evict nor count that workspace. So the pass in flight is left alone and asked again after.
+      expect(prunes).toBe(2)
     }),
   )
 

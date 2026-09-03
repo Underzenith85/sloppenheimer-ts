@@ -1,3 +1,5 @@
+import { Option } from 'effect'
+
 import type { IssueId } from '../../domain/domain.js'
 import { withCappedEntry, withEntry, withoutEntry } from '../../support/collections.js'
 import type { RetainedWorkspaceEntry, RuntimeState } from '../state.js'
@@ -44,12 +46,13 @@ export const recordRetainedWorkspaces = (
 }
 
 /**
- * The issue's workspaces are gone — a terminal cleanup took them — so nothing is retained, and no
- * count from a run that began before now may say otherwise.
+ * The issue's workspaces are gone — a terminal cleanup took them — so nothing is retained, nothing
+ * is owed a pass, and no count from a run that began before now may say otherwise.
  */
 export const forgetRetainedWorkspaces = (state: RuntimeState, id: IssueId): RuntimeState => ({
   ...state,
   retainedWorkspaces: withoutEntry(state.retainedWorkspaces, id),
+  pruneRequests: withoutEntry(state.pruneRequests, id),
   workspaceRemovals: withCappedEntry(
     state.workspaceRemovals,
     id,
@@ -57,6 +60,32 @@ export const forgetRetainedWorkspaces = (state: RuntimeState, id: IssueId): Runt
     recordedWorkspaceRemovals,
   ),
 })
+
+/**
+ * Records that a run ended while a pass for its issue was already running, so the pass runs again
+ * for it once it finishes.
+ *
+ * A pass reads the issue directory once, at its start: a run that ends after that is invisible to
+ * it, and dropping the request would leave that workspace outside the cap and the count until some
+ * later run of the same issue happened to ask — which may be never. The newest asker wins, because
+ * its workspace is the one the next pass must protect. The map holds one entry per issue with a
+ * pass in flight, and the pass consumes it.
+ */
+export const requestPrune = (state: RuntimeState, id: IssueId, runId: number): RuntimeState => ({
+  ...state,
+  pruneRequests: withEntry(state.pruneRequests, id, runId),
+})
+
+/** Takes what a finishing pass is owed, so it runs once more for the run that asked while it ran. */
+export const takePruneRequest = (
+  state: RuntimeState,
+  id: IssueId,
+): readonly [Option.Option<number>, RuntimeState] => {
+  const runId = state.pruneRequests.get(id)
+  return runId === undefined
+    ? [Option.none(), state]
+    : [Option.some(runId), { ...state, pruneRequests: withoutEntry(state.pruneRequests, id) }]
+}
 
 /** Every issue holding retained workspaces, largest first so the growth is at the top. */
 export const retainedWorkspaceSnapshots = (

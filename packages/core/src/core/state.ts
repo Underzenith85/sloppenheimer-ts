@@ -60,13 +60,10 @@ export type RuntimeState = Readonly<{
   deliveries: ReadonlyMap<IssueId, DeliveryEntry>
   /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
-  /**
-   * What each issue keeps on disk, counted after the last run of it ended; a terminal cleanup
-   * takes the row with the workspaces. The reasoning is on `transitions/workspaces.ts`.
-   */
+  /** The retention pass's three slices, all reasoned about in `transitions/workspaces.ts`. */
   retainedWorkspaces: ReadonlyMap<IssueId, RetainedWorkspaceEntry>
-  /** Issues a terminal cleanup emptied, keyed to the run counter then: older counts are refused. */
   workspaceRemovals: ReadonlyMap<IssueId, number>
+  pruneRequests: ReadonlyMap<IssueId, number>
   /**
    * Finished work an earlier host recorded, restored from the completion store and already
    * filtered to the Finished window.
@@ -215,7 +212,6 @@ export type CompletedSnapshot = Readonly<{
   finishedAt: string
   pullRequestUrl: string | null
 }>
-
 /** An issue's retained workspaces as the host last counted them. */
 export type RetainedWorkspaceEntry = Readonly<{
   issueId: IssueId
@@ -461,6 +457,7 @@ export const initialState = (
   retries: new Map(),
   retainedWorkspaces: new Map(),
   workspaceRemovals: new Map(),
+  pruneRequests: new Map(),
   deliveries: new Map(),
   completed: new Map(),
   restoredCompletions: restored.completions,

@@ -20,7 +20,7 @@ import {
 } from '@sloppenheimer/core/domain/workspace-retention.js'
 import { directorySize, pinDirectory, realDirectoryExists, reportedAs } from './filesystem.js'
 import { removeFreeRunWorkspace } from './workspace-cleanup.js'
-import { retainedOwnerIsFinished } from './workspace-lease.js'
+import { leaseIsLive, retainedOwnerIsFinished } from './workspace-lease.js'
 import { readLease } from './workspace-lease-store.js'
 
 /**
@@ -45,9 +45,13 @@ const retainedWorkspacesIn = (
       }
       const key = entry.slice(0, -'.lease'.length)
       const runPath = yield* containedWorkspacePath(issuePath, key)
-      const lease = yield* readLease(fileSystem, leasePathFor(runPath))
-      // A held lease is a run's, live or not, and is cleanup's business rather than the cap's.
-      if (Option.isSome(lease) && lease.value.status === 'retained') {
+      const leasePath = leasePathFor(runPath)
+      const lease = yield* readLease(fileSystem, leasePath)
+      // Every workspace no live run holds, which is the retained ones and one more: a release
+      // whose rewrite failed leaves a `held` record its host has let go of. Filtering on the
+      // status alone would keep those outside the cap and outside the count until the issue
+      // reached a terminal state, one per failed release.
+      if (Option.isSome(lease) && !leaseIsLive(lease.value, leasePath)) {
         retained.push({
           key,
           lease: lease.value,
