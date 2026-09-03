@@ -36,6 +36,13 @@ export type AgentDetailRecord = Readonly<{
   title: string
   url: string | null
   startedAt: Date
+  /**
+   * When the host launched the agent for the current attempt, or `null` while it is still
+   * preparing the run. The stall countdown runs from here rather than from `startedAt`: a
+   * workspace being leased, a repository being fetched or a hook running is the host's silence,
+   * not an agent's.
+   */
+  agentStartedAt: Date | null
   attempt: number
   sequence: number
   /**
@@ -89,6 +96,7 @@ export const createAgentDetailRecord = (input: AgentDetailInput): AgentDetailRec
   title: input.title,
   url: input.url,
   startedAt: input.startedAt,
+  agentStartedAt: null,
   attempt: input.attempt ?? 0,
   sequence: 0,
   retries: 0,

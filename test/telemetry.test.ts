@@ -13,6 +13,7 @@ import {
   createAgentDetailRecord,
   qualityPhaseOf,
   recordAgentEvent,
+  recordAgentStarted,
   recordAttemptStarted,
   recordCancellation,
   recordHandoff,
@@ -835,6 +836,44 @@ describe('agent detail records', (): void => {
     expect(late.activity.stalled).toBe(true)
     expect(late.activity.stallCountdownMs).toBe(0)
     expect(late.phase.phase).toBe('stalled')
+  })
+
+  it('starts the stall countdown at the agent launch, not at dispatch', (): void => {
+    const record = makeRecord()
+
+    // Still preparing: a workspace being leased or a repository fetched is the host's silence, and
+    // no countdown is published for it however long it takes.
+    const preparing = snapshotOf(record, new Date('2026-08-30T10:10:00.000Z'))
+    expect(preparing.phase.phase).toBe('starting')
+    expect(preparing.activity).toMatchObject({
+      lastActivityAt: null,
+      stallDeadline: null,
+      stallCountdownMs: null,
+      stalled: false,
+    })
+
+    const launched = recordAgentStarted(record, new Date('2026-08-30T10:04:00.000Z'))
+    const live = snapshotOf(launched, new Date('2026-08-30T10:04:30.000Z'))
+    expect(live.phase).toMatchObject({ phase: 'starting', operation: 'Starting the agent' })
+    expect(live.activity).toMatchObject({
+      lastActivityAt: null,
+      idleMs: 30_000,
+      stallDeadline: '2026-08-30T10:05:00.000Z',
+      stallCountdownMs: 30_000,
+      stalled: false,
+    })
+
+    // A launch is recorded once; a second marker does not restart the countdown.
+    expect(recordAgentStarted(launched, new Date('2026-08-30T10:04:45.000Z'))).toBe(launched)
+    const late = snapshotOf(launched, new Date('2026-08-30T10:05:00.000Z'))
+    expect(late.activity.stalled).toBe(true)
+    expect(late.phase.phase).toBe('stalled')
+
+    // A new attempt is prepared again from scratch, so its countdown waits for its own launch.
+    const retried = recordAttemptStarted(launched, new Date('2026-08-30T10:06:00.000Z'), 1)
+    expect(
+      snapshotOf(retried, new Date('2026-08-30T10:20:00.000Z')).activity.stallDeadline,
+    ).toBeNull()
   })
 
   it('keeps an attempt that is retried out of the handed-off outcome', (): void => {

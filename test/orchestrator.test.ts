@@ -959,6 +959,160 @@ describe('host-owned source-control dispatch', (): void => {
       expect(publications).toEqual(['sloppenheimer/issue-20'])
     }),
   )
+
+  /**
+   * Issue #265: the stall timer measures silence on the agent protocol, and before the runner is
+   * launched there is no agent to be silent. The workspace lease, the clone and base-branch fetch,
+   * and the hooks around them are the host's work, and measured from dispatch a fetch that outlasts
+   * the timeout was retired as a stalled agent — retried into another empty workspace, never to
+   * succeed.
+   */
+  it.scoped('does not retire a run whose workspace preparation outlasts the stall timeout', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-prepare-stall-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#265', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('265'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let prepared = 0
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          exists: () => Effect.succeed(false),
+        }),
+        makeSourceControl: () => ({
+          // A clone and fetch that outlast the stall timeout. No agent exists yet, so no protocol
+          // event can arrive — which the stall sweep used to read as an agent that had gone quiet.
+          prepare: () =>
+            Effect.sync(() => {
+              prepared += 1
+            }).pipe(Effect.zipRight(Effect.never)),
+          inspect: (prepared) => Effect.succeed(cleanWorktree(prepared.baselineSha)),
+          publish: () => Effect.die('unused'),
+        }),
+        runAgent: () => {
+          launched += 1
+          return Effect.never
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (prepared === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          // Two polling intervals: well past the stall timeout, with the preparation still in
+          // flight and the poll timer sweeping for stalls in between.
+          yield* TestClock.adjust('60 seconds')
+          yield* control.refresh
+          yield* control.refresh
+          const snapshot = yield* control.snapshot
+
+          // Retiring it would start the retry's preparation from scratch in another workspace.
+          expect(prepared).toBe(1)
+          expect(launched).toBe(0)
+          expect(snapshot.retrying).toEqual([])
+          expect(snapshot.running).toHaveLength(1)
+
+          // And the surfaces say so: no deadline the sweep would never act on.
+          expect(snapshot.running[0]?.stallDeadline).toBeNull()
+          const lookup = yield* control.agentDetail(issue.identifier)
+          expect(lookup._tag).toBe('Found')
+          if (lookup._tag === 'Found') {
+            expect(lookup.detail.phase.phase).toBe('starting')
+            expect(lookup.detail.activity.stalled).toBe(false)
+            expect(lookup.detail.activity.stallDeadline).toBeNull()
+          }
+        }),
+      )
+    }),
+  )
+
+  it.scoped('starts the stall clock at the agent launch, not at dispatch', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-launch-stall-clock-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#265', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('265'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          exists: () => Effect.succeed(false),
+        }),
+        makeSourceControl: () => ({
+          // A preparation that takes a while, on the same clock the stall sweep reads.
+          prepare: (_candidate, workspace, target) =>
+            Effect.sleep('20 seconds').pipe(
+              Effect.as({
+                workspace,
+                target,
+                baseBranch: 'main',
+                baseSha: 'base-head',
+                baselineSha: 'base-head',
+                expectedRemoteHead: Option.none(),
+              }),
+            ),
+          inspect: (prepared) => Effect.succeed(cleanWorktree(prepared.baselineSha)),
+          publish: () => Effect.die('unused'),
+        }),
+        // Launched and then silent: the one thing the stall timer exists to catch.
+        runAgent: () => {
+          launched += 1
+          return Effect.never
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while ((yield* control.snapshot).running.length === 0) {
+            yield* Effect.yieldNow()
+          }
+          yield* TestClock.adjust('20 seconds')
+          while (launched === 0) {
+            yield* Effect.yieldNow()
+          }
+
+          // Forty seconds after dispatch and twenty after the launch: past the timeout counted
+          // from dispatch, inside it counted from the launch — and the poll timer swept at thirty.
+          yield* TestClock.adjust('20 seconds')
+          yield* control.refresh
+          let snapshot = yield* control.snapshot
+          expect(snapshot.running).toHaveLength(1)
+          expect(snapshot.retrying).toEqual([])
+          // The published deadline is the launch plus the timeout, not the dispatch plus it.
+          expect(Date.parse(snapshot.running[0]?.stallDeadline ?? '')).toBe(
+            Date.parse(snapshot.running[0]?.startedAt ?? '') +
+              20_000 +
+              workflow.config.runner.stallTimeoutMs,
+          )
+
+          // Past the timeout counted from the launch: now the silence is the agent's.
+          yield* TestClock.adjust('15 seconds')
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying[0]).toMatchObject({
+            issueId: issue.id,
+            attempt: 1,
+            error: 'agent stalled',
+          })
+          expect(launched).toBe(1)
+        }),
+      )
+    }),
+  )
 })
 
 /**
@@ -2546,7 +2700,9 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
 
-      expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+      // The first pass refreshed both; later passes go on refreshing the one still running.
+      expect(refreshedIds.slice(0, 2)).toEqual([failedIssue.id, healthyIssue.id])
+      expect(refreshedIds.slice(1)).not.toContain(failedIssue.id)
       expect(launchedIds).toEqual([healthyIssue.id])
       expect(
         snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
@@ -4398,11 +4554,12 @@ describe('restored pull request handoffs', (): void => {
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          // Launched, not merely dispatched: the run is visible while the host is still preparing
+          // it, and cancelling it then would end a repair that never pushed.
+          while (currentHead !== repairedHead) {
             yield* Effect.yieldNow()
-            current = yield* control.snapshot
           }
+          let current = yield* control.snapshot
           // Not terminal: the issue simply leaves its active states while its repair is running.
           currentIssue = { ...issue, state: 'blocked' }
           while (current.handoffs[0]?.repairAttempts !== 1) {
@@ -4731,11 +4888,12 @@ describe('restored pull request handoffs', (): void => {
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          // Launched, not merely dispatched: the run is visible while the host is still preparing
+          // it, and a cancellation then is a repair whose agent never ran.
+          while (launches === 0) {
             yield* Effect.yieldNow()
-            current = yield* control.snapshot
           }
+          let current = yield* control.snapshot
           // The issue closes while its repair is running, so reconciliation cancels the worker.
           currentIssue = { ...issue, state: 'closed' }
           while (current.running.length !== 0) {
@@ -4790,11 +4948,12 @@ describe('restored pull request handoffs', (): void => {
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
-          let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          // Launched, not merely dispatched: the run is visible while the host is still preparing
+          // it, and cancelling it then would end a repair that never pushed.
+          while (currentHead !== repairedHead) {
             yield* Effect.yieldNow()
-            current = yield* control.snapshot
           }
+          let current = yield* control.snapshot
           // The tracker stops reporting the issue while its repair is running. The handoff stays
           // active, so the head that worker pushed is still the repair's.
           candidates = []

@@ -216,6 +216,16 @@ export type DeliveryAttemptResult =
 export type OrchestratorEvent =
   | Readonly<{ _tag: 'Tick' }>
   | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; update: AgentEvent }>
+  // The host has finished preparing the run and is launching the agent. Nothing about the run
+  // changes except who is working, which is what the stall timer needs to know: before this there
+  // is no agent whose silence could mean anything. `applied` is completed once the marker is in the
+  // state, and the worker waits for it before the launch, for the reason `PostflightStarted` gives.
+  | Readonly<{
+      _tag: 'AgentStarted'
+      issueId: IssueId
+      runId: number
+      applied: Deferred.Deferred<void>
+    }>
   // The agent is done and the host has taken the workspace over. Nothing about the run changes
   // except who is working, which is what the stall timer needs to know.
   // `applied` is completed once the marker is in the state. The worker waits for it before the
@@ -272,6 +282,15 @@ export type OrchestratorEvent =
       paused: boolean
       reply: Deferred.Deferred<void>
     }>
+
+/**
+ * The two events that change who is working on a run without changing anything else about it. Each
+ * is a marker the worker waits to see applied, and the loop applies them the same way.
+ */
+export type RunPhaseMarker = Extract<
+  OrchestratorEvent,
+  { _tag: 'AgentStarted' | 'PostflightStarted' }
+>
 
 /**
  * What the composition root must provide for the orchestrator to run. The code-review capability is

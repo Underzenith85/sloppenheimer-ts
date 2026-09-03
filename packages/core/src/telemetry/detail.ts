@@ -38,8 +38,11 @@ export const buildAgentDetail = (
   context: AgentDetailContext,
 ): AgentDetailSnapshot => {
   const now = context.now.getTime()
-  const activeAt = record.lastActivityAt ?? record.startedAt
-  const idleMs = Math.max(now - activeAt.getTime(), 0)
+  // Silence is the agent's only once there is an agent: the countdown runs from its last event,
+  // or from its launch until it has reported anything, and not at all while the host is still
+  // preparing the run — the same rule the stall sweep applies to the run itself.
+  const activeAt = record.lastActivityAt ?? record.agentStartedAt
+  const idleMs = Math.max(now - (activeAt ?? record.startedAt).getTime(), 0)
   // An agent that has been cancelled, is waiting to retry, is publishing, or is handing off is not
   // working, so silence from it is expected rather than evidence of a stall.
   const settledPhase =
@@ -48,7 +51,7 @@ export const buildAgentDetail = (
     record.phase === 'publishing' ||
     record.phase === 'handing_off'
   const stallDeadline =
-    context.stallTimeoutMs > 0 && context.status === 'running' && !settledPhase
+    activeAt !== null && context.stallTimeoutMs > 0 && context.status === 'running' && !settledPhase
       ? new Date(activeAt.getTime() + context.stallTimeoutMs)
       : null
   const stalled = stallDeadline !== null && stallDeadline.getTime() <= now

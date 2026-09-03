@@ -85,6 +85,33 @@ export const applyRunEvent = (entry: RunningEntry, update: AgentEvent): RunningE
 })
 
 /**
+ * Whether an agent-start marker is this run's to apply: the run the event names, and one the host
+ * is still preparing. A late marker from a superseded run must not start the clock on the run that
+ * replaced it, and a run that is no longer there has no agent to launch.
+ */
+export const agentStartApplies = (state: RuntimeState, id: IssueId, runId: number): boolean => {
+  const entry = state.running.get(id)
+  return entry !== undefined && entry.runId === runId && entry.agentStartedAt === null
+}
+
+/** Records that the host has launched the agent, which is where the stall clock starts. */
+export const noteAgentStarted = (
+  state: RuntimeState,
+  id: IssueId,
+  runId: number,
+  at: Date,
+): RuntimeState => {
+  const entry = state.running.get(id)
+  if (!agentStartApplies(state, id, runId) || entry === undefined) {
+    return state
+  }
+  return {
+    ...state,
+    running: withEntry(state.running, id, { ...entry, agentStartedAt: at }),
+  }
+}
+
+/**
  * Whether a postflight marker is this run's to apply.
  *
  * Only the run the event names, and only one: a late marker from a superseded turn must not exempt

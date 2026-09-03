@@ -1,4 +1,4 @@
-import { Effect, Ref } from 'effect'
+import { Effect, Option, Ref } from 'effect'
 
 import { normalizeState } from '../domain/domain.js'
 import { currentInstant } from '../support/clock.js'
@@ -12,16 +12,9 @@ import {
   type RunningSnapshot,
 } from './runtime.js'
 import type { DeliveryEntry } from './postflight.js'
+import { stallDeadlineOf } from './policy.js'
 import type { RetryEntry, RunningEntry, RuntimeState } from './state.js'
 import { handoffSnapshots, publishedCompletions } from './transitions.js'
-
-/**
- * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
- * detection is off for that agent, which the console must be able to tell apart from a deadline
- * that has not arrived yet.
- */
-const stallDeadlineOf = (lastActiveAt: Date, stallTimeoutMs: number): string | null =>
-  stallTimeoutMs > 0 ? new Date(lastActiveAt.getTime() + stallTimeoutMs).toISOString() : null
 
 /**
  * The normalized issue states that cannot take another agent right now. Only states the workflow
@@ -70,12 +63,14 @@ const runningSnapshot = (entry: RunningEntry): RunningSnapshot => ({
   tokens: entry.tokens,
   lastReportedTokens: entry.lastReportedTokens,
   workerHost: 'local',
-  // No deadline once the host's postflight has taken over: the stall sweep exempts such a run, and
-  // publishing a deadline it will never act on is what has the console calling it a stalled agent.
-  stallDeadline:
-    entry.postflightStartedAt !== null
-      ? null
-      : stallDeadlineOf(entry.lastEventAt ?? entry.startedAt, entry.execution.stallTimeoutMs),
+  // The sweep's own rule, so this is `null` exactly when stall detection is off for the run: a
+  // zero timeout, a run the host is still preparing, or one its postflight has taken over. The
+  // console must be able to tell that apart from a deadline that has not arrived yet, and
+  // publishing a deadline the sweep will never act on is what has it calling the run stalled.
+  stallDeadline: Option.match(stallDeadlineOf(entry), {
+    onNone: () => null,
+    onSome: (deadline) => deadline.toISOString(),
+  }),
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 

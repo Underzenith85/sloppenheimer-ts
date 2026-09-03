@@ -2,7 +2,7 @@ import { Clock, Effect, Option, Ref } from 'effect'
 
 import { logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
-import { issueIsActive, logContext, stateIsIn } from '../policy.js'
+import { issueIsActive, logContext, stallDeadlineOf, stateIsIn } from '../policy.js'
 import * as Transitions from '../transitions.js'
 import { cancelRunning } from './runs.js'
 import { scheduleRetry } from './scheduling.js'
@@ -75,19 +75,16 @@ const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void> =>
     }
     const now = yield* Clock.currentTimeMillis
     for (const [id, entry] of stalling.running) {
+      // Silence counts only while an agent could be the one silent: not before the host has
+      // launched it, and not after the host's postflight has taken over. Retiring a fetch or a
+      // push as a stalled agent turns a host problem into another coding turn — and a retried
+      // fetch starts over in another empty workspace, so it can never catch up. `stallDeadlineOf`
+      // states that rule once, for this sweep and for every surface that reports on it.
+      const deadline = stallDeadlineOf(entry)
+      if (Option.isNone(deadline) || now <= deadline.value.getTime()) {
+        continue
+      }
       const stallTimeout = entry.execution.stallTimeoutMs
-      const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
-      // A postflight is silent on the agent protocol by construction, because no agent is running.
-      // Retiring one as a stalled agent would turn a slow inspection or push into another coding
-      // turn — a publication problem read as an agent failure, which is what the postflight exists
-      // to stop. A publication that cannot finish is the source control's to fail, and it fails as
-      // a delivery.
-      if (entry.postflightStartedAt !== null) {
-        continue
-      }
-      if (stallTimeout <= 0 || now - activeAt <= stallTimeout) {
-        continue
-      }
       const ended = yield* cancelRunning(
         cells,
         id,
