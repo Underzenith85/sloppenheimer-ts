@@ -3,7 +3,7 @@
 // ordering, approval, malformed-data or shutdown path without depending on an installed Codex.
 
 import { spawn } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { closeSync, writeFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 
 type JsonRecord = Record<string, unknown>
@@ -145,6 +145,20 @@ const handleInitialize = (id: unknown, params: unknown): void => {
   }
   if (scenario === 'startup-exit') {
     process.exit(3)
+  }
+  if (scenario === 'close-stdin-after-initialize') {
+    // The read end goes away while the server keeps running, so the host's next write — the
+    // `initialized` notification — meets a broken pipe rather than a process that has exited.
+    // libuv never closes descriptors 0-2 for a stream handle, so the handle is detached first and
+    // the descriptor closed by hand once it is; the response goes out only after that, so the
+    // host cannot write before the pipe is broken.
+    process.stdin.once('close', () => {
+      closeSync(0)
+      send({ id, result: { userAgent: 'fake-app-server/1.0' } })
+    })
+    process.stdin.destroy()
+    setTimeout(() => process.exit(0), 5_000)
+    return
   }
   if (scenario === 'stderr-noise') {
     process.stderr.write('warning: this is diagnostic only\n')

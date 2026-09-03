@@ -460,6 +460,17 @@ describe('App Server session lifecycle', (): void => {
     }),
   )
 
+  it.live('fails the session rather than the host when the App Server closes its stdin', () =>
+    Effect.gen(function* () {
+      // Without a listener on the child's stdin, the broken pipe this provokes is an uncaught
+      // exception that takes the whole process down; here it has to arrive as the run's failure.
+      const outcome = yield* runScenario('close-stdin-after-initialize', { readTimeoutMs: 5_000 })
+
+      expect(outcome.error?.category).toBe('protocol_error')
+      expect(outcome.error?.message).toContain('stdin')
+    }),
+  )
+
   it.live(
     'fails a turn whose process exits mid-turn without waiting for the turn timeout',
     () =>

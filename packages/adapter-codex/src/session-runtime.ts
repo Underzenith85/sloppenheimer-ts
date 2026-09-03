@@ -69,6 +69,12 @@ export const processIdOf = (session: SessionRuntime): number | null => session.p
 /**
  * Reports the child's own lifecycle as a session failure. An exit is only a failure while the
  * session is still open: one that has stopped closed the process itself.
+ *
+ * The child's stdin is watched here too. Node turns an `error` nobody listens for into an uncaught
+ * exception, and a write can meet a broken pipe whenever the App Server has closed its input or died
+ * but its exit has not been processed yet — so the one bare pipe of the child would take down the
+ * host and every other session with it. Failing the session is the right size for that: the
+ * protocol is how the session is driven, and losing it is what the stdout reader reports as well.
  */
 export const watchProcess = (session: SessionRuntime): void => {
   session.process.once('error', (cause) => {
@@ -76,6 +82,14 @@ export const watchProcess = (session: SessionRuntime): void => {
       failSession(
         session,
         new AgentError({ category: 'spawn_failed', message: 'Codex process failed', cause }),
+      ),
+    )
+  })
+  session.process.stdin.on('error', (cause) => {
+    session.fork(
+      failUnlessClosed(
+        session,
+        new AgentError({ category: 'protocol_error', message: 'Codex stdin failed', cause }),
       ),
     )
   })
@@ -133,10 +147,16 @@ export const emitEvent = (
   )
 }
 
+/**
+ * Nothing is written once the session has failed for good — the child exited, or the pipe to it
+ * broke — as well as once it is closed. The terminal error is the flag for that rather than
+ * `closed`, because `closed` is what admits exactly one caller to the shutdown sequence, and an
+ * exit that set it would let that sequence be skipped.
+ */
 export const writeMessage = (session: SessionRuntime, message: JsonObject): Effect.Effect<void> =>
   Ref.get(session.state).pipe(
     Effect.flatMap((state) =>
-      state.closed
+      state.closed || Option.isSome(state.terminalError)
         ? Effect.void
         : Effect.sync(() => {
             session.process.stdin.write(`${JSON.stringify(message)}\n`)
