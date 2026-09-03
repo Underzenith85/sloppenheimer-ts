@@ -18,7 +18,7 @@ import type { IssueId } from '../../domain/domain.js'
  */
 
 /** What a keyed fiber is doing for its issue. */
-export type ExecutionPurpose = 'worker' | 'retry' | 'delivery'
+export type ExecutionPurpose = 'worker' | 'retry' | 'delivery' | 'rebase'
 
 /** The fibers one orchestrator owns, keyed by purpose and issue. */
 export type ExecutionOwner = FiberMap.FiberMap<string, void>

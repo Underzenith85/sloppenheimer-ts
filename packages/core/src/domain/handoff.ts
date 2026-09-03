@@ -132,6 +132,14 @@ export type HandoffDisposition =
   | Readonly<{ state: 'closed_without_merge'; reason: string }>
   | Readonly<{ state: 'awaiting_checks'; reason: string }>
   | Readonly<{ state: 'repair_needed'; reason: string }>
+  /**
+   * The branch is merely behind the protected base: nothing about the change is wrong, and the
+   * host already knows how to put it back on top of the base. It is kept apart from
+   * `repair_needed` because a repair is an agent's work and this is not -- a repair agent
+   * dispatched for it has nothing to change, and its clean worktree used to read as a repair that
+   * achieved nothing ([#274](https://github.com/Underzenith85/sloppenheimer-ts/issues/274)).
+   */
+  | Readonly<{ state: 'rebase_needed'; reason: string }>
   | Readonly<{ state: 'ready_to_merge'; headSha: string }>
 
 const successfulConclusions = new Set(['success', 'neutral', 'skipped'])
@@ -173,16 +181,16 @@ export const classifyPullRequest = (observation: PullRequestObservation): Handof
       reason: `Failed CI checks: ${failed.map((check) => check.name).join(', ')}`,
     }
   }
+  if (observation.mergeState === 'behind') {
+    return { state: 'rebase_needed', reason: 'The pull request branch is behind protected main' }
+  }
   if (
     observation.mergeable === null ||
-    ['blocked', 'behind', 'unknown', 'unstable'].includes(observation.mergeState)
+    ['blocked', 'unknown', 'unstable'].includes(observation.mergeState)
   ) {
     return {
-      state: observation.mergeState === 'behind' ? 'repair_needed' : 'awaiting_checks',
-      reason:
-        observation.mergeState === 'behind'
-          ? 'The pull request branch is behind protected main'
-          : `GitHub has not declared the pull request merge-ready (${observation.mergeState})`,
+      state: 'awaiting_checks',
+      reason: `GitHub has not declared the pull request merge-ready (${observation.mergeState})`,
     }
   }
   return { state: 'ready_to_merge', headSha: observation.headSha }
@@ -200,6 +208,7 @@ const handoffState = Schema.Literal(
   'closed_without_merge',
   'awaiting_checks',
   'repair_needed',
+  'rebase_needed',
   'ready_to_merge',
   'merging',
   'intervention_required',

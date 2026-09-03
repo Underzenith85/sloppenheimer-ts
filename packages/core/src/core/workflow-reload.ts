@@ -11,6 +11,7 @@ import {
   type CodeReviewPort,
   type SourceControlPort,
 } from '../ports/index.js'
+import { inFlightRebaseExecutions } from './rebase.js'
 import type { OrchestratorContext } from './runtime.js'
 import type {
   EffectiveWorkflow,
@@ -277,12 +278,19 @@ const heldInstances = (
   // through, and it outlives the run that produced it. Leaving it out would let a reload release
   // the workspace manager the delivery is still going to open, and the diff with it.
   ...[...state.deliveries.values()].map((entry) => select(entry.execution)),
+  // A rebase in flight was forked with the execution its handoff held at the time, and adoption
+  // has since moved the handoff on. The attempt is still preparing and pushing through what it
+  // captured, and only it remembers that.
+  ...inFlightRebaseExecutions(state.handoffs.values()).map(select),
 ]
 
 const heldCodeReviewInstances = (state: RuntimeState): readonly CodeReviewPort[] => [
   ...[...state.running.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
   ...[...state.handoffs.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
   ...[...state.deliveries.values()].flatMap((entry) => Option.toArray(entry.execution.codeReview)),
+  ...inFlightRebaseExecutions(state.handoffs.values()).flatMap((execution) =>
+    Option.toArray(execution.codeReview),
+  ),
 ]
 
 /**

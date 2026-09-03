@@ -125,6 +125,7 @@ const adoptOpenedHandoff = (
         repairHeadShas: existing?.repairHeadShas ?? [],
         repairObservedHeadShas: existing?.repairObservedHeadShas ?? [],
         repair: existing === undefined ? Option.none() : existing.repair,
+        rebase: existing === undefined ? Option.none() : existing.rebase,
         reviewRequestedHeadSha: existing?.reviewRequestedHeadSha ?? null,
         reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
         observedAt: handedOffAt,

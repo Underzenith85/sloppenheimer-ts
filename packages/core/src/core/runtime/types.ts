@@ -29,6 +29,7 @@ import type {
   RuntimeState,
 } from '../state.js'
 import type { DeliveryEntry, PostflightOutcome } from '../postflight.js'
+import type { RebaseOutcome } from '../rebase.js'
 import type { ExecutionOwner } from './execution.js'
 import type { TickSource } from '../transitions.js'
 
@@ -287,6 +288,17 @@ export type OrchestratorEvent =
       issueId: IssueId
       attempt: number
       result: DeliveryAttemptResult
+    }>
+  /**
+   * What the host's rebase of a pull request that fell behind the base amounted to, reported from
+   * the fiber that performed it. Git, so off the loop like a delivery; `headSha` names the head it
+   * was started from, which is what tells a settlement for a superseded attempt from the live one.
+   */
+  | Readonly<{
+      _tag: 'RebaseAttempted'
+      issueId: IssueId
+      headSha: string
+      outcome: RebaseOutcome
     }>
   | Readonly<{
       _tag: 'SetIssuePaused'

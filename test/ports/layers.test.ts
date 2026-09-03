@@ -193,6 +193,12 @@ describe('port layer composition', (): void => {
                       branchName: prepared.target.branchName,
                       baselineSha: prepared.baselineSha,
                     }),
+                  rebase: (_issue, prepared) =>
+                    Effect.succeed({
+                      _tag: 'NoChanges',
+                      branchName: prepared.target.branchName,
+                      baselineSha: prepared.baselineSha,
+                    }),
                 }),
             }),
           ),

@@ -130,8 +130,11 @@ remain separate code-review operations and also use only the host-side credentia
 
 After handoff, Sloppenheimer persists the PR under the workspace root and monitors its exact head
 SHA, CI checks, mergeability, review decision, and unresolved review threads. Failed checks,
-requested changes, stale branches, and conflicts return to the coding agent with repair context. A
-clean PR is squash-merged only through the repository protection rules with an expected-head guard.
+requested changes, and conflicts return to the coding agent with repair context. A branch that is
+merely behind protected main is the host's to fix, not an agent's: Sloppenheimer prepares the exact
+pull-request head, rebases it onto the current base and pushes it under the same expected-head
+lease a publication uses, spending no repair attempt and running no agent. A clean PR is
+squash-merged only through the repository protection rules with an expected-head guard.
 
 A review thread's resolution and its outdatedness are read as separate answers, because unresolved
 feedback is not the same thing as feedback that still applies. Only unresolved threads GitHub still

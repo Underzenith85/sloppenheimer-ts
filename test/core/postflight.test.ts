@@ -39,6 +39,7 @@ const sourceControl = (overrides: Partial<SourceControlPort>): SourceControlPort
   prepare: () => Effect.die('prepare is not part of the postflight'),
   inspect: () => Effect.die('the test did not state an inspection'),
   publish: () => Effect.die('the test did not state a publication'),
+  rebase: () => Effect.die('a postflight never rebases'),
   ...overrides,
 })
 
