@@ -587,6 +587,21 @@ repair agent that had achieved nothing.
   itself. All of this is a marker on the agent's session standing in for a phase of the run; the
   phase becomes explicit, and the marker and its handshake go, under
   [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
+- Nor does the stall timer run before the agent exists. A run is visible from dispatch, but until
+  the runner is launched it is the host's: the workspace lease and its `after_create` hook, the
+  source-control preparation — a fresh clone and a base-branch fetch into a brand-new workspace —
+  and the `before_run` hook. Measured from dispatch, a fetch that outlasts the timeout was retired
+  as a stalled agent, retried with backoff into another empty workspace that fetched from scratch
+  again, and so could never succeed, leaving a retained clone behind each time
+  ([#265](https://github.com/Underzenith85/sloppenheimer-ts/issues/265)). The run records when the
+  runner was launched exactly as it records the postflight takeover — announced from the worker,
+  applied by the loop, and waited for before the launch — and the stall clock starts there and
+  moves with every protocol event. The rule is stated once, as `stallDeadlineOf` in
+  `packages/core/src/core/policy.ts`, and the sweep, the running snapshot and the agent detail all
+  read it, so no surface publishes a deadline the sweep would never act on. The handshake inside
+  the runner — Codex's `initialize`, `account/rateLimits/read` and `thread/start` — is counted: it
+  is the agent protocol, each round trip is bounded by `read_timeout_ms`, and a runner that
+  launches and never reports is exactly what the watchdog is for.
 - The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
   published SHA and expected remote SHA are authoritative.
 - A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing
@@ -700,7 +715,7 @@ repair agent that had achieved nothing.
   tracker from reconciliation, retry-due and the poll. The rule that a handler handles messages only
   is [#259](https://github.com/Underzenith85/sloppenheimer-ts/issues/259).
 - The run entry is the claim, the phase and the agent session in one record, which is why the stall
-  timer has had to be taught about the postflight. Splitting it is
+  timer has had to be taught about the preparation and the postflight. Splitting it is
   [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
 
 ## Architecture record: agent runners

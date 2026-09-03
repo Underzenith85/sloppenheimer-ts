@@ -64,6 +64,7 @@ export {
   type RefreshOutcome,
   type RetrySnapshot,
   type RunningSnapshot,
+  type RunPhaseMarker,
   type RuntimeCells,
   type RuntimeStore,
   type RuntimeStores,

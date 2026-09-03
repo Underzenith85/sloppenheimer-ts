@@ -158,6 +158,17 @@ export type RunningEntry = Readonly<{
   repairRun: boolean
   startedAt: Date
   /**
+   * When the host launched the agent runner, or `null` while the run is still the host's to
+   * prepare: the workspace lease and its `after_create` hook, the source-control preparation — a
+   * fresh clone and a base-branch fetch into a brand-new workspace — and the `before_run` hook.
+   *
+   * The stall timer measures silence on the agent protocol, and before this there is no agent to
+   * be silent. Measured from `startedAt` instead, a fetch that outlasts the timeout was retired as
+   * a stalled agent and retried into another empty workspace, from where it fetched from scratch
+   * and could never succeed. The clock starts here and moves with every protocol event.
+   */
+  agentStartedAt: Date | null
+  /**
    * When the host's own postflight took over from the agent, if it has.
    *
    * The stall timer measures silence on the agent protocol, and a postflight is silent on it by

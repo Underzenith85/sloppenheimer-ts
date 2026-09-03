@@ -1,10 +1,9 @@
-import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
+import { Deferred, Effect, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
 import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
-import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning, withLogAnnotations } from '../support/logging.js'
@@ -26,7 +25,7 @@ import {
 } from './policy.js'
 import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
 import { ownIssueFiber, releaseIssueFiber } from './runtime/execution.js'
-import type { OrchestratorContext } from './runtime.js'
+import type { OrchestratorContext, RunPhaseMarker } from './runtime.js'
 import type {
   EffectiveWorkflow,
   ExecutionSnapshot,
@@ -37,6 +36,7 @@ import type {
 import type { SourceControlTarget } from '../ports/index.js'
 import * as Transitions from './transitions.js'
 import { installEffectiveWorkflow, revalidateCredentials } from './workflow-reload.js'
+import { workspaceRelease } from './workspace-release.js'
 
 /**
  * The tool surface advertised to one session.
@@ -124,6 +124,30 @@ const refreshIssueThrough =
         ),
       )
 
+/**
+ * Announces a change of who is working on the run, and waits until it is in the state.
+ *
+ * Announced *and applied*, not merely sent: offering alone would only enqueue it, and a poll already
+ * in flight would still read a run nothing had marked — retiring a publication as a stalled agent,
+ * or counting an agent's launch from the dispatch that preceded its clone and fetch. The wait is on
+ * the handler because runtime state changes go through the mailbox; the worker does not write the
+ * state itself.
+ */
+const announceRunPhase = (
+  launch: SessionLaunch,
+  phase: RunPhaseMarker['_tag'],
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const applied = yield* Deferred.make<void>()
+    yield* Queue.offer(launch.context.mailbox, {
+      _tag: phase,
+      issueId: launch.issue.id,
+      runId: launch.runId,
+      applied,
+    })
+    yield* Deferred.await(applied)
+  })
+
 /** One agent session, inside the workspace hooks that bracket it. */
 const runSession = (
   launch: SessionLaunch,
@@ -131,6 +155,10 @@ const runSession = (
 ): Effect.Effect<void, AgentError | WorkspaceError> => {
   const { context, issue, execution } = launch
   return execution.workspaces.beforeRun(workspace).pipe(
+    // From here an agent exists, and its silence is what the stall timer measures. Everything
+    // before — the lease and its hook, the clone and fetch, the hook just above — was the host's,
+    // and none of it is an agent that has gone quiet.
+    Effect.zipRight(announceRunPhase(launch, 'AgentStarted')),
     Effect.zipRight(
       context.ports.agentRunner.run({
         issue,
@@ -192,7 +220,7 @@ const runWithSourceControl = (
   launch: SessionLaunch,
   workspace: Workspace,
 ): Effect.Effect<PostflightOutcome, AgentError | WorkspaceError | SourceControlError> => {
-  const { context, issue, runId, sessionPorts, target } = launch
+  const { issue, sessionPorts, target } = launch
   const sourceControl = MutableRef.get(sessionPorts).sourceControl
   if (sourceControl === null) {
     return runSession(launch, workspace).pipe(
@@ -205,19 +233,9 @@ const runWithSourceControl = (
         Effect.zipRight(
           Effect.gen(function* () {
             const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-            // Announced *and applied* before the first git call: from here the run is the host's
-            // work, and the silence on the agent protocol that follows is not a stalled agent.
-            // Offering alone would only enqueue it — a poll already in flight would still read a
-            // run nothing had marked and retire the publication as a stalled agent, which is the
-            // one thing this marker exists to prevent.
-            const applied = yield* Deferred.make<void>()
-            yield* Queue.offer(context.mailbox, {
-              _tag: 'PostflightStarted' as const,
-              issueId: issue.id,
-              runId,
-              applied,
-            })
-            yield* Deferred.await(applied)
+            // Before the first git call: from here the run is the host's work, and the silence on
+            // the agent protocol that follows is not a stalled agent.
+            yield* announceRunPhase(launch, 'PostflightStarted')
             return yield* runPostflight(publisher, issue, prepared)
           }),
         ),
@@ -237,49 +255,6 @@ const runWithSourceControl = (
     ),
   )
 }
-
-/**
- * What becomes of the run's workspace once the run has ended.
- *
- * A postflight that published, or that found nothing to publish, has read the whole worktree and
- * put everything it found into the repository, so the directory holds nothing that is not in it.
- * Every other ending — a delivery that failed, a composition with no source control to publish
- * through, a failure, a cancellation, an interrupted shutdown — leaves work that only the directory
- * holds, so the workspace stays as a recovery artifact under the reason it is being kept for. A
- * retained delivery republishes from exactly that directory, which is why a failed delivery's
- * reason names the failure.
- */
-const workspaceRelease = (
-  exit: Exit.Exit<PostflightOutcome, AgentError | WorkspaceError | SourceControlError>,
-): WorkspaceRelease =>
-  Exit.match(exit, {
-    onSuccess: (postflight): WorkspaceRelease => {
-      switch (postflight._tag) {
-        case 'Published':
-        case 'NoChanges':
-          return { _tag: 'Completed' }
-        case 'DeliveryFailed':
-          // The category, never the message: a lease record is a file on disk rather than a log
-          // the redaction rules pass over.
-          return { _tag: 'Retained', reason: `delivery failed: ${postflight.failure.category}` }
-        case 'NotPerformed':
-          return { _tag: 'Retained', reason: 'run ended without publishing its work' }
-      }
-    },
-    onFailure: (cause): WorkspaceRelease => ({
-      _tag: 'Retained',
-      reason: Option.match(Cause.failureOption(cause), {
-        onNone: () =>
-          Cause.isInterrupted(cause)
-            ? 'run cancelled before publication'
-            : 'run ended abnormally before publication',
-        // What failed, never what the failure said: an agent or hook failure carries an excerpt of
-        // what the process wrote, and a lease record is a file on disk rather than a log the
-        // redaction rules pass over.
-        onSome: (error) => `run failed before publication: ${error._tag} ${error.category}`,
-      }),
-    }),
-  })
 
 /**
  * The whole of one run as a fiber body: the workspace this run leases for itself, the host-owned
@@ -341,6 +316,7 @@ const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
   attempt: launch.attempt,
   repairRun: launch.repairRun,
   startedAt,
+  agentStartedAt: null,
   postflightStartedAt: null,
   lastEventAt: null,
   lastEvent: null,

@@ -19,6 +19,19 @@ import type {
 } from './snapshot.js'
 
 /**
+ * The host has finished preparing the run and launched the agent.
+ *
+ * Until now the record's silence was the host's — a workspace being leased, a repository being
+ * fetched, a hook running — and `buildAgentDetail` publishes no stall countdown for it. The
+ * countdown starts here, for the reason `RunningEntry.agentStartedAt` gives, and the phase says
+ * who is working now.
+ */
+export const recordAgentStarted = (record: AgentDetailRecord, at: Date): AgentDetailRecord =>
+  record.agentStartedAt === null
+    ? setPhase({ ...record, agentStartedAt: at }, 'starting', 'Starting the agent', at)
+    : record
+
+/**
  * The host's postflight has taken the run over from the agent.
  *
  * Phase rather than a publication: nothing is known yet about whether there is anything to publish
@@ -89,6 +102,7 @@ export const recordAttemptStarted = (
     attempt: attemptNumber,
     retries: record.retries + 1,
     startedAt: at,
+    agentStartedAt: null,
     lastActivityAt: null,
     threadId: null,
     turnId: null,
@@ -99,7 +113,7 @@ export const recordAttemptStarted = (
       attempts.length > retainedAttemptLimit ? attempts.slice(-retainedAttemptLimit) : attempts,
     ),
   }
-  const next = setPhase(started, 'starting', 'Starting the agent', at)
+  const next = setPhase(started, 'starting', 'Preparing the workspace', at)
   return push(next, {
     sequence: nextSequence(next),
     attempt: attemptNumber,

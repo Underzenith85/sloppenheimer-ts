@@ -1,9 +1,10 @@
 import { Deferred, Effect, Queue, Ref } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
-import { recordPostflightStarted } from '../telemetry.js'
+import { recordAgentStarted, recordPostflightStarted } from '../telemetry.js'
 import * as Transitions from './transitions.js'
-import type { OrchestratorContext } from './runtime.js'
+import type { OrchestratorContext, RunPhaseMarker } from './runtime.js'
+import type { RuntimeState } from './state.js'
 import { onAgentUpdate } from './polling/agent-update.js'
 import { onDeliveryAttempted, onDeliveryDue } from './polling/delivery-due.js'
 import { onIssuePauseChanged } from './polling/issue-pause.js'
@@ -33,6 +34,52 @@ import { onWorkerExited } from './polling/worker-exited.js'
 
 export { poll } from './polling/pass.js'
 
+/**
+ * Applies a marker of who is working on a run — the agent from here, or the host's postflight from
+ * here — to the run and its detail together. Both or neither, and neither when the run is gone: a
+ * cancellation can reach the loop while the worker is still waiting to be let past, and the worker
+ * it belonged to is interrupted rather than going on, so a detail moved on here would sit in a
+ * phase no settlement is ever coming to leave.
+ */
+const applyRunPhaseMarker = (
+  state: RuntimeState,
+  event: RunPhaseMarker,
+  at: Date,
+): RuntimeState => {
+  switch (event._tag) {
+    case 'AgentStarted': {
+      return Transitions.agentStartApplies(state, event.issueId, event.runId)
+        ? Transitions.updateDetail(
+            Transitions.noteAgentStarted(state, event.issueId, event.runId, at),
+            event.issueId,
+            (record) => recordAgentStarted(record, at),
+          )
+        : state
+    }
+    case 'PostflightStarted': {
+      return Transitions.postflightTakeoverApplies(state, event.issueId, event.runId)
+        ? Transitions.updateDetail(
+            Transitions.notePostflightStarted(state, event.issueId, event.runId, at),
+            event.issueId,
+            (record) => recordPostflightStarted(record, at),
+          )
+        : state
+    }
+  }
+}
+
+const onRunPhaseMarker = (
+  context: OrchestratorContext,
+  event: RunPhaseMarker,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const at = yield* currentInstant
+    yield* Ref.update(context.state, (current) => applyRunPhaseMarker(current, event, at))
+    // Only now may the worker go on: it is waiting on this, and what it is waiting for is the
+    // state, not the message.
+    yield* Deferred.succeed(event.applied, undefined)
+  })
+
 export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
   Effect.gen(function* () {
     for (;;) {
@@ -42,24 +89,9 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
           yield* onTick(context)
           break
         }
+        case 'AgentStarted':
         case 'PostflightStarted': {
-          const startedAt = yield* currentInstant
-          yield* Ref.update(context.state, (current) =>
-            // Both or neither, and neither when the run is gone. A cancellation can reach the loop
-            // while the worker is still waiting to be let past, and the worker it belonged to is
-            // interrupted rather than publishing — so a detail moved to `publishing` here would sit
-            // in a phase no settlement is ever coming to leave.
-            Transitions.postflightTakeoverApplies(current, event.issueId, event.runId)
-              ? Transitions.updateDetail(
-                  Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
-                  event.issueId,
-                  (record) => recordPostflightStarted(record, startedAt),
-                )
-              : current,
-          )
-          // Only now may the publication begin: the worker is waiting on this, and what it is
-          // waiting for is the state, not the message.
-          yield* Deferred.succeed(event.applied, undefined)
+          yield* onRunPhaseMarker(context, event)
           break
         }
         case 'AgentUpdate': {

@@ -185,7 +185,10 @@ installed `codex app-server generate-json-schema` and fails as soon as such a fi
 Three timeouts stay distinct. `runner.read_timeout_ms` bounds one request/response round trip.
 `runner.turn_timeout_ms` is a _silence_ timeout for an active turn: every valid protocol output
 re-arms it, so a long but active turn never expires while a genuinely silent one does.
-`runner.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting.
+`runner.stall_timeout_ms` is the orchestrator's own watchdog over a worker that stops reporting. Its
+clock starts when the agent is launched and moves with every protocol event: the workspace lease,
+the clone and base-branch fetch, and the hooks that precede the launch are the host's work, not an
+agent gone quiet, and the host's postflight after the turn is exempt for the same reason.
 
 The App Server runs in its own process group. Shutdown, cancellation and interruption signal the
 whole tree — `SIGTERM`, then `SIGKILL` after a bounded grace — so tools the App Server itself

@@ -10,6 +10,27 @@ import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, RuntimeState }
  * answers one question the event loop asks before it acts.
  */
 
+/**
+ * The instant a live run counts as stalled, or `None` while its stall detection is off.
+ *
+ * The stall timer measures silence on the agent protocol, so its clock runs only while there is an
+ * agent to be silent: it starts when the host launches the runner, moves with every protocol event,
+ * and stops when the host's postflight takes the run over. Before the launch the run is the host's
+ * — a workspace lease and its hook, a clone and base-branch fetch, the `before_run` hook — and
+ * measured from dispatch, a fetch that outlasts the timeout was retired as a stalled agent and
+ * retried into another empty workspace, never to succeed. After the takeover no agent is running,
+ * and a slow publication is the source control's to fail, as a delivery. A zero timeout disables
+ * detection outright. The stall sweep, the running snapshot and the agent detail all read this one
+ * rule, so no surface can report a stall the sweep would never act on.
+ */
+export const stallDeadlineOf = (entry: RunningEntry): Option.Option<Date> => {
+  const activeAt = entry.lastEventAt ?? entry.agentStartedAt
+  const stallTimeoutMs = entry.execution.stallTimeoutMs
+  return activeAt === null || stallTimeoutMs <= 0 || entry.postflightStartedAt !== null
+    ? Option.none()
+    : Option.some(new Date(activeAt.getTime() + stallTimeoutMs))
+}
+
 export const stateIsIn = (state: string, configured: readonly string[]): boolean => {
   const normalized = normalizeState(state)
   return configured.some((candidate) => normalizeState(candidate) === normalized)

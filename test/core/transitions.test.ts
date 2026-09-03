@@ -157,6 +157,7 @@ const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
   attempt: null,
   repairRun: false,
   startedAt: new Date('2026-01-01T00:00:00.000Z'),
+  agentStartedAt: null,
   postflightStartedAt: null,
   lastEventAt: null,
   lastEvent: null,
@@ -624,6 +625,25 @@ describe('run lifecycle', (): void => {
     expect(kept.running.has(issue.id)).toBe(true)
     expect(Option.getOrNull(ended)?.runId).toBe(7)
     expect(cleared.running.has(issue.id)).toBe(false)
+  })
+
+  it('records the agent launch once, and only for the run named', (): void => {
+    const started = Transitions.beginRun(emptyState(), runningEntry(issue, 7))
+    const at = new Date('2026-01-01T00:05:00.000Z')
+
+    expect(Transitions.agentStartApplies(started, issue.id, 7)).toBe(true)
+    const launched = Transitions.noteAgentStarted(started, issue.id, 7, at)
+    expect(launched.running.get(issue.id)?.agentStartedAt).toEqual(at)
+
+    // A marker from a superseded run must not start the clock on the run that replaced it, and a
+    // second marker for the same run must not restart it.
+    expect(Transitions.agentStartApplies(started, issue.id, 6)).toBe(false)
+    expect(Transitions.noteAgentStarted(started, issue.id, 6, at)).toBe(started)
+    expect(Transitions.agentStartApplies(launched, issue.id, 7)).toBe(false)
+    expect(
+      Transitions.noteAgentStarted(launched, issue.id, 7, new Date('2026-01-01T00:06:00.000Z')),
+    ).toBe(launched)
+    expect(Transitions.noteAgentStarted(emptyState(), issue.id, 7, at)).toEqual(emptyState())
   })
 
   it('folds an ended run into the lifetime totals', (): void => {
