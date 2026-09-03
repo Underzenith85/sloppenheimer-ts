@@ -115,7 +115,7 @@ describe('GitHub provider-native tool extension', (): void => {
   it.effect('publishes capability-scoped profiles and rejects disabled code-review tools', () =>
     Effect.gen(function* () {
       const tracker = yield* trackerOf(provider)
-      const codeReview = makeGitHubCodeReview(provider)
+      const codeReview = yield* makeGitHubCodeReview(provider)
 
       expect(tracker.toolSpecs.map((tool) => tool.name)).toEqual([
         'github_add_comment',
@@ -269,7 +269,7 @@ describe('GitHub provider-native tool extension', (): void => {
     }
     return Effect.gen(function* () {
       const tracker = yield* trackerOf(provider)
-      const codeReview = makeGitHubCodeReview(provider)
+      const codeReview = yield* makeGitHubCodeReview(provider)
       const hostTools = makeHostToolSession({ tracker, codeReview: Option.some(codeReview) }, issue)
       expect(
         yield* executed(() =>

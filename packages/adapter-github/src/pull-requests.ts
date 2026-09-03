@@ -1,4 +1,3 @@
-import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Schema } from 'effect'
 
 import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
@@ -11,7 +10,7 @@ import {
   parseNextUrl,
   trackerCause,
   trackerPaginationError,
-  withBoundHttpClient,
+  type GitHubTransportBinding,
   type GitHubHttpResult,
   type GitHubRequestInit,
 } from './client.js'
@@ -332,10 +331,9 @@ const resolveReviewThreads = (
 
 export const makeGitHubPullRequestMonitor = (
   provider: GitHubProviderConfig,
-  httpClient?: HttpClient.HttpClient,
+  bindClient: GitHubTransportBinding,
 ): GitHubPullRequestMonitor => {
   const prefix = `${provider.apiBaseUrl}/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-  const bindClient = withBoundHttpClient(httpClient)
   return {
     inspect: (number) => bindClient(inspectPullRequest(provider, prefix, number)),
     merge: (number, expectedHeadSha) =>

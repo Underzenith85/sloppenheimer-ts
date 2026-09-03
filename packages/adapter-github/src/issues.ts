@@ -24,7 +24,8 @@ import {
   githubPageSize,
   trackerCause,
   trackerResponseError,
-  withBoundHttpClient,
+  githubTransportFor,
+  type GitHubTransportBinding,
 } from './client.js'
 import {
   githubProviderOf,
@@ -156,12 +157,12 @@ const labelList = (value: JsonValue | undefined): readonly string[] | null => {
 const makeGitHubTrackerToolExecutor = (
   provider: GitHubProviderConfig,
   prefix: string,
-  httpClient: HttpClient.HttpClient | undefined,
+  bind: GitHubTransportBinding,
 ): TrackerPort['executeTool'] =>
   githubHostToolExecutor(
     githubTrackerToolSpecs,
     provider,
-    httpClient,
+    bind,
     (name, argumentsValue, issueNumber) => {
       const issuePath = `${provider.apiBaseUrl}${prefix}/issues/${String(issueNumber)}`
       if (name === 'github_add_comment') {
@@ -314,6 +315,8 @@ const hydrateDependencies = (
 /**
  * `httpClient` binds this tracker to one client. An operation that stays in Effect otherwise reads
  * the client from its caller's context; `executeTool` has no context to read, so it uses this one.
+ * The provider generation's rate limiter is bound the same way, and is the one every other
+ * capability built from this credential paces against.
  */
 export const makeGitHubTracker = (
   configuredProvider: GitHubProviderConfig,
@@ -323,10 +326,10 @@ export const makeGitHubTracker = (
     const provider = Object.freeze({ ...configuredProvider })
     const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
     const dependencyCache = yield* Ref.make(HashMap.empty<IssueId, DependencyCacheEntry>())
-    const bindClient = withBoundHttpClient(httpClient)
+    const bindClient = yield* githubTransportFor(provider, httpClient)
     return {
       toolSpecs: githubTrackerToolSpecs,
-      executeTool: makeGitHubTrackerToolExecutor(provider, prefix, httpClient),
+      executeTool: makeGitHubTrackerToolExecutor(provider, prefix, bindClient),
       secretEnvironmentNames: githubSecretEnvironmentNames(provider),
       fetchIssuesByStates: (
         states,
@@ -416,7 +419,7 @@ export const makeGitHubIssueControl = (
   Effect.gen(function* () {
     const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
     const tracker = yield* makeGitHubTracker(provider, httpClient)
-    const bindClient = withBoundHttpClient(httpClient)
+    const bindClient = yield* githubTransportFor(provider, httpClient)
     return {
       listOpenIssues: () =>
         tracker

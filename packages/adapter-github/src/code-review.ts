@@ -13,7 +13,8 @@ import {
   githubPageSize,
   trackerCause,
   trackerResponseError,
-  withBoundHttpClient,
+  githubTransportFor,
+  type GitHubTransportBinding,
 } from './client.js'
 import { makeGitHubPullRequestMonitor } from './pull-requests.js'
 import { exactObject, githubHostToolExecutor, invalidToolArguments } from './tools.js'
@@ -42,12 +43,12 @@ const githubCodeReviewToolSpecs: readonly HostToolSpec[] = Object.freeze([
 const makeGitHubCodeReviewToolExecutor = (
   provider: GitHubProviderConfig,
   prefix: string,
-  httpClient: HttpClient.HttpClient | undefined,
+  bind: GitHubTransportBinding,
 ): CodeReviewPort['executeTool'] =>
   githubHostToolExecutor(
     githubCodeReviewToolSpecs,
     provider,
-    httpClient,
+    bind,
     (_name, argumentsValue, issueNumber) => {
       const argumentsObject = exactObject(argumentsValue, new Set(['pull_request_number']))
       const pullRequestNumber = argumentsObject?.['pull_request_number']
@@ -168,80 +169,85 @@ const createPullRequest = (
 /**
  * `httpClient` binds this capability to one client, as it does for the tracker: the operations that
  * stay in Effect otherwise read one from their caller's context, and `executeTool` cannot.
+ *
+ * Construction is an effect only because the limiter this capability paces against belongs to the
+ * provider generation rather than to this instance: reading it is how a code review built beside a
+ * tracker ends up on the tracker's limiter instead of one of its own.
  */
 export const makeGitHubCodeReview = (
   configuredProvider: GitHubProviderConfig,
   httpClient?: HttpClient.HttpClient,
-): CodeReviewPort => {
-  const provider = Object.freeze({ ...configuredProvider })
-  const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
-  const pullRequests = makeGitHubPullRequestMonitor(provider, httpClient)
-  const bindClient = withBoundHttpClient(httpClient)
-  return {
-    toolSpecs: githubCodeReviewToolSpecs,
-    executeTool: makeGitHubCodeReviewToolExecutor(provider, prefix, httpClient),
-    handoffCompletedWork: (issue) => {
-      const branchName = issueBranchName(issue)
-      return bindClient(
-        githubBranchExists(provider, prefix, branchName).pipe(
-          Effect.flatMap((exists) => {
-            if (!exists) {
-              return Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName })
-            }
-            return findPullRequest(provider, prefix, branchName).pipe(
-              Effect.flatMap(
-                Option.match({
-                  onNone: () =>
-                    createPullRequest(provider, prefix, issue, branchName).pipe(
-                      Effect.map((pullRequestUrl) => ({ pullRequestUrl, created: true })),
-                    ),
-                  onSome: (pullRequestUrl: string) =>
-                    Effect.succeed({ pullRequestUrl, created: false }),
-                }),
-              ),
-              Effect.flatMap(({ pullRequestUrl, created }) =>
-                Effect.try({
-                  try: (): HandoffResult => ({
-                    _tag: 'PullRequest',
-                    branchName,
-                    pullRequestUrl,
-                    pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
-                    created,
+): Effect.Effect<CodeReviewPort> =>
+  Effect.gen(function* () {
+    const provider = Object.freeze({ ...configuredProvider })
+    const prefix = `/repos/${encodeURIComponent(provider.owner)}/${encodeURIComponent(provider.repository)}`
+    const bindClient = yield* githubTransportFor(provider, httpClient)
+    const pullRequests = makeGitHubPullRequestMonitor(provider, bindClient)
+    return {
+      toolSpecs: githubCodeReviewToolSpecs,
+      executeTool: makeGitHubCodeReviewToolExecutor(provider, prefix, bindClient),
+      handoffCompletedWork: (issue) => {
+        const branchName = issueBranchName(issue)
+        return bindClient(
+          githubBranchExists(provider, prefix, branchName).pipe(
+            Effect.flatMap((exists) => {
+              if (!exists) {
+                return Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName })
+              }
+              return findPullRequest(provider, prefix, branchName).pipe(
+                Effect.flatMap(
+                  Option.match({
+                    onNone: () =>
+                      createPullRequest(provider, prefix, issue, branchName).pipe(
+                        Effect.map((pullRequestUrl) => ({ pullRequestUrl, created: true })),
+                      ),
+                    onSome: (pullRequestUrl: string) =>
+                      Effect.succeed({ pullRequestUrl, created: false }),
                   }),
-                  catch: trackerCause('GitHub pull request URL is invalid'),
-                }),
-              ),
-            )
-          }),
-        ),
-      )
-    },
-    findExistingHandoff: (issue) => {
-      const branchName = issueBranchName(issue)
-      return bindClient(
-        findPullRequest(provider, prefix, branchName).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName }),
-              onSome: (pullRequestUrl: string) =>
-                Effect.try({
-                  try: (): HandoffResult => ({
-                    _tag: 'PullRequest',
-                    branchName,
-                    pullRequestUrl,
-                    pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
-                    created: false,
+                ),
+                Effect.flatMap(({ pullRequestUrl, created }) =>
+                  Effect.try({
+                    try: (): HandoffResult => ({
+                      _tag: 'PullRequest',
+                      branchName,
+                      pullRequestUrl,
+                      pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
+                      created,
+                    }),
+                    catch: trackerCause('GitHub pull request URL is invalid'),
                   }),
-                  catch: trackerCause('GitHub pull request URL is invalid'),
-                }),
+                ),
+              )
             }),
           ),
-        ),
-      )
-    },
-    inspectPullRequest: pullRequests.inspect,
-    mergePullRequest: pullRequests.merge,
-    requestPullRequestReview: pullRequests.requestReview,
-    resolveReviewThreads: pullRequests.resolveThreads,
-  }
-}
+        )
+      },
+      findExistingHandoff: (issue) => {
+        const branchName = issueBranchName(issue)
+        return bindClient(
+          findPullRequest(provider, prefix, branchName).pipe(
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName }),
+                onSome: (pullRequestUrl: string) =>
+                  Effect.try({
+                    try: (): HandoffResult => ({
+                      _tag: 'PullRequest',
+                      branchName,
+                      pullRequestUrl,
+                      pullRequestNumber: pullRequestNumberFromUrl(pullRequestUrl),
+                      created: false,
+                    }),
+                    catch: trackerCause('GitHub pull request URL is invalid'),
+                  }),
+              }),
+            ),
+          ),
+        )
+      },
+      inspectPullRequest: pullRequests.inspect,
+      mergePullRequest: pullRequests.merge,
+      requestPullRequestReview: pullRequests.requestReview,
+      resolveReviewThreads: pullRequests.resolveThreads,
+    }
+  })

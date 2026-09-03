@@ -8,6 +8,8 @@ import { classifyPullRequest } from '@sloppenheimer/core/domain/handoff.js'
 import { makeGitHubCodeReview } from '@sloppenheimer/adapter-github/code-review.js'
 import { issueBranchName } from '@sloppenheimer/core/domain/handoff.js'
 import type { GitHubProviderConfig } from '@sloppenheimer/adapter-github'
+import { githubTransportFor } from '@sloppenheimer/adapter-github/client.js'
+import type { GitHubPullRequestMonitor } from '@sloppenheimer/adapter-github/pull-requests.js'
 import { anIssue } from './harness/fixtures.js'
 
 const provider: GitHubProviderConfig = {
@@ -26,6 +28,16 @@ const handoffIssue: Issue = anIssue({
   url: 'https://example.test/issues/28',
 })
 
+/**
+ * The monitor under test, on the transport binding a constructed capability would carry: the rate
+ * limiter belongs to the provider generation rather than to one instance, so it is read rather
+ * than passed in.
+ */
+const pullRequests: Effect.Effect<GitHubPullRequestMonitor> = Effect.map(
+  githubTransportFor(provider),
+  (bindClient) => makeGitHubPullRequestMonitor(provider, bindClient),
+)
+
 const requestUrl = (input: string | URL | Request): string => {
   if (typeof input === 'string') {
     return input
@@ -43,7 +55,9 @@ describe('GitHub pull request handoff', (): void => {
       const fetchMock = vi.fn(async (): Promise<Response> => new Response(null, { status: 404 }))
       vi.stubGlobal('fetch', fetchMock)
 
-      const result = yield* makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue)
+      const result = yield* (yield* makeGitHubCodeReview(provider)).handoffCompletedWork(
+        handoffIssue,
+      )
 
       expect(result).toEqual({ _tag: 'NoBranch', branchName: 'sloppenheimer/issue-28' })
       expect(issueBranchName(handoffIssue)).toBe('sloppenheimer/issue-28')
@@ -83,7 +97,9 @@ describe('GitHub pull request handoff', (): void => {
         )
         vi.stubGlobal('fetch', fetchMock)
 
-        const result = yield* makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue)
+        const result = yield* (yield* makeGitHubCodeReview(provider)).handoffCompletedWork(
+          handoffIssue,
+        )
 
         expect(result).toEqual({
           _tag: 'PullRequest',
@@ -115,7 +131,9 @@ describe('GitHub pull request handoff', (): void => {
       )
       vi.stubGlobal('fetch', fetchMock)
 
-      const result = yield* makeGitHubCodeReview(provider).handoffCompletedWork(handoffIssue)
+      const result = yield* (yield* makeGitHubCodeReview(provider)).handoffCompletedWork(
+        handoffIssue,
+      )
 
       // Adopted rather than opened, which the agent detail reports as a reused pull request.
       expect(result).toMatchObject({ _tag: 'PullRequest', created: false })
@@ -134,7 +152,9 @@ describe('GitHub pull request handoff', (): void => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      const result = yield* makeGitHubCodeReview(provider).findExistingHandoff(handoffIssue)
+      const result = yield* (yield* makeGitHubCodeReview(provider)).findExistingHandoff(
+        handoffIssue,
+      )
 
       expect(result).toEqual({
         _tag: 'PullRequest',
@@ -163,7 +183,7 @@ describe('GitHub pull request monitor', (): void => {
         )
         vi.stubGlobal('fetch', fetchMock)
 
-        const result = yield* makeGitHubPullRequestMonitor(provider).inspect(44)
+        const result = yield* (yield* pullRequests).inspect(44)
 
         expect(classifyPullRequest(result)).toEqual({
           state: 'closed_without_merge',
@@ -195,7 +215,7 @@ describe('GitHub pull request monitor', (): void => {
       )
       vi.stubGlobal('fetch', fetchMock)
 
-      const dated = yield* makeGitHubPullRequestMonitor(provider).inspect(44)
+      const dated = yield* (yield* pullRequests).inspect(44)
       expect(dated).toMatchObject({ merged: true, mergedAt: '2026-08-20T09:00:00Z' })
 
       vi.stubGlobal(
@@ -209,7 +229,7 @@ describe('GitHub pull request monitor', (): void => {
           }),
         ),
       )
-      const undated = yield* makeGitHubPullRequestMonitor(provider).inspect(44)
+      const undated = yield* (yield* pullRequests).inspect(44)
       expect(undated).toMatchObject({ merged: true, mergedAt: null })
     }),
   )
@@ -226,7 +246,7 @@ describe('GitHub pull request monitor', (): void => {
       )
       vi.stubGlobal('fetch', fetchMock)
 
-      const result = yield* makeGitHubPullRequestMonitor(provider).inspect(44)
+      const result = yield* (yield* pullRequests).inspect(44)
 
       expect(classifyPullRequest(result)).toEqual({ state: 'merged', mergeCommitSha: null })
       expect(result).toMatchObject({
@@ -293,7 +313,7 @@ describe('GitHub pull request monitor', (): void => {
         vi.fn(async (): Promise<Response> => Response.json(response)),
       )
 
-      const error = yield* Effect.flip(makeGitHubPullRequestMonitor(provider).inspect(44))
+      const error = yield* Effect.flip((yield* pullRequests).inspect(44))
 
       expect(error).toMatchObject({
         category: 'tracker_response',
@@ -311,7 +331,7 @@ describe('GitHub pull request monitor', (): void => {
       )
       vi.stubGlobal('fetch', fetchMock)
 
-      const result = yield* makeGitHubPullRequestMonitor(provider).inspect(50)
+      const result = yield* (yield* pullRequests).inspect(50)
 
       expect(result).toEqual({
         number: 50,
@@ -426,7 +446,7 @@ describe('GitHub pull request monitor', (): void => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      const result = yield* makeGitHubPullRequestMonitor(provider).inspect(41)
+      const result = yield* (yield* pullRequests).inspect(41)
 
       expect(result.headSha).toBe('head-1')
       expect(result.mergeCommitSha).toBeNull()
@@ -476,7 +496,7 @@ describe('GitHub pull request monitor', (): void => {
         }),
       )
 
-      const error = yield* Effect.flip(makeGitHubPullRequestMonitor(provider).inspect(41))
+      const error = yield* Effect.flip((yield* pullRequests).inspect(41))
 
       expect(error).toMatchObject({
         category: 'tracker_pagination',
@@ -504,7 +524,7 @@ describe('GitHub pull request monitor', (): void => {
         }),
       )
 
-      yield* makeGitHubPullRequestMonitor(provider).requestReview(41, 'head-1')
+      yield* (yield* pullRequests).requestReview(41, 'head-1')
 
       expect(requests).toEqual([
         {
@@ -533,7 +553,7 @@ describe('GitHub pull request monitor', (): void => {
       )
       vi.stubGlobal('fetch', fetchMock)
 
-      expect(yield* makeGitHubPullRequestMonitor(provider).merge(41, 'head-1')).toBe('merge-1')
+      expect(yield* (yield* pullRequests).merge(41, 'head-1')).toBe('merge-1')
     }),
   )
 
@@ -557,10 +577,7 @@ describe('GitHub pull request monitor', (): void => {
       const bodies: string[] = []
       resolveAgainstHead('head-1', bodies)
 
-      yield* makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
-        'thread-1',
-        'thread-2',
-      ])
+      yield* (yield* pullRequests).resolveThreads(41, 'head-1', ['thread-1', 'thread-2'])
 
       expect(bodies).toHaveLength(2)
       expect(bodies[0]).toContain('thread-1')
@@ -589,10 +606,7 @@ describe('GitHub pull request monitor', (): void => {
         )
 
         const failure = yield* Effect.flip(
-          makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
-            'thread-1',
-            'thread-2',
-          ]),
+          (yield* pullRequests).resolveThreads(41, 'head-1', ['thread-1', 'thread-2']),
         )
 
         expect(failure.message).toBe(
@@ -615,7 +629,7 @@ describe('GitHub pull request monitor', (): void => {
       )
 
       const failure = yield* Effect.flip(
-        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', ['thread-1']),
+        (yield* pullRequests).resolveThreads(41, 'head-1', ['thread-1']),
       )
 
       expect(failure.message).toBe(
@@ -630,7 +644,7 @@ describe('GitHub pull request monitor', (): void => {
       resolveAgainstHead('head-2', bodies)
 
       const failure = yield* Effect.flip(
-        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', ['thread-1']),
+        (yield* pullRequests).resolveThreads(41, 'head-1', ['thread-1']),
       )
 
       expect(failure.message).toBe(
@@ -662,10 +676,7 @@ describe('GitHub pull request monitor', (): void => {
       )
 
       const failure = yield* Effect.flip(
-        makeGitHubPullRequestMonitor(provider).resolveThreads(41, 'head-1', [
-          'thread-1',
-          'thread-2',
-        ]),
+        (yield* pullRequests).resolveThreads(41, 'head-1', ['thread-1', 'thread-2']),
       )
 
       expect(failure.message).toBe(

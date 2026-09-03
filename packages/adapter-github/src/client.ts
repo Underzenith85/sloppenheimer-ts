@@ -12,6 +12,12 @@ import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { isJsonValue } from '@sloppenheimer/core/support/json.js'
 import type { GitHubProviderConfig } from './provider.js'
 import { observeGitHubRequest } from './observability.js'
+import {
+  CurrentGitHubRateLimit,
+  githubRateLimitFor,
+  withGitHubRateLimit,
+  type GitHubRateLimit,
+} from './rate-limit.js'
 
 export const githubApiVersion = '2026-03-10'
 export const githubRequestTimeoutMs = 30_000
@@ -198,18 +204,41 @@ const withGitHubHttpClient = <Value, Failure>(
       : Effect.provide(effect, githubHttpClientLayer),
   )
 
-/**
- * Binds one constructed adapter to a client, for every operation it exposes.
- *
- * An operation that stays in Effect can read a client from its caller's context, but `executeTool`
- * leaves Effect for a promise and has no context to read, so an adapter that must talk through a
- * particular client has to carry it from construction. A client bound here is the more specific
- * binding of the two and takes precedence for that adapter's operations.
- */
-export const withBoundHttpClient =
+const withBoundHttpClient =
   (client: HttpClient.HttpClient | undefined) =>
   <Value, Failure>(effect: Effect.Effect<Value, Failure>): Effect.Effect<Value, Failure> =>
     client === undefined ? effect : Effect.provideService(effect, HttpClient.HttpClient, client)
+
+/** What one constructed adapter wraps around every operation it exposes. */
+export type GitHubTransportBinding = <Value, Failure>(
+  effect: Effect.Effect<Value, Failure>,
+) => Effect.Effect<Value, Failure>
+
+/**
+ * Binds one constructed adapter to the transport it talks through: the client its requests go out
+ * on, and the rate limiter its provider generation paces against.
+ *
+ * An operation that stays in Effect could read both from its caller's context, but `executeTool`
+ * leaves Effect for a promise and has no context to read, so an adapter has to carry them from
+ * construction. What is bound here is the more specific of the two and takes precedence for that
+ * adapter's operations, which is what keeps every request a generation makes — tracker, issue
+ * control, code review and host tool alike — on the one limiter that generation shares.
+ */
+const bindGitHubTransport =
+  (limit: GitHubRateLimit, client: HttpClient.HttpClient | undefined): GitHubTransportBinding =>
+  <Value, Failure>(effect: Effect.Effect<Value, Failure>): Effect.Effect<Value, Failure> =>
+    Effect.provideService(withBoundHttpClient(client)(effect), CurrentGitHubRateLimit, limit)
+
+/**
+ * The binding a capability built for `provider` wraps around every operation it exposes. The
+ * limiter comes from the generation registry rather than from this call, which is what makes the
+ * tracker, the issue control and the code review of one credential share a single one.
+ */
+export const githubTransportFor = (
+  provider: GitHubProviderConfig,
+  client?: HttpClient.HttpClient,
+): Effect.Effect<GitHubTransportBinding> =>
+  Effect.map(githubRateLimitFor(provider), (limit) => bindGitHubTransport(limit, client))
 
 const githubRequest = (
   provider: GitHubProviderConfig,
@@ -291,6 +320,9 @@ export const githubJson = (
     }),
     withGitHubHttpClient,
     observeGitHubRequest(init?.method ?? 'GET'),
+    // Outermost, so that waiting for capacity is neither charged to the request's deadline nor
+    // reported as GitHub's own latency. The wait has a metric of its own.
+    withGitHubRateLimit,
   )
 
 /** Reads the `rel="next"` target from a `Link` header, rejecting cross-origin or malformed links. */
