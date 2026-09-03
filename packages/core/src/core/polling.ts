@@ -74,6 +74,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
           yield* onRetryDue(context, event)
           break
         }
+        case 'RetainedWorkspacesObserved': {
+          const observedAt = yield* currentInstant
+          yield* Ref.update(context.state, (current) =>
+            Transitions.recordRetainedWorkspaces(current, { ...event, observedAt }),
+          )
+          break
+        }
         case 'DeliveryDue': {
           yield* onDeliveryDue(context, event)
           break

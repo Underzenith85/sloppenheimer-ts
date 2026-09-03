@@ -132,7 +132,11 @@ export type PortsConfiguration = Readonly<{
 
 export const portsConfiguration = (workflow: Workflow): PortsConfiguration => ({
   tracker: workflow.tracker,
-  workspaces: { root: workflow.config.workspaceRoot, hooks: workflow.config.hooks },
+  workspaces: {
+    root: workflow.config.workspaceRoot,
+    hooks: workflow.config.hooks,
+    retainedLimit: workflow.config.workspaceRetainedLimit,
+  },
 })
 
 /**

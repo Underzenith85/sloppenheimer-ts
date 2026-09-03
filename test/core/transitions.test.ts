@@ -18,6 +18,7 @@ import {
   type ExecutionSnapshot,
   type CompletedEntry,
   type CompletedSnapshot,
+  type RetainedWorkspaceEntry,
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
@@ -58,6 +59,7 @@ const workflow: Workflow = {
     },
     pollingIntervalMs: 30_000,
     workspaceRoot: '/tmp/sloppenheimer',
+    workspaceRetainedLimit: 3,
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -666,6 +668,43 @@ describe('run lifecycle', (): void => {
       totalTokens: 16,
     })
     expect(drained.pendingUsage.has(issue.id)).toBe(false)
+  })
+})
+
+describe('retained workspaces', (): void => {
+  const issue = makeIssue('example/sloppenheimer#273')
+  const observed = (count: number, bytes: number): RetainedWorkspaceEntry => ({
+    issueId: issue.id,
+    identifier: issue.identifier,
+    count,
+    bytes,
+    observedAt: new Date('2026-09-02T15:19:15.000Z'),
+  })
+
+  it('records what a pass over the issue directory counted, and replaces the last count', (): void => {
+    const first = Transitions.recordRetainedWorkspaces(emptyState(), observed(4, 4_096))
+    const second = Transitions.recordRetainedWorkspaces(first, observed(3, 3_072))
+
+    expect(first.retainedWorkspaces.get(issue.id)).toEqual(observed(4, 4_096))
+    expect(second.retainedWorkspaces.get(issue.id)).toEqual(observed(3, 3_072))
+  })
+
+  it('holds no row for an issue that keeps nothing', (): void => {
+    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048))
+
+    const emptied = Transitions.recordRetainedWorkspaces(recorded, observed(0, 0))
+
+    expect(emptied.retainedWorkspaces.has(issue.id)).toBe(false)
+  })
+
+  it('forgets an issue whose workspaces were removed, and is a no-op for one it never counted', (): void => {
+    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048))
+
+    const forgotten = Transitions.forgetRetainedWorkspaces(recorded, issue.id)
+    const untouched = Transitions.forgetRetainedWorkspaces(forgotten, issue.id)
+
+    expect(forgotten.retainedWorkspaces.has(issue.id)).toBe(false)
+    expect(untouched).toBe(forgotten)
   })
 })
 

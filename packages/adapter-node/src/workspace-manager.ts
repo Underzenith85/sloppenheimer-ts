@@ -2,7 +2,7 @@ import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { Cause, Effect, Exit, Option } from 'effect'
 
-import type { HooksConfig } from '@sloppenheimer/core/config/workflow.js'
+import { workflowDefaults, type HooksConfig } from '@sloppenheimer/core/config/workflow.js'
 import type { Workspace } from '@sloppenheimer/core/domain/domain.js'
 import {
   containedRunWorkspacePath,
@@ -40,6 +40,7 @@ import {
   removeRunWorkspace,
 } from './workspace-cleanup.js'
 import { runHook } from './workspace-hooks.js'
+import { pruneIssueWorkspaces } from './workspace-retention.js'
 
 /**
  * The Node implementation of `WorkspaceManagerPort`: the per-run directory lifecycle, with the
@@ -340,6 +341,7 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
 export const makeWorkspaceManager = (
   root: string,
   hooks: HooksConfig,
+  retainedLimit: number = workflowDefaults.workspaceRetainedLimit,
   owner: WorkspaceOwner = hostOwner,
 ): Effect.Effect<WorkspaceManagerPort, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
@@ -366,5 +368,10 @@ export const makeWorkspaceManager = (
               Effect.catchAll(() => Effect.void),
             ),
       remove: (identifier) => removeIssueWorkspaces(fileSystem, hooks, root, identifier),
+      prune: (identifier, protectedKeys) =>
+        pruneIssueWorkspaces(fileSystem, hooks, root, identifier, {
+          limit: retainedLimit,
+          protectedKeys,
+        }),
     }
   })

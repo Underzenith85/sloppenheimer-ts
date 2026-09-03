@@ -202,6 +202,7 @@ const workflow: Workflow = {
     },
     pollingIntervalMs: 30_000,
     workspaceRoot: '/tmp/sloppenheimer',
+    workspaceRetainedLimit: 3,
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -666,6 +667,7 @@ const makeHarness = (
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
         remove: () => Effect.void,
+        prune: () => Effect.succeed({ count: 0, bytes: 0, evicted: 0 }),
       }
     },
     runAgent: ({ config, prompt, maxTurns, onEvent }) =>
@@ -6405,6 +6407,63 @@ describe('per-run workspace leases', (): void => {
           reason: 'run failed before publication: AgentError process_exited',
         },
       })
+    }),
+  )
+
+  it.effect('bounds what an issue keeps once a run has let go of its workspace', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const pruned: ReadonlySet<string>[] = []
+      // No source control to publish through, so the run ends retaining its workspace — the case
+      // that, repeated, is one whole checkout per attempt.
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: (settings) => ({
+          ...recordingWorkspaces(harness, acquired, released)(settings),
+          prune: (_identifier, protectedKeys) =>
+            Effect.sync(() => {
+              pruned.push(protectedKeys)
+              return { count: 2, bytes: 4_096, evicted: 1 }
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retainedWorkspaces.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      // The pass ran once the run had released its workspace, with that workspace protected: the
+      // exit being handled may be turning it into a retained delivery. What the pass left is what
+      // the snapshot publishes, beside the limit the workflow sets.
+      expect(released).toHaveLength(1)
+      expect(pruned).toEqual([new Set([acquired[0]?.key])])
+      expect(snapshot.retainedWorkspaceLimit).toBe(workflow.config.workspaceRetainedLimit)
+      expect(snapshot.retainedWorkspaces).toEqual([
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          count: 2,
+          bytes: 4_096,
+          observedAt: snapshot.retainedWorkspaces[0]?.observedAt,
+        },
+      ])
     }),
   )
 })

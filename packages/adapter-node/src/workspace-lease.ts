@@ -137,6 +137,19 @@ export const leaseIsLive = (lease: WorkspaceLeaseRecord, leasePath: string): boo
   )
 
 /**
+ * Whether the host that retained a record is finished with it: this host itself, whose intentions
+ * for the workspace are the caller's to state, or a host whose process can be seen to be gone and
+ * so holds no intention at all.
+ *
+ * A retained record is nobody's claim, so this is not the liveness question `leaseIsLive` asks; it
+ * is whether anyone could still mean to republish from the directory. A live peer might — a
+ * retained delivery is in-memory intent, invisible from here — and so might one this host cannot
+ * place, which is left alone the way every workspace of an owner it cannot see is.
+ */
+export const retainedOwnerIsFinished = (lease: WorkspaceLeaseRecord): boolean =>
+  lease.owner.hostId === hostOwner.hostId || observeOwner(lease.owner)._tag === 'Gone'
+
+/**
  * The same question of a record that has been staged but not yet published. One this process wrote
  * is on its way to a name of its own, and is never swept out from under its own writer.
  */

@@ -150,16 +150,20 @@ const retryDiscard = (
 const recordDiscarded = (context: OrchestratorContext, entry: DeliveryEntry): Effect.Effect<void> =>
   Effect.gen(function* () {
     const discardedAt = yield* currentInstant
+    // The discard removed the issue's workspaces, retained ones included, so nothing is kept.
     yield* Ref.update(context.state, (current) =>
-      Transitions.releaseClaim(
-        Transitions.updateDetail(current, entry.issue.id, (record) =>
-          recordPublication(record, discardedAt, {
-            status: 'not_performed',
-            branch: entry.prepared.target.branchName,
-            baselineSha: entry.prepared.baselineSha,
-            attempts: entry.attempt,
-            message: 'Unpublished work discarded: the issue no longer wants it',
-          }),
+      Transitions.forgetRetainedWorkspaces(
+        Transitions.releaseClaim(
+          Transitions.updateDetail(current, entry.issue.id, (record) =>
+            recordPublication(record, discardedAt, {
+              status: 'not_performed',
+              branch: entry.prepared.target.branchName,
+              baselineSha: entry.prepared.baselineSha,
+              attempts: entry.attempt,
+              message: 'Unpublished work discarded: the issue no longer wants it',
+            }),
+          ),
+          entry.issue.id,
         ),
         entry.issue.id,
       ),

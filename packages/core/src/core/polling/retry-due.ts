@@ -75,6 +75,11 @@ const resumeRepair = (
     )
     if (Option.isSome(terminalIssue)) {
       yield* entry.execution.workspaces.remove(terminalIssue.value.identifier).pipe(
+        Effect.zipRight(
+          Ref.update(context.state, (pending) =>
+            Transitions.forgetRetainedWorkspaces(pending, event.issueId),
+          ),
+        ),
         Effect.catchAll((error) =>
           logWarning('terminal workspace cleanup failed', {
             ...logContext(terminalIssue.value),
@@ -136,6 +141,11 @@ const resumeContinuation = (
     }
     if (stateIsIn(issue.value.state, effective.workflow.config.tracker.terminalStates)) {
       yield* effective.workspaces.remove(issue.value.identifier).pipe(
+        Effect.zipRight(
+          Ref.update(context.state, (pending) =>
+            Transitions.forgetRetainedWorkspaces(pending, event.issueId),
+          ),
+        ),
         Effect.catchAll((error) =>
           logWarning('terminal workspace cleanup failed', {
             ...logContext(issue.value),

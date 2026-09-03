@@ -1,6 +1,7 @@
 import { type FileSystem } from '@effect/platform'
 import { SystemError, type PlatformError } from '@effect/platform/Error'
-import { rmdir } from 'node:fs/promises'
+import { lstat, readdir, rmdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { Effect, Option, type Scope } from 'effect'
 
 import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
@@ -68,6 +69,47 @@ export const removeDirectoryIfEmpty = (path: string): Effect.Effect<boolean, Pla
             }),
           )
     }),
+  )
+
+/**
+ * The bytes a directory's files hold, without following a link anywhere.
+ *
+ * `FileSystem` offers no `lstat`, and a size that followed links would count whatever a checkout
+ * happened to link to outside the workspace — or loop. Node's recursive `readdir` descends into
+ * directories only, never through a link to one, and `lstat` reports a link as itself. Only files
+ * are summed: what the workspace holds is what an operator wants to know, not what the kernel
+ * spends on directories. A directory that is gone holds nothing, which is reported rather than
+ * failed, because the run directory beside a lease is exactly what a host that died mid-acquisition
+ * leaves missing.
+ */
+export const directorySize = (path: string): Effect.Effect<number, PlatformError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const entries = await readdir(path, { withFileTypes: true, recursive: true })
+      let bytes = 0
+      for (const entry of entries) {
+        if (entry.isFile()) {
+          bytes += (await lstat(join(entry.parentPath, entry.name))).size
+        }
+      }
+      return bytes
+    },
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll((cause) =>
+      (cause as NodeJS.ErrnoException).code === 'ENOENT'
+        ? Effect.succeed(0)
+        : Effect.fail(
+            new SystemError({
+              reason: 'Unknown',
+              module: 'FileSystem',
+              method: 'stat',
+              pathOrDescriptor: path,
+              description: `could not measure the directory: ${path}`,
+              cause,
+            }),
+          ),
+    ),
   )
 
 /**

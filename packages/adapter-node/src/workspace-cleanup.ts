@@ -96,7 +96,7 @@ export const removeRunWorkspace = (
  * still the record that was decided on. A lease that stands again goes back where it was, and the
  * run keeps its workspace.
  */
-const removeFreeRunWorkspace = (
+export const removeFreeRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   runPath: string,

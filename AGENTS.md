@@ -620,6 +620,21 @@ repair agent that had achieved nothing.
   on `prepare` preserving a dirty worktree and on a workspace belonging to an issue, and both were
   removed by #166. Republishing retained artifacts on restart is a revision of that decision and a
   new port surface, not something to reintroduce here.
+- Retained workspaces of an issue that is still open are capped
+  ([#273](https://github.com/Underzenith85/sloppenheimer-ts/issues/273)). Once a run has let go of
+  its workspace the worker's own fiber — off the loop, because a pass over whole checkouts has no
+  bounded size — asks the workspace manager to `prune` the issue to the newest
+  `workspace.retained_limit` retained workspaces, and reports what stayed through the mailbox as a
+  `RetainedWorkspacesObserved` event, which is what the snapshot's `retainedWorkspaces` rows are.
+  Which workspaces go is `domain/workspace-retention.ts`'s rule: never a protected key — the
+  retained delivery's workspace read from the state, and the workspace the run itself has just
+  released, which the exit being handled may be turning into one — never one a lease still holds,
+  and never a retained workspace of a host that is running or unobservable, because a live peer's
+  retained delivery is in-memory intent nothing here can see. A cancellation runs no prune, since
+  what follows it may be removing the issue's workspaces altogether, and every removal site forgets
+  the issue's row. There is no age-based sweep: a lease's reason is a string written for a human,
+  and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
+  rule that deletes.
 - A delivery's publication runs off the event loop. Everything else a handler does is memory and a
   bounded call; a publication is git, and a push waits on a child process that may never close — so
   running it inside the loop let one hung delivery stop every issue the host was running, ticks,

@@ -179,6 +179,9 @@ export const cancelRunning = (
       // no longer exists.
       yield* abandonDelivery(cells, id, reason)
       yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
+        Effect.zipRight(
+          Ref.update(cells.state, (current) => Transitions.forgetRetainedWorkspaces(current, id)),
+        ),
         Effect.catchAll((error) =>
           logWarning('terminal workspace cleanup failed', {
             ...logContext(settled.issue),

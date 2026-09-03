@@ -71,7 +71,7 @@ const adapters = (
       WorkspaceManagerFactory,
       Effect.map(FileSystem.FileSystem, (fileSystem) => ({
         make: (settings) =>
-          makeWorkspaceManager(settings.root, settings.hooks).pipe(
+          makeWorkspaceManager(settings.root, settings.hooks, settings.retainedLimit).pipe(
             Effect.provideService(FileSystem.FileSystem, fileSystem),
           ),
       })),

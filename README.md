@@ -342,7 +342,7 @@ path read it too, and a published name has no business travelling back into the 
 | `generated_at`, `counts`, `codex_totals`                                       | `workflow_path`, `effective_workflow`, `polling_interval_ms`, `max_concurrent_agents`, `rate_limits`                                                                                                                      |
 | `running[]` with `issue_id`, `issue_identifier`, `issue_url`, `title`, `state` | `attempt`, `started_at`, `last_event_at`, `last_event`, `last_message`, `process_id`, `thread_id`, `turn_id`, `session_id`, `turn_count`, `tokens`, `last_reported_tokens`, `worker_host`, `stall_deadline`, `detail_url` |
 | `retrying[]` with `attempt`, `due_at`, `error`                                 | the same identity, `worker_host` and `detail_url` as a running row                                                                                                                                                        |
-| —                                                                              | `delivering[]`, `handoffs[]`, `completed[]`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`                                                                |
+| —                                                                              | `delivering[]`, `handoffs[]`, `completed[]`, `retained_workspaces[]` with `retained_workspace_limit`, `paused_issue_numbers`, `saturated_states`, `inspectable_agents`, `workflow_reload_error`, `handoff_recovery`       |
 
 `counts` carries `delivering` beside `running`, `retrying` and `completed`, and a `delivering[]`
 row names the `branch_name` the work is owed to, the typed source-control `category` and `reason`
@@ -584,6 +584,7 @@ rather than as the first exception a decoder happened to throw.
 | `tracker.terminal_states`     | `[closed]`                               |
 | `polling.interval_ms`         | `30000`                                  |
 | `workspace.root`              | `<tmpdir>/sloppenheimer_workspaces`      |
+| `workspace.retained_limit`    | `3` (retained run workspaces per issue)  |
 | `hooks.timeout_ms`            | `60000`                                  |
 | `agent.max_concurrent_agents` | `10`                                     |
 | `agent.max_turns`             | `20`                                     |
@@ -702,6 +703,19 @@ guards against the substitutions a host can stumble into — a path that resolve
 symlink in the tree, a directory recreated under an inspected name — and not against a process with
 write access to the root that is racing this one, which no check-then-act sequence could. The
 workspace root is the host's own directory.
+
+What an issue that is not finished with keeps is bounded. Every run that ends without publishing
+leaves its whole checkout behind, and an issue that keeps failing, stalling or being cancelled would
+otherwise leave one per attempt until the disk filled. So once a run has let go of its workspace,
+the host prunes the issue directory to the newest `workspace.retained_limit` retained workspaces
+(three by default), evicting the older ones through the same fenced removal terminal cleanup uses,
+`before_remove` hook included. Never evicted: a workspace a retained delivery will republish from,
+the workspace of the run that has just ended, anything a lease still holds, and a retained
+workspace of another host that is still running or that this host cannot observe — a live peer's
+retained delivery is invisible from here, and refusing to remove is the safe error. A host that can
+be seen to be gone held no such intent, so its artifacts are bounded like this host's own. The pass
+also counts and measures what stays, and the snapshot publishes that per issue, so an operator sees
+an issue's checkouts growing before the disk reports it.
 
 Unpublished work therefore does not travel from one attempt to the next in a shared worktree. A
 normal run starts from its branch's own published head when the branch exists, and from the

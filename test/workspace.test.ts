@@ -1173,3 +1173,160 @@ describe.skipIf(!ownersAreObservable)('reclaiming an owner this host can observe
     }),
   )
 })
+
+describe('retained workspace cap', (): void => {
+  /** Retains `runIds` for one issue, each holding one file of `bytes` bytes, in that order. */
+  const retainAll = (
+    manager: WorkspaceManagerPort,
+    identifier: string,
+    runIds: readonly number[],
+    bytes = 16,
+  ): Effect.Effect<readonly Workspace[], WorkspaceError> =>
+    Effect.forEach(runIds, (runId) =>
+      whileLeased(manager, identifier, runId, (workspace) =>
+        host(() => writeFile(join(workspace.path, 'unpublished.txt'), 'x'.repeat(bytes))).pipe(
+          Effect.as(workspace),
+        ),
+      ),
+    )
+
+  it.live('keeps the newest retained workspaces up to the limit and takes the rest', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* makeWorkspaceManager(root, hooks(), 2).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const retained = yield* retainAll(manager, 'GH-273', [1, 2, 3, 4], 100)
+
+      const report = yield* manager.prune(issueIdentifier('GH-273'), new Set())
+
+      // Runs 1 and 2 go, directory and lease alike; 3 and 4 stay, and what stays is what is
+      // counted and measured.
+      expect(report).toEqual({ count: 2, bytes: 200, evicted: 2 })
+      expect(retained.map((workspace) => existsSync(workspace.path))).toEqual([
+        false,
+        false,
+        true,
+        true,
+      ])
+      expect(retained.map((workspace) => existsSync(`${workspace.path}.lease`))).toEqual([
+        false,
+        false,
+        true,
+        true,
+      ])
+    }),
+  )
+
+  it.live('never evicts a protected workspace, and evicts past it', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* makeWorkspaceManager(root, hooks(), 1).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const [first, second, third] = yield* retainAll(manager, 'GH-274', [1, 2, 3])
+
+      const report = yield* manager.prune(
+        issueIdentifier('GH-274'),
+        new Set([second?.key ?? '', third?.key ?? '']),
+      )
+
+      expect(report).toEqual({ count: 2, bytes: 32, evicted: 1 })
+      expect(existsSync(first?.path ?? '')).toBe(false)
+      expect(existsSync(second?.path ?? '')).toBe(true)
+      expect(existsSync(third?.path ?? '')).toBe(true)
+    }),
+  )
+
+  it.live('leaves a workspace a live run holds out of the cap altogether', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* makeWorkspaceManager(root, hooks(), 1).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const [oldest] = yield* retainAll(manager, 'GH-275', [1])
+      const report = yield* whileLeased(manager, 'GH-275', 2, (held) =>
+        Effect.gen(function* () {
+          yield* host(() => writeFile(join(held.path, 'in-progress.txt'), 'x'.repeat(8)))
+          // Run 2 is a held lease, not a retained one: run 1 is the only retained workspace, so
+          // the cap of one keeps it, and the held run is neither counted nor measured.
+          return yield* manager.prune(issueIdentifier('GH-275'), new Set())
+        }),
+      )
+
+      expect(report).toEqual({ count: 1, bytes: 16, evicted: 0 })
+      expect(existsSync(oldest?.path ?? '')).toBe(true)
+    }),
+  )
+
+  it.live("leaves a live peer's retained workspace alone, though it counts against the cap", () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* makeWorkspaceManager(root, hooks(), 1).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const identifier = 'GH-276'
+      const peerPath = yield* host(() =>
+        foreignWorkspace(root, identifier, {
+          hostId: 'another live host',
+          processId: process.pid,
+          startMarker: hostOwner.startMarker,
+          namespace: hostOwner.namespace,
+        }),
+      )
+      // Retained by that peer just now, so it is the newest and the one the cap keeps.
+      yield* host(async () => {
+        const lease = await leaseOf(peerPath)
+        await writeFile(
+          `${peerPath}.lease`,
+          encodeLease({
+            ...lease,
+            status: 'retained',
+            reason: 'delivery failed: publication_failed',
+            releasedAt: new Date(Date.now() + 60_000).toISOString(),
+          }),
+        )
+      })
+      const [own] = yield* retainAll(manager, identifier, [1])
+
+      const report = yield* manager.prune(issueIdentifier(identifier), new Set())
+
+      // This host's own workspace is past the cap and goes; the peer's may be its retained
+      // delivery, which nothing here can see, and stays.
+      expect(report).toEqual({ count: 1, bytes: 27, evicted: 1 })
+      expect(existsSync(own?.path ?? '')).toBe(false)
+      expect(existsSync(peerPath)).toBe(true)
+    }),
+  )
+
+  it.live('reports an issue with no directory as holding nothing', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+
+      expect(yield* manager.prune(issueIdentifier('GH-277'), new Set())).toEqual({
+        count: 0,
+        bytes: 0,
+        evicted: 0,
+      })
+    }),
+  )
+
+  it.live('runs before_remove for each workspace it evicts', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const listing = join(root, 'removed.txt')
+      const manager = yield* makeWorkspaceManager(
+        root,
+        hooks({ beforeRemove: `pwd >> ${listing}` }),
+        1,
+      ).pipe(Effect.provide(hostFileSystem))
+      const [first, second] = yield* retainAll(manager, 'GH-278', [1, 2, 3])
+
+      yield* manager.prune(issueIdentifier('GH-278'), new Set())
+
+      const removed = readFileSync(listing, 'utf8').split('\n').filter(Boolean)
+      expect(new Set(removed)).toEqual(new Set([first?.path, second?.path]))
+    }),
+  )
+})

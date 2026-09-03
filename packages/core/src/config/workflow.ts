@@ -50,6 +50,12 @@ export type EffectiveConfig = Readonly<{
   tracker: TrackerConfig
   pollingIntervalMs: number
   workspaceRoot: string
+  /**
+   * How many retained run workspaces one issue keeps, newest first. A run that ends without
+   * publishing leaves its whole checkout behind as a recovery artifact, and an issue that keeps
+   * failing or stalling would otherwise leave one per attempt until the disk filled.
+   */
+  workspaceRetainedLimit: number
   hooks: HooksConfig
   agent: AgentConfig
   runner: RunnerConfig
@@ -78,6 +84,7 @@ export type Workflow = Readonly<{
 export const workflowDefaults = Object.freeze({
   pollingIntervalMs: 30_000,
   workspaceRootBasename: 'sloppenheimer_workspaces',
+  workspaceRetainedLimit: 3,
   hookTimeoutMs: 60_000,
   maxConcurrentAgents: 10,
   maxTurns: 20,

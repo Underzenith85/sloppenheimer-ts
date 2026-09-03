@@ -4,6 +4,7 @@ import type { HooksConfig } from '../config/workflow.js'
 import type { IssueIdentifier, Workspace } from '../domain/domain.js'
 import type { WorkspaceError } from '../domain/errors.js'
 import type { WorkspaceRelease, WorkspaceRun } from '../domain/workspace-lease.js'
+import type { WorkspacePruneReport } from '../domain/workspace-retention.js'
 import { makeAdapterCell, type AdapterCell } from './cell.js'
 
 /**
@@ -24,6 +25,11 @@ import { makeAdapterCell, type AdapterCell } from './cell.js'
  *
  * `exists` and `remove` are per-issue, because cleanup is: an issue that reached a terminal state
  * takes its retained workspaces with it, and never a workspace another run still holds.
+ *
+ * `prune` is per-issue too, and is what bounds an issue that is not finished with: it keeps the
+ * newest retained workspaces up to the manager's limit, never evicts one of `protectedKeys` or one
+ * a live host may still want, and answers with what the issue still holds — so the count and size
+ * an operator sees is measured rather than inferred.
  */
 export type WorkspaceManagerPort = Readonly<{
   withLeasedWorkspace: <Value, Failure, Requirements>(
@@ -35,12 +41,18 @@ export type WorkspaceManagerPort = Readonly<{
   beforeRun: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
   afterRun: (workspace: Workspace) => Effect.Effect<void>
   remove: (identifier: IssueIdentifier) => Effect.Effect<void, WorkspaceError>
+  prune: (
+    identifier: IssueIdentifier,
+    protectedKeys: ReadonlySet<string>,
+  ) => Effect.Effect<WorkspacePruneReport, WorkspaceError>
 }>
 
 /** The workflow-owned inputs a workspace manager is built from. */
 export type WorkspaceSettings = Readonly<{
   root: string
   hooks: HooksConfig
+  /** How many retained run workspaces one issue keeps; `prune` enforces it. */
+  retainedLimit: number
 }>
 
 /**

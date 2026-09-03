@@ -2,10 +2,11 @@ import { Effect, Exit } from 'effect'
 
 import type { IssueIdentifier, Workspace } from '@sloppenheimer/core/domain/domain.js'
 import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
+import type { WorkspacePruneReport } from '@sloppenheimer/core/domain/workspace-retention.js'
 import type { WorkspaceManagerPort } from '@sloppenheimer/core/ports/workspace.js'
 
 export type WorkspaceOperation = Readonly<{
-  operation: 'acquire' | 'release' | 'exists' | 'beforeRun' | 'afterRun' | 'remove'
+  operation: 'acquire' | 'release' | 'exists' | 'beforeRun' | 'afterRun' | 'remove' | 'prune'
   identifier: IssueIdentifier | null
   workspace: Workspace | null
   /** What a release did with the workspace; `null` for every other operation. */
@@ -27,8 +28,14 @@ export class FakeWorkspaceProcess implements WorkspaceManagerPort {
   /** Run keys released and kept, by issue. */
   readonly #retained = new Map<IssueIdentifier, Set<string>>()
 
-  constructor(root = '/fake/workspaces') {
+  /** How many retained run workspaces one issue keeps, as the Node manager's settings say. */
+  readonly #retainedLimit: number
+  /** The keys `prune` was told never to evict, one entry per call. */
+  readonly protectedKeys: ReadonlySet<string>[] = []
+
+  constructor(root = '/fake/workspaces', retainedLimit = 3) {
     this.#root = root
+    this.#retainedLimit = retainedLimit
   }
 
   #record(
@@ -102,6 +109,31 @@ export class FakeWorkspaceProcess implements WorkspaceManagerPort {
     this.#record('remove', identifier, null)
     this.#keys(this.#retained, identifier).clear()
     return Effect.void
+  }
+
+  /**
+   * Keeps the newest retained workspaces up to the limit, as the Node manager does, and never one
+   * of the protected keys. Run keys here carry the run number, so newest is the highest number.
+   * Every retained workspace is counted as one byte, so a size is reported without a filesystem.
+   */
+  prune(
+    identifier: IssueIdentifier,
+    protectedKeys: ReadonlySet<string>,
+  ): Effect.Effect<WorkspacePruneReport> {
+    this.#record('prune', identifier, null)
+    this.protectedKeys.push(protectedKeys)
+    const retained = this.#keys(this.#retained, identifier)
+    const newestFirst = [...retained].sort(
+      (left, right) => Number(right.slice('run-'.length)) - Number(left.slice('run-'.length)),
+    )
+    let evicted = 0
+    for (const key of newestFirst.slice(this.#retainedLimit)) {
+      if (!protectedKeys.has(key)) {
+        retained.delete(key)
+        evicted += 1
+      }
+    }
+    return Effect.succeed({ count: retained.size, bytes: retained.size, evicted })
   }
 }
 
