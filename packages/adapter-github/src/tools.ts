@@ -1,4 +1,3 @@
-import type * as HttpClient from '@effect/platform/HttpClient'
 import { Effect, Redacted } from 'effect'
 
 import type { JsonObject, JsonValue } from '@sloppenheimer/core/domain/domain.js'
@@ -11,7 +10,7 @@ import type {
   HostToolSpec,
 } from '@sloppenheimer/core/domain/host-tools.js'
 import { unsupportedHostTool } from '@sloppenheimer/core/domain/host-tools.js'
-import { isJsonRecord, trackerResponseError, withBoundHttpClient } from './client.js'
+import { isJsonRecord, trackerResponseError, type GitHubTransportBinding } from './client.js'
 
 /*
  * Host-tool plumbing shared by the tracker's issue tools and the code-review capability's
@@ -77,15 +76,16 @@ const hostToolFailureFrom = (error: TrackerError): HostToolResult => {
 /**
  * Runs one host-tool request to the JSON-safe result the host boundary promises.
  *
- * The port hands tool results back as a promise, so this leaves Effect and with it any client the
- * caller had in context; `httpClient` is the adapter's own binding, carried from construction.
+ * The port hands tool results back as a promise, so this leaves Effect and with it whatever the
+ * caller had in context; `bind` is the adapter's own transport binding — its client and its
+ * generation's rate limiter — carried from construction.
  */
 export const githubToolValue = (
   effect: Effect.Effect<JsonValue, TrackerError>,
-  httpClient?: HttpClient.HttpClient,
+  bind: GitHubTransportBinding,
 ): Promise<HostToolResult> =>
   Effect.runPromise(
-    withBoundHttpClient(httpClient)(effect).pipe(
+    bind(effect).pipe(
       Effect.match({
         onFailure: hostToolFailureFrom,
         onSuccess: (data): HostToolResult => ({ success: true, data }),
@@ -111,7 +111,7 @@ export const githubHostToolExecutor =
   (
     specs: readonly HostToolSpec[],
     provider: GitHubProviderConfig,
-    httpClient: HttpClient.HttpClient | undefined,
+    bind: GitHubTransportBinding,
     run: (
       name: string,
       argumentsValue: JsonValue,
@@ -134,7 +134,7 @@ export const githubHostToolExecutor =
       return invalidToolArguments('Session issue context is invalid for this GitHub adapter')
     }
     const outcome = run(name, argumentsValue, issueNumber)
-    return Effect.isEffect(outcome) ? githubToolValue(outcome, httpClient) : outcome
+    return Effect.isEffect(outcome) ? githubToolValue(outcome, bind) : outcome
   }
 
 export const requiredResponseUrl = (body: JsonValue | null, field: string): string => {

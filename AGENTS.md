@@ -357,7 +357,9 @@ narrows the parsed line with the `support/json.ts` predicates, reports an unusab
 
 Retry policy is a `Schedule` value in `packages/core/src/core/retry.ts`, not a loop with a counter.
 Retryability is a property the error carries (`TrackerError.retryable`, `retryAfterMs`) and a
-recurrence condition of the schedule, rather than a decision each call site repeats.
+recurrence condition of the schedule, rather than a decision each call site repeats. Retry is what a
+provider's refusal earns; not asking for the refusal in the first place is a separate concern, and
+**Architecture record: provider-scoped rate limiting** below is where that lives.
 
 ### Logging and telemetry
 
@@ -805,6 +807,81 @@ lifecycle. This section is the architecture record for it; do not create a separ
   retained workspaces go when the issue reaches a terminal state.
 - The remote executors under #21-#24 inherit this contract: whatever allocates the workspace, every
   run gets its own refs, index, worktree and lifecycle, and holds a lease for as long as it runs.
+
+## Architecture record: provider-scoped rate limiting
+
+Accepted 2026-09-02, implementing
+[#250](https://github.com/Underzenith85/sloppenheimer-ts/issues/250). This section is the
+architecture record for it; do not create a separate ADR.
+
+Mapping GitHub's primary and secondary rate-limit responses onto retryable `TrackerError`s only
+reacts after a request has been refused. Concurrent agents, host tools, reconciliation and handoff
+inspection all speak to one credential, so the burst they make together is what has to be bounded —
+before the request rather than after it.
+
+- The limiter lives in `packages/adapter-github/src/rate-limit.ts` and is applied in `githubJson`,
+  which is the one transport every GitHub read and mutation goes through. Core ports stay
+  provider-neutral: nothing under `core/` or `ports/` knows a limiter exists.
+- It is scoped to a **provider generation** — one owner, repository, API base and credential —
+  rather than to a constructed adapter. The tracker, the issue control and the code review of one
+  credential are built into three independent cells, at different instants; a limiter per instance
+  would bound each of them separately and the credential not at all. Source control is on the list
+  by credential but not by traffic: it speaks Git over HTTPS rather than the REST API, so it makes
+  no request for the limiter to admit.
+- Generations are matched by **traffic**, not by object identity or by whole-provider equality. A
+  validated selection is a new record every time — the console revalidates the workflow on every
+  request and a reload revalidates it on every file change — so an identity key would mint a fresh
+  limiter, and with it a fresh burst allowance, for a credential that had not changed. The key is
+  `githubTrafficKey`: owner, repository, API base and a digest of the credential, which is what
+  shares a budget at GitHub. A base branch reaches no endpoint and a credential moved to another
+  variable name is the same credential, so neither is a second claim on that budget. A rotation is
+  different traffic, so it gets a limiter of its own, and the superseded one stays in force for
+  whatever still holds it: an adapter keeps the limiter it was constructed with until its in-flight
+  work retires it.
+- The registry that keys them is module-level state, which is the deliberate exception to
+  **Resources, services, and layers**. There is no scope that outlives every holder and no parameter
+  every constructor already carries, so the sharing point has to be reachable without either. It is
+  affordable because the limiter acquires nothing — no fiber, no handle, no socket — which is also
+  why `makeGitHubRateLimit` is a plain function rather than an `Effect`: there is nothing for a
+  scope to release. Pacing is a booked instant advanced by one atomic `Ref.modify`, not a bucket a
+  background fiber refills.
+- Nothing is evicted from that registry. A count-based bound cannot tell a generation nothing holds
+  from one an in-flight adapter is still pacing against, and evicting the latter and then meeting
+  its credential again builds a second limiter beside the first, spending an independent burst
+  allowance against one budget. What is retained is made cheap instead: a digest and a number per
+  generation, never the credential — the key hashes it precisely so the registry, which outlives
+  the generations it keys, does not keep a rotated token resident. The outer map is weak on the
+  clock, so a clock that goes away takes its generations with it.
+- A limiter books its admissions on **one** clock, passed in at construction and part of the
+  generation key. A booking is an instant and means nothing measured against a different clock, and
+  the calling fiber is not always the one that built the limiter: the host-tool boundary runs its
+  request through `Effect.runPromise`, on a fresh runtime carrying the default clock. A process has
+  one clock, so this changes nothing in production; a test on `TestClock` gets a limiter that books
+  on its own clock, which is what keeps the pacing out of unrelated adapter tests and what stops a
+  live-clock booking from stranding a test-clock reader behind a wait of decades.
+- The in-flight permit is taken **before** the emission slot is booked, so pacing stays adjacent to
+  issuance. The other order lets a request spend its slot and then sit on the semaphore behind a
+  slow holder: when the permit frees, every request queued that way starts at once, a burst larger
+  than the settings describe made of slots paid for minutes earlier. Holding a permit across the
+  wait costs nothing, because a request waiting for capacity has not been issued either way.
+- Capacity waits are interruptible. An interrupted in-flight permit is released by
+  `Effect.Semaphore`, and an interrupted pacing wait gives its emission slot back when it is still
+  the last booking — when it is not, a later reservation has already been handed out against it and
+  the slot is forfeited, which errs towards asking GitHub for less.
+- Defaults are conservative, fixed, and documented beside the code: 120 requests per 90 seconds
+  (4,800 an hour against a 5,000-an-hour token) at 8 in flight. The burst is deliberately larger
+  than `githubMaxPages`, so one scoped list read is never throttled against itself. They are not
+  configurable — a workflow that could raise them could exhaust the credential every other host
+  shares.
+- `Retry-After` and `X-RateLimit-Reset` remain authoritative for a request GitHub did reject. The
+  limiter is upstream of that and changes nothing about it.
+- The wait is observable and never carries a credential: `sloppenheimer_github_rate_limit_delay`
+  records it, deliberately apart from `sloppenheimer_github_request_duration` so that local pacing
+  cannot read as a slow tracker, and a wait past a second is logged by provider scope. It covers
+  the whole wait, the permit as well as the emission slot: request latency begins once a request is
+  issued, so a queue behind several slow requests is time no other signal accounts for. That is why
+  it is measured from an instant the caller reads before the permit rather than by timing an
+  effect — the two acquisitions are not one effect to wrap.
 
 ## Testing
 
