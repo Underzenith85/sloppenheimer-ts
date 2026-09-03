@@ -192,7 +192,7 @@ const runDeliveryAttempt = (
       return { _tag: 'Held' } as const
     }
     if (disposition === 'discard') {
-      yield* stopRetentionPass(context.execution, entry.issue.id)
+      yield* stopRetentionPass(context, entry.issue.id)
       const removed = yield* entry.execution.workspaces
         .remove(entry.issue.identifier)
         .pipe(asSettled)

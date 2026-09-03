@@ -1442,6 +1442,31 @@ describe('retained workspace cap', (): void => {
     }),
   )
 
+  it.live('keeps no place under the cap for a lease whose workspace is already gone', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const identifier = 'GH-283'
+      const manager = yield* makeWorkspaceManager(root, hooks(), 1).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const [real] = yield* retainAll(manager, identifier, [1])
+      // What a release that removed the directory and then failed before its record leaves: the
+      // lease alone, acquired more recently than the checkout that is actually still there.
+      const [orphan] = yield* retainAll(manager, identifier, [2])
+      yield* host(() => rm(orphan?.path ?? '', { force: true, recursive: true }))
+
+      const report = yield* manager.prune(
+        { identifier: issueIdentifier(identifier), runId: 3 },
+        new Set(),
+      )
+
+      // Counting the empty name would let it hold the one place the cap keeps and push the real
+      // recovery checkout past the limit, deleting work nothing else holds.
+      expect(report).toEqual({ count: 1, bytes: 16, evicted: 0 })
+      expect(existsSync(real?.path ?? '')).toBe(true)
+    }),
+  )
+
   it.live('runs before_remove for each workspace it evicts', () =>
     Effect.gen(function* () {
       const root = makeRoot()

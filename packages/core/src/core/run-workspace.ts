@@ -7,7 +7,7 @@ import { logInfo, logWarning } from '../support/logging.js'
 import { logContext } from './policy.js'
 import * as Transitions from './transitions.js'
 import type { PostflightOutcome } from './postflight.js'
-import { ownIssueFiber, releaseIssueFiberFork, type ExecutionOwner } from './runtime/execution.js'
+import { ownIssueFiber, releaseIssueFiberFork } from './runtime/execution.js'
 import type { RuntimeCells } from './runtime/types.js'
 import type { WorkspaceManagerPort } from '../ports/workspace.js'
 import type { ExecutionSnapshot } from './state.js'
@@ -103,13 +103,7 @@ export const pruneRetainedWorkspaces = (
             cells.execution,
             'prune',
             issue.id,
-            prunePass(cells, issue, execution, runId).pipe(
-              // An interruption — a terminal cleanup taking these workspaces — leaves the issue
-              // recorded as having a pass that has ended, which nothing would then admit.
-              Effect.onInterrupt(() =>
-                Ref.update(cells.state, (state) => Transitions.releasePruneRun(state, issue.id)),
-              ),
-            ),
+            prunePass(cells, issue, execution, runId),
           )
         : Effect.void,
   )
@@ -123,9 +117,20 @@ export const pruneRetainedWorkspaces = (
  * would find an unleased directory, run the same hook against it again and remove it underneath
  * the pass. Signalled rather than waited for: a pass can be inside that hook, and neither the
  * event loop nor a delivery attempt may wait on one.
+ *
+ * Forgetting the admission is this caller's, not the interrupted pass's. A pass that has taken its
+ * last request is already out of the running set and may not have left the fiber collection yet, so
+ * a request admitted in that window installs its own pass under the same key — and a handler on the
+ * old fiber would then forget the new one's admission, letting a third request supersede a pass in
+ * flight. Only whoever calls a pass off says it is no longer running.
  */
-export const stopRetentionPass = (execution: ExecutionOwner, id: IssueId): Effect.Effect<void> =>
-  releaseIssueFiberFork(execution, 'prune', id)
+export const stopRetentionPass = (
+  cells: Pick<PruneCells, 'state' | 'execution'>,
+  id: IssueId,
+): Effect.Effect<void> =>
+  Ref.update(cells.state, (state) => Transitions.releasePruneRun(state, id)).pipe(
+    Effect.zipRight(releaseIssueFiberFork(cells.execution, 'prune', id)),
+  )
 
 /**
  * The pass itself, as the fiber that key owns runs it, and again for every run that asked while it

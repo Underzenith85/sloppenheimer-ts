@@ -652,7 +652,9 @@ repair agent that had achieved nothing.
   `RuntimeState`'s to say, like everything else that is running, and admitting one is the same
   transition that records what a refusal is owed: reading the fiber collection instead would be a
   read at one instant and a write at another, with a lost wakeup in between. For the
-  same reason every terminal removal stops the issue's pass first, through `stopRetentionPass`. There is no age-based sweep: a lease's reason is a string written for a human,
+  same reason every terminal removal stops the issue's pass first, through `stopRetentionPass` —
+  which also forgets the admission, because a pass that has taken its last request is already out
+  of the running set and a handler on its own fiber could forget a successor's admission instead. There is no age-based sweep: a lease's reason is a string written for a human,
   and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
   rule that deletes.
 - A delivery's publication runs off the event loop. Everything else a handler does is memory and a

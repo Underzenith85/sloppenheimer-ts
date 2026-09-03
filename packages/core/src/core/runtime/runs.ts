@@ -179,7 +179,7 @@ export const cancelRunning = (
       // have republished it goes in the same step rather than coming due against a directory that
       // no longer exists.
       yield* abandonDelivery(cells, id, reason)
-      yield* stopRetentionPass(cells.execution, id)
+      yield* stopRetentionPass(cells, id)
       yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
         Effect.zipRight(
           Ref.update(cells.state, (current) => Transitions.forgetRetainedWorkspaces(current, id)),

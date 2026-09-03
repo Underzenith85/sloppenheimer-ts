@@ -52,6 +52,13 @@ const retainedWorkspacesIn = (
     for (const key of runKeysIn(yield* fileSystem.readDirectory(issuePath))) {
       const runPath = yield* containedWorkspacePath(issuePath, key)
       const leasePath = leasePathFor(runPath)
+      // A key can come from a lease record alone, and a release that removed the directory and
+      // then failed before its record leaves exactly that. There is no workspace there to keep:
+      // counting one would let an empty name hold a place under the cap and push a real recovery
+      // checkout past it, and terminal cleanup reclaims the stray record.
+      if (!(yield* realDirectoryExists(fileSystem, runPath))) {
+        continue
+      }
       const lease = yield* readLease(fileSystem, leasePath)
       // A directory with no lease beside it is nobody's: a host killed between taking a record
       // aside and putting it back leaves one, and the staged record is swept later. Cleanup
