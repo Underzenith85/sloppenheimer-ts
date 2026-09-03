@@ -720,6 +720,22 @@ describe('retained workspaces', (): void => {
     expect(removed.workspaceRemovals.has(newest)).toBe(true)
   })
 
+  it('keeps a rewritten removal at the newest end rather than its original place', (): void => {
+    const limit = Transitions.recordedWorkspaceRemovals
+    const rewritten = issueId('example/sloppenheimer#0')
+    const filled = Array.from({ length: limit }, (_, index) =>
+      issueId(`example/sloppenheimer#${String(index)}`),
+    ).reduce(Transitions.forgetRetainedWorkspaces, emptyState())
+
+    // The oldest goes terminal a second time, and then one more issue does.
+    const renewed = Transitions.forgetRetainedWorkspaces(filled, rewritten)
+    const full = Transitions.forgetRetainedWorkspaces(renewed, issueId('example/sloppenheimer#x'))
+
+    // A write is what makes a record worth keeping, so the rewritten one is not the first to go.
+    expect(full.workspaceRemovals.has(rewritten)).toBe(true)
+    expect(full.workspaceRemovals.has(issueId('example/sloppenheimer#1'))).toBe(false)
+  })
+
   it('refuses a count from a run a removal has overtaken, and takes one from a later run', (): void => {
     // Run 7 is the newest allocated when the removal happens; its count arrives afterwards.
     const [runId, allocated] = Transitions.takeRunId(emptyState())

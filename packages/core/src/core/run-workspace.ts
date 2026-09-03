@@ -14,6 +14,7 @@ import {
   type ExecutionOwner,
 } from './runtime/execution.js'
 import type { RuntimeCells } from './runtime/types.js'
+import type { WorkspaceManagerPort } from '../ports/workspace.js'
 import type { ExecutionSnapshot } from './state.js'
 
 /**
@@ -135,8 +136,9 @@ const prunePass = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     let current = runId
+    let workspaces = execution.workspaces
     for (;;) {
-      yield* pruneOnce(cells, issue, execution, current)
+      yield* pruneOnce(cells, issue, workspaces, current)
       const owed = yield* Ref.modify(cells.state, (state) =>
         Transitions.takePruneRequest(state, issue.id),
       )
@@ -144,6 +146,11 @@ const prunePass = (
         return
       }
       current = owed.value
+      // An owed round belongs to a run dispatched after this pass began, so it is bounded through
+      // the manager in force rather than the one this pass started with: a reload may have moved
+      // the workspace root, or changed the cap, since — and that run's workspace is under the root
+      // it was dispatched into.
+      workspaces = (yield* Ref.get(cells.state)).lastKnownGood.workspaces
     }
   })
 
@@ -151,13 +158,13 @@ const prunePass = (
 const pruneOnce = (
   cells: PruneCells,
   issue: Issue,
-  execution: ExecutionSnapshot,
+  workspaces: WorkspaceManagerPort,
   runId: number,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const state = yield* Ref.get(cells.state)
     const delivery = state.deliveries.get(issue.id)
-    const report = yield* execution.workspaces.prune(
+    const report = yield* workspaces.prune(
       { identifier: issue.identifier, runId },
       new Set(delivery === undefined ? [] : [delivery.prepared.workspace.key]),
     )

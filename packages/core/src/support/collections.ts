@@ -39,7 +39,8 @@ export const withoutMember = <Value>(set: ReadonlySet<Value>, value: Value): Rea
 
 /**
  * Writes an entry and drops oldest-first until the map is within its cap. Insertion order is the
- * age order, and rewriting an existing key keeps that key's original place rather than renewing it.
+ * age order, and a rewritten key takes its place at the newest end: a write is what makes an entry
+ * worth keeping, so keeping the original place would evict a freshly written entry first.
  */
 export const withCappedEntry = <Key, Value>(
   map: ReadonlyMap<Key, Value>,
@@ -47,7 +48,9 @@ export const withCappedEntry = <Key, Value>(
   value: Value,
   limit: number,
 ): ReadonlyMap<Key, Value> => {
-  const next = new Map(map).set(key, value)
+  const next = new Map(map)
+  next.delete(key)
+  next.set(key, value)
   for (const existing of next.keys()) {
     if (next.size <= limit) {
       break

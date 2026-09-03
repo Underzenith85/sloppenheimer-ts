@@ -1389,6 +1389,34 @@ describe('retained workspace cap', (): void => {
     }),
   )
 
+  it.live('leaves no lease standing over a workspace another removal took first', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const identifier = 'GH-281'
+      // The hook is what makes the window: the pass is inside it, with the eviction candidate's
+      // lease held aside in staging, when a terminal cleanup takes the same directory and the
+      // pass is interrupted — which is what stopping it does, since nothing waits out that hook.
+      const manager = yield* makeWorkspaceManager(root, hooks({ beforeRemove: 'sleep 5' }), 1).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const [oldest] = yield* retainAll(manager, identifier, [1, 2])
+      const evicted = oldest?.path ?? ''
+
+      const pass = Effect.runFork(
+        manager.prune({ identifier: issueIdentifier(identifier), runId: 2 }, new Set()),
+      )
+      yield* Effect.sleep('300 millis')
+      // The cleanup got there first: the directory is gone while the pass holds its record.
+      yield* host(() => rm(evicted, { force: true, recursive: true }))
+      yield* Fiber.interrupt(pass)
+
+      // Putting the record back would leave a lease standing over nothing, and that record is what
+      // would then keep the issue directory from ever going with its workspaces.
+      expect(existsSync(evicted)).toBe(false)
+      expect(existsSync(`${evicted}.lease`)).toBe(false)
+    }),
+  )
+
   it.live('runs before_remove for each workspace it evicts', () =>
     Effect.gen(function* () {
       const root = makeRoot()
