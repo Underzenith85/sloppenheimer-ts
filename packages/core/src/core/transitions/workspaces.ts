@@ -52,7 +52,7 @@ export const recordRetainedWorkspaces = (
 export const forgetRetainedWorkspaces = (state: RuntimeState, id: IssueId): RuntimeState => ({
   ...state,
   retainedWorkspaces: withoutEntry(state.retainedWorkspaces, id),
-  pruneRequests: withoutEntry(state.pruneRequests, id),
+  pruneRuns: withoutEntry(state.pruneRuns, id),
   workspaceRemovals: withCappedEntry(
     state.workspaceRemovals,
     id,
@@ -62,30 +62,49 @@ export const forgetRetainedWorkspaces = (state: RuntimeState, id: IssueId): Runt
 })
 
 /**
- * Records that a run ended while a pass for its issue was already running, so the pass runs again
- * for it once it finishes.
+ * Admits one pass per issue, and records what a refused one is owed. Answers whether the caller is
+ * the pass: an issue with no entry gets one and is told to run; an issue that already has a pass
+ * has this run recorded against it instead.
  *
- * A pass reads the issue directory once, at its start: a run that ends after that is invisible to
- * it, and dropping the request would leave that workspace outside the cap and the count until some
- * later run of the same issue happened to ask — which may be never. The newest asker wins, because
- * its workspace is the one the next pass must protect. The map holds one entry per issue with a
- * pass in flight, and the pass consumes it.
+ * Both halves are this one transition, and taking the owed run is the other, because the two are a
+ * handoff: a pass that read no owed run and a caller that saw a fiber still in the collection are
+ * both looking at an instant, and between those two instants a request can be written that nothing
+ * consumes and a pass started that nothing knows about. The state says which passes are running,
+ * as it says what is running everywhere else; the fiber collection only owns them.
+ *
+ * A pass reads the issue directory once, at its start, so a run that ends after that is invisible
+ * to it and its request has to outlive the refusal. The newest asker wins: its workspace is the one
+ * the next round must protect. One entry per issue with a pass in flight, taken when it ends.
  */
-export const requestPrune = (state: RuntimeState, id: IssueId, runId: number): RuntimeState => ({
-  ...state,
-  pruneRequests: withEntry(state.pruneRequests, id, runId),
-})
+export const admitPrune = (
+  state: RuntimeState,
+  id: IssueId,
+  runId: number,
+): readonly [boolean, RuntimeState] =>
+  state.pruneRuns.has(id)
+    ? [false, { ...state, pruneRuns: withEntry(state.pruneRuns, id, runId) }]
+    : [true, { ...state, pruneRuns: withEntry(state.pruneRuns, id, null) }]
 
-/** Takes what a finishing pass is owed, so it runs once more for the run that asked while it ran. */
+/**
+ * What a finishing pass is owed: the run that asked while it ran, or nothing — and nothing takes
+ * the issue out of the running set in the same step, so the next caller is admitted rather than
+ * recorded against a pass that has ended.
+ */
 export const takePruneRequest = (
   state: RuntimeState,
   id: IssueId,
 ): readonly [Option.Option<number>, RuntimeState] => {
-  const runId = state.pruneRequests.get(id)
-  return runId === undefined
-    ? [Option.none(), state]
-    : [Option.some(runId), { ...state, pruneRequests: withoutEntry(state.pruneRequests, id) }]
+  const owed = state.pruneRuns.get(id)
+  return owed === undefined || owed === null
+    ? [Option.none(), { ...state, pruneRuns: withoutEntry(state.pruneRuns, id) }]
+    : [Option.some(owed), { ...state, pruneRuns: withEntry(state.pruneRuns, id, null) }]
 }
+
+/** Forgets that a pass is running, for one that ended without taking what it was owed. */
+export const releasePruneRun = (state: RuntimeState, id: IssueId): RuntimeState => ({
+  ...state,
+  pruneRuns: withoutEntry(state.pruneRuns, id),
+})
 
 /** Every issue holding retained workspaces, largest first so the growth is at the top. */
 export const retainedWorkspaceSnapshots = (

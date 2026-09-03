@@ -63,7 +63,7 @@ export type RuntimeState = Readonly<{
   /** The retention pass's three slices, all reasoned about in `transitions/workspaces.ts`. */
   retainedWorkspaces: ReadonlyMap<IssueId, RetainedWorkspaceEntry>
   workspaceRemovals: ReadonlyMap<IssueId, number>
-  pruneRequests: ReadonlyMap<IssueId, number>
+  pruneRuns: ReadonlyMap<IssueId, number | null>
   /**
    * Finished work an earlier host recorded, restored from the completion store and already
    * filtered to the Finished window.
@@ -457,7 +457,7 @@ export const initialState = (
   retries: new Map(),
   retainedWorkspaces: new Map(),
   workspaceRemovals: new Map(),
-  pruneRequests: new Map(),
+  pruneRuns: new Map(),
   deliveries: new Map(),
   completed: new Map(),
   restoredCompletions: restored.completions,

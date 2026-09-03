@@ -7,12 +7,7 @@ import { logInfo, logWarning } from '../support/logging.js'
 import { logContext } from './policy.js'
 import * as Transitions from './transitions.js'
 import type { PostflightOutcome } from './postflight.js'
-import {
-  issueFiberRunning,
-  ownIssueFiber,
-  releaseIssueFiberFork,
-  type ExecutionOwner,
-} from './runtime/execution.js'
+import { ownIssueFiber, releaseIssueFiberFork, type ExecutionOwner } from './runtime/execution.js'
 import type { RuntimeCells } from './runtime/types.js'
 import type { WorkspaceManagerPort } from '../ports/workspace.js'
 import type { ExecutionSnapshot } from './state.js'
@@ -96,18 +91,27 @@ export const pruneRetainedWorkspaces = (
   execution: ExecutionSnapshot,
   runId: number,
 ): Effect.Effect<void> =>
-  Effect.flatMap(issueFiberRunning(cells.execution, 'prune', issue.id), (running) =>
-    running
-      ? // Owed, never dropped: the pass in flight read the issue directory before this run's
-        // workspace existed, so it can neither evict nor count it, and it runs again for this run
-        // when it finishes.
-        Ref.update(cells.state, (state) => Transitions.requestPrune(state, issue.id, runId))
-      : ownIssueFiber(
-          cells.execution,
-          'prune',
-          issue.id,
-          prunePass(cells, issue, execution, runId),
-        ),
+  Effect.flatMap(
+    // Admission and the owed request are one transition, and the handoff at the other end is
+    // another: asking the fiber collection whether a pass is running would be a read of one
+    // instant and a write at a later one, and a request written in between is one nothing
+    // consumes.
+    Ref.modify(cells.state, (state) => Transitions.admitPrune(state, issue.id, runId)),
+    (admitted) =>
+      admitted
+        ? ownIssueFiber(
+            cells.execution,
+            'prune',
+            issue.id,
+            prunePass(cells, issue, execution, runId).pipe(
+              // An interruption — a terminal cleanup taking these workspaces — leaves the issue
+              // recorded as having a pass that has ended, which nothing would then admit.
+              Effect.onInterrupt(() =>
+                Ref.update(cells.state, (state) => Transitions.releasePruneRun(state, issue.id)),
+              ),
+            ),
+          )
+        : Effect.void,
   )
 
 /**

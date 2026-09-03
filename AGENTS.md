@@ -648,7 +648,10 @@ repair agent that had achieved nothing.
   so a replacement enumerating in that window would neither evict nor count that workspace. A pass
   already running enforces the same cap over the same directory, so a second is declined — and
   owed rather than dropped, because that pass read the directory before the asking run's workspace
-  existed: it runs again for the newest asker when it finishes. For the
+  existed: it runs again for the newest asker when it finishes. Which issues have a pass is
+  `RuntimeState`'s to say, like everything else that is running, and admitting one is the same
+  transition that records what a refusal is owed: reading the fiber collection instead would be a
+  read at one instant and a write at another, with a lost wakeup in between. For the
   same reason every terminal removal stops the issue's pass first, through `stopRetentionPass`. There is no age-based sweep: a lease's reason is a string written for a human,
   and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
   rule that deletes.

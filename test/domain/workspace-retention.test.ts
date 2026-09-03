@@ -1,12 +1,5 @@
 import { describe, expect, it } from 'vitest'
 
-import { issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
-import {
-  heldLease,
-  retainedLease,
-  type WorkspaceLeaseRecord,
-  type WorkspaceOwner,
-} from '@sloppenheimer/core/domain/workspace-lease.js'
 import {
   newestFirst,
   workspacesToEvict,
@@ -14,35 +7,18 @@ import {
 } from '@sloppenheimer/core/domain/workspace-retention.js'
 
 /**
- * The cap on an issue's retained workspaces is a rule over lease records, exercised here without a
- * filesystem or a process table. Whether a record's writer is still there is the adapter's
- * question; what its answer permits is decided below.
+ * The cap on an issue's retained workspaces is a rule over what the host could read of each one,
+ * exercised here without a filesystem or a process table. Whether a record's writer is still there
+ * is the adapter's question; what its answer permits is decided below.
  */
 
-const owner: WorkspaceOwner = {
-  hostId: 'host-a',
-  processId: 4242,
-  startMarker: '918273',
-  namespace: 'boot-1/pid:[4026531836]',
-}
-const identifier = issueIdentifier('owner/repository#273')
+const released = Date.UTC(2026, 8, 1, 10, 0)
 
-/** A retained record released `minutesAgo` before the newest, from the run number given. */
-const retainedRecord = (runId: number, minutesAgo: number): WorkspaceLeaseRecord =>
-  retainedLease(
-    heldLease(
-      { identifier, runId },
-      `run-${String(runId)}-hosta`,
-      owner,
-      new Date(Date.UTC(2026, 8, 1, 9, 0)),
-    ),
-    'run failed before publication: AgentError process_exited',
-    new Date(Date.UTC(2026, 8, 1, 10, 0) - minutesAgo * 60_000),
-  )
-
+/** One workspace this host let go of `minutesAgo` before the newest. */
 const workspace = (runId: number, minutesAgo: number, ownerFinished = true): RetainedWorkspace => ({
   key: `run-${String(runId)}-hosta`,
-  lease: retainedRecord(runId, minutesAgo),
+  retainedAt: released - minutesAgo * 60_000,
+  runId,
   ownerFinished,
 })
 
@@ -50,19 +26,22 @@ describe('retained workspace ordering', (): void => {
   it('orders by release time, then run number, whatever order the directory listed them in', (): void => {
     const listed = [workspace(2, 5), workspace(4, 0), workspace(3, 0), workspace(1, 10)]
 
-    expect(newestFirst(listed).map((entry) => entry.lease.runId)).toEqual([4, 3, 2, 1])
+    expect(newestFirst(listed).map((entry) => entry.runId)).toEqual([4, 3, 2, 1])
   })
 
-  it('falls back to the acquisition time for a record with no release time', (): void => {
-    const unreleased: RetainedWorkspace = {
-      key: 'run-5-hosta',
-      lease: { ...retainedRecord(5, 0), releasedAt: null },
+  it('sorts a workspace nothing dates oldest, whatever its key', (): void => {
+    // A run directory with no lease beside it: a host killed between taking the record aside and
+    // putting it back leaves one, and no record stands over it.
+    const undated: RetainedWorkspace = {
+      key: 'run-9-hosta',
+      retainedAt: null,
+      runId: null,
       ownerFinished: true,
     }
 
-    // Acquired at 09:00, so it sorts behind everything released at 10:00 and after.
-    expect(newestFirst([unreleased, workspace(1, 30)]).map((entry) => entry.lease.runId)).toEqual([
-      1, 5,
+    expect(newestFirst([undated, workspace(1, 30)]).map((entry) => entry.key)).toEqual([
+      'run-1-hosta',
+      'run-9-hosta',
     ])
   })
 })

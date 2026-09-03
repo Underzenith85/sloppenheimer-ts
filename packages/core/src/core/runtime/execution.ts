@@ -57,13 +57,6 @@ export const ownIssueFiber = (
   body: Effect.Effect<void>,
 ): Effect.Effect<void> => Effect.asVoid(FiberMap.run(owner, issueKey(purpose, id), body))
 
-/** Whether the issue already has a fiber for this purpose, so a caller can decline to add one. */
-export const issueFiberRunning = (
-  owner: ExecutionOwner,
-  purpose: ExecutionPurpose,
-  id: IssueId,
-): Effect.Effect<boolean> => FiberMap.has(owner, issueKey(purpose, id))
-
 /** Arms the polling timer, replacing whatever pass the previous interval had pending. */
 export const ownPollTimer = (
   owner: ExecutionOwner,

@@ -1417,6 +1417,31 @@ describe('retained workspace cap', (): void => {
     }),
   )
 
+  it.live('takes a run directory that has no lease beside it at all', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const identifier = 'GH-282'
+      const manager = yield* makeWorkspaceManager(root, hooks(), 1).pipe(
+        Effect.provide(hostFileSystem),
+      )
+      const [orphan] = yield* retainAll(manager, identifier, [1, 2])
+      // What a host killed between taking a record aside and putting it back leaves, once the
+      // staged record has been swept: the directory, and nothing standing over it.
+      yield* host(() => rm(`${orphan?.path ?? ''}.lease`, { force: true }))
+
+      const report = yield* manager.prune(
+        { identifier: issueIdentifier(identifier), runId: 2 },
+        new Set(),
+      )
+
+      // Cleanup already reads a directory with no lease as free. A cap that only read lease
+      // records would leave one of these on disk per such death, outside the limit and the count,
+      // for as long as the issue stayed open.
+      expect(report).toEqual({ count: 1, bytes: 16, evicted: 1 })
+      expect(existsSync(orphan?.path ?? '')).toBe(false)
+    }),
+  )
+
   it.live('runs before_remove for each workspace it evicts', () =>
     Effect.gen(function* () {
       const root = makeRoot()

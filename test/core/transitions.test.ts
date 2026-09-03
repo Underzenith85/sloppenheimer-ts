@@ -705,6 +705,43 @@ describe('retained workspaces', (): void => {
     expect(forgotten.retainedWorkspaces.has(issue.id)).toBe(false)
   })
 
+  it('admits one pass per issue and records what a refused one is owed', (): void => {
+    const [first, admitted] = Transitions.admitPrune(emptyState(), issue.id, 1)
+    const [second, recorded] = Transitions.admitPrune(admitted, issue.id, 2)
+    const [third, superseded] = Transitions.admitPrune(recorded, issue.id, 3)
+
+    expect(first).toBe(true)
+    expect(second).toBe(false)
+    expect(third).toBe(false)
+    // The newest asker wins: its workspace is the one the next round has to protect.
+    expect(superseded.pruneRuns.get(issue.id)).toBe(3)
+  })
+
+  it('hands a finishing pass what it is owed, and lets the next caller in when it is done', (): void => {
+    const [, running] = Transitions.admitPrune(emptyState(), issue.id, 1)
+    const [, owed] = Transitions.admitPrune(running, issue.id, 2)
+
+    const [taken, continuing] = Transitions.takePruneRequest(owed, issue.id)
+    const [none, ended] = Transitions.takePruneRequest(continuing, issue.id)
+    const [next] = Transitions.admitPrune(ended, issue.id, 3)
+
+    // Taking is the other half of the handoff: nothing owed takes the issue out of the running
+    // set in the same step, so a request cannot be written against a pass that has ended.
+    expect(taken).toEqual(Option.some(2))
+    expect(Option.isNone(none)).toBe(true)
+    expect(ended.pruneRuns.has(issue.id)).toBe(false)
+    expect(next).toBe(true)
+  })
+
+  it('forgets a pass whose fiber ended without taking what it was owed', (): void => {
+    const [, running] = Transitions.admitPrune(emptyState(), issue.id, 1)
+
+    const released = Transitions.releasePruneRun(running, issue.id)
+
+    expect(released.pruneRuns.has(issue.id)).toBe(false)
+    expect(Transitions.admitPrune(released, issue.id, 2)[0]).toBe(true)
+  })
+
   it('bounds the removals it remembers, dropping the oldest', (): void => {
     const limit = Transitions.recordedWorkspaceRemovals
     const oldest = issueId('example/sloppenheimer#0')

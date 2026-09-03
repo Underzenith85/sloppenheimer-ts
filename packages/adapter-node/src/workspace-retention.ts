@@ -32,29 +32,42 @@ import { readLease } from './workspace-lease-store.js'
  * that rule needs, removes what it names, and measures the rest.
  */
 
-/** An issue directory's retained workspaces, as the pruning rule reads them. */
+/**
+ * The run keys an issue directory holds, from its run directories and its lease records alike —
+ * the same reading cleanup takes, so nothing the one can remove is invisible to the other.
+ */
+const runKeysIn = (entries: readonly string[]): readonly string[] => [
+  ...new Set(
+    entries.map((entry) => (isLeaseEntry(entry) ? entry.slice(0, -'.lease'.length) : entry)),
+  ),
+]
+
+/** An issue directory's workspaces that no live run holds, as the pruning rule reads them. */
 const retainedWorkspacesIn = (
   fileSystem: FileSystem.FileSystem,
   issuePath: string,
 ): Effect.Effect<readonly RetainedWorkspace[], WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     const retained: RetainedWorkspace[] = []
-    for (const entry of yield* fileSystem.readDirectory(issuePath)) {
-      if (!isLeaseEntry(entry)) {
-        continue
-      }
-      const key = entry.slice(0, -'.lease'.length)
+    for (const key of runKeysIn(yield* fileSystem.readDirectory(issuePath))) {
       const runPath = yield* containedWorkspacePath(issuePath, key)
       const leasePath = leasePathFor(runPath)
       const lease = yield* readLease(fileSystem, leasePath)
-      // Every workspace no live run holds, which is the retained ones and one more: a release
-      // whose rewrite failed leaves a `held` record its host has let go of. Filtering on the
-      // status alone would keep those outside the cap and outside the count until the issue
-      // reached a terminal state, one per failed release.
-      if (Option.isSome(lease) && !leaseIsLive(lease.value, leasePath)) {
+      // A directory with no lease beside it is nobody's: a host killed between taking a record
+      // aside and putting it back leaves one, and the staged record is swept later. Cleanup
+      // already reads those as free, and a cap that skipped them would leave one on disk per
+      // such death, outside both the limit and the count, for as long as the issue stayed open.
+      if (Option.isNone(lease)) {
+        retained.push({ key, retainedAt: null, runId: null, ownerFinished: true })
+        continue
+      }
+      // Otherwise every workspace no live run holds, which is the retained records and one more:
+      // a release whose rewrite failed leaves a `held` record its host has let go of.
+      if (!leaseIsLive(lease.value, leasePath)) {
         retained.push({
           key,
-          lease: lease.value,
+          retainedAt: Date.parse(lease.value.releasedAt ?? lease.value.acquiredAt),
+          runId: lease.value.runId,
           ownerFinished: retainedOwnerIsFinished(lease.value),
         })
       }

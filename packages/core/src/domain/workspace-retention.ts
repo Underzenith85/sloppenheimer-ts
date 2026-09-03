@@ -1,5 +1,3 @@
-import type { WorkspaceLeaseRecord } from './workspace-lease.js'
-
 /**
  * The bound on what an issue keeps on disk.
  *
@@ -37,10 +35,17 @@ export type WorkspaceRetention = Readonly<{
   protectedKeys: ReadonlySet<string>
 }>
 
-/** A retained lease as the pruning rule reads it. */
+/** One workspace no live run holds, as the pruning rule reads it. */
 export type RetainedWorkspace = Readonly<{
   key: string
-  lease: WorkspaceLeaseRecord
+  /**
+   * When the run let it go — its release, or its acquisition for a record that never said. `null`
+   * for a run directory with no lease beside it at all, which is what a host killed between taking
+   * a record aside and putting it back leaves: nothing dates it, and nothing owns it.
+   */
+  retainedAt: number | null
+  /** The run the lease named, for ordering two a host let go of in the same instant. */
+  runId: number | null
   /**
    * Whether the host that retained it is finished with it: this host, whose intentions are the
    * `protectedKeys`, or a host whose process can be seen to be gone and so holds no intention at
@@ -50,20 +55,17 @@ export type RetainedWorkspace = Readonly<{
   ownerFinished: boolean
 }>
 
-/** When a retained lease was released, or, for a record that never said, when it was acquired. */
-const retainedAt = (lease: WorkspaceLeaseRecord): number =>
-  Date.parse(lease.releasedAt ?? lease.acquiredAt)
-
 /**
  * Newest first. Release time is the order an operator means by "the newest", and the run number
- * breaks a tie between two records one host released in the same instant; the key breaks any tie
- * left, so the order is total and the same on every pass.
+ * breaks a tie between two a host let go of in the same instant; the key breaks any tie left, so
+ * the order is total and the same on every pass. A workspace nothing dates sorts oldest: no record
+ * stands over it, so it is the first thing an issue should be rid of.
  */
 export const newestFirst = (retained: readonly RetainedWorkspace[]): readonly RetainedWorkspace[] =>
   [...retained].sort(
     (left, right) =>
-      retainedAt(right.lease) - retainedAt(left.lease) ||
-      right.lease.runId - left.lease.runId ||
+      (right.retainedAt ?? -Infinity) - (left.retainedAt ?? -Infinity) ||
+      (right.runId ?? -Infinity) - (left.runId ?? -Infinity) ||
       left.key.localeCompare(right.key),
   )
 
