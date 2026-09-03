@@ -38,6 +38,12 @@ export type HandoffAction =
   /** Closed without merging: retained, but nothing further is attempted. */
   | Readonly<{ _tag: 'NoteClosed' }>
   | Readonly<{ _tag: 'Repair'; reason: string; headSha: string | null; attempt: number }>
+  /**
+   * Put the branch back on top of the protected base, as the host and not an agent. The head is
+   * the lease: a branch that has moved since it was observed refuses rather than being rebased
+   * from a head that is no longer its own.
+   */
+  | Readonly<{ _tag: 'Rebase'; headSha: string; reason: string }>
 
 export type HandoffDecision = Readonly<{
   handoff: HandoffEntry
@@ -192,6 +198,32 @@ const attributeRepair = (
 }
 
 /**
+ * A rebase the host published, until the provider reports the head it pushed.
+ *
+ * The observation in between is stale -- it carries the head the rebase replaced -- and acting on
+ * it would rebase the branch a second time, against a lease the push has already moved. So the
+ * pass waits, as it waits for a published repair. Any other head, and a pull request that has
+ * closed, is the provider having caught up, and the identity is finished with.
+ */
+const awaitRebasedHead = (
+  handoff: HandoffEntry,
+  observation: PullRequestObservation,
+): HandoffEntry | HandoffDecision => {
+  if (Option.isNone(handoff.rebase) || handoff.rebase.value.publishedHeadSha === null) {
+    return handoff
+  }
+  if (observation.state === 'open' && observation.headSha === handoff.rebase.value.headSha) {
+    return decided({
+      ...handoff,
+      state: 'awaiting_checks',
+      reason:
+        'Rebased the pull request branch onto protected main; waiting for the pull request to report the new head',
+    })
+  }
+  return { ...handoff, rebase: Option.none() }
+}
+
+/**
  * The review gate for an open pull request: every head is reviewed once, and nothing is merged
  * until the review for the head in hand has completed and settled.
  *
@@ -308,7 +340,11 @@ export const observeHandoff = (
   ) {
     return decided(observed)
   }
-  let next = observed
+  const awaited = awaitRebasedHead(observed, observation)
+  if ('action' in awaited) {
+    return awaited
+  }
+  let next = awaited
   const inFlightRepair = next.repair
   if (observation.state === 'open' && Option.isSome(inFlightRepair)) {
     const attributed = attributeRepair(next, observation, inFlightRepair.value)
@@ -338,14 +374,29 @@ export const observeHandoff = (
     )
   }
   const disposition = classifyPullRequest(observation)
-  const settled: HandoffEntry = {
-    ...next,
-    state: disposition.state,
-    headSha: observation.headSha,
-    // The operator's record keeps the withheld history; the repair request below carries the
-    // disposition's reason alone, so an agent is never handed feedback it cannot act on.
-    reason: recordedReason(disposition, observation),
-  }
+  return actOnDisposition(
+    {
+      ...next,
+      state: disposition.state,
+      headSha: observation.headSha,
+      // The operator's record keeps the withheld history; the repair request below carries the
+      // disposition's reason alone, so an agent is never handed feedback it cannot act on.
+      reason: recordedReason(disposition, observation),
+    },
+    disposition,
+    observation,
+  )
+}
+
+/**
+ * The call a settled disposition asks for, once the review gate and the repair accounting have had
+ * their say. `settled` already carries the disposition's state and reason.
+ */
+const actOnDisposition = (
+  settled: HandoffEntry,
+  disposition: HandoffDisposition,
+  observation: PullRequestObservation,
+): HandoffDecision => {
   switch (disposition.state) {
     case 'merged': {
       return decided(settled, { _tag: 'Complete', mergedAt: observation.mergedAt ?? null })
@@ -375,6 +426,19 @@ export const observeHandoff = (
         reason: disposition.reason,
         headSha: observation.headSha,
         attempt: settled.repairHeadShas.length + 1,
+      })
+    }
+    case 'rebase_needed': {
+      if (observation.state !== 'open') {
+        // Only an open pull request classifies as behind; a closed one is merged or closed above.
+        return decided(settled)
+      }
+      // The host's to do, not an agent's: no permission is asked, no slot is taken, and no repair
+      // is counted. What is carried is the head the branch has to still be at when it is pushed.
+      return decided(settled, {
+        _tag: 'Rebase',
+        headSha: observation.headSha,
+        reason: disposition.reason,
       })
     }
     case 'awaiting_checks': {

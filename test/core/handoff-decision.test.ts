@@ -75,6 +75,7 @@ const handoff = (overrides: Partial<HandoffEntry> = {}): HandoffEntry => ({
   repairHeadShas: [],
   repairObservedHeadShas: [],
   repair: Option.none(),
+  rebase: Option.none(),
   reviewRequestedHeadSha: null,
   reviewCompletedHeadSha: null,
   observedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -428,6 +429,95 @@ describe('repair attribution', (): void => {
     expect(decision.handoff.repairHeadShas).toEqual([])
     expect(Option.isNone(decision.handoff.repair)).toBe(true)
     expect(decision.action).toMatchObject({ _tag: 'Repair', attempt: 1 })
+  })
+})
+
+describe('a branch that is behind protected main', (): void => {
+  const reviewed1 = handoff({
+    reviewRequestedHeadSha: 'head-1',
+    reviewCompletedHeadSha: 'head-1',
+    repairHeadShas: ['head-0'],
+    repairObservedHeadShas: ['head-0', 'head-1'],
+  })
+  const behind = open({ mergeState: 'behind', codexReview: reviewed })
+
+  it('asks the host to rebase it, spending no repair', (): void => {
+    const decision = observeHandoff(reviewed1, behind, observedAt)
+
+    expect(decision.action).toEqual({
+      _tag: 'Rebase',
+      headSha: 'head-1',
+      reason: 'The pull request branch is behind protected main',
+    })
+    expect(decision.handoff.state).toBe('rebase_needed')
+    expect(decision.handoff.repairHeadShas).toEqual(['head-0'])
+  })
+
+  it('rebases even once the repair budget is spent', (): void => {
+    const spent = handoff({
+      reviewRequestedHeadSha: 'head-1',
+      reviewCompletedHeadSha: 'head-1',
+      repairHeadShas: ['head-a', 'head-b', 'head-c'],
+    })
+
+    const decision = observeHandoff(spent, behind, observedAt)
+
+    expect(decision.action).toMatchObject({ _tag: 'Rebase', headSha: 'head-1' })
+    expect(decision.handoff.state).toBe('rebase_needed')
+  })
+
+  it('does not read a repair that changed nothing on a behind branch as no progress', (): void => {
+    // A repair dispatched for this before the host learned to rebase -- restored from the store,
+    // or still in flight across the upgrade -- comes back with a clean worktree. That is not a
+    // repair that achieved nothing: there was nothing for it to achieve.
+    const decision = observeHandoff(
+      handoff({
+        reviewRequestedHeadSha: 'head-1',
+        reviewCompletedHeadSha: 'head-1',
+        repairObservedHeadShas: ['head-1'],
+        repair: repairing('head-1'),
+      }),
+      behind,
+      observedAt,
+    )
+
+    expect(decision.handoff.state).toBe('rebase_needed')
+    expect(decision.action).toMatchObject({ _tag: 'Rebase', headSha: 'head-1' })
+    expect(Option.isNone(decision.handoff.repair)).toBe(true)
+    expect(decision.handoff.repairHeadShas).toEqual([])
+  })
+
+  it('waits for the provider to report the head a rebase pushed', (): void => {
+    const published = handoff({
+      state: 'awaiting_checks',
+      headSha: 'head-2',
+      reviewRequestedHeadSha: 'head-1',
+      reviewCompletedHeadSha: 'head-1',
+      rebase: Option.some({ headSha: 'head-1', publishedHeadSha: 'head-2' }),
+    })
+
+    // Still the head the rebase replaced: the provider has not caught up, and acting on it would
+    // rebase the branch a second time against a lease the push already moved.
+    const stale = observeHandoff(published, behind, observedAt)
+    expect(stale.action).toEqual({ _tag: 'None' })
+    expect(stale.handoff.state).toBe('awaiting_checks')
+    expect(Option.isSome(stale.handoff.rebase)).toBe(true)
+
+    // The pushed head, which is a new head like any other: reviewed once, then judged.
+    const reported = observeHandoff(published, open({ headSha: 'head-2' }), observedAt)
+    expect(reported.action).toEqual({ _tag: 'RequestReview', headSha: 'head-2' })
+    expect(Option.isNone(reported.handoff.rebase)).toBe(true)
+  })
+
+  it('lets a rebase identity go once the pull request has closed', (): void => {
+    const decision = observeHandoff(
+      handoff({ rebase: Option.some({ headSha: 'head-1', publishedHeadSha: 'head-2' }) }),
+      { ...open(), state: 'closed', merged: true, mergeCommitSha: 'merge-1' },
+      observedAt,
+    )
+
+    expect(decision.action).toEqual({ _tag: 'Complete', mergedAt: null })
+    expect(Option.isNone(decision.handoff.rebase)).toBe(true)
   })
 })
 

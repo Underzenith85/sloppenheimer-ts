@@ -14,6 +14,8 @@ import {
   type HandoffAction,
 } from './handoff-decision.js'
 import { afterRepairDispatched, awaitingSlot, repairIssue } from './repair.js'
+import { performRebase } from './polling/rebase.js'
+import { rebaseInFlight } from './rebase.js'
 import { hasSlot, logContext } from './policy.js'
 import {
   refreshHandoffIssues,
@@ -25,7 +27,7 @@ import {
 import type { CodeReviewPort } from '../ports/index.js'
 import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { EffectiveWorkflow, HandoffEntry } from './state.js'
+import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
 import * as Transitions from './transitions.js'
 
 /**
@@ -195,6 +197,31 @@ const performRepair = (
     )
   })
 
+/** Asks for a Codex review of the head in hand, and records whether the request was accepted. */
+const performReviewRequest = (
+  context: OrchestratorContext,
+  id: IssueId,
+  handoff: HandoffEntry,
+  capability: CodeReviewPort,
+  headSha: string,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const requested = yield* capability
+      .requestPullRequestReview(handoff.pullRequestNumber, headSha)
+      .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
+    yield* stageHandoff(context, id, afterReviewRequested(handoff, headSha, requested))
+    if (requested === null) {
+      yield* logInfo('Codex review requested for pull request head', {
+        ...logContext(handoff.issue),
+        action: 'pull_request_review_request',
+        outcome: 'completed',
+        error: null,
+        pull_request_url: handoff.pullRequestUrl,
+        head_sha: headSha,
+      })
+    }
+  })
+
 /**
  * Carries out the one call an observation asked for and folds its result back into the handoff.
  * Every branch ends with the handoff written, so the state after a pass reflects what actually
@@ -222,20 +249,7 @@ const perform = (
         return
       }
       case 'RequestReview': {
-        const requested = yield* capability
-          .requestPullRequestReview(handoff.pullRequestNumber, action.headSha)
-          .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
-        yield* stageHandoff(context, id, afterReviewRequested(handoff, action.headSha, requested))
-        if (requested === null) {
-          yield* logInfo('Codex review requested for pull request head', {
-            ...logContext(handoff.issue),
-            action: 'pull_request_review_request',
-            outcome: 'completed',
-            error: null,
-            pull_request_url: handoff.pullRequestUrl,
-            head_sha: action.headSha,
-          })
-        }
+        yield* performReviewRequest(context, id, handoff, capability, action.headSha)
         return
       }
       case 'ResolveThreads': {
@@ -275,6 +289,12 @@ const perform = (
           repairDispatchAllowed,
           codeReview,
         )
+        return
+      }
+      case 'Rebase': {
+        // Not gated on the repair permission or the pass's dispatch flag: no agent is dispatched,
+        // and like the merge it is the host acting on a change that already exists.
+        yield* performRebase(context, id, handoff, action)
         return
       }
     }
@@ -380,26 +400,35 @@ export const reconcileHandoffs = (
         )
       }
     }
-    // Handoffs are observations, not claim owners. A live worker, a queued retry and work waiting
-    // to be published each retain their claim; every idle handoff releases one that was restored
-    // from an older snapshot or left behind by a completed transition.
-    //
-    // The delivery belongs in that list for the same reason the other two do: the claim is what
-    // `dispatchAdmission` refuses on, and an agent dispatched while a publication is queued would
-    // be editing the very worktree that publication is about to push.
-    yield* Ref.update(context.state, (current) => {
-      let released = current
-      for (const id of current.handoffs.keys()) {
-        if (
-          selected(id) &&
-          !current.running.has(id) &&
-          !current.retries.has(id) &&
-          !current.deliveries.has(id)
-        ) {
-          released = Transitions.releaseClaim(released, id)
-        }
-      }
-      return released
-    })
+    yield* Ref.update(context.state, (current) => releaseIdleClaims(current, selected))
     yield* context.persistHandoffs
   })
+
+/**
+ * Handoffs are observations, not claim owners. A live worker, a queued retry and work waiting to
+ * be published each retain their claim; every idle handoff releases one that was restored from an
+ * older snapshot or left behind by a completed transition.
+ *
+ * The delivery belongs in that list for the same reason the other two do: the claim is what
+ * `dispatchAdmission` refuses on, and an agent dispatched while a publication is queued would be
+ * editing the very worktree that publication is about to push. A rebase in flight is the host
+ * moving the branch, and an agent admitted meanwhile would start from the head it is replacing.
+ */
+const releaseIdleClaims = (
+  current: RuntimeState,
+  selected: (id: IssueId) => boolean,
+): RuntimeState => {
+  let released = current
+  for (const [id, handoff] of current.handoffs) {
+    if (
+      selected(id) &&
+      !current.running.has(id) &&
+      !current.retries.has(id) &&
+      !current.deliveries.has(id) &&
+      !rebaseInFlight(handoff)
+    ) {
+      released = Transitions.releaseClaim(released, id)
+    }
+  }
+  return released
+}
