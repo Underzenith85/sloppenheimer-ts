@@ -23,8 +23,8 @@ import type { IssueId } from '../../domain/domain.js'
  * `prune` is the pass that bounds what an issue keeps on disk, and it is a key of its own rather
  * than the tail of the `worker` that starts it: a continuation is dispatched one second after a
  * turn ends, and a pass sharing the worker's key would be interrupted by it on every attempt —
- * which is exactly the run of repeated attempts the cap exists for. Two passes for one issue do
- * supersede: the later one reads the same directory and enforces the same cap.
+ * which is exactly the run of repeated attempts the cap exists for. Unlike every other key here,
+ * it is never superseded; `run-workspace.ts` says why.
  */
 export type ExecutionPurpose = 'worker' | 'retry' | 'delivery' | 'rebase' | 'prune'
 
@@ -56,6 +56,13 @@ export const ownIssueFiber = (
   id: IssueId,
   body: Effect.Effect<void>,
 ): Effect.Effect<void> => Effect.asVoid(FiberMap.run(owner, issueKey(purpose, id), body))
+
+/** Whether the issue already has a fiber for this purpose, so a caller can decline to add one. */
+export const issueFiberRunning = (
+  owner: ExecutionOwner,
+  purpose: ExecutionPurpose,
+  id: IssueId,
+): Effect.Effect<boolean> => FiberMap.has(owner, issueKey(purpose, id))
 
 /** Arms the polling timer, replacing whatever pass the previous interval had pending. */
 export const ownPollTimer = (

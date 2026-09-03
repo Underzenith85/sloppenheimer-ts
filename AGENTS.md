@@ -642,7 +642,12 @@ repair agent that had achieved nothing.
   bounded oldest-first, because a removal is worth remembering only while a pass that began before
   it could still report. The pass is owned under a `prune` key of its own rather than the worker's:
   a continuation is dispatched a second after a turn ends, and a pass sharing that key would be
-  interrupted by it on every attempt — the very run of repeated attempts the cap exists for. There is no age-based sweep: a lease's reason is a string written for a human,
+  interrupted by it on every attempt — the very run of repeated attempts the cap exists for. It is
+  the one key that never supersedes: arming a key only signals the interruption, and a pass holds
+  an eviction candidate's lease aside in staging while it runs the operator's `before_remove` hook,
+  so a replacement enumerating in that window would neither evict nor count that workspace. A pass
+  already running enforces the same cap over the same directory, so a second is declined. For the
+  same reason every terminal removal stops the issue's pass first, through `stopRetentionPass`. There is no age-based sweep: a lease's reason is a string written for a human,
   and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
   rule that deletes.
 - A delivery's publication runs off the event loop. Everything else a handler does is memory and a

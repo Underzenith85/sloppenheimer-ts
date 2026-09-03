@@ -7,6 +7,7 @@ import { recordPublication } from '../../telemetry.js'
 import { settlePostflight } from '../delivery.js'
 import { issueIsActive, issueIsPaused, logContext, stateIsIn } from '../policy.js'
 import { runPostflight } from '../postflight.js'
+import { stopRetentionPass } from '../run-workspace.js'
 import { ownIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { DeliveryEntry } from '../postflight.js'
@@ -191,6 +192,7 @@ const runDeliveryAttempt = (
       return { _tag: 'Held' } as const
     }
     if (disposition === 'discard') {
+      yield* stopRetentionPass(context.execution, entry.issue.id)
       const removed = yield* entry.execution.workspaces
         .remove(entry.issue.identifier)
         .pipe(asSettled)

@@ -1,12 +1,17 @@
 import { Cause, Effect, Exit, Option, Queue, Ref } from 'effect'
 
-import type { Issue } from '../domain/domain.js'
+import type { Issue, IssueId } from '../domain/domain.js'
 import type { AgentError, SourceControlError, WorkspaceError } from '../domain/errors.js'
 import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { logContext } from './policy.js'
 import type { PostflightOutcome } from './postflight.js'
-import { ownIssueFiber } from './runtime/execution.js'
+import {
+  issueFiberRunning,
+  ownIssueFiber,
+  releaseIssueFiberFork,
+  type ExecutionOwner,
+} from './runtime/execution.js'
 import type { RuntimeCells } from './runtime/types.js'
 import type { ExecutionSnapshot } from './state.js'
 
@@ -67,8 +72,15 @@ export const workspaceRelease = (
  * Forked under the issue's `prune` key rather than run where it was asked for. A pass over an
  * issue's retained checkouts is filesystem work of no bounded size, so neither the event loop nor
  * the worker's own tail may wait on it — and the worker's key is armed again by the continuation a
- * second later, which would interrupt a pass that shared it. Two passes for one issue supersede,
- * which is what the key gives: the later one reads the same directory and enforces the same cap.
+ * second later, which would interrupt a pass that shared it.
+ *
+ * A pass already running for the issue is left to finish rather than replaced, which is the one
+ * key here that does not supersede. Replacing it would only signal the interruption, and a pass
+ * inside an operator's `before_remove` hook holds an eviction candidate's lease aside in staging
+ * until its finalizer puts it back: a replacement enumerating in that window would not see that
+ * workspace at all, so it would neither evict nor count it. The pass in flight enforces the same
+ * cap over the same directory, and the workspace of the run asking for this one cannot be among
+ * what it evicts — it was retained after that pass read the directory.
  *
  * What the run itself leased is protected by the run identity rather than by a key read out of the
  * lease: an ending that never reached the session — a provisioning hook that failed — still leaves
@@ -82,7 +94,29 @@ export const pruneRetainedWorkspaces = (
   execution: ExecutionSnapshot,
   runId: number,
 ): Effect.Effect<void> =>
-  ownIssueFiber(cells.execution, 'prune', issue.id, prunePass(cells, issue, execution, runId))
+  Effect.flatMap(issueFiberRunning(cells.execution, 'prune', issue.id), (running) =>
+    running
+      ? Effect.void
+      : ownIssueFiber(
+          cells.execution,
+          'prune',
+          issue.id,
+          prunePass(cells, issue, execution, runId),
+        ),
+  )
+
+/**
+ * Stops the pass bounding this issue, because the workspaces it is deciding about are being taken
+ * away entirely.
+ *
+ * Every terminal removal calls this first. A pass holds an eviction candidate's lease aside while
+ * it runs the operator's `before_remove` hook, and a removal that walked in during that window
+ * would find an unleased directory, run the same hook against it again and remove it underneath
+ * the pass. Signalled rather than waited for: a pass can be inside that hook, and neither the
+ * event loop nor a delivery attempt may wait on one.
+ */
+export const stopRetentionPass = (execution: ExecutionOwner, id: IssueId): Effect.Effect<void> =>
+  releaseIssueFiberFork(execution, 'prune', id)
 
 /** The pass itself, as the fiber that key owns runs it. */
 const prunePass = (
