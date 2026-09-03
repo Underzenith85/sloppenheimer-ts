@@ -147,19 +147,32 @@ const isGitHubProviderConfig = (value: unknown): value is GitHubProviderConfig =
   )
 }
 
+// A rotated credential is a different selection, so the values are compared rather than the
+// wrappers, which are distinct objects on every validation.
+const sameGitHubCredential = (left: GitHubProviderConfig, right: GitHubProviderConfig): boolean =>
+  Redacted.value(left.token) === Redacted.value(right.token)
+
+const sameGitHubProvider = (left: GitHubProviderConfig, right: GitHubProviderConfig): boolean =>
+  providerFields.every((field) => left[field] === right[field]) && sameGitHubCredential(left, right)
+
+/** The fields that decide where a request goes. `baseBranch` is Git's, and reaches no endpoint. */
+const trafficFields = ['owner', 'repository', 'apiBaseUrl'] as const
+
 /**
- * Whether two validated selections are the same credential generation. Exported because the
- * transport's rate limiter is scoped to a generation and has to recognize one: a reload that
- * revalidates an unchanged provider must go on pacing against the limiter already in force.
+ * Whether two validated selections send the same requests with the same credential.
+ *
+ * This is a coarser question than provider equality, and the transport's rate limiter is the
+ * reason it is asked: a limiter is scoped to what shares a budget at GitHub, which is the endpoint
+ * and the token behind it. A reload that changes `base_branch`, or a credential moved to another
+ * variable name without changing its value, rebuilds the adapters but does not create a second
+ * claim on that budget — pacing it as a new generation would hand it a fresh burst allowance
+ * beside the one its predecessor is still spending.
  */
-export const sameGitHubProvider = (
+export const sameGitHubTraffic = (
   left: GitHubProviderConfig,
   right: GitHubProviderConfig,
 ): boolean =>
-  providerFields.every((field) => left[field] === right[field]) &&
-  // A rotated credential is a different selection, so the values are compared rather than the
-  // wrappers, which are distinct objects on every validation.
-  Redacted.value(left.token) === Redacted.value(right.token)
+  trafficFields.every((field) => left[field] === right[field]) && sameGitHubCredential(left, right)
 
 /** The token's own variable name plus the fallbacks GitHub tooling reads without being told to. */
 export const githubSecretEnvironmentNames = (provider: GitHubProviderConfig): readonly string[] => [

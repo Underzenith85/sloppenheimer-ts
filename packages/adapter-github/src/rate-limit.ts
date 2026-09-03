@@ -2,7 +2,7 @@ import { Clock, Context, Duration, Effect, Option, Ref } from 'effect'
 
 import { logInfo } from '@sloppenheimer/core/support/logging.js'
 import { observeGitHubRateLimitDelay } from './observability.js'
-import { sameGitHubProvider, type GitHubProviderConfig } from './provider.js'
+import { sameGitHubTraffic, type GitHubProviderConfig } from './provider.js'
 
 /*
  * Provider-scoped rate limiting for the GitHub transport.
@@ -86,7 +86,7 @@ type Reservation = Readonly<{
 }>
 
 /**
- * Builds a limiter for one provider generation.
+ * Builds a limiter for one provider generation, against the clock it will book its admissions on.
  *
  * This is a plain function rather than an `Effect`, and its state is `unsafeMake`d, because a
  * limiter acquires nothing: there is no fiber, no handle and no socket behind it, so there is
@@ -95,12 +95,20 @@ type Reservation = Readonly<{
  * {@link githubRateLimitFor} — and it is why the pacing is a booked instant rather than a
  * bucket a background fiber refills.
  *
+ * `clock` is a parameter rather than a read of whichever clock the calling fiber happens to carry,
+ * because a booking is an instant and the fiber is not always the one that constructed the
+ * limiter: the host-tool boundary runs its request through `Effect.runPromise`, on a fresh runtime
+ * carrying the default clock. Booking that request against a different clock than the last one
+ * would leave the bucket holding an instant no reader can interpret — and, where the two clocks
+ * are a test clock and the live one, a wait of decades.
+ *
  * Admission is the generic cell rate algorithm. `bookedUntil` is the instant the bucket would next
  * be empty; a request may start `toleranceMs` ahead of it, which is what spends the burst
  * allowance, and every admission books one more emission interval. The whole decision is a single
  * atomic `Ref.modify` of a number, so concurrent fibers cannot both read the same slot.
  */
 export const makeGitHubRateLimit = (
+  clock: Clock.Clock,
   provider: GitHubProviderConfig,
   settings: GitHubRateLimitSettings = githubRateLimitDefaults,
 ): GitHubRateLimit => {
@@ -145,21 +153,29 @@ export const makeGitHubRateLimit = (
     yield* Effect.sleep(Duration.millis(reservation.waitMs)).pipe(
       Effect.onInterrupt(() => surrender(reservation.bookedUntil)),
     )
-  }).pipe(observeGitHubRateLimitDelay)
+  }).pipe(observeGitHubRateLimitDelay, Effect.withClock(clock))
 
   return {
+    /**
+     * The permit is taken before the slot is booked, so that pacing stays adjacent to issuance.
+     * The other order lets a request spend its emission slot and then sit on the semaphore behind
+     * a slow holder: by the time the permit frees, its booking is long past, and every request
+     * queued that way starts at once — a burst larger than the one the settings describe, made of
+     * slots that were paid for minutes earlier. Holding a permit across the wait costs nothing,
+     * because a request waiting for capacity is a request that has not been issued either way.
+     */
     limit: <Value, Failure, Requirements>(
       request: Effect.Effect<Value, Failure, Requirements>,
     ): Effect.Effect<Value, Failure, Requirements> =>
-      Effect.zipRight(admit, inFlight.withPermits(1)(request)),
+      inFlight.withPermits(1)(Effect.zipRight(admit, request)),
   }
 }
 
 type Generation = Readonly<{
   /**
-   * The clock the limiter's bookings were made against. A booking is an instant, so it means
-   * nothing measured against a different clock: a test that installs its own would otherwise
-   * inherit a bucket booked minutes into a future its clock has never reached.
+   * The clock the limiter books its admissions on. A booking is an instant, so it means nothing
+   * measured against a different clock: a test that installs its own would otherwise inherit a
+   * bucket booked minutes into a future its clock has never reached.
    */
   clock: Clock.Clock
   provider: GitHubProviderConfig
@@ -180,17 +196,19 @@ const generations = Ref.unsafeMake<readonly Generation[]>([])
 /**
  * The limiter for one provider generation, building it on first use.
  *
- * Generations are matched by value rather than by identity because a validated selection is a new
- * object every time: the operator console revalidates the workflow on every request and a reload
- * revalidates it on every file change, and an identity key would mint a fresh limiter — and with
- * it a fresh burst allowance — for a credential that had not changed. A rotation does not match,
- * so it gets a limiter of its own, and the superseded one stays in force for whatever still holds
- * it: an adapter built from the previous generation keeps pacing against the limiter it was built
- * with until its in-flight work retires it.
+ * A generation is what shares a budget at GitHub, so `sameGitHubTraffic` is the key rather than
+ * whole-provider equality: a selection is a new object every time — the operator console
+ * revalidates the workflow on every request and a reload revalidates it on every file change — and
+ * a reload that only moved the base branch would otherwise mint a fresh limiter, and with it a
+ * fresh burst allowance, beside the one its predecessor is still spending. A rotated credential is
+ * different traffic, so it gets a limiter of its own, and the superseded one stays in force for
+ * whatever still holds it: an adapter built from the previous generation keeps pacing against the
+ * limiter it was built with until its in-flight work retires it.
  *
- * The clock the calling fiber reads is part of the key for the same reason a booking is an instant
- * rather than a countdown. A process has one clock, so this changes nothing in production; a test
- * that installs a `TestClock` gets a limiter whose bookings that clock can actually reach.
+ * The clock is part of the key for the same reason it is a parameter to the limiter. A process has
+ * one clock, so this changes nothing in production; a test that installs a `TestClock` gets a
+ * limiter whose bookings that clock can actually reach, rather than one pinned to a clock that has
+ * since gone.
  */
 export const githubRateLimitFor = (
   provider: GitHubProviderConfig,
@@ -202,7 +220,7 @@ export const githubRateLimitFor = (
       (current: readonly Generation[]): readonly [GitHubRateLimit, readonly Generation[]] => {
         const held = current.find(
           (generation) =>
-            generation.clock === clock && sameGitHubProvider(generation.provider, provider),
+            generation.clock === clock && sameGitHubTraffic(generation.provider, provider),
         )
         if (held !== undefined) {
           return [held.limit, current]
@@ -210,7 +228,7 @@ export const githubRateLimitFor = (
         const opened: Generation = {
           clock,
           provider,
-          limit: makeGitHubRateLimit(provider, settings),
+          limit: makeGitHubRateLimit(clock, provider, settings),
         }
         return [opened.limit, [opened, ...current].slice(0, retainedGenerations)]
       },

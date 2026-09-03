@@ -63,7 +63,7 @@ const stubClient = (
 describe('GitHub transport pacing', (): void => {
   it.effect('spends the burst allowance, then admits one request per emission interval', () =>
     Effect.gen(function* () {
-      const limiter = makeGitHubRateLimit(provider, pacedSettings)
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, pacedSettings)
       const admitted = (): Effect.Effect<number> => limiter.limit(Clock.currentTimeMillis)
 
       expect(yield* admitted()).toBe(0)
@@ -84,7 +84,7 @@ describe('GitHub transport pacing', (): void => {
 
   it.effect('bounds how many admitted requests run at once', () =>
     Effect.gen(function* () {
-      const limiter = makeGitHubRateLimit(provider, {
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, {
         requestsPerInterval: 10,
         intervalMs: 1_000,
         concurrency: 1,
@@ -100,9 +100,41 @@ describe('GitHub transport pacing', (): void => {
     }),
   )
 
+  it.effect('does not spend an emission slot behind a request it is queued on', () =>
+    Effect.gen(function* () {
+      // One permit, two admissions of burst, one every second after that.
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, {
+        requestsPerInterval: 2,
+        intervalMs: 2_000,
+        concurrency: 1,
+      })
+      const held = yield* Deferred.make<void>()
+      const holder = yield* Effect.fork(limiter.limit(Deferred.await(held)))
+      yield* TestClock.adjust(Duration.zero)
+
+      const queued = yield* Effect.fork(
+        Effect.all(
+          [
+            limiter.limit(Clock.currentTimeMillis),
+            limiter.limit(Clock.currentTimeMillis),
+            limiter.limit(Clock.currentTimeMillis),
+          ],
+          { concurrency: 3 },
+        ),
+      )
+      yield* TestClock.adjust(Duration.millis(5_000))
+      yield* Deferred.succeed(held, undefined)
+      yield* Fiber.join(holder)
+      yield* TestClock.adjust(Duration.millis(1_000))
+
+      // Slots booked while queued behind the holder would let all three start at 5,000 together.
+      expect(yield* Fiber.join(queued)).toEqual([5_000, 5_000, 6_000])
+    }),
+  )
+
   it.effect('records the wait as its own metric rather than as GitHub latency', () =>
     Effect.gen(function* () {
-      const limiter = makeGitHubRateLimit(provider, pacedSettings)
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, pacedSettings)
       const before = (yield* Metric.value(githubRateLimitDelay)).count
 
       yield* limiter.limit(Effect.void)
@@ -136,7 +168,7 @@ describe('GitHub transport pacing visibility', (): void => {
 
   it.effect('reports a throttled request by provider scope and never by credential', () =>
     Effect.gen(function* () {
-      const limiter = makeGitHubRateLimit(provider, strictSettings)
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, strictSettings)
       yield* limiter.limit(Effect.void)
 
       const throttled = yield* Effect.fork(captured(limiter.limit(Effect.void)))
@@ -155,7 +187,7 @@ describe('GitHub transport pacing visibility', (): void => {
 describe('GitHub transport pacing interruption', (): void => {
   it.effect('gives an interrupted wait its emission slot back', () =>
     Effect.gen(function* () {
-      const limiter = makeGitHubRateLimit(provider, strictSettings)
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, strictSettings)
       yield* limiter.limit(Effect.void)
 
       const abandoned = yield* Effect.fork(limiter.limit(Effect.void))
@@ -172,7 +204,7 @@ describe('GitHub transport pacing interruption', (): void => {
 
   it.effect('releases the in-flight permit an interrupted waiter was queued for', () =>
     Effect.gen(function* () {
-      const limiter = makeGitHubRateLimit(provider, {
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, {
         requestsPerInterval: 100,
         intervalMs: 1_000,
         concurrency: 1,
@@ -202,6 +234,19 @@ describe('GitHub provider generations', (): void => {
 
       // A reload revalidates the same selection into a new record; it is the same generation.
       expect(yield* githubRateLimitFor({ ...provider, token: Redacted.make('secret') })).toBe(built)
+    }),
+  )
+
+  it.effect('keeps one limiter across a reload that changed nothing it sends', () =>
+    Effect.gen(function* () {
+      const built = yield* githubRateLimitFor(provider)
+
+      // Git's branch reaches no endpoint, and a credential moved to another variable name is the
+      // same credential; neither is a second claim on the budget this limiter paces.
+      expect(yield* githubRateLimitFor({ ...provider, baseBranch: 'develop' })).toBe(built)
+      expect(yield* githubRateLimitFor({ ...provider, tokenEnvironmentName: 'GH_TOKEN' })).toBe(
+        built,
+      )
     }),
   )
 
@@ -298,6 +343,23 @@ describe('GitHub capability pacing', (): void => {
       yield* Fiber.join(saturated)
       expect(yield* Fiber.join(inspection)).toMatchObject({ number: 44, merged: false })
       expect(requests).toHaveLength(1)
+    }),
+  )
+})
+
+describe('GitHub host-tool boundary pacing', (): void => {
+  it.effect('books a request run outside the runtime on the generation clock', () =>
+    Effect.gen(function* () {
+      const limiter = yield* githubRateLimitFor(provider, strictSettings)
+
+      // What `executeTool` does: leave Effect for a promise, on a runtime carrying its own clock.
+      yield* Effect.promise(() => Effect.runPromise(limiter.limit(Effect.void)))
+
+      // Booked against the live clock instead, this would be a wait of decades.
+      const next = yield* Effect.fork(limiter.limit(Clock.currentTimeMillis))
+      yield* TestClock.adjust(Duration.millis(1_000))
+
+      expect(yield* Fiber.join(next)).toBe(1_000)
     }),
   )
 })

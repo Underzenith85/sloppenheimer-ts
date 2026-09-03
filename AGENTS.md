@@ -824,12 +824,16 @@ before the request rather than after it.
   would bound each of them separately and the credential not at all. Source control is on the list
   by credential but not by traffic: it speaks Git over HTTPS rather than the REST API, so it makes
   no request for the limiter to admit.
-- Generations are matched by value, not by object identity. A validated selection is a new record
-  every time — the console revalidates the workflow on every request and a reload revalidates it on
-  every file change — so an identity key would mint a fresh limiter, and with it a fresh burst
-  allowance, for a credential that had not changed. A rotation does not match, so it gets a limiter
-  of its own, and the superseded one stays in force for whatever still holds it: an adapter keeps
-  the limiter it was constructed with until its in-flight work retires it.
+- Generations are matched by **traffic**, not by object identity or by whole-provider equality. A
+  validated selection is a new record every time — the console revalidates the workflow on every
+  request and a reload revalidates it on every file change — so an identity key would mint a fresh
+  limiter, and with it a fresh burst allowance, for a credential that had not changed. The key is
+  `sameGitHubTraffic`: owner, repository, API base and credential value, which is what shares a
+  budget at GitHub. A base branch reaches no endpoint and a credential moved to another variable
+  name is the same credential, so neither is a second claim on that budget. A rotation is different
+  traffic, so it gets a limiter of its own, and the superseded one stays in force for whatever
+  still holds it: an adapter keeps the limiter it was constructed with until its in-flight work
+  retires it.
 - The registry that keys them is module-level state, which is the deliberate exception to
   **Resources, services, and layers**. There is no scope that outlives every holder and no parameter
   every constructor already carries, so the sharing point has to be reachable without either. It is
@@ -837,10 +841,18 @@ before the request rather than after it.
   why `makeGitHubRateLimit` is a plain function rather than an `Effect`: there is nothing for a
   scope to release. Pacing is a booked instant advanced by one atomic `Ref.modify`, not a bucket a
   background fiber refills.
-- The clock the calling fiber reads is part of the generation key, because a booking is an instant
-  and means nothing measured against a different clock. A process has one clock, so this changes
-  nothing in production; a test on `TestClock` gets a limiter whose bookings its own clock can
-  reach, which is what keeps the pacing out of unrelated adapter tests.
+- A limiter books its admissions on **one** clock, passed in at construction and part of the
+  generation key. A booking is an instant and means nothing measured against a different clock, and
+  the calling fiber is not always the one that built the limiter: the host-tool boundary runs its
+  request through `Effect.runPromise`, on a fresh runtime carrying the default clock. A process has
+  one clock, so this changes nothing in production; a test on `TestClock` gets a limiter that books
+  on its own clock, which is what keeps the pacing out of unrelated adapter tests and what stops a
+  live-clock booking from stranding a test-clock reader behind a wait of decades.
+- The in-flight permit is taken **before** the emission slot is booked, so pacing stays adjacent to
+  issuance. The other order lets a request spend its slot and then sit on the semaphore behind a
+  slow holder: when the permit frees, every request queued that way starts at once, a burst larger
+  than the settings describe made of slots paid for minutes earlier. Holding a permit across the
+  wait costs nothing, because a request waiting for capacity has not been issued either way.
 - Capacity waits are interruptible. An interrupted in-flight permit is released by
   `Effect.Semaphore`, and an interrupted pacing wait gives its emission slot back when it is still
   the last booking — when it is not, a later reservation has already been handed out against it and
