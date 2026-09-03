@@ -3,7 +3,7 @@
 // ordering, approval, malformed-data or shutdown path without depending on an installed Codex.
 
 import { spawn } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { closeSync, writeFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 
 type JsonRecord = Record<string, unknown>
@@ -145,6 +145,22 @@ const handleInitialize = (id: unknown, params: unknown): void => {
   }
   if (scenario === 'startup-exit') {
     process.exit(3)
+  }
+  if (scenario === 'stdin-closed') {
+    // Closes the protocol's input while the server itself stays alive, and only then answers, so
+    // the host's next write — the `initialized` notification — goes to a pipe with no reader and
+    // fails with `EPIPE` on the host's own stdin stream. Destroying the stream is not enough: Node
+    // keeps the descriptor behind `process.stdin` open, so the pipe is closed at the descriptor,
+    // the way a shell's `exec 0<&-` does, before the response is written.
+    process.stdin.destroy()
+    closeSync(0)
+    send({ id, result: { userAgent: 'fake-app-server/1.0' } })
+    // Nothing else holds the event loop open once stdin is gone; the server must outlive the
+    // failed write, or its exit would be reported first.
+    setTimeout(() => {
+      process.exit(0)
+    }, 30_000)
+    return
   }
   if (scenario === 'stderr-noise') {
     process.stderr.write('warning: this is diagnostic only\n')
