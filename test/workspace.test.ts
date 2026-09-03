@@ -1198,7 +1198,11 @@ describe('retained workspace cap', (): void => {
       )
       const retained = yield* retainAll(manager, 'GH-273', [1, 2, 3, 4], 100)
 
-      const report = yield* manager.prune(issueIdentifier('GH-273'), new Set())
+      // Run 4 ended last, which is the run such a pass follows.
+      const report = yield* manager.prune(
+        { identifier: issueIdentifier('GH-273'), runId: 4 },
+        new Set(),
+      )
 
       // Runs 1 and 2 go, directory and lease alike; 3 and 4 stay, and what stays is what is
       // counted and measured.
@@ -1227,7 +1231,7 @@ describe('retained workspace cap', (): void => {
       const [first, second, third] = yield* retainAll(manager, 'GH-274', [1, 2, 3])
 
       const report = yield* manager.prune(
-        issueIdentifier('GH-274'),
+        { identifier: issueIdentifier('GH-274'), runId: 3 },
         new Set([second?.key ?? '', third?.key ?? '']),
       )
 
@@ -1250,7 +1254,10 @@ describe('retained workspace cap', (): void => {
           yield* host(() => writeFile(join(held.path, 'in-progress.txt'), 'x'.repeat(8)))
           // Run 2 is a held lease, not a retained one: run 1 is the only retained workspace, so
           // the cap of one keeps it, and the held run is neither counted nor measured.
-          return yield* manager.prune(issueIdentifier('GH-275'), new Set())
+          return yield* manager.prune(
+            { identifier: issueIdentifier('GH-275'), runId: 1 },
+            new Set(),
+          )
         }),
       )
 
@@ -1288,8 +1295,13 @@ describe('retained workspace cap', (): void => {
         )
       })
       const [own] = yield* retainAll(manager, identifier, [1])
+      // Run 2 published, so nothing of its own is retained and run 1's is an ordinary artifact.
+      yield* published(manager, identifier, 2)
 
-      const report = yield* manager.prune(issueIdentifier(identifier), new Set())
+      const report = yield* manager.prune(
+        { identifier: issueIdentifier(identifier), runId: 2 },
+        new Set(),
+      )
 
       // This host's own workspace is past the cap and goes; the peer's may be its retained
       // delivery, which nothing here can see, and stays.
@@ -1304,12 +1316,47 @@ describe('retained workspace cap', (): void => {
       const root = makeRoot()
       const manager = yield* workspaceManager(root, hooks())
 
-      expect(yield* manager.prune(issueIdentifier('GH-277'), new Set())).toEqual({
-        count: 0,
-        bytes: 0,
-        evicted: 0,
-      })
+      expect(
+        yield* manager.prune({ identifier: issueIdentifier('GH-277'), runId: 1 }, new Set()),
+      ).toEqual({ count: 0, bytes: 0, evicted: 0 })
     }),
+  )
+
+  it.live(
+    'keeps the workspace of the run it prunes for, even one provisioning never handed over',
+    () =>
+      Effect.gen(function* () {
+        const root = makeRoot()
+        const identifier = 'GH-279'
+        const manager = yield* makeWorkspaceManager(root, hooks(), 1).pipe(
+          Effect.provide(hostFileSystem),
+        )
+        const [oldest] = yield* retainAll(manager, identifier, [1])
+        // Run 2 never reaches its session: `after_create` fails, and the manager keeps the
+        // directory under the reason it failed for. Nothing hands its key to a caller.
+        const provisioning = yield* makeWorkspaceManager(
+          root,
+          hooks({ afterCreate: 'exit 1' }),
+          1,
+        ).pipe(Effect.provide(hostFileSystem))
+        yield* Effect.flip(retainAll(provisioning, identifier, [2]))
+        // Two later runs, so run 2's own workspace is well past a cap of one.
+        const [third, fourth] = yield* retainAll(manager, identifier, [3, 4])
+        const failed = join(root, workspaceKey(issueIdentifier(identifier)), 'run-2-')
+
+        const report = yield* manager.prune(
+          { identifier: issueIdentifier(identifier), runId: 2 },
+          new Set(),
+        )
+
+        // Run 4 is the newest and fills the cap; run 2's is kept regardless, because the pass is
+        // its own. Runs 1 and 3 are ordinary artifacts past the cap and go.
+        expect(report).toEqual({ count: 2, bytes: 16, evicted: 2 })
+        expect(readdirSync(dirname(failed)).some((entry) => entry.startsWith('run-2-'))).toBe(true)
+        expect(existsSync(fourth?.path ?? '')).toBe(true)
+        expect(existsSync(oldest?.path ?? '')).toBe(false)
+        expect(existsSync(third?.path ?? '')).toBe(false)
+      }),
   )
 
   it.live('runs before_remove for each workspace it evicts', () =>
@@ -1323,7 +1370,7 @@ describe('retained workspace cap', (): void => {
       ).pipe(Effect.provide(hostFileSystem))
       const [first, second] = yield* retainAll(manager, 'GH-278', [1, 2, 3])
 
-      yield* manager.prune(issueIdentifier('GH-278'), new Set())
+      yield* manager.prune({ identifier: issueIdentifier('GH-278'), runId: 3 }, new Set())
 
       const removed = readFileSync(listing, 'utf8').split('\n').filter(Boolean)
       expect(new Set(removed)).toEqual(new Set([first?.path, second?.path]))

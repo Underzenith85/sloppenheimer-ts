@@ -368,10 +368,13 @@ export const makeWorkspaceManager = (
               Effect.catchAll(() => Effect.void),
             ),
       remove: (identifier) => removeIssueWorkspaces(fileSystem, hooks, root, identifier),
-      prune: (identifier, protectedKeys) =>
-        pruneIssueWorkspaces(fileSystem, hooks, root, identifier, {
+      // The run that has just ended keeps its own workspace, named here rather than by the
+      // caller: a run that failed while its workspace was being provisioned never received one
+      // to name, and that directory holds whatever the hook wrote before it failed.
+      prune: (run, protectedKeys) =>
+        pruneIssueWorkspaces(fileSystem, hooks, root, run.identifier, {
           limit: retainedLimit,
-          protectedKeys,
+          protectedKeys: new Set([...protectedKeys, runWorkspaceKey(run.runId, owner.hostId)]),
         }),
     }
   })

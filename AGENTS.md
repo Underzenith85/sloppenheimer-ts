@@ -627,10 +627,10 @@ repair agent that had achieved nothing.
   `workspace.retained_limit` retained workspaces, and reports what stayed through the mailbox as a
   `RetainedWorkspacesObserved` event, which is what the snapshot's `retainedWorkspaces` rows are.
   Which workspaces go is `domain/workspace-retention.ts`'s rule: never a protected key — the
-  retained delivery's workspace read from the state, and the workspace the run itself has just
-  released, however it ended, since a clock another host wrote to a shared root may make it look
-  older than it is — never one a lease still holds, and never a retained workspace of a host that
-  is running or unobservable, because a live peer's retained delivery is in-memory intent nothing
+  retained delivery's workspace read from the state, and the workspace of the run being pruned
+  for, which the manager names from the run identity rather than the caller from the lease, so an
+  ending that never reached the session keeps its directory too — never one a lease still holds,
+  and never a retained workspace of a host that is running or unobservable, because a live peer's retained delivery is in-memory intent nothing
   here can see; gone is read as `ownerIsGone` reads it for a held lease, so a process that
   inherited the owner's id is a successor rather than the owner. A cancellation runs no prune,
   since what follows it may be removing the issue's workspaces altogether. Every removal site

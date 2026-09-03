@@ -98,7 +98,7 @@ import {
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
-import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
+import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
@@ -6860,7 +6860,7 @@ describe('per-run workspace leases', (): void => {
       const harness = makeHarness(unpublished, () => [issue])
       const acquired: Workspace[] = []
       const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
-      const pruned: ReadonlySet<string>[] = []
+      const pruned: WorkspaceRun[] = []
       // No source control to publish through, so the run ends retaining its workspace — the case
       // that, repeated, is one whole checkout per attempt.
       const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
@@ -6868,9 +6868,9 @@ describe('per-run workspace leases', (): void => {
         ...withoutHandoff,
         makeWorkspaces: (settings) => ({
           ...recordingWorkspaces(harness, acquired, released)(settings),
-          prune: (_identifier, protectedKeys) =>
+          prune: (run) =>
             Effect.sync(() => {
-              pruned.push(protectedKeys)
+              pruned.push(run)
               return { count: 2, bytes: 4_096, evicted: 1 }
             }),
         }),
@@ -6889,11 +6889,11 @@ describe('per-run workspace leases', (): void => {
         }),
       )
 
-      // The pass ran once the run had released its workspace, with that workspace protected: the
-      // exit being handled may be turning it into a retained delivery. What the pass left is what
-      // the snapshot publishes, beside the limit the workflow sets.
+      // The pass ran once the run had released its workspace, and it names that run — which is
+      // how the manager keeps the directory this exit may be turning into a retained delivery.
+      // What the pass left is what the snapshot publishes, beside the limit the workflow sets.
       expect(released).toHaveLength(1)
-      expect(pruned).toEqual([new Set([acquired[0]?.key])])
+      expect(pruned).toEqual([{ identifier: issue.identifier, runId: 1 }])
       expect(snapshot.retainedWorkspaceLimit).toBe(workflow.config.workspaceRetainedLimit)
       expect(snapshot.retainedWorkspaces).toEqual([
         {
@@ -6907,20 +6907,20 @@ describe('per-run workspace leases', (): void => {
     }),
   )
 
-  it.effect('protects the workspace of a run that failed from the cap as well', () =>
+  it.effect('bounds the issue after a failed run too, naming the run that failed', () =>
     Effect.gen(function* () {
       const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
       const harness = makeHarness(workflow, () => [issue])
       const acquired: Workspace[] = []
       const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
-      const pruned: ReadonlySet<string>[] = []
+      const pruned: WorkspaceRun[] = []
       const ports: TestPorts = {
         ...harness.ports,
         makeWorkspaces: (settings) => ({
           ...recordingWorkspaces(harness, acquired, released)(settings),
-          prune: (_identifier, protectedKeys) =>
+          prune: (run) =>
             Effect.sync(() => {
-              pruned.push(protectedKeys)
+              pruned.push(run)
               return { count: 1, bytes: 16, evicted: 0 }
             }),
         }),
@@ -6938,10 +6938,10 @@ describe('per-run workspace leases', (): void => {
         }),
       )
 
-      // A failed run reports no value, but its directory holds edits nothing has read, and by a
-      // clock another host wrote it need not be the newest: it is protected by name.
+      // A run that failed keeps its workspace, and the pass that follows still runs and still
+      // names that run — which is what keeps the directory it retained out of its own eviction.
       expect(released[0]?.release._tag).toBe('Retained')
-      expect(pruned).toEqual([new Set([acquired[0]?.key])])
+      expect(pruned).toEqual([{ identifier: issue.identifier, runId: 1 }])
     }),
   )
 })

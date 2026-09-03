@@ -117,18 +117,20 @@ export class FakeWorkspaceProcess implements WorkspaceManagerPort {
    * Every retained workspace is counted as one byte, so a size is reported without a filesystem.
    */
   prune(
-    identifier: IssueIdentifier,
+    run: WorkspaceRun,
     protectedKeys: ReadonlySet<string>,
   ): Effect.Effect<WorkspacePruneReport> {
-    this.#record('prune', identifier, null)
-    this.protectedKeys.push(protectedKeys)
-    const retained = this.#keys(this.#retained, identifier)
+    this.#record('prune', run.identifier, null)
+    // The run being pruned for keeps its own workspace, named here as the Node manager names it.
+    const kept: ReadonlySet<string> = new Set([...protectedKeys, `run-${String(run.runId)}`])
+    this.protectedKeys.push(kept)
+    const retained = this.#keys(this.#retained, run.identifier)
     const newestFirst = [...retained].sort(
       (left, right) => Number(right.slice('run-'.length)) - Number(left.slice('run-'.length)),
     )
     let evicted = 0
     for (const key of newestFirst.slice(this.#retainedLimit)) {
-      if (!protectedKeys.has(key)) {
+      if (!kept.has(key)) {
         retained.delete(key)
         evicted += 1
       }

@@ -59,27 +59,26 @@ export const workspaceRelease = (
  * It runs on the worker's own fiber, after the exit has been offered, because a pass over an
  * issue's retained checkouts is filesystem work of no bounded size and the loop must not wait on
  * it; and it reports through the mailbox, because the count it settles is the state's to write.
- * Protected from eviction is every workspace something in this process still means to publish
- * from — a retained delivery's — and the one this run has just released, however the run ended:
- * a success's may be becoming a delivery, and a failure's holds edits nothing has read, and
- * neither is the newest by a clock another host wrote to a shared root. Nothing here can fail the
- * run: it already ended.
+ *
+ * What this run itself leased is protected by the run identity rather than by a key read out of
+ * the lease: an ending that never reached the session — a provisioning hook that failed — still
+ * leaves a retained directory, and only the manager can name it. Named here is every *other*
+ * workspace this process still means to publish from, which is a retained delivery's. Nothing
+ * here can fail the run: it already ended.
  */
 export const pruneRetainedWorkspaces = (
   context: OrchestratorContext,
   issue: Issue,
   execution: ExecutionSnapshot,
   runId: number,
-  released: Option.Option<string>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const state = yield* Ref.get(context.state)
     const delivery = state.deliveries.get(issue.id)
-    const protectedKeys = new Set<string>([
-      ...(delivery === undefined ? [] : [delivery.prepared.workspace.key]),
-      ...Option.toArray(released),
-    ])
-    const report = yield* execution.workspaces.prune(issue.identifier, protectedKeys)
+    const report = yield* execution.workspaces.prune(
+      { identifier: issue.identifier, runId },
+      new Set(delivery === undefined ? [] : [delivery.prepared.workspace.key]),
+    )
     if (report.evicted > 0) {
       yield* logInfo('action=workspace_prune outcome=evicted', {
         ...logContext(issue),

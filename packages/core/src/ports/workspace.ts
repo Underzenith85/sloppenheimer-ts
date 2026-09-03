@@ -26,10 +26,15 @@ import { makeAdapterCell, type AdapterCell } from './cell.js'
  * `exists` and `remove` are per-issue, because cleanup is: an issue that reached a terminal state
  * takes its retained workspaces with it, and never a workspace another run still holds.
  *
- * `prune` is per-issue too, and is what bounds an issue that is not finished with: it keeps the
- * newest retained workspaces up to the manager's limit, never evicts one of `protectedKeys` or one
- * a live host may still want, and answers with what the issue still holds — so the count and size
- * an operator sees is measured rather than inferred.
+ * `prune` bounds an issue that is not finished with: it keeps the newest retained workspaces up to
+ * the manager's limit, never evicts one a live host may still want, and answers with what the
+ * issue still holds — so the count and size an operator sees is measured rather than inferred.
+ *
+ * It takes the run that has just ended rather than only its issue, because that run's own
+ * workspace must survive its own prune and only the manager can name it: a run that failed while
+ * its workspace was being provisioned never received one to name, and its directory is exactly
+ * the kind that holds work nothing has read. `protectedKeys` is for the workspaces of *other*
+ * runs that this host still means to publish from — a retained delivery's above all.
  */
 export type WorkspaceManagerPort = Readonly<{
   withLeasedWorkspace: <Value, Failure, Requirements>(
@@ -42,7 +47,7 @@ export type WorkspaceManagerPort = Readonly<{
   afterRun: (workspace: Workspace) => Effect.Effect<void>
   remove: (identifier: IssueIdentifier) => Effect.Effect<void, WorkspaceError>
   prune: (
-    identifier: IssueIdentifier,
+    run: WorkspaceRun,
     protectedKeys: ReadonlySet<string>,
   ) => Effect.Effect<WorkspacePruneReport, WorkspaceError>
 }>
