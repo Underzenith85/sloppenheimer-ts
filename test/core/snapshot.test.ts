@@ -120,7 +120,7 @@ describe('operator snapshot retained workspaces', (): void => {
       storeError: null,
     })
     const counted = [retained(1, 1, 512), retained(2, 3, 300_000), retained(3, 2, 300_000)].reduce(
-      Transitions.recordRetainedWorkspaces,
+      (current, entry) => Transitions.recordRetainedWorkspaces(current, entry, 1),
       state,
     )
 

@@ -60,13 +60,16 @@ export const workspaceRelease = (
  * issue's retained checkouts is filesystem work of no bounded size and the loop must not wait on
  * it; and it reports through the mailbox, because the count it settles is the state's to write.
  * Protected from eviction is every workspace something in this process still means to publish
- * from — a retained delivery's — and the one this run has just released, which the exit being
- * handled may be turning into one. Nothing here can fail the run: it already ended.
+ * from — a retained delivery's — and the one this run has just released, however the run ended:
+ * a success's may be becoming a delivery, and a failure's holds edits nothing has read, and
+ * neither is the newest by a clock another host wrote to a shared root. Nothing here can fail the
+ * run: it already ended.
  */
 export const pruneRetainedWorkspaces = (
   context: OrchestratorContext,
   issue: Issue,
   execution: ExecutionSnapshot,
+  runId: number,
   released: Option.Option<string>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -91,6 +94,7 @@ export const pruneRetainedWorkspaces = (
       _tag: 'RetainedWorkspacesObserved',
       issueId: issue.id,
       identifier: issue.identifier,
+      runId,
       count: report.count,
       bytes: report.bytes,
     })

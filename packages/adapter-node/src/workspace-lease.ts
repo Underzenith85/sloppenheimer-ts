@@ -3,6 +3,7 @@ import { readFileSync, readlinkSync } from 'node:fs'
 
 import {
   leaseIsClaimed,
+  ownerIsGone,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
   type WorkspaceOwner,
@@ -144,10 +145,12 @@ export const leaseIsLive = (lease: WorkspaceLeaseRecord, leasePath: string): boo
  * A retained record is nobody's claim, so this is not the liveness question `leaseIsLive` asks; it
  * is whether anyone could still mean to republish from the directory. A live peer might — a
  * retained delivery is in-memory intent, invisible from here — and so might one this host cannot
- * place, which is left alone the way every workspace of an owner it cannot see is.
+ * place, which is left alone the way every workspace of an owner it cannot see is. Gone is read
+ * the way a held lease reads it, start marker included: a process that inherited the owner's id —
+ * the ordinary case for a container restarted into PID 1 — is a successor, not the owner.
  */
 export const retainedOwnerIsFinished = (lease: WorkspaceLeaseRecord): boolean =>
-  lease.owner.hostId === hostOwner.hostId || observeOwner(lease.owner)._tag === 'Gone'
+  lease.owner.hostId === hostOwner.hostId || ownerIsGone(lease.owner, observeOwner(lease.owner))
 
 /**
  * The same question of a record that has been staged but not yet published. One this process wrote

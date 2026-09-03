@@ -628,11 +628,15 @@ repair agent that had achieved nothing.
   `RetainedWorkspacesObserved` event, which is what the snapshot's `retainedWorkspaces` rows are.
   Which workspaces go is `domain/workspace-retention.ts`'s rule: never a protected key — the
   retained delivery's workspace read from the state, and the workspace the run itself has just
-  released, which the exit being handled may be turning into one — never one a lease still holds,
-  and never a retained workspace of a host that is running or unobservable, because a live peer's
-  retained delivery is in-memory intent nothing here can see. A cancellation runs no prune, since
-  what follows it may be removing the issue's workspaces altogether, and every removal site forgets
-  the issue's row. There is no age-based sweep: a lease's reason is a string written for a human,
+  released, however it ended, since a clock another host wrote to a shared root may make it look
+  older than it is — never one a lease still holds, and never a retained workspace of a host that
+  is running or unobservable, because a live peer's retained delivery is in-memory intent nothing
+  here can see; gone is read as `ownerIsGone` reads it for a held lease, so a process that
+  inherited the owner's id is a successor rather than the owner. A cancellation runs no prune,
+  since what follows it may be removing the issue's workspaces altogether. Every removal site
+  forgets the issue's row and records the run counter, and the loop refuses an observation from a
+  run older than that removal: the count is taken off the loop, so a terminal cleanup can overtake
+  it and the count would otherwise re-add a row for directories that are gone. There is no age-based sweep: a lease's reason is a string written for a human,
   and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
   rule that deletes.
 - A delivery's publication runs off the event loop. Everything else a handler does is memory and a

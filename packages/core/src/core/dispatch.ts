@@ -1,4 +1,4 @@
-import { Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
+import { Deferred, Effect, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -249,42 +249,47 @@ const runWithSourceControl = (
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
-  const worker = execution.workspaces
-    .withLeasedWorkspace(
-      { identifier: issue.identifier, runId },
-      (workspace) =>
-        runWithSourceControl(launch, workspace).pipe(
-          Effect.map((postflight) => ({ postflight, workspaceKey: workspace.key })),
-        ),
-      (exit) => workspaceRelease(Exit.map(exit, (outcome) => outcome.postflight)),
-    )
-    .pipe(
-      Effect.matchEffect({
-        onFailure: (error) =>
-          Queue.offer(context.mailbox, {
-            _tag: 'WorkerExited',
-            issueId: issue.id,
-            runId,
-            attempt,
-            outcome: 'failed',
-            error: error.message,
-            postflight: { _tag: 'NotPerformed' },
-          }).pipe(Effect.as(Option.none<string>())),
-        onSuccess: (outcome) =>
-          Queue.offer(context.mailbox, {
-            _tag: 'WorkerExited',
-            issueId: issue.id,
-            runId,
-            attempt,
-            outcome: 'normal',
-            error: null,
-            postflight: outcome.postflight,
-          }).pipe(Effect.as(Option.some(outcome.workspaceKey))),
-      }),
-      // Once the exit is on its way: the run is over, and what the issue keeps of its earlier
-      // attempts is bounded on this fiber rather than on the loop.
-      Effect.flatMap((released) => pruneRetainedWorkspaces(context, issue, execution, released)),
-    )
+  const worker = Effect.gen(function* () {
+    // Which workspace this run was handed, kept here because a failed use reports no value: the
+    // key is what protects a failed run's directory from the cap as much as a successful one's.
+    const leased = yield* Ref.make(Option.none<string>())
+    yield* execution.workspaces
+      .withLeasedWorkspace(
+        { identifier: issue.identifier, runId },
+        (workspace) =>
+          Ref.set(leased, Option.some(workspace.key)).pipe(
+            Effect.zipRight(runWithSourceControl(launch, workspace)),
+          ),
+        workspaceRelease,
+      )
+      .pipe(
+        Effect.matchEffect({
+          onFailure: (error) =>
+            Queue.offer(context.mailbox, {
+              _tag: 'WorkerExited',
+              issueId: issue.id,
+              runId,
+              attempt,
+              outcome: 'failed',
+              error: error.message,
+              postflight: { _tag: 'NotPerformed' },
+            }),
+          onSuccess: (postflight) =>
+            Queue.offer(context.mailbox, {
+              _tag: 'WorkerExited',
+              issueId: issue.id,
+              runId,
+              attempt,
+              outcome: 'normal',
+              error: null,
+              postflight,
+            }),
+        }),
+      )
+    // Once the exit is on its way: the run is over, and what the issue keeps of its earlier
+    // attempts is bounded on this fiber rather than on the loop.
+    yield* pruneRetainedWorkspaces(context, issue, execution, runId, yield* Ref.get(leased))
+  })
   return observeDuration(agentDuration, worker).pipe(
     withOperationalSpan('agent.run', { run_id: runId }),
     withLogAnnotations({

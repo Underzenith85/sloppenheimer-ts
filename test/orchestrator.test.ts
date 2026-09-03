@@ -6906,6 +6906,44 @@ describe('per-run workspace leases', (): void => {
       ])
     }),
   )
+
+  it.effect('protects the workspace of a run that failed from the cap as well', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const pruned: ReadonlySet<string>[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...recordingWorkspaces(harness, acquired, released)(settings),
+          prune: (_identifier, protectedKeys) =>
+            Effect.sync(() => {
+              pruned.push(protectedKeys)
+              return { count: 1, bytes: 16, evicted: 0 }
+            }),
+        }),
+        runAgent: () =>
+          Effect.fail(new AgentError({ category: 'process_exited', message: 'worker failed' })),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (pruned.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
+        }),
+      )
+
+      // A failed run reports no value, but its directory holds edits nothing has read, and by a
+      // clock another host wrote it need not be the newest: it is protected by name.
+      expect(released[0]?.release._tag).toBe('Retained')
+      expect(pruned).toEqual([new Set([acquired[0]?.key])])
+    }),
+  )
 })
 
 describe('tracker credential revalidation', (): void => {

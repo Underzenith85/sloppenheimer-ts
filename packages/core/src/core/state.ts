@@ -61,11 +61,12 @@ export type RuntimeState = Readonly<{
   /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
   /**
-   * What each issue keeps on disk, keyed by issue: the retained workspaces the host counted after
-   * the last run of it ended. Measured, never inferred — a row appears when a pass over the
-   * issue's directory reports one, and goes when a terminal cleanup takes the workspaces.
+   * What each issue keeps on disk, counted after the last run of it ended; a terminal cleanup
+   * takes the row with the workspaces. The reasoning is on `transitions/workspaces.ts`.
    */
   retainedWorkspaces: ReadonlyMap<IssueId, RetainedWorkspaceEntry>
+  /** Issues a terminal cleanup emptied, keyed to the run counter then: older counts are refused. */
+  workspaceRemovals: ReadonlyMap<IssueId, number>
   /**
    * Finished work an earlier host recorded, restored from the completion store and already
    * filtered to the Finished window.
@@ -459,6 +460,7 @@ export const initialState = (
   claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
   retainedWorkspaces: new Map(),
+  workspaceRemovals: new Map(),
   deliveries: new Map(),
   completed: new Map(),
   restoredCompletions: restored.completions,

@@ -267,12 +267,14 @@ export type OrchestratorEvent =
   | Readonly<{ _tag: 'RetryDue'; issueId: IssueId; attempt: number }>
   /**
    * What an issue keeps on disk, as the worker that has just ended counted it after bounding it.
-   * Reported from the worker's fiber rather than written there, because the count is the state's.
+   * Reported from the worker's fiber rather than written there, because the count is the state's;
+   * `runId` names that worker, so a count a terminal cleanup has since overtaken is refused.
    */
   | Readonly<{
       _tag: 'RetainedWorkspacesObserved'
       issueId: IssueId
       identifier: IssueIdentifier
+      runId: number
       count: number
       bytes: number
     }>

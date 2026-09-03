@@ -682,29 +682,40 @@ describe('retained workspaces', (): void => {
   })
 
   it('records what a pass over the issue directory counted, and replaces the last count', (): void => {
-    const first = Transitions.recordRetainedWorkspaces(emptyState(), observed(4, 4_096))
-    const second = Transitions.recordRetainedWorkspaces(first, observed(3, 3_072))
+    const first = Transitions.recordRetainedWorkspaces(emptyState(), observed(4, 4_096), 1)
+    const second = Transitions.recordRetainedWorkspaces(first, observed(3, 3_072), 2)
 
     expect(first.retainedWorkspaces.get(issue.id)).toEqual(observed(4, 4_096))
     expect(second.retainedWorkspaces.get(issue.id)).toEqual(observed(3, 3_072))
   })
 
   it('holds no row for an issue that keeps nothing', (): void => {
-    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048))
+    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048), 1)
 
-    const emptied = Transitions.recordRetainedWorkspaces(recorded, observed(0, 0))
+    const emptied = Transitions.recordRetainedWorkspaces(recorded, observed(0, 0), 2)
 
     expect(emptied.retainedWorkspaces.has(issue.id)).toBe(false)
   })
 
-  it('forgets an issue whose workspaces were removed, and is a no-op for one it never counted', (): void => {
-    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048))
+  it('forgets an issue whose workspaces were removed', (): void => {
+    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048), 1)
 
     const forgotten = Transitions.forgetRetainedWorkspaces(recorded, issue.id)
-    const untouched = Transitions.forgetRetainedWorkspaces(forgotten, issue.id)
 
     expect(forgotten.retainedWorkspaces.has(issue.id)).toBe(false)
-    expect(untouched).toBe(forgotten)
+  })
+
+  it('refuses a count from a run a removal has overtaken, and takes one from a later run', (): void => {
+    // Run 7 is the newest allocated when the removal happens; its count arrives afterwards.
+    const [runId, allocated] = Transitions.takeRunId(emptyState())
+    const removed = Transitions.forgetRetainedWorkspaces(allocated, issue.id)
+    const [later, allocatedAgain] = Transitions.takeRunId(removed)
+
+    const stale = Transitions.recordRetainedWorkspaces(removed, observed(3, 3_072), runId)
+    const fresh = Transitions.recordRetainedWorkspaces(allocatedAgain, observed(1, 1_024), later)
+
+    expect(stale).toBe(removed)
+    expect(fresh.retainedWorkspaces.get(issue.id)).toEqual(observed(1, 1_024))
   })
 })
 

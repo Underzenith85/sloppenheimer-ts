@@ -6,25 +6,43 @@ import type { RetainedWorkspaceSnapshot } from '../runtime/types.js'
 /**
  * What each issue is known to keep on disk. A measurement rather than a belief: the host counts an
  * issue's retained workspaces after a run of it ends, and forgets the count when it removes them.
+ *
+ * The two race, by construction: the count is taken off the loop once the run's exit is on its
+ * way, and a poll may reach terminal cleanup before the count arrives. Every run number is below
+ * the counter as it stands at any later instant, so a removal records the counter and a count from
+ * a run older than the removal describes directories that are gone, and is refused.
  */
 
-/** Records what an issue holds after a pass over its retained workspaces. An empty issue holds no row. */
+/**
+ * Records what an issue holds after a pass over its retained workspaces, unless a removal has
+ * overtaken the run that counted them. An empty issue holds no row.
+ */
 export const recordRetainedWorkspaces = (
   state: RuntimeState,
   entry: RetainedWorkspaceEntry,
-): RuntimeState => ({
-  ...state,
-  retainedWorkspaces:
-    entry.count === 0
-      ? withoutEntry(state.retainedWorkspaces, entry.issueId)
-      : withEntry(state.retainedWorkspaces, entry.issueId, entry),
-})
-
-/** The issue's workspaces are gone — a terminal cleanup took them — so nothing is retained. */
-export const forgetRetainedWorkspaces = (state: RuntimeState, id: IssueId): RuntimeState => {
-  const retainedWorkspaces = withoutEntry(state.retainedWorkspaces, id)
-  return retainedWorkspaces === state.retainedWorkspaces ? state : { ...state, retainedWorkspaces }
+  runId: number,
+): RuntimeState => {
+  if ((state.workspaceRemovals.get(entry.issueId) ?? 0) > runId) {
+    return state
+  }
+  return {
+    ...state,
+    retainedWorkspaces:
+      entry.count === 0
+        ? withoutEntry(state.retainedWorkspaces, entry.issueId)
+        : withEntry(state.retainedWorkspaces, entry.issueId, entry),
+  }
 }
+
+/**
+ * The issue's workspaces are gone — a terminal cleanup took them — so nothing is retained, and no
+ * count from a run that began before now may say otherwise.
+ */
+export const forgetRetainedWorkspaces = (state: RuntimeState, id: IssueId): RuntimeState => ({
+  ...state,
+  retainedWorkspaces: withoutEntry(state.retainedWorkspaces, id),
+  workspaceRemovals: withEntry(state.workspaceRemovals, id, state.nextRunId),
+})
 
 /** Every issue holding retained workspaces, largest first so the growth is at the top. */
 export const retainedWorkspaceSnapshots = (

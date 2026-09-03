@@ -79,7 +79,7 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
         case 'RetainedWorkspacesObserved': {
           const observedAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>
-            Transitions.recordRetainedWorkspaces(current, { ...event, observedAt }),
+            Transitions.recordRetainedWorkspaces(current, { ...event, observedAt }, event.runId),
           )
           break
         }
