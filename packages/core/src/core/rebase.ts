@@ -15,7 +15,7 @@
 
 import { Option } from 'effect'
 
-import type { HandoffEntry } from './state.js'
+import type { ExecutionSnapshot, HandoffEntry } from './state.js'
 
 /**
  * What one rebase attempt amounted to, decided off the event loop and settled on it.
@@ -39,12 +39,26 @@ export type RebaseOutcome =
 export const rebaseInFlight = (handoff: HandoffEntry): boolean =>
   Option.exists(handoff.rebase, (rebase) => rebase.publishedHeadSha === null)
 
-/** The rebase owns the pull request from here until the attempt reports back. */
+/**
+ * The rebase owns the pull request from here until the attempt reports back. The execution it
+ * records is the one the attempt is forked with, so a reload that moves the handoff on cannot
+ * retire the instances the attempt is still using.
+ */
 export const rebaseStarted = (handoff: HandoffEntry, headSha: string): HandoffEntry => ({
   ...handoff,
-  rebase: Option.some({ headSha, publishedHeadSha: null }),
+  rebase: Option.some({ headSha, execution: handoff.execution, publishedHeadSha: null }),
   reason: 'Rebasing the pull request branch onto protected main',
 })
+
+/** The executions rebases in flight are still calling through, which a retirement must wait for. */
+export const inFlightRebaseExecutions = (
+  handoffs: Iterable<HandoffEntry>,
+): readonly ExecutionSnapshot[] =>
+  [...handoffs].flatMap((handoff) =>
+    rebaseInFlight(handoff)
+      ? Option.toArray(Option.map(handoff.rebase, (rebase) => rebase.execution))
+      : [],
+  )
 
 /**
  * Folds the attempt's outcome into the handoff.

@@ -1,4 +1,4 @@
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
@@ -336,6 +336,78 @@ describe('host Git source control', (): void => {
       expect(
         yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
       ).toBe(collidingHead)
+    }),
+  )
+
+  it.live('reports a content conflict as a conflict, and leaves no rebase state behind', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() =>
+        commitFile(fixture.seed, 'contested.ts', 'base\n', 'add the contested file'),
+      )
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'contested.ts', 'ours\n', 'change the file'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const behindHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'contested.ts', 'theirs\n', 'advance the file'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: behindHead },
+      )
+
+      const failure = yield* Effect.flip(sourceControl.rebase(issue, prepared))
+
+      expect(failure).toMatchObject({ _tag: 'SourceControlError', category: 'rebase_conflict' })
+      expect(failure.message).toContain('could not rebase onto the protected base')
+      expect(yield* host(() => readdir(join(fixture.workspace, '.git')))).not.toContain(
+        'rebase-merge',
+      )
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(behindHead)
+    }),
+  )
+
+  it.live('keeps a rebase git refused to start apart from a conflict', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'feature.ts', 'feature\n', 'the feature'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const behindHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'protected.ts', 'protected\n', 'advance main'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: behindHead },
+      )
+      // A rebase git will not begin: the state of one it believes is still in progress. Nothing
+      // about the content conflicts, and a caller that read this as a conflict would give up on a
+      // pull request a later attempt could still bring up to date.
+      yield* host(() => mkdir(join(fixture.workspace, '.git', 'rebase-merge')))
+
+      const failure = yield* Effect.flip(sourceControl.rebase(issue, prepared))
+
+      expect(failure).toMatchObject({
+        _tag: 'SourceControlError',
+        category: 'publication_failed',
+        retryable: true,
+      })
+      expect(failure.message).toContain('git rebase failed')
     }),
   )
 

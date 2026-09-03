@@ -493,7 +493,7 @@ describe('a branch that is behind protected main', (): void => {
       headSha: 'head-2',
       reviewRequestedHeadSha: 'head-1',
       reviewCompletedHeadSha: 'head-1',
-      rebase: Option.some({ headSha: 'head-1', publishedHeadSha: 'head-2' }),
+      rebase: Option.some({ headSha: 'head-1', execution, publishedHeadSha: 'head-2' }),
     })
 
     // Still the head the rebase replaced: the provider has not caught up, and acting on it would
@@ -511,7 +511,9 @@ describe('a branch that is behind protected main', (): void => {
 
   it('lets a rebase identity go once the pull request has closed', (): void => {
     const decision = observeHandoff(
-      handoff({ rebase: Option.some({ headSha: 'head-1', publishedHeadSha: 'head-2' }) }),
+      handoff({
+        rebase: Option.some({ headSha: 'head-1', execution, publishedHeadSha: 'head-2' }),
+      }),
       { ...open(), state: 'closed', merged: true, mergeCommitSha: 'merge-1' },
       observedAt,
     )

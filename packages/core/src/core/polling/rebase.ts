@@ -99,6 +99,9 @@ export const performRebase = (
       )
       return
     }
+    // The attempt is forked with the execution the identity records, and holds it until it
+    // reports back: a reload that moves the handoff onto replacements meanwhile leaves these to
+    // the retirement drain, which waits on the identity.
     yield* Ref.update(context.state, (current) =>
       Transitions.putHandoff(current, id, rebaseStarted(handoff, action.headSha)),
     )

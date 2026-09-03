@@ -41,7 +41,9 @@ describe('a host rebase', (): void => {
   it('owns the pull request from the head it was started from until it reports back', (): void => {
     const started = rebaseStarted(behind, 'head-1')
 
-    expect(started.rebase).toEqual(Option.some({ headSha: 'head-1', publishedHeadSha: null }))
+    expect(started.rebase).toEqual(
+      Option.some({ headSha: 'head-1', execution, publishedHeadSha: null }),
+    )
     expect(started.state).toBe('rebase_needed')
     expect(started.reason).toBe('Rebasing the pull request branch onto protected main')
     expect(rebaseInFlight(started)).toBe(true)
@@ -56,7 +58,9 @@ describe('a host rebase', (): void => {
 
     expect(settled.state).toBe('awaiting_checks')
     expect(settled.headSha).toBe('head-2')
-    expect(settled.rebase).toEqual(Option.some({ headSha: 'head-1', publishedHeadSha: 'head-2' }))
+    expect(settled.rebase).toEqual(
+      Option.some({ headSha: 'head-1', execution, publishedHeadSha: 'head-2' }),
+    )
     // Over as far as the branch is concerned: the pass may observe the pull request again.
     expect(rebaseInFlight(settled)).toBe(false)
     expect(settled.repairHeadShas).toEqual(['head-0'])

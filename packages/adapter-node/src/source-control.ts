@@ -242,6 +242,15 @@ const abortRebase = (
     Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort'])),
   )
 
+/**
+ * Puts HEAD on top of the fetched base, leaving no rebase state behind however it ends.
+ *
+ * The failure is passed through as the git reader classified it rather than re-wrapped: a content
+ * conflict arrives as `rebase_conflict`, and a rebase git refused to start or finish -- a stale
+ * `rebase-merge` directory, a lock, a spawn failure -- keeps the publication category and its
+ * retryability, so a caller that treats a conflict as final does not treat a transient failure as
+ * final with it.
+ */
 const rebaseOntoBase = (
   settings: GitSourceControlSettings,
   prepared: PreparedRepository,
@@ -267,19 +276,7 @@ const rebaseOntoBase = (
       ),
       () => abortRebase(settings, prepared),
     ),
-    (cause) =>
-      Effect.zipRight(
-        abortRebase(settings, prepared),
-        Effect.fail(
-          new SourceControlError({
-            category: 'rebase_conflict',
-            message: 'source-control publication could not rebase onto the protected base',
-            retryable: true,
-            worktreePreserved: true,
-            cause,
-          }),
-        ),
-      ),
+    (failure) => Effect.zipRight(abortRebase(settings, prepared), Effect.fail(failure)),
   )
 
 /**

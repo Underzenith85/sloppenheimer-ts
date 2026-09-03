@@ -740,11 +740,17 @@ publication, and was skipped precisely because there was nothing to publish.
   head. The observation in between is stale -- it carries the head the rebase replaced -- and
   acting on it would rebase the branch a second time against a lease the push has already moved.
   The rebased head is then a new head like any other: reviewed once, then judged.
+- The identity records the execution the attempt was forked with, and the retirement drain holds
+  those instances until the attempt settles, as it holds a run's superseded ports and a retained
+  delivery's execution: a reload moves the handoff onto the replacements while the attempt is still
+  preparing and pushing through what it captured.
 - A rebase the rebase itself refuses (`rebase_conflict`) is `intervention_required`: the provider
   said the branch was merely behind, so what refused is the one thing the host can do about it, and
-  a repair agent is given no more than a rebase has. Every other failure -- the lease, the remote,
-  the workspace -- is recorded on the handoff and retried by the next observation from wherever the
-  branch is, exactly as a refused merge is.
+  a repair agent is given no more than a rebase has. The git reader reserves that category for a
+  content conflict git reports as one; a rebase git refused to start or finish -- a stale
+  `rebase-merge` directory, a lock, a spawn failure -- keeps the publication category. That and
+  every other failure -- the lease, the remote, the workspace -- is recorded on the handoff and
+  retried by the next observation from wherever the branch is, exactly as a refused merge is.
 - The workspace a rebase leases is released as completed whatever happened. Nothing in it is
   anyone's work, and a retained directory per attempt would be nothing a later run could adopt.
 - A repair dispatched for `behind` before this change -- restored from the store, or in flight

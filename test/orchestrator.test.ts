@@ -386,6 +386,7 @@ type TestPorts = Readonly<{
   /** Observes the watcher's own teardown, which the stream's scope owns. */
   onWatchReleased?: (path: string) => void
   onTrackerReleased?: (provider: ValidatedTrackerProvider) => void
+  onSourceControlReleased?: (provider: ValidatedTrackerProvider) => void
   onWorkspacesReleased?: (settings: WorkspaceSettings) => void
 }>
 
@@ -508,8 +509,11 @@ const layerTestPorts = (
       ports.configuration,
       Layer.succeed(SourceControlFactory, {
         make: (provider) =>
-          Effect.succeed(
-            makeSourceControl === undefined ? sourceControl : makeSourceControl(provider),
+          Effect.acquireRelease(
+            Effect.sync(() =>
+              makeSourceControl === undefined ? sourceControl : makeSourceControl(provider),
+            ),
+            () => Effect.sync(() => ports.onSourceControlReleased?.(provider)),
           ),
       }),
     ),
@@ -3376,6 +3380,100 @@ describe('restored pull request handoffs', (): void => {
       expect(yield* loadHandoffs(handoffStorePath)).toEqual([
         expect.objectContaining({ state: 'intervention_required', repairAttempts: 0 }),
       ])
+    }),
+  )
+
+  it.scoped('keeps the source control a reload replaced until its rebase settles', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-reload-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-reloaded-')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: reloadedRoot },
+      }
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const behindHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, behindHead)
+      const harness = makeHarness(
+        initial,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      let rebases = 0
+      let releasedSourceControls = 0
+      let release = (): void => undefined
+      const hanging = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(behindObservation(number, behindHead)),
+        }),
+        makeSourceControl: () =>
+          behindSourceControl((_candidate, prepared) => {
+            rebases += 1
+            return Effect.promise(() => hanging).pipe(
+              Effect.as({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                commitCreated: false,
+              }),
+            )
+          }),
+        onSourceControlReleased: () => {
+          releasedSourceControls += 1
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          while (rebases === 0) {
+            yield* Effect.yieldNow()
+          }
+          let snapshot = yield* control.snapshot
+
+          const beforeReload = releasedSourceControls
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          while (snapshot.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+
+          // The handoff has moved onto the reloaded source control, and the attempt is still
+          // preparing and pushing through the one it was forked with. Only the rebase identity
+          // remembers that, and it is what keeps the drain from retiring the instance under it.
+          expect(releasedSourceControls).toBe(beforeReload)
+          expect(snapshot.handoffs[0]).toMatchObject({ state: 'rebase_needed' })
+
+          release()
+          while (snapshot.handoffs[0]?.state !== 'awaiting_checks') {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+
+          // Settled, so nothing calls through it any more and the next drain lets it go.
+          expect(releasedSourceControls).toBe(beforeReload + 1)
+        }),
+      )
     }),
   )
 
