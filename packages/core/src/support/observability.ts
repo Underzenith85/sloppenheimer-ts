@@ -1,8 +1,13 @@
 import { Clock, Context, Duration, Effect, Metric, Option, Tracer, type Exit } from 'effect'
 
 /** The fixed outcome vocabulary is deliberately exported so adapters cannot invent labels. */
-export type DispatchOutcome = 'started' | 'already_running' | 'preflight_failed' | 'prompt_failed'
-export type RetryOutcome = 'scheduled' | 'not_retryable'
+export type DispatchOutcome =
+  | 'started'
+  | 'already_running'
+  | 'paused'
+  | 'preflight_failed'
+  | 'prompt_failed'
+export type RetryOutcome = 'scheduled' | 'not_retryable' | 'paused'
 export type ValidationOutcome = 'succeeded' | 'credential_failed' | 'reload_failed' | 'ports_failed'
 export type HandoffOutcome = 'completed' | 'failed' | 'no_branch' | 'merged' | 'intervention'
 export type AgentOutcome = 'normal' | 'failed' | 'cancelled' | 'stalled'

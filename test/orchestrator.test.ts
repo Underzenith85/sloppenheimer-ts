@@ -1625,6 +1625,128 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
+  it.scoped('ends a continuation that comes due after a pause landed on its publication', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-paused-in-flight-')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(isolated, () => [issue])
+      let launched = 0
+      let publications = 0
+      // The retried publication is held until the pause has landed under it.
+      const release = yield* Deferred.make<void>()
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          handoffCompletedWork: () =>
+            Effect.succeed({
+              _tag: 'PullRequest' as const,
+              branchName: 'sloppenheimer/issue-167',
+              pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/167',
+              pullRequestNumber: 167,
+              created: true,
+            }),
+          // Once the pause lifts the handoff is reconciled again; an observation with nothing to
+          // act on keeps that pass to the inspection alone.
+          inspectPullRequest: (number) =>
+            Effect.succeed(
+              anOpenPullRequest({
+                number,
+                headSha: 'delivered-head',
+                checks: [{ name: 'quality', status: 'in_progress', conclusion: null, url: null }],
+                codexReview: { headShaPrefix: 'deliver', status: 'pending' },
+              }),
+            ),
+        }),
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launched > 0,
+            (_candidate, prepared) => {
+              publications += 1
+              // The turn's own publication fails, which retains the work; the delivery's retry is
+              // the publication the pause finds under way.
+              return publications === 1
+                ? Effect.fail(deliveryFailure())
+                : Deferred.await(release).pipe(
+                    Effect.as({
+                      _tag: 'Published' as const,
+                      branchName: prepared.target.branchName,
+                      headSha: 'delivered-head',
+                      commitCreated: true,
+                    }),
+                  )
+            },
+          ),
+        runAgent: () => {
+          launched += 1
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let snapshot = yield* control.snapshot
+          while (snapshot.delivering.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          while (publications < 2) {
+            yield* TestClock.adjust('30 seconds')
+            yield* Effect.yieldNow()
+          }
+
+          // The pause lands on a publication under way, which it deliberately leaves to finish.
+          yield* control.setIssuePaused(167, true)
+          yield* Deferred.succeed(release, undefined)
+          // The publication settles as published, the pull request is handed off, and the
+          // continuation that schedules is queued behind a pause that is still standing.
+          snapshot = yield* control.snapshot
+          while (snapshot.retrying.length === 0) {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          expect(snapshot.handoffs).toHaveLength(1)
+          expect(snapshot.pausedIssueNumbers).toEqual([167])
+
+          // Well past the continuation's due time, with the pause in force throughout: the retry
+          // is ended the way the pause ends a retry it finds queued, and no agent is dispatched.
+          for (let round = 0; round < 5; round += 1) {
+            yield* TestClock.adjust('2 seconds')
+            yield* control.refresh
+          }
+          snapshot = yield* control.snapshot
+          expect(launched).toBe(1)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.retrying).toEqual([])
+          const lookup = readDetail(control, issue.identifier)
+          expect(lookup._tag).toBe('Found')
+          if (lookup._tag === 'Found') {
+            expect(lookup.detail.status).toBe('completed')
+            expect(lookup.detail.retry).toBeNull()
+            expect(lookup.detail.phase.phase).toBe('cancelled')
+            expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
+              outcome: 'cancelled',
+              reason: 'the operator paused the issue',
+            })
+          }
+
+          // A pause is a hold rather than a loss: the claim went with the retry, so lifting the
+          // pause lets the poll put an agent back on the issue.
+          yield* control.setIssuePaused(167, false)
+          while (launched < 2) {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+          }
+        }),
+      )
+    }),
+  )
+
   it.scoped('publishes a retained delivery through the credential a rotation installed', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-rotation-')

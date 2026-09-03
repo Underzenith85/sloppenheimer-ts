@@ -35,8 +35,8 @@ helps correlate one operation. It is never attached to metrics.
 | `sloppenheimer_github_request_duration`   | timer   | GitHub HTTP latency                                        |
 | `sloppenheimer_github_rate_limit_delay`   | timer   | Wait for GitHub rate-limit capacity: permit and pacing     |
 | `sloppenheimer_agent_duration`            | timer   | Agent worker latency                                       |
-| `sloppenheimer_dispatch_total`            | counter | Started, duplicate, and validation/render refusal outcomes |
-| `sloppenheimer_retry_total`               | counter | Scheduled and non-retryable decisions                      |
+| `sloppenheimer_dispatch_total`            | counter | Started, duplicate, paused, and validation/render refusals |
+| `sloppenheimer_retry_total`               | counter | Scheduled, paused, and non-retryable decisions             |
 | `sloppenheimer_workflow_validation_total` | counter | Successful and refused validation passes                   |
 | `sloppenheimer_handoff_total`             | counter | Handoff, merge, and intervention outcomes                  |
 | `sloppenheimer_agent_total`               | counter | Normal, failed, cancelled, and stalled exits               |

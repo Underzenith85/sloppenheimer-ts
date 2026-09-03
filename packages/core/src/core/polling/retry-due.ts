@@ -2,8 +2,16 @@ import { Effect, Option, Ref } from 'effect'
 
 import type { Issue, IssueId } from '../../domain/domain.js'
 import { currentInstant } from '../../support/clock.js'
-import { logContext, hasSlot, issueIsActive, issueIsRoutable, stateIsIn } from '../policy.js'
-import { logWarning } from '../../support/logging.js'
+import {
+  logContext,
+  hasSlot,
+  issueIsActive,
+  issueIsPaused,
+  issueIsRoutable,
+  stateIsIn,
+} from '../policy.js'
+import { logInfo, logWarning } from '../../support/logging.js'
+import { recordOutcome, retryOutcomes } from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
 import { settleRepair } from '../repair.js'
@@ -12,6 +20,7 @@ import { applyHandoffObservation, reconcileHandoffs } from '../handoff-reconcili
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { EffectiveWorkflow, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
+import { endRetryForPause } from './paused-retry.js'
 import { releaseHandoffRepair, writeHandoff } from './repair-identity.js'
 
 type RetryDue = Extract<OrchestratorEvent, { _tag: 'RetryDue' }>
@@ -165,8 +174,40 @@ const resumeContinuation = (
   })
 
 /**
+ * A due retry the operator's pause has overtaken.
+ *
+ * The pause is read here, not only when it lands: this retry may have been queued after it, by the
+ * publication the pause deliberately left to finish or by any other settlement on the issue. It is
+ * read before the tracker refresh and before the repair split, so every retry queued behind a
+ * pause — a continuation, a repair, one whose refresh would have failed — ends the way the pause
+ * ends a retry it finds queued, rather than one path dispatching, one rescheduling, and one
+ * carrying on with handoff actions.
+ */
+const endOvertakenRetry = (
+  context: OrchestratorContext,
+  event: RetryDue,
+  issue: Issue,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const overtaken = yield* Ref.get(context.state)
+    yield* endRetryForPause(
+      context,
+      event.issueId,
+      Option.fromNullable(overtaken.handoffs.get(event.issueId)),
+    )
+    yield* logInfo('action=retry outcome=paused', {
+      ...logContext(issue),
+      action: 'retry',
+      outcome: 'paused',
+      attempt: event.attempt,
+    })
+    yield* recordOutcome(retryOutcomes, 'paused')
+  })
+
+/**
  * A queued retry coming due. Only the attempt that was scheduled may take it: a `RetryDue` for a
- * superseded attempt belongs to a timer that has since been replaced.
+ * superseded attempt belongs to a timer that has since been replaced — and a retry the operator's
+ * pause has overtaken is ended rather than resumed, whatever kind it was.
  */
 export const onRetryDue = (context: OrchestratorContext, event: RetryDue): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -174,6 +215,11 @@ export const onRetryDue = (context: OrchestratorContext, event: RetryDue): Effec
       Transitions.takeDueRetry(current, event.issueId, event.attempt),
     )
     if (Option.isNone(due)) {
+      return
+    }
+    const taken = yield* Ref.get(context.state)
+    if (issueIsPaused(taken, due.value.issue)) {
+      yield* endOvertakenRetry(context, event, due.value.issue)
       return
     }
     if (yield* handoffTookOver(context, event.issueId)) {

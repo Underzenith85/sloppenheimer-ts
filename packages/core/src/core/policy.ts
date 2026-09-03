@@ -95,6 +95,20 @@ export const identifierIssueNumber = (identifier: string): Option.Option<number>
 }
 
 /**
+ * Whether the operator's pause list names this issue.
+ *
+ * Asked by every path that can put an agent on an issue — the poll, a due retry, a due delivery, a
+ * handoff pass, and the dispatch itself — because a pause is read at the moment something would
+ * dispatch, not only at the moment it lands. A retry can be queued after the pause: the
+ * publication a pause deliberately leaves to finish schedules a continuation when it settles, and
+ * that continuation coming due is the moment the pause has to be read again.
+ */
+export const issueIsPaused = (state: RuntimeState, issue: Issue): boolean =>
+  Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
+    state.pausedIssueNumbers.has(issueNumber),
+  )
+
+/**
  * Whether the poll loop dispatches this candidate, and if not, which rule refused it. The order is
  * the order the event loop applied inline before this was a function, and it is significant:
  * startup recovery gates everything, and a claim is checked before the costlier predicates.
@@ -110,11 +124,7 @@ export const dispatchAdmission = (
   if (state.claimed.has(issue.id)) {
     return { _tag: 'Refuse', reason: 'claimed' }
   }
-  if (
-    Option.exists(identifierIssueNumber(issue.identifier), (issueNumber) =>
-      state.pausedIssueNumbers.has(issueNumber),
-    )
-  ) {
+  if (issueIsPaused(state, issue)) {
     return { _tag: 'Refuse', reason: 'paused' }
   }
   if (!issueIsActive(issue, workflow.config.tracker)) {

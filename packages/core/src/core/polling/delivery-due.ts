@@ -5,7 +5,7 @@ import { logInfo, logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
 import { recordPublication } from '../../telemetry.js'
 import { settlePostflight } from '../delivery.js'
-import { identifierIssueNumber, issueIsActive, logContext, stateIsIn } from '../policy.js'
+import { issueIsActive, issueIsPaused, logContext, stateIsIn } from '../policy.js'
 import { runPostflight } from '../postflight.js'
 import { ownIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
@@ -38,10 +38,7 @@ const dispositionOf = (
   entry: DeliveryEntry,
 ): Effect.Effect<DeliveryDisposition> =>
   Effect.gen(function* () {
-    const paused = Option.exists(identifierIssueNumber(entry.issue.identifier), (issueNumber) =>
-      state.pausedIssueNumbers.has(issueNumber),
-    )
-    if (paused) {
+    if (issueIsPaused(state, entry.issue)) {
       return 'hold'
     }
     const refreshed = yield* entry.execution.tracker
