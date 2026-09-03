@@ -278,19 +278,11 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             postflight,
           }),
       }),
-      // Once the exit is on its way: the run is over, and what the issue keeps of its earlier
-      // attempts is bounded off the loop. Under its own key, not this worker's: the continuation
-      // this exit schedules is dispatched a second later, and it would otherwise interrupt the
-      // pass every time. The run names itself, so the workspace it leased survives its own pass
-      // however the run ended.
-      Effect.zipRight(
-        ownIssueFiber(
-          context.execution,
-          'prune',
-          issue.id,
-          pruneRetainedWorkspaces(context, issue, execution, runId),
-        ),
-      ),
+      // Once the exit is on its way: the run is over, so what the issue keeps of its earlier
+      // attempts is bounded. The pass owns its own fiber; this only starts it. An interruption
+      // never reaches here, which is why a cancellation that keeps the workspace starts one of
+      // its own — see `cancelRunning`.
+      Effect.zipRight(pruneRetainedWorkspaces(context, issue, execution, runId)),
     )
   return observeDuration(agentDuration, worker).pipe(
     withOperationalSpan('agent.run', { run_id: runId }),

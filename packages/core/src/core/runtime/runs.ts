@@ -23,6 +23,7 @@ import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
 import { abandonDelivery } from './deliveries.js'
 import { releaseIssueFiber, releaseIssueFiberFork } from './execution.js'
+import { pruneRetainedWorkspaces } from '../run-workspace.js'
 import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -195,6 +196,12 @@ export const cancelRunning = (
           }),
         ),
       )
+    } else {
+      // The workspace stays, so what the issue keeps of its earlier attempts still has to be
+      // bounded — and the worker's own tail never ran: an interruption does not reach it. This is
+      // the stall loop's path, where every attempt would otherwise leave one more whole checkout.
+      // The lease is already released: the interruption above was waited for.
+      yield* pruneRetainedWorkspaces(cells, settled.issue, settled.execution, settled.runId)
     }
     yield* recordOutcome(agentOutcomes, agentOutcome)
     return Option.some(settled)

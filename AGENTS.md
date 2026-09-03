@@ -632,8 +632,10 @@ repair agent that had achieved nothing.
   ending that never reached the session keeps its directory too — never one a lease still holds,
   and never a retained workspace of a host that is running or unobservable, because a live peer's retained delivery is in-memory intent nothing
   here can see; gone is read as `ownerIsGone` reads it for a held lease, so a process that
-  inherited the owner's id is a successor rather than the owner. A cancellation runs no prune,
-  since what follows it may be removing the issue's workspaces altogether. Every removal site
+  inherited the owner's id is a successor rather than the owner. A cancellation that removes the
+  issue's workspaces runs no pass and interrupts one already running; a cancellation that keeps
+  them runs one, because the worker's own tail never runs — an interruption does not reach it —
+  and that is the stall loop, where every attempt would otherwise leave one more whole checkout. Every removal site
   forgets the issue's row and records the run counter, and the loop refuses an observation from a
   run older than that removal: the count is taken off the loop, so a terminal cleanup can overtake
   it and the count would otherwise re-add a row for directories that are gone; those records are

@@ -6976,6 +6976,59 @@ describe('per-run workspace leases', (): void => {
     }),
   )
 
+  it.effect('bounds the issue after a stall, which keeps the workspace and retries', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const stalling: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          runner: { ...workflow.config.runner, stallTimeoutMs: 1 },
+        },
+      }
+      const harness = makeHarness(stalling, () => [issue])
+      const pruned: WorkspaceRun[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          prune: (run) =>
+            Effect.sync(() => {
+              pruned.push(run)
+              return { count: 2, bytes: 4_096, evicted: 1 }
+            }),
+        }),
+        // The harness's own runner is silent on the agent protocol for good, which is what the
+        // stall sweep retires.
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          yield* TestClock.adjust(2)
+          yield* control.refresh
+          let current = yield* control.snapshot
+          while (current.retainedWorkspaces.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      // A stall keeps the workspace and queues the next attempt, so nothing about the cancellation
+      // bounds what the issue holds — and the worker's own tail never runs, because it was
+      // interrupted. Every attempt would otherwise leave one more whole checkout behind.
+      expect(pruned).toEqual([{ identifier: issue.identifier, runId: 1 }])
+      expect(snapshot.retainedWorkspaces[0]).toMatchObject({
+        identifier: issue.identifier,
+        count: 2,
+        bytes: 4_096,
+      })
+    }),
+  )
+
   it.effect('bounds the issue after a failed run too, naming the run that failed', () =>
     Effect.gen(function* () {
       const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])

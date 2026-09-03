@@ -6,8 +6,16 @@ import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { logInfo, logWarning } from '../support/logging.js'
 import { logContext } from './policy.js'
 import type { PostflightOutcome } from './postflight.js'
-import type { OrchestratorContext } from './runtime.js'
+import { ownIssueFiber } from './runtime/execution.js'
+import type { RuntimeCells } from './runtime/types.js'
 import type { ExecutionSnapshot } from './state.js'
+
+/**
+ * What a pass needs of the host: the state it reads its protected workspaces from, the mailbox it
+ * reports its count through, and the collection that owns it. Stated as what it uses so that both
+ * the worker's own context and the runtime cells a cancellation holds can supply it.
+ */
+type PruneCells = Pick<RuntimeCells, 'state' | 'mailbox' | 'execution'>
 
 /**
  * What becomes of a run's workspace once the run has ended, and of the older ones beside it.
@@ -53,27 +61,38 @@ export const workspaceRelease = (
   })
 
 /**
- * Bounds what the issue keeps once this run has let go of its workspace: the newest few retained
+ * Bounds what the issue keeps now that a run has let go of its workspace: the newest few retained
  * workspaces stay, and what the pass left is reported for the snapshot.
  *
- * It runs on the worker's own fiber, after the exit has been offered, because a pass over an
- * issue's retained checkouts is filesystem work of no bounded size and the loop must not wait on
- * it; and it reports through the mailbox, because the count it settles is the state's to write.
+ * Forked under the issue's `prune` key rather than run where it was asked for. A pass over an
+ * issue's retained checkouts is filesystem work of no bounded size, so neither the event loop nor
+ * the worker's own tail may wait on it — and the worker's key is armed again by the continuation a
+ * second later, which would interrupt a pass that shared it. Two passes for one issue supersede,
+ * which is what the key gives: the later one reads the same directory and enforces the same cap.
  *
- * What this run itself leased is protected by the run identity rather than by a key read out of
- * the lease: an ending that never reached the session — a provisioning hook that failed — still
- * leaves a retained directory, and only the manager can name it. Named here is every *other*
- * workspace this process still means to publish from, which is a retained delivery's. Nothing
- * here can fail the run: it already ended.
+ * What the run itself leased is protected by the run identity rather than by a key read out of the
+ * lease: an ending that never reached the session — a provisioning hook that failed — still leaves
+ * a retained directory, and only the manager can name it. Named here is every *other* workspace
+ * this process still means to publish from, which is a retained delivery's. Nothing here can fail
+ * anything: the run it follows has already ended.
  */
 export const pruneRetainedWorkspaces = (
-  context: OrchestratorContext,
+  cells: PruneCells,
+  issue: Issue,
+  execution: ExecutionSnapshot,
+  runId: number,
+): Effect.Effect<void> =>
+  ownIssueFiber(cells.execution, 'prune', issue.id, prunePass(cells, issue, execution, runId))
+
+/** The pass itself, as the fiber that key owns runs it. */
+const prunePass = (
+  cells: PruneCells,
   issue: Issue,
   execution: ExecutionSnapshot,
   runId: number,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const state = yield* Ref.get(context.state)
+    const state = yield* Ref.get(cells.state)
     const delivery = state.deliveries.get(issue.id)
     const report = yield* execution.workspaces.prune(
       { identifier: issue.identifier, runId },
@@ -89,7 +108,7 @@ export const pruneRetainedWorkspaces = (
         bytes: report.bytes,
       })
     }
-    yield* Queue.offer(context.mailbox, {
+    yield* Queue.offer(cells.mailbox, {
       _tag: 'RetainedWorkspacesObserved',
       issueId: issue.id,
       identifier: issue.identifier,
