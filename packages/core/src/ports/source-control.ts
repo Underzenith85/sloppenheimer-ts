@@ -72,6 +72,21 @@ export type SourceControlPort = Readonly<{
     issue: Issue,
     prepared: PreparedRepository,
   ) => Effect.Effect<PublicationOutcome, SourceControlError>
+  /**
+   * Puts the prepared branch back on top of the protected base and publishes it under the same
+   * expected-head lease a publication uses, with no agent having edited anything.
+   *
+   * Separate from {@link publish} because the two answer different questions of the same worktree.
+   * A publication asks whether there is work to deliver and declines a clean worktree; a rebase is
+   * for a worktree the host knows to be clean, where the only thing wrong is that the base has
+   * moved. `NoChanges` here means the branch already sits on the base as the remote has it now, and
+   * `Published` carries the rewritten head. Meant for a preparation nothing has edited: the caller
+   * prepares from the exact pull-request head and hands the preparation straight here.
+   */
+  rebase: (
+    issue: Issue,
+    prepared: PreparedRepository,
+  ) => Effect.Effect<PublicationOutcome, SourceControlError>
 }>
 
 export type SourceControlFactoryPort = Readonly<{

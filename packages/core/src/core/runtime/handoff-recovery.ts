@@ -127,6 +127,9 @@ const restoredHandoffEntry = (
             publication: restored.repairPublication ?? 'pending',
             publishedHeadSha: restored.repairPublishedHeadSha ?? null,
           }),
+    // Never restored: a rebase is the host's own in-flight action, and the process that was
+    // performing it is gone. The next observation finds the branch still behind or already moved.
+    rebase: Option.none(),
     reviewRequestedHeadSha: restored.reviewRequestedHeadSha ?? null,
     reviewCompletedHeadSha: restored.reviewCompletedHeadSha ?? null,
     observedAt: new Date(restored.observedAt),
@@ -278,6 +281,7 @@ const recoverIssueHandoff = (
         repairHeadShas: [],
         repairObservedHeadShas: [],
         repair: Option.none(),
+        rebase: Option.none(),
         reviewRequestedHeadSha: null,
         reviewCompletedHeadSha: null,
         observedAt,

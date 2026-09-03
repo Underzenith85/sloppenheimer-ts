@@ -277,6 +277,29 @@ export type { RepairPublication }
  */
 export type RepairDisposition = 'release' | 'retain' | 'settle'
 
+/**
+ * A rebase the host is performing on a pull request that fell behind the protected base. It is a
+ * host action rather than a repair: no agent runs, no repair budget is spent, and the identity is
+ * in-memory only -- a restart finds the branch either still behind, and rebases it again, or
+ * already moved, and observes the new head.
+ */
+export type RebaseEntry = Readonly<{
+  /** The pull-request head the rebase was started from, and the lease it publishes under. */
+  headSha: string
+  /**
+   * The ports the attempt captured when it was forked. A reload moves the handoff onto the
+   * replacements while the attempt is still calling through these, and this is what keeps a
+   * retirement from releasing them under it -- as a run's superseded ports do for a run.
+   */
+  execution: ExecutionSnapshot
+  /**
+   * The head the rebase pushed, or `null` while the attempt is still running. Kept until the
+   * provider reports it: an observation that still carries `headSha` is the provider catching up,
+   * not a branch that is behind again.
+   */
+  publishedHeadSha: string | null
+}>
+
 export type HandoffEntry = Readonly<{
   issue: Issue
   execution: ExecutionSnapshot
@@ -296,6 +319,8 @@ export type HandoffEntry = Readonly<{
   repairObservedHeadShas: readonly string[]
   /** The repair currently running or waiting to retry; None for ordinary worker continuations. */
   repair: Option.Option<RepairEntry>
+  /** The host rebase in flight for this pull request, which nothing else may act on meanwhile. */
+  rebase: Option.Option<RebaseEntry>
   reviewRequestedHeadSha: string | null
   reviewCompletedHeadSha: string | null
   observedAt: Date

@@ -121,6 +121,7 @@ const publishedHandoffSchema: Schema.Schema<PublishedHandoff> = Schema.Struct({
     'closed_without_merge',
     'awaiting_checks',
     'repair_needed',
+    'rebase_needed',
     'ready_to_merge',
     'merging',
     'intervention_required',

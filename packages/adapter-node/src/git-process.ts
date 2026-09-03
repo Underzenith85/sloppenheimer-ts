@@ -85,22 +85,38 @@ const isAuthenticationFailure = (failure: GitFailure): boolean =>
     diagnosticText(failure),
   )
 
+/**
+ * Whether a failed `rebase` is a content conflict, as opposed to git refusing to start or finish
+ * the rebase at all -- a stale `rebase-merge` directory, a lock it could not take, a process that
+ * could not be spawned. Only the first is a conflict: the second keeps the category every other
+ * git failure gets, so a caller that treats a conflict as final does not treat a transient failure
+ * as final with it. A rebase's stdout is diagnostics rather than data, so both streams are read.
+ */
+const isRebaseConflict = (failure: GitFailure): boolean =>
+  failure.args[0] === 'rebase' &&
+  /could not apply|resolve all conflicts|CONFLICT \(/iu.test(failureText(failure))
+
 const sourceControlFailure = (failure: GitFailure, operation: GitOperation): SourceControlError => {
   const authentication = isAuthenticationFailure(failure)
   const leaseConflict = /stale info|fetch first|non-fast-forward|rejected.*stale/iu.test(
     diagnosticText(failure),
   )
+  const rebaseConflict = isRebaseConflict(failure)
   return new SourceControlError({
     category: authentication
       ? 'authentication_failed'
       : leaseConflict
         ? 'lease_conflict'
-        : operation === 'prepare'
-          ? 'prepare_failed'
-          : 'publication_failed',
+        : rebaseConflict
+          ? 'rebase_conflict'
+          : operation === 'prepare'
+            ? 'prepare_failed'
+            : 'publication_failed',
     message: authentication
       ? 'source-control authentication failed'
-      : `git ${failure.args[0] ?? operation} failed: ${failureText(failure) || 'no diagnostic'}`,
+      : rebaseConflict
+        ? `source-control publication could not rebase onto the protected base: ${failureText(failure)}`
+        : `git ${failure.args[0] ?? operation} failed: ${failureText(failure) || 'no diagnostic'}`,
     retryable: true,
     worktreePreserved: operation === 'publish',
     cause: failure,

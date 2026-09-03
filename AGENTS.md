@@ -718,6 +718,61 @@ repair agent that had achieved nothing.
   timer has had to be taught about the preparation and the postflight. Splitting it is
   [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
 
+## Architecture record: a branch that is behind is the host's to rebase
+
+Accepted 2026-09-03, implementing
+[#274](https://github.com/Underzenith85/sloppenheimer-ts/issues/274). This section is the
+architecture record for it; do not create a separate ADR.
+
+A pull request whose only fault is that protected main has moved used to classify as
+`repair_needed`. The repair agent it earned had nothing to change, its clean worktree read as a
+repair that achieved nothing, and the handoff ended in `intervention_required` for a state the host
+already knew how to fix -- `publishRepository` rebases and force-pushes with a lease on every
+publication, and was skipped precisely because there was nothing to publish.
+
+- `mergeable_state: 'behind'` classifies as `rebase_needed`, a disposition of its own in
+  `packages/core/src/domain/handoff.ts`, and the decision it produces is a `Rebase` action rather
+  than a `Repair`. Everything else wrong with a head still comes first: a failing check or an
+  unresolved thread on a behind branch is the agent's to fix, and its publication rebases anyway.
+- `SourceControlPort.rebase` is the host action: the preparation a repair gets -- the exact
+  pull-request head, under its lease -- followed by the rebase and leased push a publication ends
+  with, without the commit a publication begins with. It answers `NoChanges` when the base is
+  already behind HEAD, asked by containment _before_ the rebase: `--committer-date-is-author-date`
+  rewrites every commit it replays whether or not the base moved, so comparing heads afterwards
+  would push an unchanged branch under a new head and cost the pull request a review of the same
+  change.
+- No agent runs, no slot is taken, no repair permission is asked and no repair attempt is spent.
+  Like the merge, it is the host acting on a change that already exists, so it is not gated on the
+  issue's eligibility either. An operator pause still holds it, because the pass skips a paused
+  handoff before it decides anything.
+- The attempt is git, so like a delivery it runs off the event loop under the issue's `rebase`
+  execution key and settles as a `RebaseAttempted` event. While it runs the handoff carries a
+  `RebaseEntry`: the pass skips the handoff -- the branch is about to move under a lease this pass
+  did not take -- and keeps the issue's claim, so no continuation is admitted to start from the
+  head the push is replacing. The identity is in-memory only: a restart finds the branch either
+  still behind, and rebases it again, or already moved, and observes the new head.
+- A published rebase keeps its identity, with the head it pushed, until the provider reports that
+  head. The observation in between is stale -- it carries the head the rebase replaced -- and
+  acting on it would rebase the branch a second time against a lease the push has already moved.
+  The rebased head is then a new head like any other: reviewed once, then judged.
+- The identity records the execution the attempt was forked with, and the retirement drain holds
+  those instances until the attempt settles, as it holds a run's superseded ports and a retained
+  delivery's execution: a reload moves the handoff onto the replacements while the attempt is still
+  preparing and pushing through what it captured.
+- A rebase the rebase itself refuses (`rebase_conflict`) is `intervention_required`: the provider
+  said the branch was merely behind, so what refused is the one thing the host can do about it, and
+  a repair agent is given no more than a rebase has. The git reader reserves that category for a
+  content conflict git reports as one; a rebase git refused to start or finish -- a stale
+  `rebase-merge` directory, a lock, a spawn failure -- keeps the publication category. That and
+  every other failure -- the lease, the remote, the workspace -- is recorded on the handoff and
+  retried by the next observation from wherever the branch is, exactly as a refused merge is.
+- The workspace a rebase leases is released as completed whatever happened. Nothing in it is
+  anyone's work, and a retained directory per attempt would be nothing a later run could adopt.
+- A repair dispatched for `behind` before this change -- restored from the store, or in flight
+  across the upgrade -- comes back with a clean worktree and an unchanged head. That is no longer
+  read as "achieved nothing": the unchanged head classifies as `rebase_needed`, the repair identity
+  is released, and the same pass rebases.
+
 ## Architecture record: agent runners
 
 The agent-runner boundary was completed in [#214](https://github.com/Underzenith85/sloppenheimer-ts/issues/214),

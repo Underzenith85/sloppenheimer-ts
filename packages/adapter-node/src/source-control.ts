@@ -16,8 +16,9 @@ export type { GitCredential, GitSourceControlSettings } from './git-process.js'
 
 /**
  * Host Git source control: preparing a run's own workspace from the branch's published head, the
- * exact head of a repair, or the protected base, and publishing the agent's work back under an
- * expected-head lease.
+ * exact head of a repair, or the protected base, publishing the agent's work back under an
+ * expected-head lease, and putting a branch that fell behind the base back on top of it under the
+ * same lease.
  *
  * How a git invocation is run, authenticated, and read when it fails lives in `git-process.ts`;
  * this module decides only which invocations to make and what their output means.
@@ -241,6 +242,15 @@ const abortRebase = (
     Effect.ignore(runGit(settings, 'publish', prepared.workspace.path, ['rebase', '--abort'])),
   )
 
+/**
+ * Puts HEAD on top of the fetched base, leaving no rebase state behind however it ends.
+ *
+ * The failure is passed through as the git reader classified it rather than re-wrapped: a content
+ * conflict arrives as `rebase_conflict`, and a rebase git refused to start or finish -- a stale
+ * `rebase-merge` directory, a lock, a spawn failure -- keeps the publication category and its
+ * retryability, so a caller that treats a conflict as final does not treat a transient failure as
+ * final with it.
+ */
 const rebaseOntoBase = (
   settings: GitSourceControlSettings,
   prepared: PreparedRepository,
@@ -266,19 +276,7 @@ const rebaseOntoBase = (
       ),
       () => abortRebase(settings, prepared),
     ),
-    (cause) =>
-      Effect.zipRight(
-        abortRebase(settings, prepared),
-        Effect.fail(
-          new SourceControlError({
-            category: 'rebase_conflict',
-            message: 'source-control publication could not rebase onto the protected base',
-            retryable: true,
-            worktreePreserved: true,
-            cause,
-          }),
-        ),
-      ),
+    (failure) => Effect.zipRight(abortRebase(settings, prepared), Effect.fail(failure)),
   )
 
 /**
@@ -371,14 +369,53 @@ const publishRepository = (
       return already
     }
 
-    yield* runGit(settings, 'publish', prepared.workspace.path, [
-      'fetch',
-      '--no-tags',
-      'origin',
-      `+refs/heads/${prepared.baseBranch}:refs/remotes/origin/${prepared.baseBranch}`,
-    ])
+    yield* fetchBase(settings, prepared)
     yield* rebaseOntoBase(settings, prepared)
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    yield* pushUnderLease(settings, prepared)
+    const published: PublicationOutcome = {
+      _tag: 'Published',
+      branchName: prepared.target.branchName,
+      headSha,
+      commitCreated: dirty,
+    }
+    return published
+  })
+
+/**
+ * Brings the protected base up to date and answers its head. The preparation's copy is as old as
+ * the preparation, and what a branch is put on top of is the base as the remote has it now.
+ */
+const fetchBase = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<string, SourceControlError> =>
+  runGit(settings, 'publish', prepared.workspace.path, [
+    'fetch',
+    '--no-tags',
+    'origin',
+    `+refs/heads/${prepared.baseBranch}:refs/remotes/origin/${prepared.baseBranch}`,
+  ]).pipe(
+    Effect.zipRight(
+      revParse(
+        settings,
+        'publish',
+        prepared.workspace,
+        `refs/remotes/origin/${prepared.baseBranch}`,
+      ),
+    ),
+  )
+
+/**
+ * Pushes HEAD to the target branch, provided the branch is still where the preparation found it.
+ * The lease is read once here and enforced again by git: the read is what turns a moved branch into
+ * a typed refusal rather than a rejected push.
+ */
+const pushUnderLease = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<void, SourceControlError> =>
+  Effect.gen(function* () {
     const actualRemoteHead = yield* remoteHead(
       settings,
       'publish',
@@ -395,11 +432,43 @@ const publishRepository = (
       `HEAD:refs/heads/${prepared.target.branchName}`,
       `--force-with-lease=refs/heads/${prepared.target.branchName}:${expected}`,
     ])
+  })
+
+/**
+ * The host's own answer to a branch that is behind the protected base: the same rebase and leased
+ * push a publication ends with, without the commit a publication begins with.
+ *
+ * Nothing is asked of the worktree first. The preparation put the branch at its published head with
+ * nothing carried over, so there is no work to find, and the question a publication asks -- is this
+ * commit already on the remote -- is true by construction and would answer `Published` for a branch
+ * this has not moved. What is asked instead is whether the base is already behind HEAD, and it is
+ * asked before the rebase rather than by comparing heads afterwards: the rebase rewrites every
+ * commit it replays whether or not the base moved, so an unchanged branch would come back with a
+ * new head, be pushed, and cost the pull request a review of a change that is the same change.
+ */
+const rebaseRepository = (
+  settings: GitSourceControlSettings,
+  prepared: PreparedRepository,
+): Effect.Effect<PublicationOutcome, SourceControlError> =>
+  Effect.gen(function* () {
+    const baseSha = yield* fetchBase(settings, prepared)
+    const onBase = yield* containedIn(settings, 'publish', prepared.workspace, baseSha, 'HEAD')
+    if (onBase) {
+      const unchanged: PublicationOutcome = {
+        _tag: 'NoChanges',
+        branchName: prepared.target.branchName,
+        baselineSha: prepared.baselineSha,
+      }
+      return unchanged
+    }
+    yield* rebaseOntoBase(settings, prepared)
+    const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    yield* pushUnderLease(settings, prepared)
     const published: PublicationOutcome = {
       _tag: 'Published',
       branchName: prepared.target.branchName,
       headSha,
-      commitCreated: dirty,
+      commitCreated: false,
     }
     return published
   })
@@ -408,4 +477,5 @@ export const makeGitSourceControl = (settings: GitSourceControlSettings): Source
   prepare: (issue, workspace, target) => prepareRepository(settings, issue, workspace, target),
   inspect: (prepared) => inspectRepository(settings, prepared),
   publish: (issue, prepared) => publishRepository(settings, issue, prepared),
+  rebase: (_issue, prepared) => rebaseRepository(settings, prepared),
 })

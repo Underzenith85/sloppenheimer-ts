@@ -22,7 +22,25 @@ describe('pull request handoff state machine', (): void => {
         }),
       ),
     ).toEqual({ state: 'repair_needed', reason: 'Failed CI checks: quality' })
-    expect(classifyPullRequest(observation({ mergeState: 'behind' })).state).toBe('repair_needed')
+  })
+
+  it('asks the host, not an agent, to bring a branch that is merely behind up to date', (): void => {
+    // Nothing about the change is wrong; only the base has moved. A repair agent dispatched for
+    // this had nothing to change, and its clean worktree read as a repair that achieved nothing.
+    expect(classifyPullRequest(observation({ mergeState: 'behind' }))).toEqual({
+      state: 'rebase_needed',
+      reason: 'The pull request branch is behind protected main',
+    })
+    // Whatever else is wrong with the head comes first: a failing check on a behind branch is
+    // still the agent's to fix, and its publication rebases anyway.
+    expect(
+      classifyPullRequest(
+        observation({
+          mergeState: 'behind',
+          checks: [{ name: 'quality', status: 'completed', conclusion: 'failure', url: null }],
+        }),
+      ),
+    ).toEqual({ state: 'repair_needed', reason: 'Failed CI checks: quality' })
   })
 
   it('includes unresolved review feedback in repair context', (): void => {

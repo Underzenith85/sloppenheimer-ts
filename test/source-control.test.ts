@@ -1,4 +1,4 @@
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { it } from '@effect/vitest'
 import { Effect } from 'effect'
@@ -222,6 +222,192 @@ describe('host Git source control', (): void => {
       expect(
         yield* host(() => git(fixture.workspace, ['show', `${remoteHead}:attempt-two.ts`])),
       ).toBe('second attempt')
+    }),
+  )
+
+  it.live('puts a branch that fell behind back on top of protected main under its lease', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'feature.ts', 'feature\n', 'the feature'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const behindHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      const protectedHead = yield* host(() =>
+        commitFile(fixture.seed, 'protected.ts', 'protected\n', 'advance main'),
+      )
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      const sourceControl = sourceControlFor(fixture)
+      // The preparation a repair gets: the exact pull-request head, under its lease. No agent
+      // edits anything in between.
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: behindHead },
+      )
+
+      const rebased = yield* sourceControl.rebase(issue, prepared)
+
+      expect(rebased).toMatchObject({
+        _tag: 'Published',
+        branchName: 'sloppenheimer/issue-165',
+        commitCreated: false,
+      })
+      const remoteHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      expect(remoteHead).toBe(rebased._tag === 'Published' ? rebased.headSha : '')
+      expect(remoteHead).not.toBe(behindHead)
+      // On top of the base now, carrying the same change and no commit of the host's own.
+      expect(
+        yield* host(() => git(fixture.workspace, ['merge-base', protectedHead, remoteHead])),
+      ).toBe(protectedHead)
+      expect(yield* host(() => git(fixture.workspace, ['show', `${remoteHead}:feature.ts`]))).toBe(
+        'feature',
+      )
+      expect(yield* host(() => git(fixture.workspace, ['log', '-1', '--pretty=%s']))).toBe(
+        'the feature',
+      )
+    }),
+  )
+
+  it.live('reports a branch already on top of protected main as unchanged', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'feature.ts', 'feature\n', 'the feature'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const currentHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: currentHead },
+      )
+
+      // The observation that asked for this was stale: nothing is pushed, and the branch is where
+      // it was.
+      expect(yield* sourceControl.rebase(issue, prepared)).toEqual({
+        _tag: 'NoChanges',
+        branchName: 'sloppenheimer/issue-165',
+        baselineSha: currentHead,
+      })
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(currentHead)
+    }),
+  )
+
+  it.live('refuses to rebase over a branch that moved after it was prepared', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'feature.ts', 'feature\n', 'the feature'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const behindHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'protected.ts', 'protected\n', 'advance main'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: behindHead },
+      )
+      // Somebody pushes to the branch between the observation and the rebase.
+      yield* host(() => git(fixture.seed, ['checkout', 'sloppenheimer/issue-165']))
+      const collidingHead = yield* host(() =>
+        commitFile(fixture.seed, 'collision.ts', 'collision\n', 'colliding push'),
+      )
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+
+      const failure = yield* Effect.flip(sourceControl.rebase(issue, prepared))
+
+      expect(failure).toMatchObject({ _tag: 'SourceControlError', category: 'lease_conflict' })
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(collidingHead)
+    }),
+  )
+
+  it.live('reports a content conflict as a conflict, and leaves no rebase state behind', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() =>
+        commitFile(fixture.seed, 'contested.ts', 'base\n', 'add the contested file'),
+      )
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'contested.ts', 'ours\n', 'change the file'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const behindHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'contested.ts', 'theirs\n', 'advance the file'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: behindHead },
+      )
+
+      const failure = yield* Effect.flip(sourceControl.rebase(issue, prepared))
+
+      expect(failure).toMatchObject({ _tag: 'SourceControlError', category: 'rebase_conflict' })
+      expect(failure.message).toContain('could not rebase onto the protected base')
+      expect(yield* host(() => readdir(join(fixture.workspace, '.git')))).not.toContain(
+        'rebase-merge',
+      )
+      expect(
+        yield* host(() => git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165'])),
+      ).toBe(behindHead)
+    }),
+  )
+
+  it.live('keeps a rebase git refused to start apart from a conflict', () =>
+    Effect.gen(function* () {
+      const fixture = yield* host(makeGitRepository)
+      roots.push(fixture.root)
+      yield* host(() => git(fixture.seed, ['checkout', '-b', 'sloppenheimer/issue-165']))
+      yield* host(() => commitFile(fixture.seed, 'feature.ts', 'feature\n', 'the feature'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'sloppenheimer/issue-165']))
+      const behindHead = yield* host(() =>
+        git(fixture.remote, ['rev-parse', 'refs/heads/sloppenheimer/issue-165']),
+      )
+      yield* host(() => git(fixture.seed, ['checkout', 'main']))
+      yield* host(() => commitFile(fixture.seed, 'protected.ts', 'protected\n', 'advance main'))
+      yield* host(() => git(fixture.seed, ['push', 'origin', 'main']))
+      const sourceControl = sourceControlFor(fixture)
+      const prepared = yield* sourceControl.prepare(
+        issue,
+        { path: fixture.workspace, key: 'issue-165' },
+        { _tag: 'Repair', branchName: 'sloppenheimer/issue-165', expectedHeadSha: behindHead },
+      )
+      // A rebase git will not begin: the state of one it believes is still in progress. Nothing
+      // about the content conflicts, and a caller that read this as a conflict would give up on a
+      // pull request a later attempt could still bring up to date.
+      yield* host(() => mkdir(join(fixture.workspace, '.git', 'rebase-merge')))
+
+      const failure = yield* Effect.flip(sourceControl.rebase(issue, prepared))
+
+      expect(failure).toMatchObject({
+        _tag: 'SourceControlError',
+        category: 'publication_failed',
+        retryable: true,
+      })
+      expect(failure.message).toContain('git rebase failed')
     }),
   )
 
