@@ -145,6 +145,32 @@ describe('GitHub transport pacing', (): void => {
       expect((yield* Metric.value(githubRateLimitDelay)).count).toBe(before + 2)
     }),
   )
+
+  it.effect('counts a wait for an in-flight permit as capacity delay, not as latency', () =>
+    Effect.gen(function* () {
+      // Pacing never binds here, so the whole wait is the permit the holder is sitting on.
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, {
+        requestsPerInterval: 100,
+        intervalMs: 1_000,
+        concurrency: 1,
+      })
+      const before = yield* Metric.value(githubRateLimitDelay)
+      const held = yield* Deferred.make<void>()
+      const holder = yield* Effect.fork(limiter.limit(Deferred.await(held)))
+      yield* TestClock.adjust(Duration.zero)
+
+      const queued = yield* Effect.fork(limiter.limit(Effect.void))
+      yield* TestClock.adjust(Duration.millis(4_000))
+      yield* Deferred.succeed(held, undefined)
+      yield* Fiber.join(holder)
+      yield* Fiber.join(queued)
+
+      const after = yield* Metric.value(githubRateLimitDelay)
+      expect(after.count).toBe(before.count + 2)
+      // The queued request waited 4,000ms for the permit, and no metric reported it before.
+      expect(after.sum - before.sum).toBe(4_000)
+    }),
+  )
 })
 
 describe('GitHub transport pacing visibility', (): void => {
@@ -176,7 +202,7 @@ describe('GitHub transport pacing visibility', (): void => {
       const { logs } = yield* Fiber.join(throttled)
 
       expect(logs).toHaveLength(1)
-      expect(logs[0]).toContain('paced by the provider rate limiter')
+      expect(logs[0]).toContain('waiting on the provider rate limiter')
       expect(logs[0]).toContain('example/sloppenheimer')
       expect(logs[0]).toContain('1000')
       expect(logs.join('')).not.toContain('secret')
@@ -257,6 +283,19 @@ describe('GitHub provider generations', (): void => {
       expect(yield* githubRateLimitFor(rotated)).not.toBe(built)
       expect(yield* githubRateLimitFor({ ...provider, repository: 'other' })).not.toBe(built)
       expect(yield* githubRateLimitFor(provider)).toBe(built)
+    }),
+  )
+
+  it.effect('keeps a generation reachable however many rotations have followed it', () =>
+    Effect.gen(function* () {
+      const original = yield* githubRateLimitFor(provider, strictSettings)
+      for (const credential of ['first', 'second', 'third', 'fourth', 'fifth', 'sixth']) {
+        yield* githubRateLimitFor({ ...provider, token: Redacted.make(credential) }, strictSettings)
+      }
+
+      // An adapter from the original generation may still be running; meeting its credential
+      // again must not build a second limiter to spend a second burst allowance against.
+      expect(yield* githubRateLimitFor(provider, strictSettings)).toBe(original)
     }),
   )
 

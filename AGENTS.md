@@ -828,12 +828,12 @@ before the request rather than after it.
   validated selection is a new record every time — the console revalidates the workflow on every
   request and a reload revalidates it on every file change — so an identity key would mint a fresh
   limiter, and with it a fresh burst allowance, for a credential that had not changed. The key is
-  `sameGitHubTraffic`: owner, repository, API base and credential value, which is what shares a
-  budget at GitHub. A base branch reaches no endpoint and a credential moved to another variable
-  name is the same credential, so neither is a second claim on that budget. A rotation is different
-  traffic, so it gets a limiter of its own, and the superseded one stays in force for whatever
-  still holds it: an adapter keeps the limiter it was constructed with until its in-flight work
-  retires it.
+  `githubTrafficKey`: owner, repository, API base and a digest of the credential, which is what
+  shares a budget at GitHub. A base branch reaches no endpoint and a credential moved to another
+  variable name is the same credential, so neither is a second claim on that budget. A rotation is
+  different traffic, so it gets a limiter of its own, and the superseded one stays in force for
+  whatever still holds it: an adapter keeps the limiter it was constructed with until its in-flight
+  work retires it.
 - The registry that keys them is module-level state, which is the deliberate exception to
   **Resources, services, and layers**. There is no scope that outlives every holder and no parameter
   every constructor already carries, so the sharing point has to be reachable without either. It is
@@ -841,6 +841,13 @@ before the request rather than after it.
   why `makeGitHubRateLimit` is a plain function rather than an `Effect`: there is nothing for a
   scope to release. Pacing is a booked instant advanced by one atomic `Ref.modify`, not a bucket a
   background fiber refills.
+- Nothing is evicted from that registry. A count-based bound cannot tell a generation nothing holds
+  from one an in-flight adapter is still pacing against, and evicting the latter and then meeting
+  its credential again builds a second limiter beside the first, spending an independent burst
+  allowance against one budget. What is retained is made cheap instead: a digest and a number per
+  generation, never the credential — the key hashes it precisely so the registry, which outlives
+  the generations it keys, does not keep a rotated token resident. The outer map is weak on the
+  clock, so a clock that goes away takes its generations with it.
 - A limiter books its admissions on **one** clock, passed in at construction and part of the
   generation key. A booking is an instant and means nothing measured against a different clock, and
   the calling fiber is not always the one that built the limiter: the host-tool boundary runs its
@@ -865,8 +872,12 @@ before the request rather than after it.
 - `Retry-After` and `X-RateLimit-Reset` remain authoritative for a request GitHub did reject. The
   limiter is upstream of that and changes nothing about it.
 - The wait is observable and never carries a credential: `sloppenheimer_github_rate_limit_delay`
-  times it, deliberately apart from `sloppenheimer_github_request_duration` so that local pacing
-  cannot read as a slow tracker, and a wait past a second is logged by provider scope.
+  records it, deliberately apart from `sloppenheimer_github_request_duration` so that local pacing
+  cannot read as a slow tracker, and a wait past a second is logged by provider scope. It covers
+  the whole wait, the permit as well as the emission slot: request latency begins once a request is
+  issued, so a queue behind several slow requests is time no other signal accounts for. That is why
+  it is measured from an instant the caller reads before the permit rather than by timing an
+  effect — the two acquisitions are not one effect to wrap.
 
 ## Testing
 

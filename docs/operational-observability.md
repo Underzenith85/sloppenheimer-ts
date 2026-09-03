@@ -33,7 +33,7 @@ helps correlate one operation. It is never attached to metrics.
 | ----------------------------------------- | ------- | ---------------------------------------------------------- |
 | `sloppenheimer_poll_duration`             | timer   | Complete poll-pass latency                                 |
 | `sloppenheimer_github_request_duration`   | timer   | GitHub HTTP latency                                        |
-| `sloppenheimer_github_rate_limit_delay`   | timer   | Wait for GitHub rate-limit capacity before a request       |
+| `sloppenheimer_github_rate_limit_delay`   | timer   | Wait for GitHub rate-limit capacity: permit and pacing     |
 | `sloppenheimer_agent_duration`            | timer   | Agent worker latency                                       |
 | `sloppenheimer_dispatch_total`            | counter | Started, duplicate, and validation/render refusal outcomes |
 | `sloppenheimer_retry_total`               | counter | Scheduled and non-retryable decisions                      |
@@ -63,7 +63,9 @@ access controls to trace attributes.
 
 - Poll or GitHub duration growth points to tracker or network degradation. A growing
   `sloppenheimer_github_rate_limit_delay` separates the two readings: the host is holding requests
-  back against its own provider budget rather than GitHub answering slowly. A request the limiter
+  back against its own provider budget rather than GitHub answering slowly. It counts the wait for
+  an in-flight permit as well as the wait for a paced slot, so a queue behind several slow requests
+  shows up here rather than nowhere. A request the limiter
   delayed by more than a second is also logged, by provider scope and never by credential.
 - A rising `preflight_failed`, workflow-validation failure, or `not_retryable` frequency indicates
   configuration or credential trouble.

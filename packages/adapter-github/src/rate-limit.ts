@@ -1,8 +1,8 @@
 import { Clock, Context, Duration, Effect, Option, Ref } from 'effect'
 
 import { logInfo } from '@sloppenheimer/core/support/logging.js'
-import { observeGitHubRateLimitDelay } from './observability.js'
-import { sameGitHubTraffic, type GitHubProviderConfig } from './provider.js'
+import { recordGitHubRateLimitDelay } from './observability.js'
+import { githubTrafficKey, type GitHubProviderConfig } from './provider.js'
 
 /*
  * Provider-scoped rate limiting for the GitHub transport.
@@ -44,15 +44,6 @@ export const githubRateLimitDefaults: GitHubRateLimitSettings = Object.freeze({
 
 /** Below this a wait is ordinary pacing; past it an operator wants to know the host holds back. */
 const delayLogThresholdMs = 1_000
-
-/**
- * How many provider generations the registry keeps.
- *
- * Eviction cannot disturb an adapter still running against an evicted generation: a constructed
- * adapter holds its limiter, not a lookup. The bound is only what keeps a host that rotates
- * credentials for weeks from accumulating one entry per rotation.
- */
-const retainedGenerations = 4
 
 /** One generation's admission control: it paces starts and bounds how many requests run at once. */
 export type GitHubRateLimit = Readonly<{
@@ -137,23 +128,31 @@ export const makeGitHubRateLimit = (
   const surrender = (booking: number): Effect.Effect<void> =>
     Ref.update(bookedUntil, (booked: number) => (booked === booking ? booked - emissionMs : booked))
 
-  const admit: Effect.Effect<void> = Effect.gen(function* () {
-    const reservation = yield* reserve
-    if (reservation.waitMs === 0) {
-      return
-    }
-    if (reservation.waitMs >= delayLogThresholdMs) {
-      yield* logInfo('GitHub requests are being paced by the provider rate limiter', {
-        action: 'github_rate_limit',
-        outcome: 'delayed',
-        provider_scope: providerScope,
-        waited_ms: reservation.waitMs,
-      })
-    }
-    yield* Effect.sleep(Duration.millis(reservation.waitMs)).pipe(
-      Effect.onInterrupt(() => surrender(reservation.bookedUntil)),
-    )
-  }).pipe(observeGitHubRateLimitDelay, Effect.withClock(clock))
+  /**
+   * Books the slot and waits it out, then reports what the whole wait came to — the permit
+   * included, which is why `queuedAt` is read before the permit rather than here. Reporting after
+   * admission rather than before it costs an operator nothing a metric does not already give them,
+   * and it is the only point at which the true wait is known.
+   */
+  const admit = (queuedAt: number): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const reservation = yield* reserve
+      if (reservation.waitMs > 0) {
+        yield* Effect.sleep(Duration.millis(reservation.waitMs)).pipe(
+          Effect.onInterrupt(() => surrender(reservation.bookedUntil)),
+        )
+      }
+      const waitedMs = (yield* Clock.currentTimeMillis) - queuedAt
+      yield* recordGitHubRateLimitDelay(waitedMs)
+      if (waitedMs >= delayLogThresholdMs) {
+        yield* logInfo('GitHub requests are waiting on the provider rate limiter', {
+          action: 'github_rate_limit',
+          outcome: 'delayed',
+          provider_scope: providerScope,
+          waited_ms: waitedMs,
+        })
+      }
+    }).pipe(Effect.withClock(clock))
 
   return {
     /**
@@ -167,36 +166,34 @@ export const makeGitHubRateLimit = (
     limit: <Value, Failure, Requirements>(
       request: Effect.Effect<Value, Failure, Requirements>,
     ): Effect.Effect<Value, Failure, Requirements> =>
-      inFlight.withPermits(1)(Effect.zipRight(admit, request)),
+      Effect.flatMap(clock.currentTimeMillis, (queuedAt: number) =>
+        inFlight.withPermits(1)(Effect.zipRight(admit(queuedAt), request)),
+      ),
   }
 }
 
-type Generation = Readonly<{
-  /**
-   * The clock the limiter books its admissions on. A booking is an instant, so it means nothing
-   * measured against a different clock: a test that installs its own would otherwise inherit a
-   * bucket booked minutes into a future its clock has never reached.
-   */
-  clock: Clock.Clock
-  provider: GitHubProviderConfig
-  limit: GitHubRateLimit
-}>
-
 /**
- * The limiters in force, one per provider generation.
+ * The limiters in force, one per provider generation, under the clock each books its admissions on.
  *
  * This is process-wide state, and deliberately so. The GitHub capabilities are built into four
  * independent adapter cells, at different instants and into different scopes, and the whole point
  * of the limiter is that all of them pace against one credential: there is no scope that outlives
  * every holder and no parameter every constructor already carries, so the sharing point has to be
  * a registry the generation itself keys. It holds no resource, so it needs no scope of its own.
+ *
+ * Nothing is evicted, because a count-based bound cannot tell a generation nothing holds from one
+ * an in-flight adapter is still pacing against: evicting the latter and then meeting its
+ * credential again would build a second limiter beside the first, and the two would spend
+ * independent burst allowances against one budget. What is retained instead is made cheap — a
+ * digest and a number per generation, and no credential — and the outer map is weak on the clock,
+ * so a clock that goes away takes its generations with it.
  */
-const generations = Ref.unsafeMake<readonly Generation[]>([])
+const generations = new WeakMap<Clock.Clock, Map<string, GitHubRateLimit>>()
 
 /**
  * The limiter for one provider generation, building it on first use.
  *
- * A generation is what shares a budget at GitHub, so `sameGitHubTraffic` is the key rather than
+ * A generation is what shares a budget at GitHub, so `githubTrafficKey` is the key rather than
  * whole-provider equality: a selection is a new object every time — the operator console
  * revalidates the workflow on every request and a reload revalidates it on every file change — and
  * a reload that only moved the base branch would otherwise mint a fresh limiter, and with it a
@@ -205,32 +202,29 @@ const generations = Ref.unsafeMake<readonly Generation[]>([])
  * whatever still holds it: an adapter built from the previous generation keeps pacing against the
  * limiter it was built with until its in-flight work retires it.
  *
- * The clock is part of the key for the same reason it is a parameter to the limiter. A process has
+ * The clock is the outer key for the same reason it is a parameter to the limiter. A process has
  * one clock, so this changes nothing in production; a test that installs a `TestClock` gets a
  * limiter whose bookings that clock can actually reach, rather than one pinned to a clock that has
  * since gone.
+ *
+ * The lookup is one synchronous step, which is what makes it atomic: no other fiber runs between
+ * finding nothing and installing what it built.
  */
 export const githubRateLimitFor = (
   provider: GitHubProviderConfig,
   settings: GitHubRateLimitSettings = githubRateLimitDefaults,
 ): Effect.Effect<GitHubRateLimit> =>
   Effect.clockWith((clock: Clock.Clock) =>
-    Ref.modify(
-      generations,
-      (current: readonly Generation[]): readonly [GitHubRateLimit, readonly Generation[]] => {
-        const held = current.find(
-          (generation) =>
-            generation.clock === clock && sameGitHubTraffic(generation.provider, provider),
-        )
-        if (held !== undefined) {
-          return [held.limit, current]
-        }
-        const opened: Generation = {
-          clock,
-          provider,
-          limit: makeGitHubRateLimit(clock, provider, settings),
-        }
-        return [opened.limit, [opened, ...current].slice(0, retainedGenerations)]
-      },
-    ),
+    Effect.sync(() => {
+      const underClock = generations.get(clock) ?? new Map<string, GitHubRateLimit>()
+      generations.set(clock, underClock)
+      const key = githubTrafficKey(provider)
+      const held = underClock.get(key)
+      if (held !== undefined) {
+        return held
+      }
+      const opened = makeGitHubRateLimit(clock, provider, settings)
+      underClock.set(key, opened)
+      return opened
+    }),
   )

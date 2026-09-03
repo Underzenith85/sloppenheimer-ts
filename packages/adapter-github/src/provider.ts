@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import { Effect, Redacted } from 'effect'
 
 import {
@@ -155,24 +157,29 @@ const sameGitHubCredential = (left: GitHubProviderConfig, right: GitHubProviderC
 const sameGitHubProvider = (left: GitHubProviderConfig, right: GitHubProviderConfig): boolean =>
   providerFields.every((field) => left[field] === right[field]) && sameGitHubCredential(left, right)
 
-/** The fields that decide where a request goes. `baseBranch` is Git's, and reaches no endpoint. */
-const trafficFields = ['owner', 'repository', 'apiBaseUrl'] as const
-
 /**
- * Whether two validated selections send the same requests with the same credential.
+ * Identifies what a selection sends, and with what credential: two selections sharing this key
+ * share a budget at GitHub.
  *
  * This is a coarser question than provider equality, and the transport's rate limiter is the
- * reason it is asked: a limiter is scoped to what shares a budget at GitHub, which is the endpoint
- * and the token behind it. A reload that changes `base_branch`, or a credential moved to another
- * variable name without changing its value, rebuilds the adapters but does not create a second
- * claim on that budget — pacing it as a new generation would hand it a fresh burst allowance
- * beside the one its predecessor is still spending.
+ * reason it is asked. `baseBranch` is Git's and reaches no endpoint; a credential moved to another
+ * variable name without changing its value is the same credential. A reload that changes either
+ * rebuilds the adapters but does not create a second claim on that budget — pacing it as a new
+ * generation would hand it a fresh burst allowance beside the one its predecessor is still
+ * spending.
+ *
+ * The credential enters as a digest. The limiter's registry outlives the generations it keys, and
+ * a rotated token has no business staying resident once nothing sends it; a digest answers the
+ * only question the key asks of it. This is the second place the credential is unwrapped, and it
+ * is unwrapped into a hash rather than into anything that could be sent or printed.
  */
-export const sameGitHubTraffic = (
-  left: GitHubProviderConfig,
-  right: GitHubProviderConfig,
-): boolean =>
-  trafficFields.every((field) => left[field] === right[field]) && sameGitHubCredential(left, right)
+export const githubTrafficKey = (provider: GitHubProviderConfig): string =>
+  [
+    provider.owner,
+    provider.repository,
+    provider.apiBaseUrl,
+    createHash('sha256').update(Redacted.value(provider.token)).digest('hex'),
+  ].join('\n')
 
 /** The token's own variable name plus the fallbacks GitHub tooling reads without being told to. */
 export const githubSecretEnvironmentNames = (provider: GitHubProviderConfig): readonly string[] => [
