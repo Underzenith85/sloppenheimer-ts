@@ -302,6 +302,34 @@ The console's own data comes from the same versioned API a script can call. Ever
 and every refusal is the envelope `{"version":"v1","error":{"code","message"}}` with no backend
 detail in it.
 
+The API is one executable contract. `src/operator/api/endpoints.ts` defines every versioned endpoint
+as an `@effect/platform` schema-backed `HttpApi` endpoint — its path, method, parameters, success
+document and the statuses it may refuse with — and nothing else describes them. The handlers in
+`src/operator/handlers.ts` are written against those definitions, each response is encoded through
+the schema its endpoint declared before it is sent. The schemas are annotated with the published
+types beside them, so a mapping that stops agreeing with its own type fails the build rather than
+reshaping a document quietly.
+
+A request the console's files and the endpoint group both decline is answered last, by a router
+registered over the same paths — the same matcher, the same parameter decoding, the same bound on a
+parameter's length — so what the server says a URI serves is decided by the thing that decides what
+serves it. A `405` names every method the URI serves, including a method of a more general path that
+also answers there (`PUT /api/v1/refresh` is `Allow: GET, HEAD, POST`), and `HEAD` wherever `GET` is
+served, because the router answers one with the other; a URI that names nothing is `404`.
+The one rule that matcher cannot know is which parameters this API can address, and
+`pathParameterShapes` in `src/operator/api/endpoints.ts` states it — `issueNumber` is digits, an
+identifier is unconstrained — so `GET /api/v1/issues/not-a-number/start` is `404` rather than a `405`
+advertising the POST of a resource that does not exist. The console's own files are registered there
+too, so `POST /openapi.json` reports `Allow: GET, HEAD` rather than claiming the file is absent.
+
+`GET /openapi.json` serves the OpenAPI description generated from those definitions. It sits outside
+the versioned namespace deliberately: a name under `/api/v1/` would shadow an issue identifier
+spelled the same way, and that namespace reserves exactly two (see below). The console's page token
+is part of that contract rather than prose beside it — it is declared as an API-key security scheme,
+so the description names the header and marks the three mutations that require it. The description
+carries no `400`, because nothing this API reads can fail to decode — there is no request body, no
+query parameter, and the one path parameter is an unconstrained string.
+
 `GET /api/v1/state` publishes the SPEC 13.7.2 baseline document. That document is not the runtime's
 internal record: it is snake_case, and it names a running row's issue `issue_id`,
 `issue_identifier`, `issue_url` and `state`, and the aggregate counters `codex_totals` with
@@ -422,16 +450,16 @@ registered for POST alone rather than for every method, so the method distinguis
 per-issue resource: `GET /api/v1/refresh` reads the issue identified that way, and `POST` refreshes.
 The consequence is that a GET of that path no longer reports `405`; it answers as the per-issue
 resource does, which for a host with no such issue is `404 issue_not_found`. A method neither route
-serves is `405` naming both — `Allow: GET, POST` — since `Allow` states what the URI serves rather
+serves is `405` naming both — `Allow: GET, HEAD, POST` — since `Allow` states what the URI serves rather
 than what one route does; the set is read from the registrations, so it stays true if another fixed
 route comes to share a path. `agents` and `issues`
 are addressable for a different reason — the routes that use those words carry a further segment.
 
 `test/operator/server.test.ts` pins both halves — what each shadowed identifier answers, and that
-the set has not silently grown. The second reads the router's own registrations rather than the
-source that spells them, taking each route's method as well as its path, since what reserves a name
-is a fixed one-segment path reachable by GET. A third such route cannot be added without this
-decision being taken again.
+the set has not silently grown. The second reads the endpoint definitions rather than the source that
+spells them, taking each route's method as well as its path, since what reserves a name is a fixed
+one-segment path reachable by GET. A third such route cannot be added without this decision being
+taken again.
 
 ### Why a refresh needs the console's token
 
@@ -453,6 +481,13 @@ curl -s -X POST -H "X-Sloppenheimer-CSRF: $token" http://127.0.0.1:3000/api/v1/r
 The token is a forgery defence, not authentication: it proves the caller could read the console
 page, which a cross-origin page cannot do. Anything that needs authentication belongs behind the
 host, not behind this token.
+
+`src/operator/api/page-token.ts` declares the header as an API-key security scheme, which is what
+puts it in the generated description and marks the operations that require it. The scheme decodes
+the submitted token; it does not judge it. Judging it there would move the refusal ahead of
+everything else an endpoint checks, and an issue number this API cannot address is `404` whether or
+not a token came with the request. `requirePageToken` in `src/operator/handlers.ts` makes the
+comparison, in constant time, in the order the routes have always answered in.
 
 ## Live agent inspection
 
