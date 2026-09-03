@@ -4,7 +4,7 @@ import type { IssueId } from '../../domain/domain.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
 import { withEntry, withoutEntry, withMember } from '../../support/collections.js'
 import type { CompletedEntry, HandoffEntry, HandoffRecoveryCounts, RuntimeState } from '../state.js'
-import { claimIssue, completeIssue } from './claims.js'
+import { claimIssue, completeIssue, releaseClaim } from './claims.js'
 
 /**
  * The pull requests this orchestrator is still following, what the store is asked to persist for
@@ -112,3 +112,11 @@ export const dropRestoredHandoffs = (
     (handoff) => !hydrated.has(handoff.issueId),
   ),
 })
+
+/**
+ * Gives up a restored handoff that will never hydrate, because the tracker no longer has its issue:
+ * the snapshot leaves the persisted list, and the claim `initialState` took for it is released so
+ * the issue is dispatchable again should the tracker report it after all.
+ */
+export const releaseRestoredHandoff = (state: RuntimeState, id: IssueId): RuntimeState =>
+  releaseClaim(dropRestoredHandoffs(state, new Set([id])), id)

@@ -9,6 +9,7 @@ import {
   type Issue,
   type IssueId,
 } from '@sloppenheimer/core/domain/domain.js'
+import type { HandoffSnapshot } from '@sloppenheimer/core/domain/handoff.js'
 import { dispatchAdmission, hasSlot } from '@sloppenheimer/core/core/policy.js'
 import {
   initialState,
@@ -414,6 +415,38 @@ describe('claim lifecycle', (): void => {
     expect(released.claimed.has(issue.id)).toBe(false)
     expect(released.completed.has(issue.id)).toBe(false)
     expect(released.identifiers.get(issue.id)).toBe(issue.identifier)
+  })
+
+  it('releases a restored handoff together with the claim startup took for it', (): void => {
+    const issue = makeIssue('example/sloppenheimer#1')
+    const other = makeIssue('example/sloppenheimer#2')
+    const snapshotOf = (of: Issue): HandoffSnapshot => ({
+      issueId: of.id,
+      identifier: of.identifier,
+      pullRequestUrl: `https://github.test/example/sloppenheimer/pull/${of.id}`,
+      branchName: `sloppenheimer/issue-${of.id}`,
+      state: 'awaiting_checks',
+      headSha: null,
+      reason: null,
+      repairAttempts: 0,
+      observedAt: new Date(0).toISOString(),
+    })
+    const restored = initialState(effective, {
+      handoffs: [snapshotOf(issue), snapshotOf(other)],
+      completions: [],
+      storeReadFailed: false,
+      storeError: null,
+    })
+    expect(restored.claimed.has(issue.id)).toBe(true)
+
+    const released = Transitions.releaseRestoredHandoff(restored, issue.id)
+
+    expect(released.claimed.has(issue.id)).toBe(false)
+    expect(released.pendingRestoredHandoffs.map((handoff) => handoff.issueId)).toEqual([other.id])
+    // The other restored handoff is untouched: still pending, still claimed.
+    expect(released.claimed.has(other.id)).toBe(true)
+    expect(released.handoffs.size).toBe(0)
+    expect(released.completed.has(issue.id)).toBe(false)
   })
 
   it('gives up the claim and records completion in one step', (): void => {

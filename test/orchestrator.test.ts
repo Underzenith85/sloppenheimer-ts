@@ -2245,6 +2245,284 @@ describe('restored pull request handoffs', (): void => {
     }),
   )
 
+  it.scoped('drops a restored handoff whose issue GitHub no longer has and hydrates the rest', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-gone-handoff-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const deleted = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      // Hydrated, but never offered for dispatch: reconciliation releases the claim of a handoff
+      // nothing is acting on, and this test is about the other issue's claim.
+      const kept = {
+        ...makeIssue('example/sloppenheimer#75', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('75'),
+        dispatchable: false,
+      }
+      yield* saveHandoffs(
+        storePath,
+        [deleted, kept].map((issue, index) => ({
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: `https://github.test/example/sloppenheimer/pull/${String(65 + index)}`,
+          branchName: `sloppenheimer/issue-${issue.id}`,
+          state: 'awaiting_checks' as const,
+          headSha: 'persisted-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        })),
+      )
+      // The state list still names the deleted issue, so that its release is observable: an issue
+      // whose claim was given up is dispatched in the same pass, and one still claimed is not.
+      const harness = makeHarness(isolated, () => [deleted, kept])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByIds: (ids, options) =>
+              ids.includes(deleted.id)
+                ? Effect.fail(
+                    new TrackerError({
+                      category: 'tracker_not_found',
+                      message: 'GitHub returned HTTP 404',
+                      retryable: false,
+                    }),
+                  )
+                : tracker.fetchIssuesByIds(ids, options),
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              url: `https://github.test/example/sloppenheimer/pull/${String(number)}`,
+              headSha: 'persisted-head',
+              merged: false as const,
+              state: 'open' as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+            }),
+        }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      // The other restored pull request hydrated in the very pass that met the 404.
+      expect(snapshot.handoffs.map((handoff) => handoff.issueId)).toEqual(['75'])
+      // The deleted issue's claim is released: nothing else holds it, so it was dispatched.
+      expect(snapshot.running).toEqual([
+        expect.objectContaining({ issueId: deleted.id, identifier: deleted.identifier }),
+      ])
+      expect(snapshot.handoffRecovery).toMatchObject({ loaded: 2, recovered: 0, failed: 0 })
+      expect(yield* loadHandoffs(storePath)).toEqual([expect.objectContaining({ issueId: '75' })])
+    }),
+  )
+
+  it.scoped('drops a restored handoff whose issue the tracker no longer returns', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-unreturned-handoff-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const kept = {
+        ...makeIssue('example/sloppenheimer#75', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('75'),
+        dispatchable: false,
+      }
+      yield* saveHandoffs(storePath, [
+        {
+          issueId: '20',
+          identifier: 'example/sloppenheimer#20',
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/65',
+          branchName: 'sloppenheimer/issue-20',
+          state: 'awaiting_checks',
+          headSha: 'persisted-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+        {
+          issueId: kept.id,
+          identifier: kept.identifier,
+          pullRequestUrl: 'https://github.test/example/sloppenheimer/pull/95',
+          branchName: 'sloppenheimer/issue-75',
+          state: 'awaiting_checks',
+          headSha: 'persisted-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        },
+      ])
+      const harness = makeHarness(isolated, () => [kept])
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            // The harness answers an id refresh with every candidate; the tracker under test
+            // answers with the issues it was asked for and still has.
+            fetchIssuesByIds: (ids, options) =>
+              tracker
+                .fetchIssuesByIds(ids, options)
+                .pipe(Effect.map((issues) => issues.filter((issue) => ids.includes(issue.id)))),
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.succeed({
+              number,
+              url: `https://github.test/example/sloppenheimer/pull/${String(number)}`,
+              headSha: 'persisted-head',
+              merged: false as const,
+              state: 'open' as const,
+              mergeCommitSha: null,
+              mergeable: null,
+              mergeState: 'unknown',
+              checks: [],
+              reviewDecision: null,
+              reviewThreads: [],
+              codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+            }),
+        }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      expect(snapshot.handoffs.map((handoff) => handoff.issueId)).toEqual(['75'])
+      expect(snapshot.running).toEqual([])
+      // Skipped twice: the dropped snapshot, and the non-dispatchable issue startup recovery read.
+      expect(snapshot.handoffRecovery).toMatchObject({
+        loaded: 2,
+        recovered: 0,
+        skipped: 2,
+        failed: 0,
+      })
+      expect(yield* loadHandoffs(storePath)).toEqual([expect.objectContaining({ issueId: '75' })])
+    }),
+  )
+
+  it.scoped('keeps a restored handoff pending through a failure that is only its own', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-isolated-hydration-')
+      const storePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const failing = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      // Hydrated, but never offered for dispatch, so that the only dispatch candidate left is the
+      // issue whose claim this test expects to stand.
+      const kept = {
+        ...makeIssue('example/sloppenheimer#75', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('75'),
+        dispatchable: false,
+      }
+      yield* saveHandoffs(
+        storePath,
+        [failing, kept].map((issue, index) => ({
+          issueId: issue.id,
+          identifier: issue.identifier,
+          pullRequestUrl: `https://github.test/example/sloppenheimer/pull/${String(65 + index)}`,
+          branchName: `sloppenheimer/issue-${issue.id}`,
+          state: 'awaiting_checks' as const,
+          headSha: 'persisted-head',
+          reason: null,
+          repairAttempts: 0,
+          observedAt: new Date(0).toISOString(),
+        })),
+      )
+      const harness = makeHarness(isolated, () => [failing, kept])
+      const inspected: number[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeTracker: (provider) => {
+          const tracker = harness.ports.makeTracker(provider)
+          return {
+            ...tracker,
+            fetchIssuesByIds: (ids, options) =>
+              ids.includes(failing.id)
+                ? Effect.fail(
+                    new TrackerError({
+                      category: 'tracker_status',
+                      message: 'GitHub returned HTTP 502',
+                      retryable: true,
+                    }),
+                  )
+                : tracker.fetchIssuesByIds(ids, options),
+          }
+        },
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) =>
+            Effect.sync(() => {
+              inspected.push(number)
+              return {
+                number,
+                url: `https://github.test/example/sloppenheimer/pull/${String(number)}`,
+                headSha: 'persisted-head',
+                merged: false as const,
+                state: 'open' as const,
+                mergeCommitSha: null,
+                mergeable: null,
+                mergeState: 'unknown',
+                checks: [],
+                reviewDecision: null,
+                reviewThreads: [],
+                codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+              }
+            }),
+        }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      // Both are still followed — the pending snapshot ahead of the live one — and only the live
+      // one was reconciled: its pull request is the one that was inspected.
+      expect(snapshot.handoffs.map((handoff) => handoff.issueId)).toEqual(['20', '75'])
+      expect(inspected).toEqual([66])
+      // The pending handoff's claim still stands, so its issue is not dispatched while its fetch
+      // keeps failing.
+      expect(snapshot.running).toEqual([])
+      // Nothing was dropped: the one skip is the non-dispatchable issue startup recovery read.
+      expect(snapshot.handoffRecovery).toMatchObject({ loaded: 2, recovered: 0, skipped: 1 })
+      expect(snapshot.handoffRecovery.failed).toBeGreaterThanOrEqual(1)
+      expect((yield* loadHandoffs(storePath)).map((handoff) => handoff.issueId)).toEqual([
+        '20',
+        '75',
+      ])
+    }),
+  )
+
   it.scoped('removes a restored handoff after its pull request is confirmed merged', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-restored-handoff-')
@@ -2461,11 +2739,11 @@ describe('restored pull request handoffs', (): void => {
           return {
             ...tracker,
             fetchIssuesByIds: (ids, options) => {
-              if (ids.length !== 1) {
-                return tracker.fetchIssuesByIds(ids, options)
-              }
               refreshedIds.push(...ids)
-              if (ids.includes(failedIssue.id)) {
+              // Hydration refreshes each restored handoff once at startup and is let through, so
+              // that the failure below lands on the eligibility refresh of a live handoff.
+              const hydrating = refreshedIds.filter((id) => id === failedIssue.id).length === 1
+              if (ids.includes(failedIssue.id) && !hydrating) {
                 return Effect.fail(
                   new TrackerError({
                     category: 'tracker_request',
@@ -2474,7 +2752,9 @@ describe('restored pull request handoffs', (): void => {
                   }),
                 )
               }
-              return Effect.succeed([healthyIssue])
+              return tracker
+                .fetchIssuesByIds(ids, options)
+                .pipe(Effect.map((issues) => issues.filter((issue) => ids.includes(issue.id))))
             },
           }
         },
@@ -2498,7 +2778,13 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
 
-      expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+      // One refresh per issue to hydrate it at startup, then one per handoff for eligibility.
+      expect(refreshedIds).toEqual([
+        failedIssue.id,
+        healthyIssue.id,
+        failedIssue.id,
+        healthyIssue.id,
+      ])
       expect(launchedIds).toEqual([healthyIssue.id])
       expect(
         snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,

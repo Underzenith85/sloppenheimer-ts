@@ -175,7 +175,7 @@ describe('GitHub transport error mapping', (): void => {
 
       expect(serverError.category).toBe('tracker_status')
       expect(serverError.retryable).toBe(true)
-      expect(clientError.category).toBe('tracker_status')
+      expect(clientError.category).toBe('tracker_not_found')
       expect(clientError.message).toBe('GitHub returned HTTP 404')
       expect(clientError.retryable).toBe(false)
     }),

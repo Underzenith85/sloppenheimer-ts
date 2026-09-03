@@ -6,7 +6,7 @@ import { currentInstant } from '../../support/clock.js'
 import { logError, logInfo, logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
 import { recordHandoff } from '../../telemetry.js'
-import type { CodeReviewPort } from '../../ports/index.js'
+import type { CodeReviewPort, TrackerPort } from '../../ports/index.js'
 import { captureExecutionSnapshot, issueIsRoutable, logContext } from '../policy.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -16,7 +16,14 @@ import type { RuntimeCells } from './types.js'
 
 /**
  * Turns the handoffs read from the store into live entries, once the tracker has answered for the
- * issues behind them. A fetch that fails leaves them pending, so the next pass tries again.
+ * issues behind them.
+ *
+ * One issue at a time, for the reason `handoff-eligibility.ts` gives for its refreshes: the tracker
+ * boundary fails fast even when it accepts several ids, so one issue GitHub no longer has would
+ * fail the whole batch and leave every restored pull request unhydrated — and claimed — on every
+ * poll. A fetch that failed leaves its own handoff pending, so the next pass tries again. An issue
+ * the tracker says is gone, or simply no longer returns, can never hydrate: its snapshot is dropped
+ * and its claim released, because otherwise nothing would ever dispatch that issue again.
  */
 export const hydrateRestoredHandoffs = (cells: RuntimeCells): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -24,68 +31,128 @@ export const hydrateRestoredHandoffs = (cells: RuntimeCells): Effect.Effect<void
     if (pending.pendingRestoredHandoffs.length === 0) {
       return
     }
-    const fetched = yield* pending.lastKnownGood.tracker
-      .fetchIssuesByIds(pending.pendingRestoredHandoffs.map((handoff) => issueId(handoff.issueId)))
-      .pipe(
-        Effect.matchEffect({
-          onFailure: (error) =>
-            Ref.update(cells.state, (failing) =>
-              Transitions.noteRecovery(failing, { failed: 1 }),
-            ).pipe(
-              Effect.zipRight(
-                logWarning('persisted handoff hydration failed; retrying later', {
-                  action: 'handoff_hydration',
-                  outcome: 'failed',
-                  pending: pending.pendingRestoredHandoffs.length,
-                  error: error.message,
-                }),
-              ),
-              Effect.as<readonly Issue[] | null>(null),
-            ),
-          onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
-        }),
-      )
-    if (fetched === null) {
-      return
+    let dropped = false
+    for (const restored of pending.pendingRestoredHandoffs) {
+      dropped =
+        (yield* hydrateRestoredHandoff(cells, pending.lastKnownGood.tracker, restored)) || dropped
     }
-    yield* Ref.update(cells.state, (current) => {
-      const hydrated = new Set<string>()
-      let next = current
-      for (const restored of current.pendingRestoredHandoffs) {
-        const issue = fetched.find((candidate) => candidate.id === restored.issueId)
-        const entry =
-          issue === undefined
-            ? null
-            : restoredHandoffEntry(
-                issue,
-                restored,
-                captureExecutionSnapshot(next.lastKnownGood, ''),
-              )
-        if (entry === null) {
-          continue
-        }
-        next = Transitions.putHandoff(next, entry.issue.id, entry)
-        hydrated.add(restored.issueId)
-      }
-      return Transitions.dropRestoredHandoffs(next, hydrated)
-    })
+    if (dropped) {
+      // A dropped snapshot must not come back with the next restart. While startup recovery is
+      // still running this is a no-op, and `finishRecovery` writes the store itself.
+      yield* persistHandoffs(cells)
+    }
   })
 
 /**
- * Reads one persisted snapshot back as a live handoff, or answers `null` when its pull-request URL
- * carries no number to inspect against. Migration of the older shapes lives here: a snapshot
- * written before a field existed is read as the most its author can honestly have meant.
+ * Hydrates one restored handoff against the tracker, and says whether its snapshot was dropped.
+ *
+ * Only a `tracker_not_found` answer and an issue missing from a successful answer count as gone.
+ * Every other failure — a credential refused, a record that would not decode, a transient status —
+ * says nothing about the issue itself, so the handoff stays pending and is tried again.
+ */
+const hydrateRestoredHandoff = (
+  cells: RuntimeCells,
+  tracker: TrackerPort,
+  restored: HandoffSnapshot,
+): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const pullRequestNumber = restoredPullRequestNumber(restored)
+    if (Option.isNone(pullRequestNumber)) {
+      yield* dropRestoredHandoff(cells, restored, 'its pull request URL names no number to inspect')
+      return true
+    }
+    const fetched = yield* tracker.fetchIssuesByIds([issueId(restored.issueId)]).pipe(asSettled)
+    if (fetched._tag === 'Failed' && fetched.error.category !== 'tracker_not_found') {
+      yield* Ref.update(cells.state, (failing) => Transitions.noteRecovery(failing, { failed: 1 }))
+      yield* logWarning('persisted handoff hydration failed; retrying later', {
+        ...restoredLogContext(restored),
+        action: 'handoff_hydration',
+        outcome: 'failed',
+        error: fetched.error.message,
+      })
+      return false
+    }
+    if (fetched._tag === 'Failed') {
+      yield* dropRestoredHandoff(
+        cells,
+        restored,
+        `the tracker has no such issue: ${fetched.error.message}`,
+      )
+      return true
+    }
+    const issue = fetched.value.find((candidate) => candidate.id === restored.issueId)
+    if (issue === undefined) {
+      yield* dropRestoredHandoff(cells, restored, 'the tracker no longer reports its issue')
+      return true
+    }
+    yield* Ref.update(cells.state, (current) =>
+      Transitions.dropRestoredHandoffs(
+        Transitions.putHandoff(
+          current,
+          issue.id,
+          restoredHandoffEntry(
+            issue,
+            restored,
+            pullRequestNumber.value,
+            captureExecutionSnapshot(current.lastKnownGood, ''),
+          ),
+        ),
+        new Set([restored.issueId]),
+      ),
+    )
+    return false
+  })
+
+/**
+ * Gives up a restored handoff nothing can hydrate: the snapshot goes and the claim it held since
+ * startup is released, so the issue is dispatchable again if the tracker does report it. Counted as
+ * skipped, which is what recovery reports for a pull request it read but did not adopt.
+ */
+const dropRestoredHandoff = (
+  cells: RuntimeCells,
+  restored: HandoffSnapshot,
+  reason: string,
+): Effect.Effect<void> =>
+  Ref.update(cells.state, (dropping) =>
+    Transitions.noteRecovery(
+      Transitions.releaseRestoredHandoff(dropping, issueId(restored.issueId)),
+      { skipped: 1 },
+    ),
+  ).pipe(
+    Effect.zipRight(
+      logWarning('persisted handoff dropped; its claim is released', {
+        ...restoredLogContext(restored),
+        action: 'handoff_hydration',
+        outcome: 'dropped',
+        pull_request_url: restored.pullRequestUrl,
+        reason,
+      }),
+    ),
+  )
+
+/** The issue context a snapshot can supply before its issue has been fetched. */
+const restoredLogContext = (restored: HandoffSnapshot): Readonly<Record<string, string>> => ({
+  issue_id: restored.issueId,
+  issue_identifier: restored.identifier,
+})
+
+/** The pull-request number a snapshot's URL names, when it names one. */
+const restoredPullRequestNumber = (restored: HandoffSnapshot): Option.Option<number> => {
+  const numberMatch = /\/pulls?\/(\d+)(?:\/)?$/u.exec(restored.pullRequestUrl)
+  const pullRequestNumber = Number(numberMatch?.[1])
+  return Number.isSafeInteger(pullRequestNumber) ? Option.some(pullRequestNumber) : Option.none()
+}
+
+/**
+ * Reads one persisted snapshot back as a live handoff. Migration of the older shapes lives here: a
+ * snapshot written before a field existed is read as the most its author can honestly have meant.
  */
 const restoredHandoffEntry = (
   issue: Issue,
   restored: HandoffSnapshot,
+  pullRequestNumber: number,
   execution: ExecutionSnapshot,
-): HandoffEntry | null => {
-  const numberMatch = /\/pulls?\/(\d+)(?:\/)?$/u.exec(restored.pullRequestUrl)
-  const pullRequestNumber = Number(numberMatch?.[1])
-  if (!Number.isSafeInteger(pullRequestNumber)) {
-    return null
-  }
+): HandoffEntry => {
   const repairStartedHeadSha = restored.repairStartedHeadSha ?? null
   return {
     issue,

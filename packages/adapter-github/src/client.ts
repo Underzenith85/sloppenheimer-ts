@@ -161,9 +161,14 @@ export const rateLimitError = (
   })
 }
 
+/**
+ * A `404` is its own category rather than one more terminal status: it is the one answer that says
+ * the record is gone rather than that the request went wrong, and a caller holding state about
+ * that record — a persisted handoff — decides differently on it.
+ */
 export const statusError = (status: number): TrackerError =>
   new TrackerError({
-    category: 'tracker_status',
+    category: status === 404 ? 'tracker_not_found' : 'tracker_status',
     message: `GitHub returned HTTP ${String(status)}`,
     retryable: status >= 500 || status === 408 || status === 409,
   })

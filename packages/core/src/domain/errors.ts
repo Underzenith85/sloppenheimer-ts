@@ -19,6 +19,8 @@ export class TrackerError extends Data.TaggedError('TrackerError')<{
     | 'missing_tracker_secret'
     | 'tracker_request'
     | 'tracker_status'
+    /** The tracker says the record does not exist: never retryable, and not a transient status. */
+    | 'tracker_not_found'
     | 'tracker_response'
     | 'tracker_pagination'
     | 'tracker_rate_limited'
