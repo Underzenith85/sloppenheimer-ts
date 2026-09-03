@@ -1,12 +1,10 @@
 import { Deferred, Effect, Option, Ref } from 'effect'
 
-import { currentInstant } from '../../support/clock.js'
-import { recordCancellation } from '../../telemetry.js'
 import { issuesForNumber } from '../policy.js'
 import { releaseIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import * as Transitions from '../transitions.js'
-import { releaseHandoffRepair } from './repair-identity.js'
+import { endRetryForPause, operatorPausedReason } from './paused-retry.js'
 
 /**
  * The operator pausing or resuming an issue number. A pause ends whatever that number has running
@@ -28,11 +26,11 @@ export const onIssuePauseChanged = (
       )
       const paused = yield* Ref.get(context.state)
       for (const id of issuesForNumber(paused.running, event.issueNumber)) {
-        yield* context.cancelRunning(id, false, 'the operator paused the issue')
+        yield* context.cancelRunning(id, false, operatorPausedReason)
       }
       const delivering = yield* Ref.get(context.state)
       for (const id of issuesForNumber(delivering.deliveries, event.issueNumber)) {
-        yield* context.suspendDelivery(id, 'the operator paused the issue')
+        yield* context.suspendDelivery(id, operatorPausedReason)
       }
       const retrying = yield* Ref.get(context.state)
       for (const id of issuesForNumber(retrying.retries, event.issueNumber)) {
@@ -43,18 +41,7 @@ export const onIssuePauseChanged = (
           continue
         }
         yield* releaseIssueFiber(context.execution, 'retry', id)
-        // An operator pause is a decision to stop, not an interruption to recover from:
-        // the repair identity goes with the run the operator ended.
-        yield* releaseHandoffRepair(context, id, Option.fromNullable(retrying.handoffs.get(id)))
-        // Dropping the queued retry ends the agent, so its detail has to say so: without
-        // this the record would publish as completed while still claiming to be waiting
-        // to retry, and the retry it pointed at would never arrive.
-        const cancelledAt = yield* currentInstant
-        yield* Ref.update(context.state, (current) =>
-          Transitions.updateDetail(Transitions.releaseClaim(current, id), id, (record) =>
-            recordCancellation(record, cancelledAt, 'the operator paused the issue', true),
-          ),
-        )
+        yield* endRetryForPause(context, id, Option.fromNullable(retrying.handoffs.get(id)))
       }
     } else {
       yield* Ref.update(context.state, (current) =>

@@ -7,7 +7,7 @@ import { AgentError, type SourceControlError, type WorkspaceError } from '../dom
 import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
-import { logError, logInfo, withLogAnnotations } from '../support/logging.js'
+import { logError, logInfo, logWarning, withLogAnnotations } from '../support/logging.js'
 import {
   agentDuration,
   dispatchOutcomes,
@@ -17,11 +17,23 @@ import {
 } from '../support/observability.js'
 import { asSettled } from '../support/settled.js'
 import type { AgentEvent } from '../telemetry.js'
-import { captureExecutionSnapshot, issueIsActive, issueIsRoutable, logContext } from './policy.js'
+import {
+  captureExecutionSnapshot,
+  issueIsActive,
+  issueIsPaused,
+  issueIsRoutable,
+  logContext,
+} from './policy.js'
 import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
 import { ownIssueFiber, releaseIssueFiber } from './runtime/execution.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { EffectiveWorkflow, ExecutionSnapshot, RunningEntry, SessionPorts } from './state.js'
+import type {
+  EffectiveWorkflow,
+  ExecutionSnapshot,
+  RunningEntry,
+  RuntimeState,
+  SessionPorts,
+} from './state.js'
 import type { SourceControlTarget } from '../ports/index.js'
 import * as Transitions from './transitions.js'
 import { installEffectiveWorkflow, revalidateCredentials } from './workflow-reload.js'
@@ -343,6 +355,27 @@ const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
   lastReportedTokens: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
 })
 
+/**
+ * Whether a dispatch is refused before it claims anything: a worker is already on the issue, or
+ * the operator has paused it. Every caller reads the pause before it gets here — the poll, a due
+ * retry, a handoff pass — so this is the last word rather than the first, there so that a path
+ * added later cannot put an agent on a paused issue by omission. A pause refused here is logged as
+ * the surprise it would be.
+ */
+const refusedBeforeClaim = (state: RuntimeState, issue: Issue): Effect.Effect<boolean> => {
+  if (state.running.has(issue.id)) {
+    return recordOutcome(dispatchOutcomes, 'already_running').pipe(Effect.as(true))
+  }
+  if (!issueIsPaused(state, issue)) {
+    return Effect.succeed(false)
+  }
+  return logWarning('action=dispatch outcome=paused', {
+    ...logContext(issue),
+    action: 'dispatch',
+    outcome: 'paused',
+  }).pipe(Effect.zipRight(recordOutcome(dispatchOutcomes, 'paused')), Effect.as(true))
+}
+
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 const runDispatch = (
   context: OrchestratorContext,
@@ -353,8 +386,7 @@ const runDispatch = (
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     const before = yield* Ref.get(context.state)
-    if (before.running.has(issue.id)) {
-      yield* recordOutcome(dispatchOutcomes, 'already_running')
+    if (yield* refusedBeforeClaim(before, issue)) {
       return false
     }
     // Claiming and taking the queued retry are one transition: the issue must never be seen as

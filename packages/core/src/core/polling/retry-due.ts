@@ -2,8 +2,16 @@ import { Effect, Option, Ref } from 'effect'
 
 import type { Issue, IssueId } from '../../domain/domain.js'
 import { currentInstant } from '../../support/clock.js'
-import { logContext, hasSlot, issueIsActive, issueIsRoutable, stateIsIn } from '../policy.js'
-import { logWarning } from '../../support/logging.js'
+import {
+  logContext,
+  hasSlot,
+  issueIsActive,
+  issueIsPaused,
+  issueIsRoutable,
+  stateIsIn,
+} from '../policy.js'
+import { logInfo, logWarning } from '../../support/logging.js'
+import { recordOutcome, retryOutcomes } from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
 import { settleRepair } from '../repair.js'
@@ -12,6 +20,7 @@ import { applyHandoffObservation, reconcileHandoffs } from '../handoff-reconcili
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { EffectiveWorkflow, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
+import { endRetryForPause } from './paused-retry.js'
 import { releaseHandoffRepair, writeHandoff } from './repair-identity.js'
 
 type RetryDue = Extract<OrchestratorEvent, { _tag: 'RetryDue' }>
@@ -110,7 +119,8 @@ const resumeRepair = (
 
 /**
  * The retry a normal continuation was waiting on: the issue is re-read, and the session continues
- * only while it is still active, routable, and inside the workflow's concurrency limits.
+ * only while it is not paused and still active, routable, and inside the workflow's concurrency
+ * limits.
  */
 const resumeContinuation = (
   context: OrchestratorContext,
@@ -141,6 +151,26 @@ const resumeContinuation = (
       )
       return
     }
+    const admitting = yield* Ref.get(context.state)
+    // Read here, not only when the pause lands: this retry may have been queued after it, by the
+    // publication the pause deliberately left to finish, and a due retry that dispatched would put
+    // an agent on the very issue the operator stopped. It ends the way the pause ends a retry it
+    // finds queued, so the two orders of events leave the same state behind.
+    if (issueIsPaused(admitting, issue.value)) {
+      yield* endRetryForPause(
+        context,
+        event.issueId,
+        Option.fromNullable(admitting.handoffs.get(event.issueId)),
+      )
+      yield* logInfo('action=retry outcome=paused', {
+        ...logContext(issue.value),
+        action: 'retry',
+        outcome: 'paused',
+        attempt: event.attempt,
+      })
+      yield* recordOutcome(retryOutcomes, 'paused')
+      return
+    }
     if (
       !issueIsActive(issue.value, effective.workflow.config.tracker) ||
       !issueIsRoutable(issue.value, effective.workflow.config.tracker)
@@ -150,7 +180,6 @@ const resumeContinuation = (
       )
       return
     }
-    const admitting = yield* Ref.get(context.state)
     if (!hasSlot(admitting, issue.value, effective.workflow)) {
       yield* context.scheduleRetry(
         issue.value,

@@ -633,7 +633,11 @@ repair agent that had achieved nothing.
   which is [#259](https://github.com/Underzenith85/sloppenheimer-ts/issues/259).
 - An operator pause does not interrupt a publication already under way. Cutting off a push mid-flight
   is what leaves the remote in a state nobody can name, and the pause is not lost: the attempt
-  settles, and whatever is scheduled next re-reads the pause before publishing anything.
+  settles, and whatever is scheduled next re-reads the pause before publishing anything. That
+  includes the continuation a published attempt schedules: a retry that comes due against a pause
+  ends the way the pause ends a retry it finds queued — claim released, cancellation recorded — and
+  the dispatch itself refuses a paused issue as its last word
+  ([#263](https://github.com/Underzenith85/sloppenheimer-ts/issues/263)).
 - A publication asks whether the branch already carries its commit before rebasing, not after. The
   rebase is what makes the question unanswerable: a protected base that moved since the accepted
   push rewrites the very commit the branch holds, so the comparison could only ever answer that the

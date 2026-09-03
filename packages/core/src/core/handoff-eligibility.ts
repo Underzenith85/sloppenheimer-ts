@@ -10,7 +10,7 @@
 import { Effect, Option } from 'effect'
 
 import type { Issue, IssueId } from '../domain/domain.js'
-import { identifierIssueNumber, issueIsActive, issueIsRoutable, stateIsIn } from './policy.js'
+import { issueIsActive, issueIsPaused, issueIsRoutable, stateIsIn } from './policy.js'
 import type { HandoffEntry, RuntimeState } from './state.js'
 
 /** Whether this handoff is the orchestrator's to act on at all in this pass. */
@@ -24,9 +24,7 @@ export const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry)
   if (handoff.state === 'closed_without_merge') {
     return true
   }
-  return Option.exists(identifierIssueNumber(handoff.issue.identifier), (issueNumber) =>
-    state.pausedIssueNumbers.has(issueNumber),
-  )
+  return issueIsPaused(state, handoff.issue)
 }
 
 export type IssueRefresh =
