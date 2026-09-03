@@ -206,7 +206,7 @@ const unclaimedRequest = (
   [...servedMethods(routes)]
     .reduce(
       (router, [path, served]) => HttpRouter.all(router, path, methodRefusal(served)),
-      HttpRouter.empty as HttpRouter.HttpRouter<never, never>,
+      HttpRouter.empty,
     )
     .pipe(
       HttpRouter.withRouterConfig({ maxParamLength: maxIdentifierParamLength }),
