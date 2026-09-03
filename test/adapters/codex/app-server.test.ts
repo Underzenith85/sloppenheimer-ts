@@ -470,6 +470,25 @@ describe('App Server session lifecycle', (): void => {
       }),
     30_000,
   )
+
+  /*
+   * Before the listener existed this took the whole worker down: Node rethrows an `error` event
+   * with no listener as an uncaught exception, and a host write to a pipe the App Server had
+   * closed raised one on the child's stdin. The server here stays alive after closing its input,
+   * so the only way the session can end this quickly is by the write's own failure — an exit would
+   * be reported as `process_exited`, and silence as `read_timeout`.
+   */
+  it.live(
+    'fails the session rather than the host when a write reaches a closed stdin',
+    () =>
+      Effect.gen(function* () {
+        const outcome = yield* runScenario('stdin-closed', { readTimeoutMs: 5_000 })
+
+        expect(outcome.error?.category).toBe('protocol_error')
+        expect(outcome.error?.message).toBe('Codex stdin failed')
+      }),
+    30_000,
+  )
 })
 
 describe('App Server request handling', (): void => {
