@@ -15,9 +15,15 @@
 // The per-issue resource 13.7.2 documents beside `/api/v1/state` is mapped here too, from the same
 // snapshot and from the agent detail record the runtime publishes for that issue.
 //
-// This module is the whole of that published surface and the only path anything imports; the two
+// This module is the mapping's own surface: what the runtime's records become on the wire. The two
 // documents it re-exports live beside it in `api/`, which is one module split for size rather than
 // a boundary of its own.
+//
+// The published *types* here are one half of the contract; the schemas in `api/*-schema.ts` are the
+// other, and `api/endpoints.ts` binds them to paths, methods and statuses as the executable
+// definition the server routes, encodes and generates its OpenAPI description from. Each schema is
+// annotated with the type it serves, so the two halves cannot drift apart without the build saying
+// so.
 
 export {
   issueDetailPath,

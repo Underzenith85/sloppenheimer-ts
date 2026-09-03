@@ -1,16 +1,19 @@
 import { createServer, request } from 'node:http'
 import { it } from '@effect/vitest'
-import { Chunk, Effect, Option } from 'effect'
+import { Effect } from 'effect'
 import { describe, expect, vi } from 'vitest'
 
 import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
+import { isJsonObject, type JsonObject } from '@sloppenheimer/core/support/json.js'
 import type { ServerError } from '@sloppenheimer/core/domain/errors.js'
 import type { HandoffSnapshot } from '@sloppenheimer/core/domain/handoff.js'
 import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { issueDetailPath } from '../../src/operator/api.js'
+import { operatorRoutes } from '../../src/operator/api/endpoints.js'
+import { operatorOpenApiDocument } from '../../src/operator/openapi.js'
 import type { OperatorBackend } from '../../src/operator/operator.js'
 import type { AgentDetailLookup, OrchestratorSnapshot } from '@sloppenheimer/core'
-import { makeRouter, startOperatorServer } from '../../src/operator/server.js'
+import { startOperatorServer } from '../../src/operator/server.js'
 import {
   buildAgentDetail,
   createAgentDetailRecord,
@@ -208,6 +211,21 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
       setIssueEnabled(number, enabled)
     }),
 })
+
+/**
+ * One response body, read as the JSON object this API publishes rather than asserted to be one.
+ * `Response.json` answers `unknown`, and a cast would let a case inspect fields of a body whose
+ * shape was never established — which is the thing these cases exist to establish. `isJsonObject`
+ * is the repository's one structural record test; a body that is not a record fails here, with the
+ * body in the message, rather than as a confusing assertion further down.
+ */
+const jsonObjectBody = async (response: Response): Promise<JsonObject> => {
+  const payload: unknown = await response.json()
+  if (!isJsonObject(payload)) {
+    throw new Error(`expected a JSON object body, received ${JSON.stringify(payload)}`)
+  }
+  return payload
+}
 
 /**
  * Serves the console on a loopback socket for the length of the case. The callback stays
@@ -408,7 +426,7 @@ describe('operator server', (): void => {
         error: { code: 'issue_not_found' },
       })
       expect(wrongMethod.status).toBe(405)
-      expect(wrongMethod.headers.get('allow')).toBe('GET')
+      expect(wrongMethod.headers.get('allow')).toBe('GET, HEAD')
     }),
   )
 
@@ -569,13 +587,11 @@ describe('operator server', (): void => {
         // The link a successful response advertises must be one its own target accepts. The agent
         // route answers for this identifier on its own terms — no session ran for it — rather than
         // refusing to read it at all.
-        const body: unknown = await (
-          await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`)
-        ).json()
-        const detailUrl =
-          typeof body === 'object' && body !== null && 'detail_url' in body
-            ? String((body as { detail_url: unknown }).detail_url)
-            : ''
+        const body = await jsonObjectBody(
+          await fetch(`${url}/api/v1/${encodeURIComponent('GH-7')}`),
+        )
+        const published = body['detail_url']
+        const detailUrl = typeof published === 'string' ? published : ''
         expect(detailUrl).toBe('/api/v1/agents/GH-7')
         const followed = await fetch(`${url}${detailUrl}`)
         expect(followed.status).toBe(404)
@@ -622,14 +638,14 @@ describe('operator server', (): void => {
 
         const shadowedState = await fetch(`${url}/api/v1/state`)
         expect(shadowedState.status).toBe(200)
-        const stateBody = (await shadowedState.json()) as Record<string, unknown>
+        const stateBody = await jsonObjectBody(shadowedState)
         // The runtime state document, not the issue whose identifier is spelled that way.
         expect(stateBody).toMatchObject({ counts: { running: 0 } })
         expect(stateBody['issue_identifier']).toBeUndefined()
 
         const shadowedBacklog = await fetch(`${url}/api/v1/backlog`)
         expect(shadowedBacklog.status).toBe(200)
-        const backlogBody = (await shadowedBacklog.json()) as Record<string, unknown>
+        const backlogBody = await jsonObjectBody(shadowedBacklog)
         // The backlog document, in the internal vocabulary its own consumer reads.
         expect(backlogBody).toMatchObject({ controlLabel: 'sloppenheimer' })
         expect(Array.isArray(backlogBody['nodes'])).toBe(true)
@@ -658,14 +674,14 @@ describe('operator server', (): void => {
         // reporting the documented refresh method as unavailable.
         const wrongOnShared = await fetch(`${url}/api/v1/refresh`, { method: 'PUT' })
         expect(wrongOnShared.status).toBe(405)
-        expect(wrongOnShared.headers.get('allow')).toBe('GET, POST')
+        expect(wrongOnShared.headers.get('allow')).toBe('GET, HEAD, POST')
         expect(await wrongOnShared.json()).toMatchObject({
-          error: { message: 'Use GET or POST for this endpoint' },
+          error: { message: 'Use GET, HEAD or POST for this endpoint' },
         })
         // A path the per-issue resource has to itself still names only its own method.
         const wrongOnIssue = await fetch(`${url}/api/v1/agents`, { method: 'PUT' })
         expect(wrongOnIssue.status).toBe(405)
-        expect(wrongOnIssue.headers.get('allow')).toBe('GET')
+        expect(wrongOnIssue.headers.get('allow')).toBe('GET, HEAD')
 
         // The other two words the router uses are not reserved either: those routes carry a further
         // segment, so the wildcard still answers for an issue identified by the bare word.
@@ -683,27 +699,71 @@ describe('operator server', (): void => {
   )
 
   /*
-   * The shadowed set is what the router's own registrations make it, so it is derived from them
-   * here rather than restated: a path assembled from a constant, a helper or a template literal, or
-   * contributed by a prefixed sub-router, shadows an identifier exactly as a literal does and would
-   * be invisible to a guard that read the source. A third shadowed name would arrive without
-   * anybody deciding to reserve one.
+   * The shadowed set is what the endpoint definitions make it, so it is derived from them here
+   * rather than restated: a path assembled from a constant, a helper or a template literal shadows
+   * an identifier exactly as a literal does and would be invisible to a guard that read the source.
+   * A third shadowed name would arrive without anybody deciding to reserve one.
    */
-  it('reserves no identifier beyond the two fixed v1 GET routes the router registers', (): void => {
-    const registered = Chunk.toReadonlyArray(makeRouter(makeBackend(), 'csrf').routes).flatMap(
-      (route) => {
-        const path = `${Option.getOrElse(route.prefix, () => '')}${route.path}`
-        // Neither a parameter nor a further segment can collide: an identifier is one segment, and
-        // only a fixed one is spelled the same way twice. Nor can a route that answers some other
-        // method: the per-issue resource is a GET, so only a route reachable by GET hides it.
-        const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(path)?.[1]
-        const shadows = route.method === 'GET' || route.method === '*'
-        return reserved === undefined || !shadows ? [] : [reserved]
-      },
-    )
+  it('reserves no identifier beyond the two fixed v1 GET routes the API declares', (): void => {
+    const registered = operatorRoutes.flatMap((route) => {
+      // Neither a parameter nor a further segment can collide: an identifier is one segment, and
+      // only a fixed one is spelled the same way twice. Nor can a route that answers some other
+      // method: the per-issue resource is a GET, so only a route reachable by GET hides it.
+      const reserved = /^\/api\/v1\/([^/:*]+)$/u.exec(route.path)?.[1]
+      return reserved === undefined || route.method !== 'GET' ? [] : [reserved]
+    })
 
     expect([...new Set(registered)].sort()).toEqual(['backlog', 'state'])
   })
+
+  /*
+   * The documents are encoded through the schemas the endpoints declare, so what reaches a reader
+   * is what the contract describes rather than whatever the backend happened to be holding. A field
+   * no endpoint declares is the observable half of that: it does not reach the wire.
+   */
+  it.live('publishes the document its endpoint declares, and nothing beside it', () =>
+    Effect.gen(function* () {
+      const held = {
+        controlLabel: 'sloppenheimer',
+        issues: [],
+        nodes: [],
+        edges: [],
+        cycles: [],
+        internalNote: 'not part of the published contract',
+      }
+      const backend: OperatorBackend = { ...makeBackend(), backlog: Effect.succeed(held) }
+
+      yield* withServer(backend, async (url) => {
+        const response = await fetch(`${url}/api/v1/backlog`)
+        const body = await jsonObjectBody(response)
+
+        expect(response.status).toBe(200)
+        expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8')
+        expect(body).toMatchObject({ controlLabel: 'sloppenheimer', issues: [], nodes: [] })
+        expect(body['internalNote']).toBeUndefined()
+      })
+    }),
+  )
+
+  /*
+   * The description is generated from the same endpoint definitions the server routes and encodes
+   * against, and it is served outside the versioned namespace: a name under `/api/v1/` would shadow
+   * an issue identifier spelled the same way, and that namespace reserves exactly two.
+   */
+  it.live('serves an OpenAPI description generated from its own endpoint definitions', () =>
+    withServer(makeBackend(), async (url) => {
+      const response = await fetch(`${url}/openapi.json`)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8')
+      // What is served is the generated description itself, rather than something reshaped on the
+      // way out; what that description says is pinned against the endpoint definitions in
+      // `test/operator/api-contract.test.ts`.
+      expect(await response.json()).toEqual(operatorOpenApiDocument())
+      // Serving it reserves no identifier, because it is not in the versioned namespace at all.
+      expect(operatorRoutes.some((route) => route.path === '/openapi.json')).toBe(false)
+    }),
+  )
 
   it.live('acknowledges a refresh with what the request amounted to', () =>
     withServer(makeBackend(), async (url) => {
@@ -735,6 +795,15 @@ describe('operator server', (): void => {
         const rejected = await fetch(`${url}/api/v1/issues/17/pause`, { method: 'POST' })
         expect(rejected.status).toBe(403)
 
+        // A token that arrived and does not match is refused on the same terms as one that never
+        // arrived at all.
+        const wrongToken = await fetch(`${url}/api/v1/issues/17/start`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': 'not-the-token-this-process-minted' },
+        })
+        expect(wrongToken.status).toBe(403)
+        expect(await wrongToken.json()).toMatchObject({ error: { code: 'invalid_csrf_token' } })
+
         const page = await (await fetch(url)).text()
         const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1]
         expect(token).toBeDefined()
@@ -742,9 +811,32 @@ describe('operator server', (): void => {
           method: 'POST',
           headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
         })
+        const started = await fetch(`${url}/api/v1/issues/17/start`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
+        })
 
         expect(accepted.status).toBe(202)
+        expect(started.status).toBe(202)
         expect(setIssueEnabled).toHaveBeenCalledWith(17, false)
+        expect(setIssueEnabled).toHaveBeenCalledWith(17, true)
+
+        // The token is what the endpoint declares, and an issue number this API cannot address
+        // names no resource whether or not one came with the request.
+        const unaddressable = await fetch(`${url}/api/v1/issues/not-a-number/start`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
+        })
+        expect(unaddressable.status).toBe(404)
+
+        // A parameter is judged as the router will hand it to the handler, which is decoded. An
+        // escaped spelling of a number this API can address still names that issue.
+        const escaped = await fetch(`${url}/api/v1/issues/%31%37/pause`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token ?? '' },
+        })
+        expect(escaped.status).toBe(202)
+        expect(await escaped.json()).toMatchObject({ issueNumber: 17, enabled: false })
       })
     }),
   )
@@ -759,8 +851,91 @@ describe('operator server', (): void => {
 
       expect(missing.status).toBe(404)
       expect(wrongMethod.status).toBe(405)
-      expect(wrongMethod.headers.get('allow')).toBe('GET')
+      expect(wrongMethod.headers.get('allow')).toBe('GET, HEAD')
       expect(invalidAction.status).toBe(404)
+
+      // A `405` advertises what a URI serves, so it is only ever the answer for a URI that names
+      // something. An issue number this API cannot address names no resource on any method, and
+      // reporting the eligibility POST for it would say a resource exists that does not.
+      const readableAction = await fetch(`${url}/api/v1/issues/17/start`)
+      const unaddressableAction = await fetch(`${url}/api/v1/issues/not-a-number/start`)
+
+      expect(readableAction.status).toBe(405)
+      expect(readableAction.headers.get('allow')).toBe('POST')
+      expect(unaddressableAction.status).toBe(404)
+      expect(await unaddressableAction.json()).toMatchObject({ error: { code: 'not_found' } })
+    }),
+  )
+
+  /*
+   * The console's own files are resources like any other: a URI that exists reports what it serves.
+   * They used to fall through to the unknown-path answer, which said a file the host is serving
+   * does not exist. `HEAD` is the same question from the other side — it is answered wherever `GET`
+   * is, which the page already did and the versioned resources did not.
+   */
+  it.live("reports what the console's own files serve, and answers HEAD wherever GET is", () =>
+    withServer(makeBackend(), async (url) => {
+      const postedDocument = await fetch(`${url}/openapi.json`, { method: 'POST' })
+      const postedPage = await fetch(url, { method: 'POST' })
+      const postedScript = await fetch(`${url}/app.js`, { method: 'POST' })
+      const headedState = await fetch(`${url}/api/v1/state`, { method: 'HEAD' })
+      const headedPage = await fetch(url, { method: 'HEAD' })
+
+      for (const refusal of [postedDocument, postedPage, postedScript]) {
+        expect(refusal.status).toBe(405)
+        expect(refusal.headers.get('allow')).toBe('GET, HEAD')
+      }
+      expect(await postedDocument.json()).toMatchObject({
+        error: { code: 'method_not_allowed' },
+      })
+      expect(headedState.status).toBe(200)
+      expect(headedPage.status).toBe(200)
+
+      // `Allow` has to name what the URI actually answers, and only that. A refusal advertising a
+      // method that is itself refused describes a resource the host does not serve.
+      const refused = await fetch(`${url}/api/v1/state`, { method: 'DELETE' })
+      const advertised = (refused.headers.get('allow') ?? '').split(', ')
+      expect(advertised).toEqual(['GET', 'HEAD'])
+      for (const method of advertised) {
+        const answered = await fetch(`${url}/api/v1/state`, { method })
+        expect(answered.status).toBe(200)
+      }
+    }),
+  )
+
+  /*
+   * A URI whose parameter carries a malformed escape names nothing: there is no reading of it to
+   * route on, and the router will not match one. It has to be refused as unaddressable rather than
+   * dispatched — a request the API cannot route is a `404` like any other URI that names nothing,
+   * not a failure to report.
+   */
+  it.live('refuses a parameter that has no reading rather than dispatching it', () =>
+    withServer(makeBackend(), async (url) => {
+      const refusals = await Promise.all(
+        [
+          `${url}/api/v1/%`,
+          `${url}/api/v1/%zz`,
+          `${url}/api/v1/%E0%A4%A`,
+          `${url}/api/v1/agents/%`,
+          `${url}/api/v1/issues/%/start`,
+        ].map(async (target) => {
+          const response = await fetch(target, {
+            method: target.endsWith('/start') ? 'POST' : 'GET',
+          })
+          const body = await jsonObjectBody(response)
+          return { status: response.status, body }
+        }),
+      )
+
+      for (const refusal of refusals) {
+        expect(refusal.status).toBe(404)
+        expect(refusal.body).toMatchObject({ error: { code: 'not_found' } })
+      }
+
+      // An escape that does have a reading is addressed on that reading, which is how every
+      // identifier this API publishes a link for reaches its resource.
+      const encoded = await fetch(`${url}/api/v1/${encodeURIComponent('example/sloppenheimer#17')}`)
+      expect(encoded.status).toBe(200)
     }),
   )
 

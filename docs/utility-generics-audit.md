@@ -350,7 +350,8 @@ server side, though it cannot share the browser helpers as things stand.
 **Related.** `policy.ts:76` `identifierIssueNumber` and `src/operator/ui/model.ts:191`
 `issueNumberOf` parse the same `/#(\d+)$/u` from the same identifiers, differing only in returning
 `Option` versus `null` — which is exactly the boundary `AGENTS.md` describes, so this pair is
-defensible. `src/operator/server.ts:75` holds a third, stricter reading of the same format. Worth a
+defensible. `src/operator/handlers.ts` holds a third, stricter reading of the same format, as the schema an
+issue-eligibility path parameter is decoded against. Worth a
 shared regexp constant even if the three readings stay separate.
 
 ---
