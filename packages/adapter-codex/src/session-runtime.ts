@@ -69,8 +69,22 @@ export const processIdOf = (session: SessionRuntime): number | null => session.p
 /**
  * Reports the child's own lifecycle as a session failure. An exit is only a failure while the
  * session is still open: one that has stopped closed the process itself.
+ *
+ * The child's stdin is watched here too. Node rethrows an `error` event nobody listens to as an
+ * uncaught exception, and a write to a pipe the App Server has already closed — or one it left
+ * behind when it died, before Node has processed the exit — raises exactly that on stdin. Listening
+ * makes a broken pipe fail this session rather than the host and every other session it runs; the
+ * two readers cover stdout and stderr the same way.
  */
 export const watchProcess = (session: SessionRuntime): void => {
+  session.process.stdin.on('error', (cause) => {
+    session.fork(
+      failUnlessClosed(
+        session,
+        new AgentError({ category: 'protocol_error', message: 'Codex stdin failed', cause }),
+      ),
+    )
+  })
   session.process.once('error', (cause) => {
     session.fork(
       failSession(
@@ -133,10 +147,15 @@ export const emitEvent = (
   )
 }
 
+/**
+ * Writes one protocol message to the child, unless the session is over. A session that has failed
+ * is one whose process exited, or whose pipes broke, so nothing is left to read the message: a
+ * write attempted anyway could only fail the same way again.
+ */
 export const writeMessage = (session: SessionRuntime, message: JsonObject): Effect.Effect<void> =>
   Ref.get(session.state).pipe(
     Effect.flatMap((state) =>
-      state.closed
+      state.closed || Option.isSome(state.terminalError)
         ? Effect.void
         : Effect.sync(() => {
             session.process.stdin.write(`${JSON.stringify(message)}\n`)

@@ -3,7 +3,7 @@ import type { Deferred, Effect, MutableRef, Option } from 'effect'
 import type { Workflow } from '../config/workflow.js'
 import { issueId } from '../domain/domain.js'
 import type { Issue, IssueId, IssueIdentifier, JsonObject, TokenTotals } from '../domain/domain.js'
-import type { HandoffSnapshot } from '../domain/handoff.js'
+import type { HandoffSnapshot, RepairPublication } from '../domain/handoff.js'
 import type {
   AgentRunnerConfig,
   AgentRunnerPort,
@@ -264,11 +264,10 @@ export type RepairEntry = Readonly<{
 }>
 
 /**
- * The postflight verdict a repair carries, as the handoff state machine needs it.
- *
- * `pending` is a repair whose turn has not settled yet — including one dispatched but not started.
+ * The postflight verdict a repair carries, as the handoff state machine needs it. It is the
+ * persisted format's literal, so a verdict the state machine can reach is one the store reads back.
  */
-export type RepairPublication = 'pending' | 'published' | 'no_changes' | 'delivery_failed'
+export type { RepairPublication }
 
 /**
  * What a cancelled run does with the repair identity it was carrying.
