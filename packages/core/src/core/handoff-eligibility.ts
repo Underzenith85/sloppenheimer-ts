@@ -11,6 +11,7 @@ import { Effect, Option } from 'effect'
 
 import type { Issue, IssueId } from '../domain/domain.js'
 import { issueIsActive, issueIsPaused, issueIsRoutable, stateIsIn } from './policy.js'
+import { rebaseInFlight } from './rebase.js'
 import type { HandoffEntry, RuntimeState } from './state.js'
 
 /** Whether this handoff is the orchestrator's to act on at all in this pass. */
@@ -19,6 +20,11 @@ export const skipped = (state: RuntimeState, id: IssueId, handoff: HandoffEntry)
   // waits would read the pre-delivery state as the repair's output, which is the reading this
   // whole separation exists to prevent.
   if (state.running.has(id) || state.retries.has(id) || state.deliveries.has(id)) {
+    return true
+  }
+  // A rebase the host is performing is the same kind of thing: the branch is about to move under
+  // a lease this pass did not take, and an observation now would act on the head it is replacing.
+  if (rebaseInFlight(handoff)) {
     return true
   }
   if (handoff.state === 'closed_without_merge') {

@@ -43,6 +43,8 @@ type PipelinePhase =
   | 'delivering'
   | 'handing_off'
   | 'awaiting_checks'
+  /** The host is putting the pull request branch back on top of the protected base. */
+  | 'rebasing'
   | 'ready_to_merge'
   | 'merging'
   | 'repair_needed'
@@ -162,6 +164,7 @@ const phaseLabels: Readonly<Record<PipelinePhase, string>> = {
   delivering: 'Delivering',
   handing_off: 'Handing off',
   awaiting_checks: 'Awaiting checks',
+  rebasing: 'Rebasing',
   ready_to_merge: 'Ready to merge',
   merging: 'Merging',
   repair_needed: 'Repair needed',
@@ -193,6 +196,7 @@ const handoffPhases: Readonly<Record<string, PipelinePhase>> = {
   awaiting_checks: 'awaiting_checks',
   delivery_failed: 'delivering',
   repair_needed: 'repair_needed',
+  rebase_needed: 'rebasing',
   ready_to_merge: 'ready_to_merge',
   merging: 'merging',
   closed_without_merge: 'closed_without_merge',
@@ -300,6 +304,7 @@ const progressOrder: readonly PipelinePhase[] = [
   'delivering',
   'handing_off',
   'awaiting_checks',
+  'rebasing',
   'ready_to_merge',
   'merging',
 ]

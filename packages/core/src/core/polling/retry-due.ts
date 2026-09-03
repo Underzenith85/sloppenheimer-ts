@@ -14,6 +14,7 @@ import { logInfo, logWarning } from '../../support/logging.js'
 import { recordOutcome, retryOutcomes } from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
+import { rebaseInFlight } from '../rebase.js'
 import { settleRepair } from '../repair.js'
 import { repairPermission } from '../handoff-eligibility.js'
 import { applyHandoffObservation, reconcileHandoffs } from '../handoff-reconciliation.js'
@@ -43,10 +44,14 @@ const handoffTookOver = (context: OrchestratorContext, issueId: IssueId): Effect
     // issue that keeps completing normal continuation turns.
     yield* reconcileHandoffs(context, true, Option.some(issueId))
     const reconciled = yield* Ref.get(context.state)
+    const handoff = reconciled.handoffs.get(issueId)
     return (
-      !reconciled.handoffs.has(issueId) ||
+      handoff === undefined ||
       reconciled.running.has(issueId) ||
-      reconciled.retries.has(issueId)
+      reconciled.retries.has(issueId) ||
+      // A rebase the pass just started is moving the branch this continuation would start from.
+      // The handoff has the issue for now; the poll re-dispatches it once the claim is released.
+      rebaseInFlight(handoff)
     )
   })
 

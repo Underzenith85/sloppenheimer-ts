@@ -386,6 +386,7 @@ type TestPorts = Readonly<{
   /** Observes the watcher's own teardown, which the stream's scope owns. */
   onWatchReleased?: (path: string) => void
   onTrackerReleased?: (provider: ValidatedTrackerProvider) => void
+  onSourceControlReleased?: (provider: ValidatedTrackerProvider) => void
   onWorkspacesReleased?: (settings: WorkspaceSettings) => void
 }>
 
@@ -487,6 +488,13 @@ const layerTestPorts = (
         headSha: 'published-head',
         commitCreated: true,
       }),
+    rebase: (_issue, prepared) =>
+      Effect.succeed({
+        _tag: 'Published',
+        branchName: prepared.target.branchName,
+        headSha: 'rebased-head',
+        commitCreated: false,
+      }),
   }
   const makeSourceControl = ports.makeSourceControl
   return Layer.mergeAll(
@@ -501,8 +509,11 @@ const layerTestPorts = (
       ports.configuration,
       Layer.succeed(SourceControlFactory, {
         make: (provider) =>
-          Effect.succeed(
-            makeSourceControl === undefined ? sourceControl : makeSourceControl(provider),
+          Effect.acquireRelease(
+            Effect.sync(() =>
+              makeSourceControl === undefined ? sourceControl : makeSourceControl(provider),
+            ),
+            () => Effect.sync(() => ports.onSourceControlReleased?.(provider)),
           ),
       }),
     ),
@@ -748,6 +759,40 @@ const repairObservation = (number: number, headSha: string): PullRequestObservat
     codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
   })
 
+/**
+ * A pull request GitHub reports as merely out of date: the checks pass, nothing conflicts, and the
+ * head has been reviewed. Nothing about the change is an agent's to fix.
+ */
+const behindObservation = (number: number, headSha: string): PullRequestObservation =>
+  anOpenPullRequest({
+    number,
+    url: 'https://github.test/example/sloppenheimer/pull/65',
+    headSha,
+    mergeable: true,
+    mergeState: 'behind',
+    codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
+  })
+
+/**
+ * Source control for a pull request the host rebases: the preparation a repair gets, a worktree
+ * nothing has edited, and no publication -- a behind branch is rebased, never published.
+ */
+const behindSourceControl = (rebase: SourceControlPort['rebase']): SourceControlPort => ({
+  prepare: (_candidate, workspace, target) =>
+    Effect.succeed({
+      workspace,
+      target,
+      baseBranch: 'main',
+      baseSha: 'protected-main',
+      baselineSha: target._tag === 'Repair' ? target.expectedHeadSha : 'protected-main',
+      expectedRemoteHead:
+        target._tag === 'Repair' ? Option.some(target.expectedHeadSha) : Option.none(),
+    }),
+  inspect: (prepared) => Effect.succeed(cleanWorktree(prepared.baselineSha)),
+  publish: () => Effect.die('a behind branch is rebased, never published'),
+  rebase,
+})
+
 const saveRepairHandoff = (
   path: string,
   issue: Issue,
@@ -820,6 +865,7 @@ describe('host-owned source-control dispatch', (): void => {
               commitCreated: true,
             })
           },
+          rebase: () => Effect.die('no test here rebases a pull request'),
         }),
         runAgent: (launch) => {
           launched = true
@@ -888,6 +934,7 @@ describe('host-owned source-control dispatch', (): void => {
               commitCreated: true,
             })
           },
+          rebase: () => Effect.die('no test here rebases a pull request'),
         }),
         runAgent: () => {
           launched = true
@@ -950,6 +997,7 @@ describe('agent turn completion separated from work publication', (): void => {
     inspect: (prepared) =>
       Effect.succeed(hasWork() ? changedWorktree : cleanWorktree(prepared.baselineSha)),
     publish,
+    rebase: () => Effect.die('no test here rebases a pull request'),
   })
 
   it.scoped('retains the work a failed publication left, rather than retrying the agent', () =>
@@ -3004,6 +3052,7 @@ describe('restored pull request handoffs', (): void => {
               branchName: prepared.target.branchName,
               baselineSha: prepared.baselineSha,
             }),
+          rebase: () => Effect.die('no test here rebases a pull request'),
         }),
         runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
       }
@@ -3033,6 +3082,397 @@ describe('restored pull request handoffs', (): void => {
       })
       expect(snapshot.handoffs[0]?.reason).toContain(
         'Repair agent completed without changing the pull request head',
+      )
+    }),
+  )
+
+  it.scoped(
+    'rebases a pull request that is behind protected main with no agent and no repair',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-')
+        const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+        const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+        const issue = {
+          ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('20'),
+        }
+        const behindHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        const rebasedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+        yield* saveRepairHandoff(handoffStorePath, issue, behindHead)
+        // Out of the poll's sight, so the only agent this could dispatch is a repair.
+        const harness = makeHarness(
+          isolated,
+          () => [issue],
+          () => Effect.succeed([]),
+        )
+        let observedHead = behindHead
+        let launches = 0
+        const targets: SourceControlTarget[] = []
+        const rebasedFrom: string[] = []
+        const requestedHeads: string[] = []
+        const stub = behindSourceControl((_candidate, prepared) => {
+          rebasedFrom.push(prepared.baselineSha)
+          return Effect.succeed({
+            _tag: 'Published',
+            branchName: prepared.target.branchName,
+            headSha: rebasedHead,
+            commitCreated: false,
+          })
+        })
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeCodeReview: (provider) => ({
+            ...requireCodeReview(harness.ports, provider),
+            inspectPullRequest: (number) =>
+              Effect.sync(() =>
+                observedHead === behindHead
+                  ? behindObservation(number, behindHead)
+                  : anOpenPullRequest({
+                      number,
+                      url: 'https://github.test/example/sloppenheimer/pull/65',
+                      headSha: observedHead,
+                      mergeable: null,
+                      mergeState: 'unknown',
+                      codexReview: { headShaPrefix: behindHead.slice(0, 7), status: 'completed' },
+                    }),
+              ),
+            requestPullRequestReview: (_number, expectedHeadSha) =>
+              Effect.sync(() => {
+                requestedHeads.push(expectedHeadSha)
+              }),
+          }),
+          makeSourceControl: () => ({
+            ...stub,
+            prepare: (candidate, workspace, target) => {
+              targets.push(target)
+              return stub.prepare(candidate, workspace, target)
+            },
+          }),
+          runAgent: () => {
+            launches += 1
+            return Effect.never
+          },
+        }
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            yield* control.refresh
+            let snapshot = yield* control.snapshot
+            // The attempt runs off the loop and settles as an event of its own.
+            while (snapshot.handoffs[0]?.state !== 'awaiting_checks') {
+              yield* Effect.yieldNow()
+              snapshot = yield* control.snapshot
+            }
+            expect(targets).toEqual([
+              { _tag: 'Repair', branchName: 'sloppenheimer/issue-20', expectedHeadSha: behindHead },
+            ])
+            expect(rebasedFrom).toEqual([behindHead])
+            expect(snapshot.handoffs[0]).toMatchObject({
+              state: 'awaiting_checks',
+              headSha: rebasedHead,
+              repairAttempts: 0,
+              repairHeadShas: [],
+              repairStartedHeadSha: null,
+              reason:
+                'Rebased the pull request branch onto protected main; waiting for the pull request to report the new head',
+            })
+
+            // The provider still reports the head the rebase replaced: not behind again, and not a
+            // second rebase against a lease the push has already moved.
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+            expect(rebasedFrom).toEqual([behindHead])
+            expect(snapshot.handoffs[0]).toMatchObject({ state: 'awaiting_checks' })
+
+            // Once it does, the pushed head is a new head like any other: reviewed once.
+            observedHead = rebasedHead
+            yield* control.refresh
+            snapshot = yield* control.snapshot
+            expect(requestedHeads).toEqual([rebasedHead])
+            expect(snapshot.handoffs[0]).toMatchObject({
+              state: 'awaiting_checks',
+              headSha: rebasedHead,
+              reviewRequestedHeadSha: rebasedHead,
+              repairAttempts: 0,
+            })
+            expect(snapshot.running).toEqual([])
+            expect(snapshot.retrying).toEqual([])
+          }),
+        )
+
+        expect(launches).toBe(0)
+        // The head the host pushed is nobody's repair, so it is not persisted as one.
+        expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+          expect.objectContaining({ headSha: rebasedHead, repairAttempts: 0, repairHeadShas: [] }),
+        ])
+      }),
+  )
+
+  it.scoped('keeps the loop answering and the issue claimed while a rebase hangs', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-hang-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const behindHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, behindHead)
+      // In the poll's sight: an issue the poll would dispatch the moment its claim were released.
+      const harness = makeHarness(isolated, () => [issue])
+      let launches = 0
+      let rebases = 0
+      let release = (): void => undefined
+      const hanging = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(behindObservation(number, behindHead)),
+        }),
+        makeSourceControl: () =>
+          // A push waiting on a child process that will not close.
+          behindSourceControl((_candidate, prepared) => {
+            rebases += 1
+            return Effect.promise(() => hanging).pipe(
+              Effect.as({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                commitCreated: false,
+              }),
+            )
+          }),
+        runAgent: () => {
+          launches += 1
+          return Effect.never
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          while (rebases === 0) {
+            yield* Effect.yieldNow()
+          }
+          let snapshot = yield* control.snapshot
+          expect(snapshot.handoffs[0]).toMatchObject({
+            state: 'rebase_needed',
+            reason: 'Rebasing the pull request branch onto protected main',
+          })
+
+          // The rebase is in flight and will not return. The loop still answers -- each refresh
+          // runs a whole pass -- and the pass neither rebases the branch a second time nor releases
+          // the claim under it: the issue is a live candidate, and an agent admitted now would
+          // start from the head the push is replacing.
+          yield* control.refresh
+          yield* control.refresh
+          snapshot = yield* control.snapshot
+          expect(rebases).toBe(1)
+          expect(launches).toBe(0)
+          expect(snapshot.running).toEqual([])
+          expect(snapshot.handoffs[0]).toMatchObject({ state: 'rebase_needed' })
+
+          release()
+          while (snapshot.handoffs[0]?.state !== 'awaiting_checks') {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+        }),
+      )
+    }),
+  )
+
+  it.scoped('needs a human when the rebase of a behind branch itself conflicts', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-conflict-')
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const behindHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, behindHead)
+      const harness = makeHarness(
+        isolated,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      let launches = 0
+      let attempts = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(behindObservation(number, behindHead)),
+        }),
+        makeSourceControl: () =>
+          behindSourceControl(() => {
+            attempts += 1
+            // The lease refuses first: the branch moved between the observation and the attempt.
+            // That is the next observation's to retry from wherever the branch is. A conflict in
+            // the rebase itself is not: the provider said the branch was merely behind, so what
+            // refused is the one thing the host can do about it.
+            return Effect.fail(
+              attempts === 1
+                ? new SourceControlError({
+                    category: 'lease_conflict',
+                    message: 'remote branch sloppenheimer/issue-20 changed after preparation',
+                    retryable: true,
+                    worktreePreserved: true,
+                  })
+                : new SourceControlError({
+                    category: 'rebase_conflict',
+                    message: 'source-control publication could not rebase onto the protected base',
+                    retryable: true,
+                    worktreePreserved: true,
+                  }),
+            )
+          }),
+        runAgent: () => {
+          launches += 1
+          return Effect.never
+        },
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          let current = yield* control.snapshot
+          while (current.handoffs[0]?.reason?.startsWith('Could not rebase') !== true) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          expect(current.handoffs[0]).toMatchObject({
+            state: 'rebase_needed',
+            reason:
+              'Could not rebase the pull request branch onto protected main: remote branch sloppenheimer/issue-20 changed after preparation',
+          })
+
+          yield* control.refresh
+          while (current.handoffs[0]?.state !== 'intervention_required') {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          // Held there while the head is unchanged, and observed every poll all the same.
+          yield* control.refresh
+          return yield* control.snapshot
+        }),
+      )
+
+      expect(attempts).toBe(2)
+      expect(launches).toBe(0)
+      expect(snapshot.handoffs[0]).toMatchObject({
+        state: 'intervention_required',
+        headSha: behindHead,
+        repairAttempts: 0,
+        reason:
+          'The pull request branch is behind protected main and could not be rebased onto it: source-control publication could not rebase onto the protected base',
+      })
+      expect(yield* loadHandoffs(handoffStorePath)).toEqual([
+        expect.objectContaining({ state: 'intervention_required', repairAttempts: 0 }),
+      ])
+    }),
+  )
+
+  it.scoped('keeps the source control a reload replaced until its rebase settles', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-reload-')
+      const reloadedRoot = yield* isolatedWorkspaceRoot('sloppenheimer-behind-rebase-reloaded-')
+      const initial: Workflow = {
+        ...changedWorkflow({ fingerprint: 'initial' }),
+        config: { ...workflow.config, workspaceRoot },
+      }
+      const reloaded: Workflow = {
+        ...changedWorkflow({ fingerprint: 'reloaded' }),
+        config: { ...initial.config, workspaceRoot: reloadedRoot },
+      }
+      const handoffStorePath = join(workspaceRoot, '.sloppenheimer', 'handoffs.json')
+      const issue = {
+        ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('20'),
+      }
+      const behindHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      yield* saveRepairHandoff(handoffStorePath, issue, behindHead)
+      const harness = makeHarness(
+        initial,
+        () => [issue],
+        () => Effect.succeed([]),
+      )
+      let rebases = 0
+      let releasedSourceControls = 0
+      let release = (): void => undefined
+      const hanging = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeCodeReview: (provider) => ({
+          ...requireCodeReview(harness.ports, provider),
+          inspectPullRequest: (number) => Effect.succeed(behindObservation(number, behindHead)),
+        }),
+        makeSourceControl: () =>
+          behindSourceControl((_candidate, prepared) => {
+            rebases += 1
+            return Effect.promise(() => hanging).pipe(
+              Effect.as({
+                _tag: 'Published',
+                branchName: prepared.target.branchName,
+                headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                commitCreated: false,
+              }),
+            )
+          }),
+        onSourceControlReleased: () => {
+          releasedSourceControls += 1
+        },
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* control.refresh
+          while (rebases === 0) {
+            yield* Effect.yieldNow()
+          }
+          let snapshot = yield* control.snapshot
+
+          const beforeReload = releasedSourceControls
+          harness.setWorkflow(reloaded)
+          harness.notifyChanged()
+          while (snapshot.effectiveWorkflow.fingerprint !== 'reloaded') {
+            yield* control.refresh
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+
+          // The handoff has moved onto the reloaded source control, and the attempt is still
+          // preparing and pushing through the one it was forked with. Only the rebase identity
+          // remembers that, and it is what keeps the drain from retiring the instance under it.
+          expect(releasedSourceControls).toBe(beforeReload)
+          expect(snapshot.handoffs[0]).toMatchObject({ state: 'rebase_needed' })
+
+          release()
+          while (snapshot.handoffs[0]?.state !== 'awaiting_checks') {
+            yield* Effect.yieldNow()
+            snapshot = yield* control.snapshot
+          }
+          yield* control.refresh
+          yield* control.refresh
+
+          // Settled, so nothing calls through it any more and the next drain lets it go.
+          expect(releasedSourceControls).toBe(beforeReload + 1)
+        }),
       )
     }),
   )

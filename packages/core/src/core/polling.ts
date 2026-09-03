@@ -7,6 +7,7 @@ import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
 import { onDeliveryAttempted, onDeliveryDue } from './polling/delivery-due.js'
 import { onIssuePauseChanged } from './polling/issue-pause.js'
+import { onRebaseAttempted } from './polling/rebase.js'
 import { onRetryDue } from './polling/retry-due.js'
 import { onTick } from './polling/tick.js'
 import { onWorkerExited } from './polling/worker-exited.js'
@@ -25,6 +26,7 @@ import { onWorkerExited } from './polling/worker-exited.js'
  * - `polling/worker-exited.ts` — a worker fiber ending, and the handoff that may follow.
  * - `polling/retry-due.ts` — a queued retry coming due, continuing work or resuming a repair.
  * - `polling/delivery-due.ts` — a retained delivery's next publication attempt, with no agent.
+ * - `polling/rebase.ts` — the host rebasing a pull request that fell behind the base, with no agent.
  * - `polling/issue-pause.ts` — the operator pausing or resuming an issue number.
  *
  * `polling/pass.ts` holds the reconciliation pass itself, and `polling/repair-identity.ts` the
@@ -80,6 +82,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
         }
         case 'DeliveryAttempted': {
           yield* onDeliveryAttempted(context, event)
+          break
+        }
+        case 'RebaseAttempted': {
+          yield* onRebaseAttempted(context, event)
           break
         }
         case 'SetIssuePaused': {
