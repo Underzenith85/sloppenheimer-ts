@@ -98,6 +98,22 @@ const observe = (
     if (Option.contains(actual, candidate.headSha)) {
       return { _tag: 'Published', headSha: candidate.headSha }
     }
+    if (Option.isSome(actual)) {
+      // Read the observed object, not a moving tracking ref. A descendant preserves the push
+      // even when its acknowledgement was lost; failures to fetch remain failures, not divergence.
+      yield* runGit(settings, 'publish', prepared.workspace.path, [
+        'fetch',
+        '--no-tags',
+        '--no-write-fetch-head',
+        'origin',
+        actual.value,
+      ])
+      if (
+        yield* containedIn(settings, 'publish', prepared.workspace, candidate.headSha, actual.value)
+      ) {
+        return { _tag: 'Published', headSha: candidate.headSha }
+      }
+    }
     const expected = prepared.expectedRemoteHead
     const unchanged = Option.match(expected, {
       onNone: () => Option.isNone(actual),

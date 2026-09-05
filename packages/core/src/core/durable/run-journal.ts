@@ -55,6 +55,7 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
   const phase = (
     kind: 'implement' | 'inspect' | 'verify' | 'publish',
     artifact?: Artifact,
+    requireActive = true,
   ): Effect.Effect<void> =>
     Clock.currentTimeMillis.pipe(
       Effect.flatMap((now) =>
@@ -78,7 +79,7 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
             },
           }),
           owner,
-          true,
+          requireActive,
         ),
       ),
     )
@@ -91,10 +92,14 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
       checkpointed: (candidate) => phase('inspect', candidateArtifact(candidate)),
       aligned: (candidate) => phase('verify', candidateArtifact(candidate)),
       verified: (verified) =>
-        phase('publish', {
-          ...candidateArtifact(verified.candidate),
-          verifiedRevision: verified.evidence.treeSha,
-        }),
+        phase(
+          'publish',
+          {
+            ...candidateArtifact(verified.candidate),
+            verifiedRevision: verified.evidence.treeSha,
+          },
+          false,
+        ),
       published: settled,
     },
     settled,

@@ -7,7 +7,7 @@ import type { DeliveryRequest, RuntimeCells } from './types.js'
 
 /** Keep the candidate and issue claim, without spending retries on unchanged verification inputs. */
 export const holdDelivery = (
-  cells: RuntimeCells,
+  cells: Pick<RuntimeCells, 'state'>,
   request: DeliveryRequest,
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {

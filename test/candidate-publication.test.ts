@@ -314,3 +314,84 @@ it.live('durably settles an already-current host rebase without pushing or stran
     )
   }),
 )
+
+for (const descendant of [false, true]) {
+  it.live(
+    'settles an observed push without new eligibility or mutation, descendant=' +
+      String(descendant),
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { repository, source, candidates, issue, prepared } = yield* fixture
+          const store = yield* openWorkflowStore(join(repository.root, 'observed.sqlite'), true)
+          const host = yield* makeDurableHost(store)
+          const journal = yield* host
+            .start(issue, prepared.target)
+            .pipe(Effect.map(Option.getOrThrow))
+          yield* journal.prepared(prepared)
+          const checkpoint = yield* candidates
+            .checkpoint(issue, prepared)
+            .pipe(Effect.map(Option.getOrThrow))
+          const verified = yield* candidates.verify(checkpoint, gate, [])
+          yield* journal.publication.verified(verified)
+          yield* candidates.publish(verified)
+          if (descendant) {
+            yield* Effect.promise(() => git(repository.seed, ['fetch', 'origin', 'candidate/test']))
+            yield* Effect.promise(() =>
+              git(repository.seed, ['checkout', '-B', 'candidate/test', 'FETCH_HEAD']),
+            )
+            yield* Effect.promise(() =>
+              commitFile(repository.seed, 'review.txt', 'review', 'advance candidate'),
+            )
+            yield* Effect.promise(() => git(repository.seed, ['push', 'origin', 'candidate/test']))
+          }
+          const remote = yield* Effect.promise(() =>
+            git(repository.remote, ['rev-parse', 'refs/heads/candidate/test']),
+          )
+          const observed: typeof source = {
+            ...source,
+            candidates: {
+              ...candidates,
+              publish: () => Effect.die('must not publish a known fact'),
+            },
+          }
+          const result = yield* runVerifiedPublication(observed, issue, prepared, gate, [], {
+            journal: journal.publication,
+            beforePublish: Effect.fail(
+              new SourceControlError({
+                category: 'publication_blocked',
+                message: 'tracker unavailable or issue ineligible',
+                retryable: false,
+                worktreePreserved: true,
+              }),
+            ),
+          })
+          expect(result).toMatchObject({ _tag: 'Published', headSha: checkpoint.headSha })
+          expect((yield* host.snapshot)[0]?.artifact?.publishedHead).toBe(checkpoint.headSha)
+          expect((yield* host.snapshot)[0]?.status).toMatchObject({
+            _tag: 'Waiting',
+            condition: 'review',
+          })
+          expect(
+            yield* Effect.promise(() =>
+              git(repository.remote, ['rev-parse', 'refs/heads/candidate/test']),
+            ),
+          ).toBe(remote)
+        }),
+      ),
+  )
+}
+
+it.live('preserves divergence when the remote contains unrelated work', () =>
+  Effect.gen(function* () {
+    const { repository, candidates, issue, prepared } = yield* fixture
+    const checkpoint = yield* candidates
+      .checkpoint(issue, prepared)
+      .pipe(Effect.map(Option.getOrThrow))
+    yield* Effect.promise(() => commitFile(repository.seed, 'other.txt', 'other', 'unrelated work'))
+    yield* Effect.promise(() =>
+      git(repository.seed, ['push', 'origin', 'HEAD:refs/heads/candidate/test']),
+    )
+    expect((yield* candidates.observe(checkpoint))._tag).toBe('Diverged')
+  }),
+)

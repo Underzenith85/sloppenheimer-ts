@@ -9,6 +9,7 @@ import { issueIsActive, issueIsPaused, logContext, stateIsIn } from '../policy.j
 import { publicationEligibility } from '../publication-eligibility.js'
 import { runPostflight } from '../postflight.js'
 import { stopRetentionPass } from '../run-workspace.js'
+import { holdDelivery as retainIntervention } from '../runtime/held-delivery.js'
 import { ownIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { DeliveryEntry } from '../postflight.js'
@@ -193,7 +194,11 @@ const runDeliveryAttempt = (
       return { _tag: 'Held' } as const
     }
     if (disposition === 'discard' && context.durable !== undefined) {
-      return { _tag: 'Held' } as const
+      return {
+        _tag: 'Intervention',
+        reason:
+          'Issue is no longer active. Durable candidate retained; cleanup requires reconciliation.',
+      } as const
     }
     if (disposition === 'discard') {
       yield* stopRetentionPass(context, entry.issue.id)
@@ -316,6 +321,25 @@ export const onDeliveryAttempted = (
     const entry = due.value
     if (event.result._tag === 'Held') {
       yield* holdDelivery(context, entry)
+      return
+    }
+    if (event.result._tag === 'Intervention') {
+      const failure = {
+        category: 'publication_blocked',
+        message: event.result.reason,
+        retryable: false,
+        worktreePreserved: true,
+      } as const
+      yield* (
+        entry.execution.journal?.settled({
+          _tag: 'DeliveryFailed',
+          branchName: entry.prepared.target.branchName,
+          prepared: entry.prepared,
+          changedFileCount: entry.changedFileCount,
+          failure,
+        }) ?? Effect.void
+      )
+      yield* retainIntervention(context, { ...entry, failure })
       return
     }
     if (event.result._tag === 'DiscardFailed') {

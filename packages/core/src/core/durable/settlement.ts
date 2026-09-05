@@ -33,7 +33,7 @@ export const settleRun = (
               outcome._tag === 'Published'
                 ? 'Observed publication does not match durable verification evidence; inspect before repair'
                 : outcome._tag === 'DeliveryFailed'
-                  ? 'Candidate retained: ' + outcome.failure.category
+                  ? 'Candidate retained: ' + outcome.failure.message
                   : 'Run ended without a published candidate; inspect before a new coding attempt',
           },
   }

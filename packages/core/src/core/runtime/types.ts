@@ -235,6 +235,7 @@ export type OrchestratorControl = Readonly<{
  */
 export type DeliveryAttemptResult =
   | Readonly<{ _tag: 'Held' }>
+  | Readonly<{ _tag: 'Intervention'; reason: string }>
   | Readonly<{ _tag: 'Discarded' }>
   | Readonly<{ _tag: 'DiscardFailed'; error: string }>
   | Readonly<{ _tag: 'Abandoned' }>

@@ -1,5 +1,6 @@
 import { Effect, FiberSet, Option, Queue, Ref, Stream, type Scope } from 'effect'
 
+import { validateWorkflowComposition } from './runtime/composition.js'
 import { WorkflowStore } from '../ports/workflow-store.js'
 import { makeDurableHost } from './durable/live-journal.js'
 import type { WorkflowError } from '../domain/errors.js'
@@ -110,10 +111,9 @@ export const startOrchestratorRuntime = (
      * check measures the file against the workflow adopted here, never against the cells' input.
      * The instances the layer built are replaced immediately and retired on the first poll.
      */
-    const bootstrap = yield* rebuildEffectiveWorkflow(
-      ports,
-      yield* ports.workflowLoader.load(selectedWorkflowPath),
-    )
+    const loaded = yield* ports.workflowLoader.load(selectedWorkflowPath)
+    yield* validateWorkflowComposition(loaded)
+    const bootstrap = yield* rebuildEffectiveWorkflow(ports, loaded)
     // A bootstrap that refuses takes the whole host down with it, so whatever it replaced is
     // released by the composition root's own scope rather than by a drain that never runs.
     const bootstrapWorkflow = yield* bootstrap.value

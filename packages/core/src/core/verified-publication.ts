@@ -74,22 +74,23 @@ export const runVerifiedPublication = (
     yield* options.journal?.aligned(aligned) ?? Effect.void
     const verified = yield* candidates.verify(aligned, verification, secretEnvironmentNames)
     yield* options.journal?.verified(verified) ?? Effect.void
-    if (rebaseOnly && observed._tag === 'Published' && aligned.headSha === prepared.baselineSha) {
+    if (observed._tag === 'Published' && aligned.headSha === checkpoint.value.headSha) {
       // A remote fact still needs durable settlement. Reverify because checkpoint/alignment
       // invalidated the previous evidence, then record it without another push.
-      yield* (
-        options.journal?.published({
-          _tag: 'Published',
-          branchName: prepared.target.branchName,
-          headSha: aligned.headSha,
-          commitCreated: false,
-        }) ?? Effect.void
-      )
-      return {
-        _tag: 'NoChanges',
+      const published: PublicationOutcome = {
+        _tag: 'Published',
         branchName: prepared.target.branchName,
-        baselineSha: prepared.baselineSha,
+        headSha: aligned.headSha,
+        commitCreated: aligned.commitCreated,
       }
+      yield* options.journal?.published(published) ?? Effect.void
+      return rebaseOnly && aligned.headSha === prepared.baselineSha
+        ? {
+            _tag: 'NoChanges',
+            branchName: prepared.target.branchName,
+            baselineSha: prepared.baselineSha,
+          }
+        : published
     }
     yield* options.beforePublish ?? Effect.void
     const published = yield* candidates.publish(verified)

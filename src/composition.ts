@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
+import { WorkflowComposition } from '@sloppenheimer/core/ports/workflow-store.js'
 import { layerWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import { WorkflowError as WorkflowConfigurationError } from '@sloppenheimer/core/domain/errors.js'
 import { FileSystem } from '@effect/platform'
@@ -164,6 +165,9 @@ export const applicationPorts = (
           layerPorts(configuration, adapters(workflow.runner)),
           layerSourceControlPorts(configuration, sourceControl),
           issueControl,
+          Layer.succeed(WorkflowComposition, {
+            verificationEnabled: workflow.config.verification !== undefined,
+          }),
         )
         const durable =
           workflow.config.verification === undefined
