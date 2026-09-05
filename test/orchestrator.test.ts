@@ -1980,7 +1980,7 @@ describe('agent turn completion separated from work publication', (): void => {
         ...workflow,
         config: {
           ...workflow.config,
-          // Small enough that the whole budget fits inside one TestClock advance per attempt.
+          // Keep each observed delivery deadline close without changing the attempt budget.
           agent: { ...workflow.config.agent, maxRetryBackoffMs: 10_000 },
         },
       }
@@ -1990,6 +1990,7 @@ describe('agent turn completion separated from work publication', (): void => {
         id: issueId('167'),
       }
       const harness = makeHarness(rooted, () => [issue])
+      const replacementStarted = yield* Deferred.make<void>()
       let launched = 0
       const publications: string[] = []
       const ports: TestPorts = {
@@ -2002,20 +2003,37 @@ describe('agent turn completion separated from work publication', (): void => {
               return Effect.fail(deliveryFailure())
             },
           ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
+        runAgent: () =>
+          Effect.gen(function* () {
+            launched += 1
+            if (launched > 1) {
+              yield* Deferred.succeed(replacementStarted, undefined)
+              return yield* Effect.never
+            }
+            return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+          }),
       }
 
       yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
+          for (let attempt = 1; attempt < deliveryAttemptLimit; attempt += 1) {
+            // Real workspace I/O may still be settling the previous result. Do not advance time
+            // until its next delivery is recorded, or the clock can also fire the agent retry.
+            while (snapshot.delivering[0]?.attempt !== attempt) {
+              yield* Effect.yieldNow()
+              snapshot = yield* control.snapshot
+            }
+            const delivery = snapshot.delivering[0]
+            if (delivery === undefined) {
+              return yield* Effect.die('the observed delivery must exist')
+            }
+            yield* TestClock.setTime(new Date(delivery.dueAt).getTime())
+            snapshot = yield* control.snapshot
+          }
+          // Let the final result settle without firing the replacement agent's timer.
           while (snapshot.retrying.length === 0) {
-            // One step per delivery backoff, so the run that follows the spent budget cannot start
-            // inside the same advance and add publications of its own.
-            yield* TestClock.adjust('11 seconds')
             yield* Effect.yieldNow()
             snapshot = yield* control.snapshot
           }
@@ -2025,6 +2043,15 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(publications).toHaveLength(deliveryAttemptLimit)
           expect(snapshot.delivering).toEqual([])
           expect(snapshot.retrying[0]?.error).toContain('delivery failed')
+          expect(launched).toBe(1)
+          const retry = snapshot.retrying[0]
+          if (retry === undefined) {
+            return yield* Effect.die('spent delivery must schedule an agent retry')
+          }
+          yield* TestClock.setTime(new Date(retry.dueAt).getTime())
+          yield* Deferred.await(replacementStarted)
+          expect(launched).toBe(2)
+          expect(publications).toHaveLength(deliveryAttemptLimit)
         }),
       )
     }),
