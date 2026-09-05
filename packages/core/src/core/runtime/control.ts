@@ -1,3 +1,4 @@
+import type { WorkflowError } from '../../domain/errors.js'
 import { Clock, Deferred, Effect, Fiber, Queue, Ref } from 'effect'
 
 import { agentDetail, createSnapshot } from '../snapshot.js'
@@ -12,11 +13,18 @@ import type { OrchestratorContext, OrchestratorControl, RuntimeCells } from './t
 export const orchestratorControl = (
   cells: RuntimeCells,
   context: OrchestratorContext,
-  eventLoopFiber: Fiber.RuntimeFiber<never>,
+  eventLoopFiber: Fiber.RuntimeFiber<never, WorkflowError>,
 ): OrchestratorControl => ({
   snapshot: Effect.map(
-    Effect.all([Ref.get(cells.state), Clock.currentTimeMillis]),
-    ([current, now]) => createSnapshot(current, context.selectedWorkflowPath, now),
+    Effect.all([
+      Ref.get(cells.state),
+      Clock.currentTimeMillis,
+      cells.durable?.snapshot ?? Effect.succeed(undefined),
+    ]),
+    ([current, now, durableWorkflows]) => ({
+      ...createSnapshot(current, context.selectedWorkflowPath, now),
+      ...(durableWorkflows === undefined ? {} : { durableWorkflows }),
+    }),
   ),
   refresh: requestRefresh(cells),
   agentDetail: (identifier) => agentDetail(context, identifier),

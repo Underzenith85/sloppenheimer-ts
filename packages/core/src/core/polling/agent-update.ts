@@ -16,7 +16,7 @@ const applyAgentUpdate = (
   Effect.gen(function* () {
     const observed = yield* Ref.get(context.state)
     const entry = observed.running.get(event.issueId)
-    if (entry !== undefined) {
+    if (entry !== undefined && entry.runId === event.runId) {
       const applied = yield* context.applyLifecycleUpdate(entry, event.update)
       yield* Ref.update(context.state, (current) => {
         const settled = Transitions.dropPendingLifecycle(

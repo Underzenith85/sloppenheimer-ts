@@ -1,3 +1,5 @@
+import type { DurableHost } from '../durable/live-journal.js'
+import type { DurableWorkflow } from '../../domain/durable-workflow.js'
 import type { FileSystem } from '@effect/platform'
 import type { Deferred, Effect, Option, Queue, Ref } from 'effect'
 
@@ -91,6 +93,7 @@ export type DeliverySnapshot = Readonly<{
   observedAt: string
   workerHost: 'local'
   detailUrl: string
+  interventionRequired?: boolean
 }>
 
 /**
@@ -130,6 +133,7 @@ export type AgentDetailLookup =
   | Readonly<{ _tag: 'Unknown'; identifier: string }>
 
 export type OrchestratorSnapshot = Readonly<{
+  durableWorkflows?: readonly DurableWorkflow[]
   generatedAt: string
   workflowPath: string
   effectiveWorkflow: Readonly<{
@@ -217,7 +221,7 @@ export type OrchestratorControl = Readonly<{
    */
   agentDetail: (identifier: string) => Effect.Effect<AgentDetailLookup>
   /** Completes only when the host event loop fails or is interrupted during shutdown. */
-  awaitTermination: Effect.Effect<never>
+  awaitTermination: Effect.Effect<never, WorkflowError>
 }>
 
 /**
@@ -238,7 +242,14 @@ export type DeliveryAttemptResult =
 
 export type OrchestratorEvent =
   | Readonly<{ _tag: 'Tick' }>
-  | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; update: AgentEvent }>
+  | Readonly<{
+      _tag: 'AgentStarted'
+      issueId: IssueId
+      runId: number
+      applied: Deferred.Deferred<boolean>
+    }>
+  | Readonly<{ _tag: 'WorkerCrashed'; issueId: IssueId; runId: number }>
+  | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; runId: number; update: AgentEvent }>
   // The agent is done and the host has taken the workspace over. Nothing about the run changes
   // except who is working, which is what the stall timer needs to know.
   // `applied` is completed once the marker is in the state. The worker waits for it before the
@@ -363,6 +374,7 @@ export type RuntimeStores = Readonly<{
  * change as a transition applied to it. A reader sees one coherent value; a writer replaces it.
  */
 export type RuntimeCells = Readonly<{
+  durable?: DurableHost
   state: Ref.Ref<RuntimeState>
   mailbox: Queue.Queue<OrchestratorEvent>
   stores: RuntimeStores
@@ -387,6 +399,7 @@ export type DeliveryRequest = Omit<
  * directly: every field is one of the extracted operations, bound to the cells the factory made.
  */
 export type OrchestratorContext = Readonly<{
+  durable?: DurableHost
   state: Ref.Ref<RuntimeState>
   ports: RuntimePorts
   selectedWorkflowPath: string

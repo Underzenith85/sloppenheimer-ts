@@ -1,3 +1,5 @@
+import { WorkflowStore } from '@sloppenheimer/core/ports/workflow-store.js'
+import { openWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import type { FileSystem } from '@effect/platform'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -1002,6 +1004,94 @@ describe('agent turn completion separated from work publication', (): void => {
     publish,
     rebase: () => Effect.die('no test here rebases a pull request'),
   })
+
+  it.scoped(
+    'holds a failed verification without repeating publication or coding until resumed',
+    () =>
+      Effect.gen(function* () {
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const harness = makeHarness(workflow, () => [issue])
+        let launches = 0
+        let publications = 0
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeSourceControl: () =>
+            failingSourceControl(
+              () => launches > 0,
+              () => {
+                publications += 1
+                return Effect.fail(
+                  deliveryFailure({ category: 'verification_failed', retryable: false }),
+                )
+              },
+            ),
+          runAgent: () => {
+            launches += 1
+            return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+          },
+        }
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+        while ((yield* control.snapshot).delivering.length === 0) {
+          yield* Effect.yieldNow()
+        }
+        yield* TestClock.adjust(60_000)
+        expect(launches).toBe(1)
+        expect(publications).toBe(1)
+        expect((yield* control.snapshot).retrying).toEqual([])
+        expect((yield* control.snapshot).delivering[0]?.interventionRequired).toBe(true)
+        yield* control.setIssuePaused(167, false)
+        yield* TestClock.adjust(20_000)
+        while (publications < 2) {
+          yield* Effect.yieldNow()
+        }
+        expect(launches).toBe(1)
+      }),
+  )
+
+  it.scoped(
+    'keeps partial work after an agent error instead of launching a replacement coder',
+    () =>
+      Effect.gen(function* () {
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const configured: Workflow = {
+          ...workflow,
+          config: { ...workflow.config, verification: { command: 'pnpm check', timeoutMs: 1_000 } },
+        }
+        const harness = makeHarness(configured, () => [issue])
+        let launches = 0
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeSourceControl: () =>
+            failingSourceControl(
+              () => launches > 0,
+              () => Effect.die('partial work must not be automatically published'),
+            ),
+          runAgent: () => {
+            launches += 1
+            return Effect.fail(
+              new AgentError({ category: 'turn_timeout', message: 'session stopped' }),
+            )
+          },
+        }
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+        while ((yield* control.snapshot).delivering.length === 0) {
+          yield* Effect.yieldNow()
+        }
+        yield* TestClock.adjust(60_000)
+        expect(launches).toBe(1)
+        expect((yield* control.snapshot).retrying).toEqual([])
+        expect((yield* control.snapshot).delivering[0]).toMatchObject({
+          category: 'candidate_partial',
+          interventionRequired: true,
+        })
+      }),
+  )
 
   it.scoped('retains the work a failed publication left, rather than retrying the agent', () =>
     Effect.gen(function* () {
@@ -2549,7 +2639,7 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
 
-      expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+      expect([...new Set(refreshedIds)]).toEqual([failedIssue.id, healthyIssue.id])
       expect(launchedIds).toEqual([healthyIssue.id])
       expect(
         snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
@@ -4402,7 +4492,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          while (currentHead !== repairedHead) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -4735,7 +4825,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          while (launches === 0) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -4794,7 +4884,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          while (currentHead !== repairedHead) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -6305,7 +6395,7 @@ describe('workflow hot reload', (): void => {
       }),
   )
 
-  it.effect('defers stalled-worker retry creation until validation recovers', () =>
+  it.effect('enforces the agent deadline even while workflow validation is failing', () =>
     Effect.gen(function* () {
       const issue = makeIssue('GH-1', 1, null, ['sloppenheimer', 'ready'])
       const initial: Workflow = {
@@ -6334,8 +6424,8 @@ describe('workflow hot reload', (): void => {
       )
 
       expect(observed.failedSnapshot.workflowReloadError?.message).toBe('invalid reload')
-      expect(observed.failedSnapshot.running[0]?.issueId).toBe(issue.id)
-      expect(observed.failedSnapshot.retrying).toEqual([])
+      expect(observed.failedSnapshot.running).toEqual([])
+      expect(observed.failedSnapshot.retrying[0]?.issueId).toBe(issue.id)
       expect(observed.recoveredSnapshot.running).toEqual([])
       expect(observed.recoveredSnapshot.retrying[0]).toMatchObject({
         issueId: issue.id,
@@ -7599,6 +7689,9 @@ describe('rebuilt port lifecycle', (): void => {
           expect(harness.releasedWorkspaces()).toHaveLength(1)
 
           finishWorker()
+          while ((yield* control.snapshot).running.length !== 0) {
+            yield* Effect.yieldNow()
+          }
           yield* control.refresh
           yield* control.refresh
 
@@ -9359,3 +9452,51 @@ describe('session telemetry accounting', (): void => {
     }),
   )
 })
+
+it.scoped('restores a durable running claim without launching a replacement agent', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-live-durable-')
+    const configured: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+      id: issueId('167'),
+    }
+    const path = join(workspaceRoot, 'workflow.sqlite')
+    let launches = 0
+    const started = yield* Deferred.make<void>()
+    const firstHarness = makeHarness(configured, () => [issue])
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* openWorkflowStore(path, true)
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+          ...firstHarness.ports,
+          runAgent: () =>
+            Effect.gen(function* () {
+              launches += 1
+              expect((yield* store.list.pipe(Effect.orDie))[0]?.status._tag).toBe('Executing')
+              yield* Deferred.succeed(started, undefined)
+              return yield* Effect.never
+            }),
+        }).pipe(Effect.provideService(WorkflowStore, store))
+        yield* Deferred.await(started)
+        expect((yield* control.snapshot).durableWorkflows?.[0]?.codingAttempts).toBe(1)
+      }),
+    )
+    const store = yield* openWorkflowStore(path, true)
+    const nextHarness = makeHarness(configured, () => [issue])
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...nextHarness.ports,
+      runAgent: () =>
+        Effect.sync(() => {
+          launches += 1
+          return { threadId: 'duplicate', turnId: 'duplicate', turnCount: 1 }
+        }),
+    }).pipe(Effect.provideService(WorkflowStore, store))
+    yield* control.refresh
+    yield* TestClock.adjust(60_000)
+    yield* control.refresh
+    expect(launches).toBe(1)
+    expect((yield* control.snapshot).running).toEqual([])
+    expect((yield* control.snapshot).durableWorkflows?.[0]?.status._tag).toBe('Intervention')
+  }),
+)

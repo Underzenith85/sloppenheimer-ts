@@ -70,7 +70,7 @@ export const publishDetails = (state: RuntimeState): RuntimeState => {
       context: {
         self: agentDetailPath(record.identifier),
         status,
-        stallTimeoutMs: running?.execution.stallTimeoutMs ?? 0,
+        stallTimeoutMs: running?.phase._tag === 'Agent' ? running.execution.stallTimeoutMs : 0,
         workerHost: 'local',
         // Read from the execution the agent is running under, falling back to the workflow in
         // force: composing no code-review services at all is what "handoff disabled" means.

@@ -1,5 +1,9 @@
-import { Deferred, Effect, MutableRef, Option, Queue, Ref } from 'effect'
+import { journalExecution } from './durable/journal-execution.js'
+import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
 
+import { retainFailedCandidate, type RunResult } from './failed-candidate.js'
+import { publicationEligibility } from './publication-eligibility.js'
+import { runSession } from './run-session.js'
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
@@ -15,15 +19,8 @@ import {
   withOperationalSpan,
 } from '../support/observability.js'
 import { asSettled } from '../support/settled.js'
-import type { AgentEvent } from '../telemetry.js'
-import {
-  captureExecutionSnapshot,
-  issueIsActive,
-  issueIsPaused,
-  issueIsRoutable,
-  logContext,
-} from './policy.js'
-import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
+import { captureExecutionSnapshot, issueIsPaused, logContext } from './policy.js'
+import { postflightLogOutcome, runPostflight } from './postflight.js'
 import { pruneRetainedWorkspaces, workspaceRelease } from './run-workspace.js'
 import { ownIssueFiber, releaseIssueFiber } from './runtime/execution.js'
 import type { OrchestratorContext } from './runtime.js'
@@ -79,15 +76,8 @@ export const makeHostToolSession = (
     },
   })
 
-/**
- * Whether an update reports a lifecycle transition the run has to be told about, as the runner that
- * emitted it says so. This used to match one backend's own method names, which meant a second
- * runner's session would start, run and finish with none of these ever queued.
- */
-const isLifecycleEvent = (update: AgentEvent): boolean => update.lifecycle !== null
-
 /** Everything one dispatched session is launched with, in one value its parts can be built from. */
-type SessionLaunch = Readonly<{
+export type SessionLaunch = Readonly<{
   context: OrchestratorContext
   issue: Issue
   attempt: number | null
@@ -106,81 +96,6 @@ type SessionLaunch = Readonly<{
   repairRun: boolean
 }>
 
-/** Re-reads the issue through whichever tracker instance the run holds at the moment it asks. */
-const refreshIssueThrough =
-  (launch: SessionLaunch): (() => Effect.Effect<Issue | null, AgentError>) =>
-  () =>
-    MutableRef.get(launch.sessionPorts)
-      .tracker.fetchIssuesByIds([launch.issue.id])
-      .pipe(
-        Effect.map((issues) => issues[0] ?? null),
-        Effect.mapError(
-          (error) =>
-            new AgentError({
-              category: 'protocol_error',
-              message: `issue refresh failed: ${error.message}`,
-              cause: error,
-            }),
-        ),
-      )
-
-/** One agent session, inside the workspace hooks that bracket it. */
-const runSession = (
-  launch: SessionLaunch,
-  workspace: Workspace,
-): Effect.Effect<void, AgentError | WorkspaceError> => {
-  const { context, issue, execution } = launch
-  return execution.workspaces.beforeRun(workspace).pipe(
-    Effect.zipRight(
-      context.ports.agentRunner.run({
-        issue,
-        workspace,
-        workspaceRoot: execution.workspaceRoot,
-        config: execution.agentRunner,
-        prompt: execution.prompt,
-        maxTurns: execution.maxTurns,
-        secretEnvironmentNames: execution.secretEnvironmentNames,
-        hostTools: launch.hostTools,
-        refreshIssue: refreshIssueThrough(launch),
-        isRoutable: (refreshed) =>
-          issueIsActive(refreshed, execution) && issueIsRoutable(refreshed, execution),
-        // The runner reports progress from a plain callback. Recording what the update owes
-        // the run and enqueueing it are one step, so an exit cannot overtake a report the
-        // callback has already made.
-        onEvent: (update) => {
-          context.runFromCallback(
-            Ref.update(context.state, (current) => {
-              let next = current
-              if (update.usage !== null) {
-                next = Transitions.recordPendingUsage(next, issue.id, update.usage)
-              }
-              if (update.rateLimits !== null) {
-                next = Transitions.recordPendingRateLimits(next, update.rateLimits)
-              }
-              if (isLifecycleEvent(update)) {
-                next = Transitions.queuePendingLifecycle(next, issue.id, update)
-              }
-              return next
-            }).pipe(
-              Effect.zipRight(
-                Queue.offer(context.mailbox, {
-                  _tag: 'AgentUpdate',
-                  issueId: issue.id,
-                  update,
-                }),
-              ),
-              Effect.asVoid,
-            ),
-          )
-        },
-      }),
-    ),
-    Effect.ensuring(execution.workspaces.afterRun(workspace)),
-    Effect.asVoid,
-  )
-}
-
-/**
 /**
  * The postflight-bracketed body of one run, inside the workspace the run leases.
  *
@@ -191,37 +106,73 @@ const runSession = (
 const runWithSourceControl = (
   launch: SessionLaunch,
   workspace: Workspace,
-): Effect.Effect<PostflightOutcome, AgentError | WorkspaceError | SourceControlError> => {
+): Effect.Effect<RunResult, AgentError | WorkspaceError | SourceControlError> => {
   const { context, issue, runId, sessionPorts, target } = launch
   const sourceControl = MutableRef.get(sessionPorts).sourceControl
   if (sourceControl === null) {
     return runSession(launch, workspace).pipe(
-      Effect.as<PostflightOutcome>({ _tag: 'NotPerformed' }),
+      Effect.as<RunResult>({
+        postflight: { _tag: 'NotPerformed' },
+        outcome: 'normal',
+        error: null,
+      }),
     )
   }
   return sourceControl.prepare(issue, workspace, target).pipe(
+    Effect.tap((prepared) => launch.execution.journal?.prepared(prepared) ?? Effect.void),
     Effect.flatMap((prepared) =>
-      runSession(launch, workspace).pipe(
-        Effect.zipRight(
-          Effect.gen(function* () {
-            const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-            // Announced *and applied* before the first git call: from here the run is the host's
-            // work, and the silence on the agent protocol that follows is not a stalled agent.
-            // Offering alone would only enqueue it — a poll already in flight would still read a
-            // run nothing had marked and retire the publication as a stalled agent, which is the
-            // one thing this marker exists to prevent.
-            const applied = yield* Deferred.make<void>()
-            yield* Queue.offer(context.mailbox, {
-              _tag: 'PostflightStarted' as const,
-              issueId: issue.id,
-              runId,
-              applied,
-            })
-            yield* Deferred.await(applied)
-            return yield* runPostflight(publisher, issue, prepared)
-          }),
-        ),
-        Effect.tap((outcome) =>
+      Effect.either(runSession(launch, workspace)).pipe(
+        Effect.flatMap((session) => {
+          if (session._tag === 'Left') {
+            return launch.execution.workflow.config.verification === undefined
+              ? Effect.fail(session.left)
+              : retainFailedCandidate(
+                  sourceControl,
+                  issue,
+                  prepared,
+                  session.left,
+                  launch.execution.journal?.publication,
+                )
+          }
+          return Effect.void.pipe(
+            Effect.zipRight(
+              Effect.gen(function* () {
+                const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
+                // Announced *and applied* before the first git call: from here the run is the host's
+                // work, and the silence on the agent protocol that follows is not a stalled agent.
+                // Offering alone would only enqueue it — a poll already in flight would still read a
+                // run nothing had marked and retire the publication as a stalled agent, which is the
+                // one thing this marker exists to prevent.
+                const applied = yield* Deferred.make<void>()
+                yield* Queue.offer(context.mailbox, {
+                  _tag: 'PostflightStarted' as const,
+                  issueId: issue.id,
+                  runId,
+                  applied,
+                })
+                yield* Deferred.await(applied)
+                return yield* runPostflight(
+                  publisher,
+                  issue,
+                  prepared,
+                  launch.execution.workflow.config.verification,
+                  launch.execution.secretEnvironmentNames,
+                  Effect.suspend(() =>
+                    publicationEligibility(
+                      context.state,
+                      issue,
+                      launch.execution,
+                      MutableRef.get(sessionPorts).tracker,
+                    ),
+                  ),
+                  launch.execution.journal?.publication,
+                )
+              }),
+            ),
+            Effect.map((postflight): RunResult => ({ outcome: 'normal', error: null, postflight })),
+          )
+        }),
+        Effect.tap(({ postflight: outcome }) =>
           (outcome._tag === 'DeliveryFailed' ? logError : logInfo)(
             'host source-control postflight settled',
             {
@@ -253,9 +204,29 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
     .withLeasedWorkspace(
       { identifier: issue.identifier, runId },
       (workspace) => runWithSourceControl(launch, workspace),
-      workspaceRelease,
+      (exit) => workspaceRelease(Exit.map(exit, (result) => result.postflight)),
     )
     .pipe(
+      Effect.onExit((exit) =>
+        Exit.isFailure(exit) && Cause.isDie(exit.cause)
+          ? logError('worker crashed', {
+              ...logContext(issue),
+              action: 'worker',
+              outcome: 'crashed',
+              run_id: runId,
+            }).pipe(
+              Effect.zipRight(
+                Queue.offer(context.mailbox, {
+                  _tag: 'WorkerCrashed',
+                  issueId: issue.id,
+                  runId,
+                }),
+              ),
+            )
+          : Effect.void,
+      ),
+      Effect.tapError(() => execution.journal?.failed ?? Effect.void),
+      Effect.tap((result) => execution.journal?.settled(result.postflight) ?? Effect.void),
       Effect.matchEffect({
         onFailure: (error) =>
           Queue.offer(context.mailbox, {
@@ -267,15 +238,15 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             error: error.message,
             postflight: { _tag: 'NotPerformed' },
           }),
-        onSuccess: (postflight) =>
+        onSuccess: (result) =>
           Queue.offer(context.mailbox, {
             _tag: 'WorkerExited',
             issueId: issue.id,
             runId,
             attempt,
-            outcome: 'normal',
-            error: null,
-            postflight,
+            outcome: result.outcome,
+            error: result.error,
+            postflight: result.postflight,
           }),
       }),
       // Once the exit is on its way: the run is over, so what the issue keeps of its earlier
@@ -305,7 +276,7 @@ const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
   attempt: launch.attempt,
   repairRun: launch.repairRun,
   startedAt,
-  postflightStartedAt: null,
+  phase: { _tag: 'Preparing' },
   lastEventAt: null,
   lastEvent: null,
   lastMessage: null,
@@ -340,6 +311,18 @@ const refusedBeforeClaim = (state: RuntimeState, issue: Issue): Effect.Effect<bo
   }).pipe(Effect.zipRight(recordOutcome(dispatchOutcomes, 'paused')), Effect.as(true))
 }
 
+const claimDispatch = (context: OrchestratorContext, issue: Issue): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    // Claiming and taking the queued retry are one transition: the issue must never be seen as
+    // claimed-but-still-retrying, and the timer that would fire is interrupted here.
+    const displacedRetry = yield* Ref.modify(context.state, (current) =>
+      Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
+    )
+    if (Option.isSome(displacedRetry)) {
+      yield* releaseIssueFiber(context.execution, 'retry', issue.id)
+    }
+  })
+
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 const runDispatch = (
   context: OrchestratorContext,
@@ -353,14 +336,7 @@ const runDispatch = (
     if (yield* refusedBeforeClaim(before, issue)) {
       return false
     }
-    // Claiming and taking the queued retry are one transition: the issue must never be seen as
-    // claimed-but-still-retrying, and the timer that would fire is interrupted here.
-    const displacedRetry = yield* Ref.modify(context.state, (current) =>
-      Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
-    )
-    if (Option.isSome(displacedRetry)) {
-      yield* releaseIssueFiber(context.execution, 'retry', issue.id)
-    }
+    yield* claimDispatch(context, issue)
 
     const base = effectiveOverride ?? before.lastKnownGood
     const target: SourceControlTarget = sourceTarget ?? {
@@ -406,7 +382,16 @@ const runDispatch = (
       )
       return false
     }
-    const execution = captureExecutionSnapshot(effective, renderedPrompt.value)
+    const admitted = yield* journalExecution(
+      context,
+      issue,
+      target,
+      captureExecutionSnapshot(effective, renderedPrompt.value),
+    )
+    if (Option.isNone(admitted)) {
+      return false
+    }
+    const execution = admitted.value
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
     const sessionPorts = MutableRef.make<SessionPorts>({
       tracker: execution.tracker,

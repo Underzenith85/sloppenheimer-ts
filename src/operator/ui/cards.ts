@@ -167,16 +167,17 @@ const actionControl = (item: WorkItem, scope: string): HTMLElement | null => {
   if (item.action === 'blockers') {
     return blockerDisclosure(item)
   }
-  const button = text('button', `action action-${item.action}`, actionLabels[item.action])
+  const label =
+    item.phase === 'delivering' && item.action === 'start'
+      ? 'Resume delivery'
+      : actionLabels[item.action]
+  const button = text('button', `action action-${item.action}`, label)
   button.type = 'button'
   // The same item is rendered in more than one list — a state view and the complete work list —
   // so the description's id is scoped to the list it belongs to rather than to the issue alone.
   const describedBy = `${scope}-action-help-${identifierKey(item.identifier)}`
   button.setAttribute('aria-describedby', describedBy)
-  button.setAttribute(
-    'aria-label',
-    `${actionLabels[item.action]} for ${item.identifier}: ${item.title}`,
-  )
+  button.setAttribute('aria-label', `${label} for ${item.identifier}: ${item.title}`)
   const busy = inFlight.has(item.identifier)
   button.disabled = busy
   button.setAttribute('aria-busy', String(busy))

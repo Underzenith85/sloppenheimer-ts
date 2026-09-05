@@ -68,6 +68,7 @@ export type PublishedDelivering = Readonly<{
   /** The typed source-control category, so an operator can tell a lease conflict from an auth failure. */
   category: string
   reason: string
+  intervention_required?: boolean
   changed_file_count: number | null
   repair_run: boolean
   observed_at: string
@@ -111,6 +112,17 @@ export type PublishedHandoff = Readonly<{
 }>
 
 export type PublishedState = Readonly<{
+  durable_workflows?: readonly Readonly<{
+    issue_id: string
+    issue_identifier: string
+    title: string
+    status: string
+    intent: string
+    reason: string | null
+    workspace_path: string | null
+    candidate_head: string | null
+    published_head: string | null
+  }>[]
   generated_at: string
   workflow_path: string
   effective_workflow: Readonly<{ fingerprint: string; loaded_at: string }>
@@ -206,6 +218,7 @@ const publishDelivering = (entry: DeliveringRow): PublishedDelivering => ({
   due_at: entry.dueAt,
   category: entry.category,
   reason: entry.reason,
+  ...(entry.interventionRequired ? { intervention_required: true } : {}),
   changed_file_count: entry.changedFileCount,
   repair_run: entry.repairRun,
   observed_at: entry.observedAt,
@@ -244,6 +257,21 @@ const publishHandoff = (entry: HandoffRow): PublishedHandoff => ({
 })
 
 export const publishState = (snapshot: Snapshot): PublishedState => ({
+  ...(snapshot.durableWorkflows === undefined
+    ? {}
+    : {
+        durable_workflows: snapshot.durableWorkflows.map((record) => ({
+          issue_id: record.issueId,
+          issue_identifier: record.identifier,
+          title: record.objective,
+          status: record.status._tag,
+          intent: record.intent,
+          reason: record.status._tag === 'Intervention' ? record.status.reason : null,
+          workspace_path: record.artifact?.workspacePath ?? null,
+          candidate_head: record.artifact?.repository?.headSha ?? null,
+          published_head: record.artifact?.publishedHead ?? null,
+        })),
+      }),
   generated_at: snapshot.generatedAt,
   workflow_path: snapshot.workflowPath,
   effective_workflow: {

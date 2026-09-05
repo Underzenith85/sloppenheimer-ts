@@ -50,7 +50,7 @@ export const onWorkerExited = (
         },
       )
     }
-    if (event.outcome !== 'normal') {
+    if (event.outcome !== 'normal' && event.postflight._tag === 'NotPerformed') {
       yield* context.scheduleRetry(
         settled.issue,
         (event.attempt ?? 0) + 1,

@@ -170,8 +170,8 @@ const deliveringItem = (
     issueNumber,
     title: entry.title,
     url: entry.issue_url,
-    state: 'progress',
-    attention: null,
+    state: entry.intervention_required ? 'attention' : 'progress',
+    attention: entry.intervention_required ? 'intervention_required' : null,
     phase: 'delivering',
     eligibility,
     priority: issue?.priority ?? null,
@@ -187,7 +187,7 @@ const deliveringItem = (
     // A pause suspends a delivery rather than dropping it, so the row an operator sees while one is
     // held has to offer the way back: without a resume here the timer is never re-armed and the
     // retained change waits on an API call by hand.
-    action: eligibility === 'paused' ? 'start' : 'pause',
+    action: eligibility === 'paused' || entry.intervention_required ? 'start' : 'pause',
   }
 }
 
@@ -335,3 +335,30 @@ const backlogItem = (
     action,
   }
 }
+
+/** Recovery cannot offer Start: a lost host does not prove its detached command exited. */
+const durableItem = (
+  entry: NonNullable<PublishedState['durable_workflows']>[number],
+  issue: BacklogIssue | undefined,
+): WorkItem => ({
+  identifier: entry.issue_identifier,
+  issueNumber: issueNumberOf(entry.issue_identifier),
+  title: entry.title,
+  url: issue?.url ?? null,
+  state: 'attention',
+  attention: 'intervention_required',
+  phase: 'intervention_required',
+  eligibility: entry.intent === 'paused' ? 'paused' : 'not_eligible',
+  priority: issue?.priority ?? null,
+  labels: issue?.labels ?? [],
+  reason:
+    entry.reason ?? 'Published work needs review reconciliation before another coding attempt.',
+  ranking: null,
+  blockers: [],
+  unlocks: 0,
+  hasDetail: false,
+  queueReason: null,
+  finishedAt: null,
+  pullRequestUrl: null,
+  action: 'none',
+})

@@ -58,6 +58,7 @@ export const orchestratorContext = (
   selectedWorkflowPath: string,
   runFromCallback: (effect: Effect.Effect<void>) => void,
 ): OrchestratorContext => ({
+  ...(cells.durable === undefined ? {} : { durable: cells.durable }),
   state: cells.state,
   ports,
   selectedWorkflowPath,

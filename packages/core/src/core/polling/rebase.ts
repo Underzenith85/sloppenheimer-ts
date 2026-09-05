@@ -1,3 +1,7 @@
+import { SourceControlError } from '../../domain/errors.js'
+import type { RunJournal } from '../durable/run-journal.js'
+import { publicationEligibility } from '../publication-eligibility.js'
+import { runVerifiedPublication } from '../verified-publication.js'
 import { Effect, Option, Queue, Ref } from 'effect'
 
 import type { IssueId } from '../../domain/domain.js'
@@ -6,6 +10,7 @@ import type { SourceControlPort } from '../../ports/index.js'
 import type { HandoffAction } from '../handoff-decision.js'
 import { logContext } from '../policy.js'
 import { rebaseInFlight, rebaseSettled, rebaseStarted, type RebaseOutcome } from '../rebase.js'
+import { pruneRetainedWorkspaces } from '../run-workspace.js'
 import { ownIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { HandoffEntry } from '../state.js'
@@ -22,8 +27,8 @@ type RebaseAction = Extract<HandoffAction, { _tag: 'Rebase' }>
  * clean worktree was read as a repair that achieved nothing, and the pull request ended in
  * intervention for a state the host already knew how to fix. The rebase is what the publication
  * of a repair would have done anyway -- prepare from the exact pull-request head, put it on the
- * base, push under the expected-head lease -- performed here as a host action, spending no repair
- * budget and no agent slot ([#274](https://github.com/Underzenith85/sloppenheimer-ts/issues/274)).
+ * base, push under the expected-head lease -- performed here as a host action, spending no agent slot. Durable mode charges the bounded repair
+ * budget for this mutation ([#274](https://github.com/Underzenith85/sloppenheimer-ts/issues/274)).
  *
  * Like a delivery's publication it is git, and runs off the event loop: a fetch or a push waits on
  * a child process that may never close, and the loop is the only thing that can process the tick,
@@ -36,15 +41,16 @@ type RebaseAction = Extract<HandoffAction, { _tag: 'Rebase' }>
  * the exact pull-request head, under the lease that refuses if the branch has moved since it was
  * observed.
  *
- * The workspace is released as completed whatever happened. Nothing in it is anyone's work -- it
- * holds the branch as the remote had it, and a rebase that failed left an aborted rebase behind --
- * so retaining it would keep one directory per attempt for nothing a later run could adopt.
+ * Successful rebases release the workspace. Failures retain it for diagnosis, including a gate
+ * that mutated its candidate, and the usual retention pass bounds obsolete attempts.
  */
 const runRebaseAttempt = (
+  context: OrchestratorContext,
   handoff: HandoffEntry,
   sourceControl: SourceControlPort,
   runId: number,
   headSha: string,
+  journal?: RunJournal,
 ): Effect.Effect<RebaseOutcome> =>
   handoff.execution.workspaces
     .withLeasedWorkspace(
@@ -56,20 +62,59 @@ const runRebaseAttempt = (
             branchName: handoff.branchName,
             expectedHeadSha: headSha,
           })
-          .pipe(Effect.flatMap((prepared) => sourceControl.rebase(handoff.issue, prepared))),
-      () => ({ _tag: 'Completed' }),
+          .pipe(
+            Effect.tap((prepared) => journal?.prepared(prepared) ?? Effect.void),
+            Effect.flatMap((prepared) => {
+              const verification = handoff.execution.workflow.config.verification
+              return verification === undefined && journal === undefined
+                ? sourceControl.rebase(handoff.issue, prepared)
+                : verification === undefined
+                  ? Effect.fail(
+                      new SourceControlError({
+                        category: 'verification_failed',
+                        message: 'Restore verification before rebasing durable work',
+                        retryable: false,
+                        worktreePreserved: true,
+                      }),
+                    )
+                  : runVerifiedPublication(
+                      sourceControl,
+                      handoff.issue,
+                      prepared,
+                      verification,
+                      handoff.execution.secretEnvironmentNames,
+                      {
+                        rebaseOnly: true,
+                        ...(journal === undefined ? {} : { journal: journal.publication }),
+                        beforePublish: publicationEligibility(
+                          context.state,
+                          handoff.issue,
+                          handoff.execution,
+                        ),
+                      },
+                    )
+            }),
+          ),
+      (exit) =>
+        exit._tag === 'Success'
+          ? { _tag: 'Completed' }
+          : { _tag: 'Retained', reason: 'host rebase did not complete' },
     )
     .pipe(
+      Effect.tapError(() => journal?.failed ?? Effect.void),
       Effect.match({
         onFailure: (error): RebaseOutcome =>
           error._tag === 'SourceControlError' && error.category === 'rebase_conflict'
             ? { _tag: 'Conflicted', message: error.message }
-            : { _tag: 'Failed', message: error.message },
+            : error._tag === 'SourceControlError' && !error.retryable
+              ? { _tag: 'Blocked', message: error.message }
+              : { _tag: 'Failed', message: error.message },
         onSuccess: (published): RebaseOutcome =>
           published._tag === 'Published'
             ? { _tag: 'Published', headSha: published.headSha }
             : { _tag: 'NoChanges' },
       }),
+      Effect.tap(() => pruneRetainedWorkspaces(context, handoff.issue, handoff.execution, runId)),
     )
 
 /**
@@ -99,6 +144,23 @@ export const performRebase = (
       )
       return
     }
+    const journal =
+      context.durable === undefined
+        ? Option.none()
+        : yield* context.durable.start(handoff.issue, {
+            _tag: 'Repair',
+            branchName: handoff.branchName,
+            expectedHeadSha: action.headSha,
+          })
+    if (context.durable !== undefined && Option.isNone(journal)) {
+      yield* writeHandoff(context, id, {
+        ...handoff,
+        state: 'intervention_required',
+        reason:
+          'Durable workflow admission refused this rebase; inspect the retained workflow or exhausted budget.',
+      })
+      return
+    }
     // The attempt is forked with the execution the identity records, and holds it until it
     // reports back: a reload that moves the handoff onto replacements meanwhile leaves these to
     // the retirement drain, which waits on the identity.
@@ -118,13 +180,22 @@ export const performRebase = (
       context.execution,
       'rebase',
       id,
-      Effect.flatMap(runRebaseAttempt(handoff, sourceControl, runId, action.headSha), (outcome) =>
-        Queue.offer(context.mailbox, {
-          _tag: 'RebaseAttempted' as const,
-          issueId: id,
-          headSha: action.headSha,
-          outcome,
-        }),
+      Effect.flatMap(
+        runRebaseAttempt(
+          context,
+          handoff,
+          sourceControl,
+          runId,
+          action.headSha,
+          Option.getOrUndefined(journal),
+        ),
+        (outcome) =>
+          Queue.offer(context.mailbox, {
+            _tag: 'RebaseAttempted' as const,
+            issueId: id,
+            headSha: action.headSha,
+            outcome,
+          }),
       ).pipe(Effect.asVoid),
     )
   })

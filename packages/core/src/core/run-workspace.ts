@@ -17,7 +17,7 @@ import type { ExecutionSnapshot } from './state.js'
  * reports its count through, and the collection that owns it. Stated as what it uses so that both
  * the worker's own context and the runtime cells a cancellation holds can supply it.
  */
-type PruneCells = Pick<RuntimeCells, 'state' | 'mailbox' | 'execution'>
+type PruneCells = Pick<RuntimeCells, 'state' | 'mailbox' | 'execution' | 'durable'>
 
 /**
  * What becomes of a run's workspace once the run has ended, and of the older ones beside it.
@@ -173,9 +173,16 @@ const pruneOnce = (
   Effect.gen(function* () {
     const state = yield* Ref.get(cells.state)
     const delivery = state.deliveries.get(issue.id)
+    const durable = yield* cells.durable?.snapshot ?? Effect.succeed([])
+    const protectedKeys = durable.flatMap((record) =>
+      record.issueId === issue.id && record.artifact !== null ? [record.artifact.workspaceKey] : [],
+    )
     const report = yield* workspaces.prune(
       { identifier: issue.identifier, runId },
-      new Set(delivery === undefined ? [] : [delivery.prepared.workspace.key]),
+      new Set([
+        ...protectedKeys,
+        ...(delivery === undefined ? [] : [delivery.prepared.workspace.key]),
+      ]),
     )
     if (report.evicted > 0) {
       yield* logInfo('action=workspace_prune outcome=evicted', {

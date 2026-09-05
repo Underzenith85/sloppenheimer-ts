@@ -8,6 +8,8 @@ import {
   assertWorkspaceIdentity,
   openVerifiedWorkspace,
 } from '@sloppenheimer/adapter-node/workspace-identity.js'
+import { openProcess } from '@sloppenheimer/adapter-node/process.js'
+import { makeCodexEnvironment } from './session.js'
 import { CodexConnection } from './connection.js'
 import { initialConnectionState } from './connection-state.js'
 import { sessionSecretValues } from './session.js'
@@ -72,20 +74,33 @@ const openConnection = (
   verified: VerifiedWorkspace,
   runtime: Runtime.Runtime<never>,
   scope: Scope.Scope,
-): Effect.Effect<CodexConnection, never, Scope.Scope> =>
+): Effect.Effect<CodexConnection, AgentError, Scope.Scope> =>
   Effect.acquireRelease(
     Effect.all([
       sessionSecretValues(launch.secretEnvironmentNames),
       Ref.make(initialConnectionState),
       Effect.makeSemaphore(1),
+      openProcess({
+        command: 'bash',
+        args: ['-lc', launch.config.command],
+        cwd: verified.path,
+        environment: makeCodexEnvironment(process.env, launch.secretEnvironmentNames),
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new AgentError({
+              category: 'spawn_failed',
+              message: 'failed to start agent subprocess',
+              cause,
+            }),
+        ),
+      ),
     ]).pipe(
       Effect.map(
-        ([knownSecretValues, state, lifecycle]) =>
+        ([knownSecretValues, state, lifecycle, child]) =>
           new CodexConnection(
-            launch.config.command,
-            verified.path,
+            child,
             launch.config,
-            launch.secretEnvironmentNames,
             knownSecretValues,
             launch.hostTools ?? null,
             launch.onEvent,

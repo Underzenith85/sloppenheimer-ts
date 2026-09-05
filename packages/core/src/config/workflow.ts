@@ -1,6 +1,7 @@
 import { Effect } from 'effect'
 import { Liquid } from 'liquidjs'
 
+import type { VerificationConfig } from '../ports/candidate.js'
 import type { Issue, JsonObject } from '../domain/domain.js'
 import { WorkflowError } from '../domain/errors.js'
 import type { ValidatedAgentRunner } from '../domain/agent-runner-provider.js'
@@ -57,6 +58,7 @@ export type EffectiveConfig = Readonly<{
    */
   workspaceRetainedLimit: number
   hooks: HooksConfig
+  verification?: VerificationConfig
   agent: AgentConfig
   runner: RunnerConfig
   serverPort: number | null

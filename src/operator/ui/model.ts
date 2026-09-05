@@ -372,12 +372,22 @@ const buildWorkModel = (
   for (const entry of state?.delivering ?? []) {
     claim(deliveringItem(entry, issues.get(entry.issue_identifier), paused, inspectable))
   }
+  for (const entry of state?.durable_workflows ?? []) {
+    if (entry.status === 'Intervention') {
+      claim(durableItem(entry, issues.get(entry.issue_identifier)))
+    }
+  }
   for (const entry of state?.handoffs ?? []) {
     claim(handoffItem(entry, issues.get(entry.issue_identifier), paused, inspectable, now))
   }
   for (const entry of state?.completed ?? []) {
     if (now - new Date(entry.finished_at).getTime() <= finishedWindowMs) {
       claim(completedItem(entry, inspectable))
+    }
+  }
+  for (const entry of state?.durable_workflows ?? []) {
+    if (entry.status !== 'Completed') {
+      claim(durableItem(entry, issues.get(entry.issue_identifier)))
     }
   }
   for (const issue of backlog?.issues ?? []) {
