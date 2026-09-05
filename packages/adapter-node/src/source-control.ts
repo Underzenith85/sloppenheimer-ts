@@ -1,3 +1,4 @@
+import { makePublicationRecovery, repositoryIdentity } from './git-recovery.js'
 import { Effect, Option } from 'effect'
 
 import type { Issue, Workspace } from '@sloppenheimer/core/domain/domain.js'
@@ -315,8 +316,12 @@ const rebaseRepository = (
   })
 
 export const makeGitSourceControl = (settings: GitSourceControlSettings): SourceControlPort => ({
+  recovery: makePublicationRecovery(settings),
   candidates: makeCandidateSourceControl(settings),
-  prepare: (issue, workspace, target) => prepareRepository(settings, issue, workspace, target),
+  prepare: (issue, workspace, target) =>
+    prepareRepository(settings, issue, workspace, target).pipe(
+      Effect.map((prepared) => ({ ...prepared, repositoryIdentity: repositoryIdentity(settings) })),
+    ),
   inspect: (prepared) => inspectRepository(settings, prepared),
   publish: (issue, prepared) => publishRepository(settings, issue, prepared),
   rebase: (_issue, prepared) => rebaseRepository(settings, prepared),

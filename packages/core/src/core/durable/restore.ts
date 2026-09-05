@@ -16,6 +16,7 @@ export const restoreWorkflows = (
         record.status._tag === 'Intervention' ||
         (record.status._tag === 'Waiting' &&
           (record.status.condition === 'continuation' ||
+            (record.status.condition === 'retry' && record.runTarget !== undefined) ||
             (record.artifact?.publishedHead !== null &&
               record.artifact?.publishedHead !== undefined)))
       ) {

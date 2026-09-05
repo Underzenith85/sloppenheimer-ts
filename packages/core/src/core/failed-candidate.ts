@@ -20,11 +20,13 @@ export const retainFailedCandidate = (
   prepared: PreparedRepository,
   failure: AgentError | WorkspaceError,
   journal?: CandidateJournal,
+  onCleanFailure: Effect.Effect<void> = Effect.void,
 ): Effect.Effect<RunResult, AgentError | WorkspaceError> =>
   Effect.gen(function* () {
     yield* journal?.checkpointing ?? Effect.void
     const inspected = yield* sourceControl.inspect(prepared).pipe(asSettled)
     if (inspected._tag === 'Succeeded' && inspected.value._tag === 'Clean') {
+      yield* onCleanFailure
       return yield* Effect.fail(failure)
     }
     const candidates = sourceControl.candidates

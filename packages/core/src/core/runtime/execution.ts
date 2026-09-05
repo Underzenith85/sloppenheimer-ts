@@ -26,7 +26,7 @@ import type { IssueId } from '../../domain/domain.js'
  * which is exactly the run of repeated attempts the cap exists for. Unlike every other key here,
  * it is never superseded; `run-workspace.ts` says why.
  */
-export type ExecutionPurpose = 'worker' | 'retry' | 'delivery' | 'rebase' | 'prune'
+export type ExecutionPurpose = 'worker' | 'retry' | 'delivery' | 'rebase' | 'prune' | 'recovery'
 
 /** The fibers one orchestrator owns, keyed by purpose and issue. */
 export type ExecutionOwner = FiberMap.FiberMap<string, void>

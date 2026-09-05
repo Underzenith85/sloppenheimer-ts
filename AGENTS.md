@@ -1095,3 +1095,36 @@ Tracked by [#290](https://github.com/Underzenith85/sloppenheimer-ts/issues/290),
   still support explicit re-verification and delivery.
 - The legacy mailbox still owns polling, review, delivery timers, and execution fibers. This
   bridge is a staged production integration, not completion of the durable kernel cutover.
+
+### Remote-only publication recovery
+
+The stacked recovery slice for #291 adds an optional source-control recovery capability.
+
+- Preparation captures a credential-free remote fingerprint in candidate provenance. Recovery
+  consults only the configured adapter whose identity matches that fingerprint; older records
+  without identity remain held. A workflow reload cannot redirect an old candidate to a new remote.
+- Git recovery reads an exact branch with bounded `ls-remote` from its own temporary directory,
+  without inspecting, fetching into, or trusting configuration in the retained workspace.
+  Every invocation acquires its own resources. The capability captures immutable settings and
+  stays callable independently of retirement of its parent publishing adapter.
+- Startup remote reads use keyed recovery fibers, limited to four concurrent observations.
+  Tracker polling and control processing do not wait for those reads. Store settlement compares
+  the observed record's revision; a stale read cannot overwrite newer intent or candidate state.
+- A matching remote head records the verified publication fact, including after pause. Absence,
+  divergence, and transport failure remain distinct from confirmation. The original workspace
+  remains held, and neither publication confirmation nor intent restoration authorizes another
+  coder, workspace adoption, or a remote write before process ownership is resolved.
+
+### Known run settlement and retry admission
+
+A known failure before preparation, or a failed/cancelled session whose workspace inspection
+proves it still matches its baseline, settles as Waiting(retry). The durable record retains the
+original normal or repair target; admission requires the same branch and repair head lease and
+continues the original coding/repair counters and total deadline.
+
+Cancellation inspects only after the session and command finalizers have completed and while
+the run still holds its workspace lease. This settlement is awaited by the worker cancellation
+before pause returns. A dirty workspace, failed inspection, interrupted preparation, or candidate
+with verification/publication evidence remains an explicit intervention hold. Pausing or restarting
+does not turn uncertain work into a safe fresh attempt. Startup preserves known retry settlements;
+records left executing by a host crash still require reconciliation.

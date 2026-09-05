@@ -1,3 +1,4 @@
+import { settleStoppedRun } from './retry-settlement.js'
 import { settleRun } from './settlement.js'
 import { Clock, Effect, Option } from 'effect'
 import type { Artifact, DurableWorkflow } from '../../domain/durable-workflow.js'
@@ -9,6 +10,7 @@ export type RunJournal = Readonly<{
   prepared: (prepared: PreparedRepository) => Effect.Effect<void>
   publication: CandidateJournal
   settled: (outcome: PostflightOutcome) => Effect.Effect<void>
+  stopped: (clean: boolean) => Effect.Effect<void>
   failed: Effect.Effect<void>
 }>
 
@@ -22,6 +24,7 @@ const preparedArtifact = (prepared: PreparedRepository): Artifact => ({
   verifiedRevision: null,
   publishedHead: null,
   repository: {
+    ...(prepared.repositoryIdentity === undefined ? {} : { identity: prepared.repositoryIdentity }),
     branchName: prepared.target.branchName,
     baseBranch: prepared.baseBranch,
     baseSha: prepared.baseSha,
@@ -34,6 +37,9 @@ const candidateArtifact = (candidate: Candidate): Artifact => ({
   ...preparedArtifact(candidate.prepared),
   candidateRevision: candidate.treeSha,
   repository: {
+    ...(candidate.prepared.repositoryIdentity === undefined
+      ? {}
+      : { identity: candidate.prepared.repositoryIdentity }),
     branchName: candidate.prepared.target.branchName,
     baseBranch: candidate.prepared.baseBranch,
     baseSha: candidate.prepared.baseSha,
@@ -103,12 +109,7 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
       published: settled,
     },
     settled,
-    failed: owned((current) => ({
-      ...current,
-      status: {
-        _tag: 'Intervention',
-        reason: 'Execution ended before durable settlement; inspect retained work',
-      },
-    })),
+    stopped: (clean) => owned((current) => settleStoppedRun(current, clean)),
+    failed: owned((current) => settleStoppedRun(current, false, true)),
   }
 }
