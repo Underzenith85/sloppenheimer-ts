@@ -4,7 +4,7 @@
   "options": {
     "typeAware": true
   },
-  "plugins": ["typescript"],
+  "plugins": ["typescript", "react", "react-perf", "jsx-a11y"],
   "rules": {
     "curly": ["error", "all"],
     "eqeqeq": "error",
@@ -49,6 +49,63 @@
   // a package-root module for never rejecting a compliant one.  Prefer flat layers.
   "overrides": [
     {
+      "files": ["packages/coordinator-ui/src/**"],
+      "rules": {
+        "react/rules-of-hooks": "error",
+        "react/exhaustive-deps": "error",
+        "jsx-a11y/alt-text": "error",
+        "jsx-a11y/anchor-has-content": "error",
+        "jsx-a11y/aria-props": "error",
+        "jsx-a11y/aria-proptypes": "error",
+        "jsx-a11y/aria-role": "error",
+        "jsx-a11y/aria-unsupported-elements": "error",
+        "jsx-a11y/click-events-have-key-events": "error",
+        "jsx-a11y/label-has-associated-control": "error",
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "node:*",
+                  "@sloppenheimer/**",
+                  "**/packages/core/**",
+                  "**/packages/adapter-*/**",
+                  "**/src/operator/**"
+                ],
+                "message": "The coordinator browser consumes its own HTTP API, never host or adapter implementations."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/**", "packages/adapter-*/src/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "react",
+                  "react/**",
+                  "react-dom",
+                  "react-dom/**",
+                  "@tanstack/react-query",
+                  "@sloppenheimer/coordinator-ui",
+                  "@sloppenheimer/coordinator-ui/**",
+                  "**/coordinator-ui/**"
+                ],
+                "message": "The instance and adapters must not import the coordinator browser or its runtime dependencies."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       // Module and function size limits.  #211 chose these thresholds — 500 lines a file, 100 a
       // function, counting blank lines and comments — and owns turning them on.
       //
@@ -74,6 +131,7 @@
         "packages/adapter-github/src/**",
         "packages/adapter-node/src/**",
         "packages/core/src/**",
+        "packages/coordinator-ui/src/**",
         "src/**"
       ],
       "rules": {

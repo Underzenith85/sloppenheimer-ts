@@ -60,6 +60,21 @@ The `effect`, `@effect/platform`, and `@effect/platform-node` versions are pinne
 Effect 3 set. Update them together: Platform releases declare Effect-line peer ranges, and a partial
 upgrade can produce incompatible HTTP runtime types or behavior.
 
+### Coordinator UI development
+
+The independent React/Vite scaffold lives in `packages/coordinator-ui`. Start it on loopback with:
+
+```sh
+pnpm --filter @sloppenheimer/coordinator-ui dev
+```
+
+`pnpm check` includes its lint, strict typecheck, tests, and production build. The static output
+is `packages/coordinator-ui/dist/`; preview it with
+`pnpm --filter @sloppenheimer/coordinator-ui preview` after building.
+This initial scaffold has a query provider and CSS Modules, but no coordinator API connection.
+The existing instance console and server continue to build and run as before.
+UI tests live in `test/coordinator-ui/` and run with `pnpm test test/coordinator-ui`.
+
 ## Run
 
 ```sh
