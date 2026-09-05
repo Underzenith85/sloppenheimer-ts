@@ -179,6 +179,14 @@ export const parseConfig = (
       beforeRemove: hooks?.before_remove ?? null,
       timeoutMs: hooks?.timeout_ms ?? workflowDefaults.hookTimeoutMs,
     },
+    ...(raw.verification === undefined
+      ? {}
+      : {
+          verification: {
+            command: raw.verification.command,
+            timeoutMs: raw.verification.timeout_ms,
+          },
+        }),
     agent: {
       maxConcurrentAgents: agent?.max_concurrent_agents ?? workflowDefaults.maxConcurrentAgents,
       maxTurns: agent?.max_turns ?? workflowDefaults.maxTurns,

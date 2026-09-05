@@ -1,16 +1,10 @@
-import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Readable } from 'node:stream'
 import { Effect, Option, Redacted, type Scope } from 'effect'
 
 import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
-import {
-  detachChildProcess,
-  resumeOnce,
-  terminateChildProcess,
-} from '@sloppenheimer/core/support/subprocess.js'
+import { runCommand } from './command.js'
 
 /**
  * How one git invocation runs, and how the way it failed is read.
@@ -30,6 +24,8 @@ export type GitSourceControlSettings = Readonly<{
   remoteUrl: string
   baseBranch: string
   credential: Option.Option<GitCredential>
+  /** Hard deadline per Git invocation, independent of agent protocol silence. */
+  timeoutMs?: number
 }>
 
 /** Which port operation a git invocation serves. It decides how a failure is categorised. */
@@ -46,7 +42,8 @@ type GitFailure = Readonly<{
 
 const outputLimit = 1024 * 1024
 /** How long a git process group has to exit politely before it is killed. */
-const gitTerminationGraceMs = 5_000
+const gitTerminationGraceMs = 1_000
+const gitTimeoutMs = 15 * 60 * 1000
 export const gitIdentity: NodeJS.ProcessEnv = {
   GIT_AUTHOR_NAME: 'Sloppenheimer',
   GIT_AUTHOR_EMAIL: 'sloppenheimer@localhost',
@@ -59,13 +56,6 @@ case "$1" in
   *) printf '%s\\n' "$SLOPPENHEIMER_GIT_PASSWORD" ;;
 esac
 `
-
-const append = (current: string, chunk: Buffer): string => {
-  if (current.length >= outputLimit) {
-    return current
-  }
-  return `${current}${chunk.toString('utf8')}`.slice(0, outputLimit)
-}
 
 /** What a failure reads like to a human: both streams, so no diagnostic is lost from the message. */
 const failureText = (failure: GitFailure): string => `${failure.stderr}\n${failure.stdout}`.trim()
@@ -143,98 +133,48 @@ const runProcess = (
   cwd: string,
   args: readonly string[],
   environment: NodeJS.ProcessEnv,
+  timeoutMs: number,
 ): Effect.Effect<string, SourceControlError> =>
-  Effect.async<string, SourceControlError>((resume) => {
-    let child: ChildProcessByStdio<null, Readable, Readable>
-    try {
-      child = spawn('git', [...args], {
-        cwd,
-        env: environment,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true,
-      })
-    } catch (cause: unknown) {
-      // `spawn` rejects an invalid argument — a NUL byte in a branch name or remote URL — by
-      // throwing here rather than emitting `error`. A throw out of this registration would be a
-      // defect, bypassing the failure channel this effect declares, so it is reported like any
-      // other way of failing to start git.
-      resume(
-        Effect.fail(
-          sourceControlFailure({ args, exitCode: null, stdout: '', stderr: '', cause }, operation),
+  runCommand({
+    command: 'git',
+    args,
+    cwd,
+    environment,
+    timeoutMs,
+    captureLimit: outputLimit,
+    terminationGraceMs: gitTerminationGraceMs,
+  }).pipe(
+    Effect.mapError((cause) =>
+      sourceControlFailure(
+        {
+          args,
+          exitCode: null,
+          stdout: '',
+          stderr: cause.message,
+          cause,
+        },
+        operation,
+      ),
+    ),
+    Effect.flatMap((result) => {
+      // Git stdout is data: incomplete capture cannot be accepted as a revision or status.
+      if (result.code === 0 && !result.outputInterrupted && !result.stdoutTruncated) {
+        return Effect.succeed(result.stdout)
+      }
+      return Effect.fail(
+        sourceControlFailure(
+          {
+            args,
+            exitCode: result.code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            cause: result.outputInterrupted ? 'output pipe failed' : result,
+          },
+          operation,
         ),
       )
-      return
-    }
-    let stdout = ''
-    let stderr = ''
-    let streamFailure: unknown
-
-    /**
-     * Reads one output pipe, remembering the first error it raises.
-     *
-     * A pipe that fails mid-read leaves `stdout` holding a prefix of git's output rather than the
-     * whole of it, and callers here read that output for revisions and status. Reporting the
-     * invocation as a failure is therefore the safe reading: a truncated answer must never be
-     * mistaken for a complete one, whatever exit code git goes on to report.
-     */
-    const capture = (stream: Readable, append: (chunk: Buffer) => void): void => {
-      stream.on('data', append)
-      stream.on('error', (cause: unknown) => {
-        streamFailure ??= cause
-      })
-    }
-
-    // Node delivers a spawn failure asynchronously, so one can still arrive after this effect has
-    // settled or been cancelled, and the child outlives an interrupted fiber until the terminator
-    // below reaps it. `resumeOnce` is what keeps both from reaching a resume that has already
-    // fired, and takes the listeners off as it settles.
-    const { settle, claim } = resumeOnce(resume, () => {
-      detachChildProcess(child)
-    })
-
-    capture(child.stdout, (chunk: Buffer) => {
-      stdout = append(stdout, chunk)
-    })
-    capture(child.stderr, (chunk: Buffer) => {
-      stderr = append(stderr, chunk)
-    })
-    child.once('error', (cause: unknown) => {
-      settle(
-        Effect.fail(
-          sourceControlFailure({ args, exitCode: null, stdout, stderr, cause }, operation),
-        ),
-      )
-    })
-    // `close` rather than `exit`: both pipes are fully drained by then — which is also what makes
-    // this the point at which a pipe failure is known, so it is reported here rather than settling
-    // early and leaving the git process running with nobody waiting on it.
-    child.once('close', (exitCode: number | null) => {
-      if (streamFailure !== undefined) {
-        settle(
-          Effect.fail(
-            sourceControlFailure(
-              { args, exitCode, stdout, stderr, cause: streamFailure },
-              operation,
-            ),
-          ),
-        )
-        return
-      }
-      if (exitCode === 0) {
-        settle(Effect.succeed(stdout))
-        return
-      }
-      settle(Effect.fail(sourceControlFailure({ args, exitCode, stdout, stderr }, operation)))
-    })
-
-    // Interruption: a git invocation nobody is waiting on any more must not keep running against
-    // the workspace, but one that already settled has nothing left to terminate.
-    return Effect.suspend(() =>
-      claim()
-        ? Effect.promise(() => terminateChildProcess(child, gitTerminationGraceMs))
-        : Effect.void,
-    )
-  })
+    }),
+  )
 
 /**
  * The path of a `GIT_ASKPASS` script staged in a temporary directory that the surrounding scope
@@ -276,22 +216,34 @@ export const runGit = (
 ): Effect.Effect<string, SourceControlError> =>
   Option.match(settings.credential, {
     onNone: () =>
-      runProcess(operation, cwd, args, {
-        ...process.env,
-        ...extraEnvironment,
-        GIT_TERMINAL_PROMPT: '0',
-      }),
+      runProcess(
+        operation,
+        cwd,
+        args,
+        {
+          ...process.env,
+          ...extraEnvironment,
+          GIT_TERMINAL_PROMPT: '0',
+        },
+        settings.timeoutMs ?? gitTimeoutMs,
+      ),
     onSome: (credential) =>
       Effect.scoped(
         Effect.flatMap(askPassScriptPath(operation), (askPass) =>
-          runProcess(operation, cwd, args, {
-            ...process.env,
-            ...extraEnvironment,
-            GIT_ASKPASS: askPass,
-            GIT_TERMINAL_PROMPT: '0',
-            SLOPPENHEIMER_GIT_USERNAME: credential.username,
-            SLOPPENHEIMER_GIT_PASSWORD: Redacted.value(credential.password),
-          }),
+          runProcess(
+            operation,
+            cwd,
+            args,
+            {
+              ...process.env,
+              ...extraEnvironment,
+              GIT_ASKPASS: askPass,
+              GIT_TERMINAL_PROMPT: '0',
+              SLOPPENHEIMER_GIT_USERNAME: credential.username,
+              SLOPPENHEIMER_GIT_PASSWORD: Redacted.value(credential.password),
+            },
+            settings.timeoutMs ?? gitTimeoutMs,
+          ),
         ),
       ),
   })

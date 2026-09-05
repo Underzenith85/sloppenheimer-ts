@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Option, type Scope } from 'effect'
 
+import type { CandidateSourceControlPort } from './candidate.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
 import type { SourceControlError } from '../domain/errors.js'
@@ -57,6 +58,8 @@ export type PublicationOutcome =
  * publication; an agent receives only the prepared worktree and edits ordinary files inside it.
  */
 export type SourceControlPort = Readonly<{
+  /** Explicit candidate operations, required when host verification is configured. */
+  candidates?: CandidateSourceControlPort
   prepare: (
     issue: Issue,
     workspace: Workspace,

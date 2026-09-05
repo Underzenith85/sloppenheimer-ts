@@ -44,6 +44,30 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
           yield* onTick(context)
           break
         }
+        case 'WorkerCrashed': {
+          // A defect is a host bug. Fail the supervisor visibly, rather than silently retrying it.
+          return yield* Effect.dieMessage(
+            `worker ${String(event.runId)} crashed for ${event.issueId}`,
+          )
+        }
+        case 'AgentStarted': {
+          const startedAt = yield* currentInstant
+          const accepted = yield* Ref.modify(context.state, (current) => {
+            const entry = current.running.get(event.issueId)
+            if (entry?.runId !== event.runId || entry.phase._tag !== 'Preparing') {
+              return [false, current]
+            }
+            return [
+              true,
+              Transitions.updateRun(current, event.issueId, (run) => ({
+                ...run,
+                phase: { _tag: 'Agent', startedAt },
+              })),
+            ]
+          })
+          yield* Deferred.succeed(event.applied, accepted)
+          break
+        }
         case 'PostflightStarted': {
           const startedAt = yield* currentInstant
           yield* Ref.update(context.state, (current) =>

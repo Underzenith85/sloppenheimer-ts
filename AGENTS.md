@@ -249,9 +249,10 @@ never through `Date.now()` or `new Date()`.
 - Delays and repetition in orchestration are `Effect.sleep` and `Schedule`. Process-lifecycle code
   is the standing exception, wrapped in an effect or not: where the thing being timed is a real
   child process or the host itself, a test clock would never advance it, so a native timer is
-  correct there. That covers the hook deadline and its kill grace period in
-  `packages/adapter-node/src/workspace-hooks.ts` (inside `Effect.async`, the shape that bridges such
-  a callback), the force, bound, and reap timers of `terminateChildProcess` in
+  correct there. That covers command and hook deadlines in
+  `packages/adapter-node/src/command.ts` (inside `Effect.async`), the worker response deadline in
+  `packages/adapter-node/src/workflow-store.ts`, the force, bound, and reap timers of
+  `terminateChildProcess` in
   `packages/core/src/support/subprocess.ts`, and the CLI's shutdown watchdog. Each says why. Reach
   for one only when a real process is what you are waiting on.
 - `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
@@ -313,11 +314,10 @@ narrows the parsed line with the `support/json.ts` predicates, reports an unusab
   own child scope, so its resources are released when _it_ is retired rather than accumulating
   finalizers for the life of the process.
 - Construction that allocates a resource is an `Effect`, so the acquisition is a step the runtime
-  can see, interrupt, and pair with a release. `CodexConnection` is the exception and shows what it
-  costs: its constructor spawns the child process, so it is safe only because `openConnection` in
-  `packages/adapter-codex/src/codex.ts` is the one thing that builds it and does so inside
-  `Effect.acquireRelease`. Do not copy the shape; if you change that class, keep the construction
-  inside that acquisition.
+  can see, interrupt, and pair with a release. `openProcess` in
+  `packages/adapter-node/src/process.ts` is the shared scoped acquisition for buffered commands and
+  the streaming Codex transport. `CodexConnection` receives an already acquired child and owns
+  protocol session identity; its constructor does not spawn a process.
 
 ### Concurrency and interruption
 
@@ -345,11 +345,10 @@ narrows the parsed line with the `support/json.ts` predicates, reports an unusab
 - A protocol read is a `Stream`: the Codex reader lifts the child's stdout with
   `NodeStream.fromReadable` and frames it in `packages/adapter-codex/src/readers.ts`, so
   backpressure and interruption are the runtime's problem. Draining a subprocess pipe for its
-  diagnostics is not that, and does not pretend to be — `runProcess` in
-  `packages/adapter-node/src/git-process.ts` and `captureStream` in its `workspace-hooks.ts` attach
-  `data` and `error` listeners inside the `Effect.async` that owns the child, bounding what they
-  keep. Use a `Stream` when the bytes are a protocol; use the listeners when you are draining a
-  process you are already holding.
+  diagnostics uses `runCommand` in `packages/adapter-node/src/command.ts`: it attaches
+  `data` and `error` listeners inside `Effect.async`, drains both pipes, and bounds what it keeps.
+  Git and workspace hooks share this implementation. Use a `Stream` when bytes are a protocol;
+  use listeners when draining a process already held in a scope.
 - Write interruption-safe code: assume any effect can be interrupted between two steps, and put the
   cleanup in a finalizer.
 
@@ -366,11 +365,8 @@ provider's refusal earns; not asking for the refusal in the first place is a sep
 Structured logging goes through `logInfo`, `logWarning`, and `logError` in
 `packages/core/src/support/logging.ts`, which sanitize fields, redact secret-named keys, and bound
 strings before anything is emitted, and default every record to an `action` and an `outcome`. New
-logging uses those. One caller predates the rule and logs through Effect's own
-`Effect.logInfo` / `Effect.logWarning` directly — the hook lifecycle in
-`packages/adapter-node/src/workspace-hooks.ts`, whose records therefore carry neither the defaults
-nor the sanitizing, including the `stderr` excerpt it reports on a failed hook. Read it as the
-exception it is rather than as a pattern to copy.
+logging uses those, including workspace hook lifecycle messages and their bounded diagnostic
+excerpts.
 
 Telemetry events state their own `lifecycle`; nothing infers a session transition by matching a
 runner's event names.
@@ -571,22 +567,12 @@ repair agent that had achieved nothing.
   inspection found. It answers with one of `NotPerformed`, `NoChanges`, `Published` or
   `DeliveryFailed`, and it cannot fail — raising a publication problem as a worker failure is what
   turned a delivery problem into an agent retry.
-- The agent stall timer does not run over a postflight. It measures silence on the agent protocol,
-  and a postflight is silent on it by construction: no agent is running. A run records when the host
-  took it over, and the stall sweep leaves those alone — otherwise an inspection or a push that
-  outlasts the timeout is retired as a stalled agent and the coding agent runs again on work it had
-  already finished, which is the confusion this whole record exists to end. A publication that
-  cannot finish is the source control's to fail, and it fails as a delivery. The surfaces say the same
-  thing: the run's snapshot publishes no stall deadline once the host has taken over, and its detail
-  moves to the `publishing` phase — a deadline nothing will act on is what has a console reporting a
-  stalled agent for a run whose stall detection is off. The takeover is recorded before the first git
-  call, and the worker waits for it to be recorded rather than merely sent: enqueueing the event and
-  publishing anyway leaves a poll already in flight reading a run nothing had marked, which retires
-  the publication as a stalled agent — the one thing the marker exists to prevent. The wait is on the
-  handler because runtime state changes go through the mailbox; the worker does not write the state
-  itself. All of this is a marker on the agent's session standing in for a phase of the run; the
-  phase becomes explicit, and the marker and its handshake go, under
-  [#260](https://github.com/Underzenith85/sloppenheimer-ts/issues/260).
+- Agent silence is supervised in the session scope by `core/supervise-agent.ts`, independently
+  of tracker polling and workflow validation. `RunningEntry.phase` distinguishes `Preparing`,
+  `Agent`, and `Postflight`. Hooks and publication never consume the agent's silence budget.
+  Snapshots publish an agent deadline only during the `Agent` phase. Phase handshakes remain
+  ordered through the mailbox; the deadline itself does not depend on mailbox progress.
+  Agent callback events carry the run identity, so late telemetry cannot update a replacement run.
 - The agent's final message is never parsed to decide any of this. Worktree state, baseline SHA,
   published SHA and expected remote SHA are authoritative.
 - A clean worktree is not published. `SourceControlPort.inspect` exists so that "there was nothing
@@ -594,8 +580,10 @@ repair agent that had achieved nothing.
 - `DeliveryFailed` retains the workspace and queues a **delivery**, not a retry: a delivery holds
   the issue's claim with no worker behind it, and what comes due is one more `publish` of the same
   preparation. It is bounded by `deliveryAttemptLimit` in `core/retry.ts`; when the failure did not
-  preserve the worktree, or those attempts are spent, the work goes back to the coding agent as an
-  ordinary retry. `deliveryAttemptLimit` counts publications, the turn's own included. A retained
+  preserve the worktree, the work goes back to the coding agent as an ordinary retry. With host
+  verification configured, spent delivery retries retain the candidate for intervention; they do
+  not authorize a new coder. Non-retryable failures that preserve work are also held, without a
+  timer. An explicit operator resume retries delivery. `deliveryAttemptLimit` counts publications, the turn's own included. A retained
   delivery keeps calling the tracker and the code-review port after the run that produced it has
   ended, so a workflow reload or a credential rotation adopts it exactly as it adopts a running run
   and a handoff.
@@ -728,11 +716,10 @@ repair agent that had achieved nothing.
 
 ### Known limits and follow-ups
 
-- No git invocation is bounded: `runProcess` in `packages/adapter-node/src/git-process.ts` waits on
-  `close` with no deadline, so a hung `fetch` or `push` waits forever. A delivery's publication is
-  off the loop, so the host keeps answering; the operation itself does not end. One subprocess
-  primitive with a deadline, and a fake for lifecycle tests, is
-  [#258](https://github.com/Underzenith85/sloppenheimer-ts/issues/258).
+- Git invocations now use the shared bounded command runner (15 minutes per invocation by
+  default). This is a per-command deadline, not yet a total publication budget. Process-tree
+  cleanup is bounded; exhausting its reap bound is not proof that a retained workspace is safe to
+  adopt. Recovery must prove ownership before reuse.
 - Handlers still yield on ports that block: `before_remove` hooks from terminal cleanup, and the
   tracker from reconciliation, retry-due and the poll. The rule that a handler handles messages only
   is [#259](https://github.com/Underzenith85/sloppenheimer-ts/issues/259).
@@ -788,8 +775,8 @@ publication, and was skipped precisely because there was nothing to publish.
   `rebase-merge` directory, a lock, a spawn failure -- keeps the publication category. That and
   every other failure -- the lease, the remote, the workspace -- is recorded on the handoff and
   retried by the next observation from wherever the branch is, exactly as a refused merge is.
-- The workspace a rebase leases is released as completed whatever happened. Nothing in it is
-  anyone's work, and a retained directory per attempt would be nothing a later run could adopt.
+- A successful rebase releases its workspace. A failed rebase or verification retains it for
+  diagnosis, and the regular retention pass bounds obsolete attempts.
 - A repair dispatched for `behind` before this change -- restored from the store, or in flight
   across the upgrade -- comes back with a clean worktree and an unchanged head. That is no longer
   read as "achieved nothing": the unchanged head classifies as `rebase_needed`, the repair identity
@@ -1009,3 +996,102 @@ not do, and inline comments only where the reason is not visible in the code.
 Record a decision here, in the section it belongs to, rather than in a new ADR file. Reference
 issues as full Markdown links to `https://github.com/Underzenith85/sloppenheimer-ts/issues/<number>`,
 and when a rule is temporary, name the issue that removes it.
+
+## Architecture record: durable workflow kernel foundation
+
+Tracked by [#288](https://github.com/Underzenith85/sloppenheimer-ts/issues/288).
+The pure kernel remains the target scheduler. Production now journals admission and candidate
+publication through the migration bridge below; it does not automatically replay interrupted work.
+
+- `domain/durable-workflow.ts` defines JSON-shaped issue intent, operation generations,
+  artifact provenance, explicit execution states, and budgets. Processes and fibers stay outside
+  persisted records.
+- `core/durable/transition.ts` owns pure decisions. Stale or duplicate settlement is a no-op.
+  Cancellation preserves observed candidate and publication evidence. Restart converts interrupted
+  execution to reconciliation, never to an assumed failure or automatic replay.
+- `core/durable/execute.ts` commits the claim before invoking a command. Only the writer that
+  advances the queued revision may launch it. It waits for command resource finalization before
+  recording settlement; deadlines and interruption leave an unknown outcome for reconciliation.
+  Expected adapter failures are outcome data, while defects remain defects.
+- `WorkflowStore` commits the workflow and history atomically with an expected revision.
+  The Node adapter uses SQLite on a dedicated worker, with WAL and full synchronization.
+  Database errors fail closed. No dependency or independent runtime boundary is added.
+- Full cutover still requires proven workspace ownership, automatic publication reconciliation,
+  exact-head review operations, and retirement of the legacy scheduler. The live bridge below
+  provides durable admission and candidate evidence during that migration.
+
+## Architecture record: verified candidates in the production publication path
+
+Tracked by [#291](https://github.com/Underzenith85/sloppenheimer-ts/issues/291).
+Workflows may declare `verification.command` and a positive, bounded `verification.timeout_ms`.
+This repository uses `pnpm check`. The section is optional for existing workflows; declaring it
+requires a source-control adapter with the explicit candidate capability. Enabling or disabling
+verification requires a host restart because it changes durable-store composition; reload refuses
+the change and retains the last known good workflow. Command and timeout edits remain reloadable.
+
+- The candidate port separates checkpoint, alignment to the protected base, verification, remote
+  observation, and publication. A candidate names its commit SHA and tree SHA as well as the
+  original prepared repository and expected remote head.
+- Alignment happens before the gate. Verification checks HEAD, tree identity, and a clean worktree
+  both before and after the command. Publication rechecks those identities and pushes the exact
+  verified object SHA under the original expected-head lease. No rebase happens inside that push.
+- A retry observes the remote before alignment. A matching remote head is an observed publication,
+  even if the first acknowledgement was lost. Unknown transport results never prove delivery.
+- Publication eligibility is refreshed after verification, immediately before the remote action.
+  Missing, paused, or ineligible issues hold candidates; transient lookup errors retain them for
+  transport retry. Automatic rebases use the same gate when configured.
+- A typed agent failure with the gate configured is followed by inspection and checkpointing of
+  partial work. Execution remains failed; a partial candidate is held for operator inspection
+  instead of launching another coder. Defects remain defects, and cancellation still preserves
+  the leased workspace.
+- Held deliveries retain their issue claim and remain protected from workspace pruning. They
+  have no retry timer and appear as needing attention. Explicit resume retries delivery and
+  verification, never the coding session.
+- `before_run` must not replace the repository the host prepared. This repository's hook installs
+  dependencies with `pnpm install --frozen-lockfile`; it no longer checks out main over a repair.
+- These operations persist candidate obligations and verification evidence through the live bridge
+  below. Safe adoption of pre-restart workspaces remains required before automatic recovery.
+
+## Architecture record: durable admission and publication bridge
+
+Tracked by [#290](https://github.com/Underzenith85/sloppenheimer-ts/issues/290),
+[#291](https://github.com/Underzenith85/sloppenheimer-ts/issues/291), and
+[#293](https://github.com/Underzenith85/sloppenheimer-ts/issues/293).
+
+- At startup, workflows declaring verification compose a SQLite workflow store under
+  `.sloppenheimer/` beside the workflow file, keyed by its absolute path. A separate SQLite
+  ownership database holds an exclusive transaction for the host's scope. A second host using
+  that path fails startup. This is host exclusion, not proof that an orphaned child exited.
+- `core/durable/live-journal.ts` commits admission before a workspace or agent is launched.
+  Journal callbacks are fenced by the admitted owner. Store commits and the in-memory projection
+  update form one interruption-masked step; a store failure interrupts the caller and fails the
+  host supervisor instead of retrying an unrecorded command.
+- Preparation records workspace provenance and the original remote lease. Checkpoint, alignment,
+  verification, and push have separate journal barriers. The verified tree and candidate commit
+  are persisted before push; an observed publication is persisted before releasing the workspace.
+  A published head with missing or mismatched verification cannot authorize another repair.
+- Successful non-handoff runs explicitly wait for a core continuation, never for review. Admission
+  permits those normal targets while enforcing the persisted three-attempt coding limit and the
+  original deadline. Clean non-handoff outcomes may continue without inventing a publication fact.
+  Other holds and review waits never implicitly authorize a fresh normal run.
+- A host rebase whose branch is already current verifies the unchanged candidate and records the
+  observed publication before returning NoChanges. It performs no push, and does not leave an
+  Executing journal or reuse evidence invalidated by checkpoint/alignment.
+- Repairs and host rebases share a persisted limit of three mutations and the original 24-hour
+  admission deadline. Restart cannot reset either budget. Publication transport retries reuse
+  their existing journal and candidate rather than spending another coding attempt.
+- Pause intent for admitted work is persisted before cancelling fibers. Candidate mutation
+  barriers refuse paused owners; settlement can still preserve a remote fact observed during
+  cancellation. Restoring intent alone never authorizes reuse of an orphaned workspace.
+- Startup converts unfinished records into visible intervention holds. It preserves exact
+  candidate evidence and refuses a fresh coder, including when a push may have succeeded without
+  acknowledgement. Confirmed published records continue through existing handoff reconciliation.
+  Automatic inspection/adoption after proving child termination is still outstanding.
+- Durable candidates are protected from retention pruning. Automatic whole-issue workspace
+  deletion is deferred in durable mode until cleanup has its own durable operation. This
+  conservative migration behavior can retain additional disk usage.
+- The API exposes optional `durable_workflows` summaries. The console puts unresolved recovery
+  work in Needs attention and offers no misleading Start action. Existing live delivery holds
+  still support explicit re-verification and delivery.
+- The legacy mailbox still owns polling, review, delivery timers, and execution fibers. This
+  bridge is a staged production integration, not completion of the durable kernel cutover.

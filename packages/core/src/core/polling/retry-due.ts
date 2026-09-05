@@ -79,7 +79,7 @@ const resumeRepair = (
     const terminalIssue = Option.filter(issue, (record) =>
       stateIsIn(record.state, entry.execution.workflow.config.tracker.terminalStates),
     )
-    if (Option.isSome(terminalIssue)) {
+    if (Option.isSome(terminalIssue) && context.durable === undefined) {
       yield* stopRetentionPass(context, event.issueId)
       yield* entry.execution.workspaces.remove(terminalIssue.value.identifier).pipe(
         Effect.zipRight(
@@ -148,7 +148,11 @@ const resumeContinuation = (
     }
     if (stateIsIn(issue.value.state, effective.workflow.config.tracker.terminalStates)) {
       yield* stopRetentionPass(context, event.issueId)
-      yield* effective.workspaces.remove(issue.value.identifier).pipe(
+      yield* (
+        context.durable === undefined
+          ? effective.workspaces.remove(issue.value.identifier)
+          : Effect.void
+      ).pipe(
         Effect.zipRight(
           Ref.update(context.state, (pending) =>
             Transitions.forgetRetainedWorkspaces(pending, event.issueId),

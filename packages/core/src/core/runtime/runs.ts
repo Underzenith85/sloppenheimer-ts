@@ -174,7 +174,7 @@ export const cancelRunning = (
         error: null,
       })
     }
-    if (cleanupWorkspace) {
+    if (cleanupWorkspace && cells.durable === undefined) {
       // Removing the workspace destroys anything unpublished in it, so the delivery that would
       // have republished it goes in the same step rather than coming due against a directory that
       // no longer exists.

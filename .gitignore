@@ -6,3 +6,5 @@ coverage/
 .sloppenheimer/
 *.log
 .DS_Store
+# Retained workspaces from the former application name.
+.symphony/

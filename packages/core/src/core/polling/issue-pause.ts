@@ -1,6 +1,6 @@
 import { Deferred, Effect, Option, Ref } from 'effect'
 
-import { issuesForNumber } from '../policy.js'
+import { identifierIssueNumber, issuesForNumber } from '../policy.js'
 import { releaseIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import * as Transitions from '../transitions.js'
@@ -20,6 +20,14 @@ export const onIssuePauseChanged = (
   event: Extract<OrchestratorEvent, { _tag: 'SetIssuePaused' }>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
+    if (context.durable !== undefined) {
+      const records = yield* context.durable.snapshot
+      for (const record of records) {
+        if (Option.contains(identifierIssueNumber(record.identifier), event.issueNumber)) {
+          yield* context.durable.setIntent(record.identifier, event.paused ? 'paused' : 'active')
+        }
+      }
+    }
     if (event.paused) {
       yield* Ref.update(context.state, (current) =>
         Transitions.pauseIssueNumber(current, event.issueNumber),

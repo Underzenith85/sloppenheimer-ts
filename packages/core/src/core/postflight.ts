@@ -14,6 +14,8 @@
  */
 
 import { Effect } from 'effect'
+import type { VerificationConfig, CandidateJournal } from '../ports/candidate.js'
+import { runVerifiedPublication } from './verified-publication.js'
 
 import type { Issue } from '../domain/domain.js'
 import type { SourceControlError } from '../domain/errors.js'
@@ -76,9 +78,7 @@ const failureOf = (error: SourceControlError): DeliveryFailure => ({
  * again.
  */
 export const deliveryIsRecoverable = (outcome: PostflightOutcome): boolean =>
-  outcome._tag === 'DeliveryFailed' &&
-  outcome.failure.retryable &&
-  outcome.failure.worktreePreserved
+  outcome._tag === 'DeliveryFailed' && outcome.failure.worktreePreserved
 
 /** The postflight outcome as one log token, so a line reads the same for every backend. */
 export const postflightLogOutcome = (
@@ -132,9 +132,29 @@ export const runPostflight = (
   sourceControl: SourceControlPort,
   issue: Issue,
   prepared: PreparedRepository,
+  verification?: VerificationConfig,
+  secretEnvironmentNames: readonly string[] = [],
+  beforePublish: Effect.Effect<void, SourceControlError> = Effect.void,
+  journal?: CandidateJournal,
 ): Effect.Effect<PostflightOutcome> =>
   Effect.gen(function* () {
     const branchName = prepared.target.branchName
+    if (journal !== undefined && verification === undefined) {
+      return {
+        _tag: 'DeliveryFailed',
+        branchName,
+        changedFileCount: null,
+        prepared,
+        failure: {
+          category: 'verification_failed',
+          message:
+            'Verification was disabled for a durable candidate; restore the gate before delivery',
+          retryable: false,
+          worktreePreserved: true,
+        },
+      }
+    }
+
     const inspected = yield* sourceControl.inspect(prepared).pipe(asSettled)
     if (inspected._tag === 'Failed') {
       return {
@@ -149,7 +169,18 @@ export const runPostflight = (
       return { _tag: 'NoChanges', branchName, baselineSha: prepared.baselineSha }
     }
     const changedFileCount = inspected.value.dirtyFileCount
-    const published = yield* sourceControl.publish(issue, prepared).pipe(asSettled)
+    const published = yield* (
+      verification === undefined
+        ? sourceControl.publish(issue, prepared)
+        : runVerifiedPublication(
+            sourceControl,
+            issue,
+            prepared,
+            verification,
+            secretEnvironmentNames,
+            { beforePublish, ...(journal === undefined ? {} : { journal }) },
+          )
+    ).pipe(asSettled)
     if (published._tag === 'Failed') {
       return {
         _tag: 'DeliveryFailed',

@@ -98,7 +98,7 @@ export const postflightTakeoverApplies = (
   runId: number,
 ): boolean => {
   const entry = state.running.get(id)
-  return entry !== undefined && entry.runId === runId && entry.postflightStartedAt === null
+  return entry !== undefined && entry.runId === runId && entry.phase._tag !== 'Postflight'
 }
 
 /**
@@ -116,7 +116,10 @@ export const notePostflightStarted = (
   }
   return {
     ...state,
-    running: withEntry(state.running, id, { ...entry, postflightStartedAt: at }),
+    running: withEntry(state.running, id, {
+      ...entry,
+      phase: { _tag: 'Postflight', startedAt: at },
+    }),
   }
 }
 

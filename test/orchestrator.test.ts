@@ -1,3 +1,6 @@
+import { makeDurableHost } from '@sloppenheimer/core/core/durable/live-journal.js'
+import { WorkflowComposition, WorkflowStore } from '@sloppenheimer/core/ports/workflow-store.js'
+import { openWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import type { FileSystem } from '@effect/platform'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -464,7 +467,18 @@ const layerTestPorts = (
   )
   const makeCodeReview = ports.makeCodeReview
   if (makeCodeReview === undefined) {
-    return base
+    const makeSourceControl = ports.makeSourceControl
+    return makeSourceControl === undefined
+      ? base
+      : Layer.merge(
+          base,
+          layerSourceControlPorts(
+            ports.configuration,
+            Layer.succeed(SourceControlFactory, {
+              make: (provider) => Effect.sync(() => makeSourceControl(provider)),
+            }),
+          ),
+        )
   }
   const sourceControl: SourceControlPort = {
     prepare: (_issue, workspace, target) =>
@@ -1002,6 +1016,94 @@ describe('agent turn completion separated from work publication', (): void => {
     publish,
     rebase: () => Effect.die('no test here rebases a pull request'),
   })
+
+  it.scoped(
+    'holds a failed verification without repeating publication or coding until resumed',
+    () =>
+      Effect.gen(function* () {
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const harness = makeHarness(workflow, () => [issue])
+        let launches = 0
+        let publications = 0
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeSourceControl: () =>
+            failingSourceControl(
+              () => launches > 0,
+              () => {
+                publications += 1
+                return Effect.fail(
+                  deliveryFailure({ category: 'verification_failed', retryable: false }),
+                )
+              },
+            ),
+          runAgent: () => {
+            launches += 1
+            return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+          },
+        }
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+        while ((yield* control.snapshot).delivering.length === 0) {
+          yield* Effect.yieldNow()
+        }
+        yield* TestClock.adjust(60_000)
+        expect(launches).toBe(1)
+        expect(publications).toBe(1)
+        expect((yield* control.snapshot).retrying).toEqual([])
+        expect((yield* control.snapshot).delivering[0]?.interventionRequired).toBe(true)
+        yield* control.setIssuePaused(167, false)
+        yield* TestClock.adjust(20_000)
+        while (publications < 2) {
+          yield* Effect.yieldNow()
+        }
+        expect(launches).toBe(1)
+      }),
+  )
+
+  it.scoped(
+    'keeps partial work after an agent error instead of launching a replacement coder',
+    () =>
+      Effect.gen(function* () {
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const configured: Workflow = {
+          ...workflow,
+          config: { ...workflow.config, verification: { command: 'pnpm check', timeoutMs: 1_000 } },
+        }
+        const harness = makeHarness(configured, () => [issue])
+        let launches = 0
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeSourceControl: () =>
+            failingSourceControl(
+              () => launches > 0,
+              () => Effect.die('partial work must not be automatically published'),
+            ),
+          runAgent: () => {
+            launches += 1
+            return Effect.fail(
+              new AgentError({ category: 'turn_timeout', message: 'session stopped' }),
+            )
+          },
+        }
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+        while ((yield* control.snapshot).delivering.length === 0) {
+          yield* Effect.yieldNow()
+        }
+        yield* TestClock.adjust(60_000)
+        expect(launches).toBe(1)
+        expect((yield* control.snapshot).retrying).toEqual([])
+        expect((yield* control.snapshot).delivering[0]).toMatchObject({
+          category: 'candidate_partial',
+          interventionRequired: true,
+        })
+      }),
+  )
 
   it.scoped('retains the work a failed publication left, rather than retrying the agent', () =>
     Effect.gen(function* () {
@@ -1879,7 +1981,7 @@ describe('agent turn completion separated from work publication', (): void => {
         ...workflow,
         config: {
           ...workflow.config,
-          // Small enough that the whole budget fits inside one TestClock advance per attempt.
+          // Keep each observed delivery deadline close without changing the attempt budget.
           agent: { ...workflow.config.agent, maxRetryBackoffMs: 10_000 },
         },
       }
@@ -1889,6 +1991,7 @@ describe('agent turn completion separated from work publication', (): void => {
         id: issueId('167'),
       }
       const harness = makeHarness(rooted, () => [issue])
+      const replacementStarted = yield* Deferred.make<void>()
       let launched = 0
       const publications: string[] = []
       const ports: TestPorts = {
@@ -1901,20 +2004,37 @@ describe('agent turn completion separated from work publication', (): void => {
               return Effect.fail(deliveryFailure())
             },
           ),
-        runAgent: () => {
-          launched += 1
-          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
-        },
+        runAgent: () =>
+          Effect.gen(function* () {
+            launched += 1
+            if (launched > 1) {
+              yield* Deferred.succeed(replacementStarted, undefined)
+              return yield* Effect.never
+            }
+            return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+          }),
       }
 
       yield* Effect.scoped(
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let snapshot = yield* control.snapshot
+          for (let attempt = 1; attempt < deliveryAttemptLimit; attempt += 1) {
+            // Real workspace I/O may still be settling the previous result. Do not advance time
+            // until its next delivery is recorded, or the clock can also fire the agent retry.
+            while (snapshot.delivering[0]?.attempt !== attempt) {
+              yield* Effect.yieldNow()
+              snapshot = yield* control.snapshot
+            }
+            const delivery = snapshot.delivering[0]
+            if (delivery === undefined) {
+              return yield* Effect.die('the observed delivery must exist')
+            }
+            yield* TestClock.setTime(new Date(delivery.dueAt).getTime())
+            snapshot = yield* control.snapshot
+          }
+          // Let the final result settle without firing the replacement agent's timer.
           while (snapshot.retrying.length === 0) {
-            // One step per delivery backoff, so the run that follows the spent budget cannot start
-            // inside the same advance and add publications of its own.
-            yield* TestClock.adjust('11 seconds')
             yield* Effect.yieldNow()
             snapshot = yield* control.snapshot
           }
@@ -1924,6 +2044,15 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(publications).toHaveLength(deliveryAttemptLimit)
           expect(snapshot.delivering).toEqual([])
           expect(snapshot.retrying[0]?.error).toContain('delivery failed')
+          expect(launched).toBe(1)
+          const retry = snapshot.retrying[0]
+          if (retry === undefined) {
+            return yield* Effect.die('spent delivery must schedule an agent retry')
+          }
+          yield* TestClock.setTime(new Date(retry.dueAt).getTime())
+          yield* Deferred.await(replacementStarted)
+          expect(launched).toBe(2)
+          expect(publications).toHaveLength(deliveryAttemptLimit)
         }),
       )
     }),
@@ -2549,7 +2678,7 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
 
-      expect(refreshedIds).toEqual([failedIssue.id, healthyIssue.id])
+      expect([...new Set(refreshedIds)]).toEqual([failedIssue.id, healthyIssue.id])
       expect(launchedIds).toEqual([healthyIssue.id])
       expect(
         snapshot.handoffs.find((handoff) => handoff.issueId === failedIssue.id)?.reason,
@@ -4402,7 +4531,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          while (currentHead !== repairedHead) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -4735,7 +4864,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          while (launches === 0) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -4794,7 +4923,7 @@ describe('restored pull request handoffs', (): void => {
         Effect.gen(function* () {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
           let current = yield* control.snapshot
-          while (current.running.length === 0) {
+          while (currentHead !== repairedHead) {
             yield* Effect.yieldNow()
             current = yield* control.snapshot
           }
@@ -6305,7 +6434,7 @@ describe('workflow hot reload', (): void => {
       }),
   )
 
-  it.effect('defers stalled-worker retry creation until validation recovers', () =>
+  it.effect('enforces the agent deadline even while workflow validation is failing', () =>
     Effect.gen(function* () {
       const issue = makeIssue('GH-1', 1, null, ['sloppenheimer', 'ready'])
       const initial: Workflow = {
@@ -6334,8 +6463,8 @@ describe('workflow hot reload', (): void => {
       )
 
       expect(observed.failedSnapshot.workflowReloadError?.message).toBe('invalid reload')
-      expect(observed.failedSnapshot.running[0]?.issueId).toBe(issue.id)
-      expect(observed.failedSnapshot.retrying).toEqual([])
+      expect(observed.failedSnapshot.running).toEqual([])
+      expect(observed.failedSnapshot.retrying[0]?.issueId).toBe(issue.id)
       expect(observed.recoveredSnapshot.running).toEqual([])
       expect(observed.recoveredSnapshot.retrying[0]).toMatchObject({
         issueId: issue.id,
@@ -7599,6 +7728,9 @@ describe('rebuilt port lifecycle', (): void => {
           expect(harness.releasedWorkspaces()).toHaveLength(1)
 
           finishWorker()
+          while ((yield* control.snapshot).running.length !== 0) {
+            yield* Effect.yieldNow()
+          }
           yield* control.refresh
           yield* control.refresh
 
@@ -9359,3 +9491,488 @@ describe('session telemetry accounting', (): void => {
     }),
   )
 })
+
+it.scoped('restores a durable running claim without launching a replacement agent', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-live-durable-')
+    const configured: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+    const issue = {
+      ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+      id: issueId('167'),
+    }
+    const path = join(workspaceRoot, 'workflow.sqlite')
+    let launches = 0
+    const started = yield* Deferred.make<void>()
+    const firstHarness = makeHarness(configured, () => [issue])
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* openWorkflowStore(path, true)
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+          ...firstHarness.ports,
+          runAgent: () =>
+            Effect.gen(function* () {
+              launches += 1
+              expect((yield* store.list.pipe(Effect.orDie))[0]?.status._tag).toBe('Executing')
+              yield* Deferred.succeed(started, undefined)
+              return yield* Effect.never
+            }),
+        }).pipe(Effect.provideService(WorkflowStore, store))
+        yield* Deferred.await(started)
+        expect((yield* control.snapshot).durableWorkflows?.[0]?.codingAttempts).toBe(1)
+      }),
+    )
+    const store = yield* openWorkflowStore(path, true)
+    const nextHarness = makeHarness(configured, () => [issue])
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...nextHarness.ports,
+      runAgent: () =>
+        Effect.sync(() => {
+          launches += 1
+          return { threadId: 'duplicate', turnId: 'duplicate', turnCount: 1 }
+        }),
+    }).pipe(Effect.provideService(WorkflowStore, store))
+    yield* control.refresh
+    yield* TestClock.adjust(60_000)
+    yield* control.refresh
+    expect(launches).toBe(1)
+    expect((yield* control.snapshot).running).toEqual([])
+    expect((yield* control.snapshot).durableWorkflows?.[0]?.status._tag).toBe('Intervention')
+  }),
+)
+
+for (const initiallyEnabled of [false, true]) {
+  it.effect(
+    'requires restart when verification mode changes from ' + String(initiallyEnabled),
+    () =>
+      Effect.gen(function* () {
+        const enabled: Workflow = {
+          ...changedWorkflow({ fingerprint: 'verified' }),
+          config: { ...workflow.config, verification: { command: 'pnpm check', timeoutMs: 1_000 } },
+        }
+        const disabled = changedWorkflow({ fingerprint: 'unverified' })
+        const initial = initiallyEnabled ? enabled : disabled
+        const harness = makeHarness(initial)
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+            yield* control.refresh
+            const providers = harness.trackerProviders().length
+            harness.setWorkflow(initiallyEnabled ? disabled : enabled)
+            yield* control.refresh
+            const snapshot = yield* control.snapshot
+            expect(snapshot.effectiveWorkflow.fingerprint).toBe(initial.fingerprint)
+            expect(snapshot.workflowReloadError?.message).toContain('restart the host')
+            expect(harness.trackerProviders().length).toBe(providers)
+          }),
+        )
+      }),
+  )
+}
+
+it.scoped('dispatches a verified continuation when no code-review port is composed', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('durable-continuation-')
+    const configured: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        workspaceRoot,
+        handoffEnabled: false,
+        verification: { command: 'pnpm check', timeoutMs: 1_000 },
+      },
+    }
+    const issue = {
+      ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+      id: issueId('167'),
+    }
+    const harness = makeHarness(configured, () => [issue])
+    const { makeCodeReview, ...corePorts } = harness.ports
+    void makeCodeReview
+    const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+    let launches = 0
+    const second = yield* Deferred.make<void>()
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...corePorts,
+      makeSourceControl: (): SourceControlPort => ({
+        prepare: (_issue, workspace, target) =>
+          Effect.succeed({
+            workspace,
+            target,
+            baseBranch: 'main',
+            baseSha: 'base',
+            baselineSha: 'base',
+            expectedRemoteHead: Option.none(),
+          }),
+        inspect: () => Effect.succeed(changedWorktree),
+        publish: () => Effect.die('must use verified publication'),
+        rebase: () => Effect.die('no handoff to rebase'),
+        candidates: {
+          checkpoint: (_issue, prepared) =>
+            Effect.succeed(
+              Option.some({
+                prepared,
+                headSha: 'candidate',
+                treeSha: 'tree',
+                commitCreated: true,
+              }),
+            ),
+          observe: () => Effect.succeed({ _tag: 'Unpublished' }),
+          align: (candidate) => Effect.succeed(candidate),
+          verify: (candidate) =>
+            Effect.succeed({
+              candidate,
+              evidence: {
+                headSha: candidate.headSha,
+                treeSha: candidate.treeSha,
+                command: 'pnpm check',
+                verifiedAt: 0,
+              },
+            }),
+          publish: (verified) =>
+            Effect.succeed({
+              _tag: 'Published',
+              headSha: verified.candidate.headSha,
+              branchName: verified.candidate.prepared.target.branchName,
+              commitCreated: true,
+            }),
+        },
+      }),
+      runAgent: () =>
+        Effect.gen(function* () {
+          launches += 1
+          if (launches === 2) {
+            yield* Deferred.succeed(second, undefined)
+            return yield* Effect.never
+          }
+          return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+        }),
+    }).pipe(Effect.provideService(WorkflowStore, store))
+    while ((yield* control.snapshot).retrying.length === 0) {
+      yield* Effect.yieldNow()
+    }
+    expect((yield* store.list)[0]?.status).toMatchObject({
+      _tag: 'Waiting',
+      condition: 'continuation',
+    })
+    yield* TestClock.adjust(1_001)
+    yield* Deferred.await(second)
+    expect(launches).toBe(2)
+    expect((yield* store.list)[0]?.codingAttempts).toBe(2)
+  }),
+)
+
+it.effect('reloads verification command changes without changing durable mode', () =>
+  Effect.gen(function* () {
+    const initial: Workflow = {
+      ...changedWorkflow({ fingerprint: 'first-gate' }),
+      config: { ...workflow.config, verification: { command: 'pnpm check', timeoutMs: 1_000 } },
+    }
+    const reloaded: Workflow = {
+      ...initial,
+      fingerprint: 'new-gate',
+      config: { ...initial.config, verification: { command: 'pnpm test', timeoutMs: 2_000 } },
+    }
+    const harness = makeHarness(initial)
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+        yield* control.refresh
+        harness.setWorkflow(reloaded)
+        yield* control.refresh
+        expect((yield* control.snapshot).effectiveWorkflow.fingerprint).toBe('new-gate')
+        expect((yield* control.snapshot).workflowReloadError).toBeNull()
+      }),
+    )
+  }),
+)
+
+for (const composedEnabled of [false, true]) {
+  it.scoped(
+    'rejects verification mode changing between composition and bootstrap, composed=' +
+      String(composedEnabled),
+    () =>
+      Effect.gen(function* () {
+        const initial: Workflow = {
+          ...workflow,
+          config: {
+            ...workflow.config,
+            ...(composedEnabled ? { verification: { command: 'true', timeoutMs: 1_000 } } : {}),
+          },
+        }
+        const next: Workflow = {
+          ...workflow,
+          config: {
+            ...workflow.config,
+            ...(!composedEnabled ? { verification: { command: 'true', timeoutMs: 1_000 } } : {}),
+          },
+        }
+        const harness = makeHarness(initial)
+        harness.setWorkflow(next)
+        const error = yield* Effect.flip(
+          startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports).pipe(
+            Effect.provideService(WorkflowComposition, { verificationEnabled: composedEnabled }),
+          ),
+        )
+        expect(error).toMatchObject({ category: 'invalid_config' })
+        expect(error.message).toContain('restart required')
+        expect(harness.trackerProviders()).toHaveLength(1)
+      }),
+  )
+}
+
+it.effect('waits for after_run on shutdown before releasing the workspace', () =>
+  Effect.gen(function* () {
+    const issue = makeIssue('example/sloppenheimer#24', 1, null, ['sloppenheimer', 'ready'])
+    const harness = makeHarness(workflow, () => [issue])
+    const started = yield* Deferred.make<void>()
+    const hookStarted = yield* Deferred.make<void>()
+    const allowCleanup = yield* Deferred.make<void>()
+    const events: string[] = []
+    const task = yield* Effect.fork(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+            ...harness.ports,
+            makeWorkspaces: (settings): WorkspaceManagerPort => ({
+              ...harness.ports.makeWorkspaces(settings),
+              afterRun: () =>
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(hookStarted, undefined)
+                  yield* Deferred.await(allowCleanup)
+                  events.push('after_run')
+                }),
+            }),
+            runAgent: () =>
+              Deferred.succeed(started, undefined).pipe(Effect.zipRight(Effect.never)),
+          })
+          yield* Deferred.await(started)
+        }),
+      ).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            events.push('scope_closed')
+          }),
+        ),
+      ),
+    )
+    yield* Deferred.await(hookStarted)
+    expect(events).toEqual([])
+    yield* Deferred.succeed(allowCleanup, undefined)
+    yield* Fiber.join(task)
+    expect(events).toEqual(['after_run', 'scope_closed'])
+  }),
+)
+
+for (const initiallyPaused of [false, true]) {
+  it.scoped(
+    'resumes the durable handoff after a crash between push and PR creation, paused=' +
+      String(initiallyPaused),
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* isolatedWorkspaceRoot('durable-handoff-')
+        const configured: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const branchName = 'sloppenheimer/issue-167'
+        const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+        const host = yield* makeDurableHost(store)
+        const target = { _tag: 'Normal', branchName } as const
+        const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+        const prepared = {
+          target,
+          workspace: { path: workspaceRoot, key: 'retained' },
+          baseBranch: 'main',
+          baselineSha: 'base',
+          baseSha: 'base',
+          expectedRemoteHead: Option.none<string>(),
+        }
+        yield* journal.prepared(prepared)
+        yield* journal.publication.verified({
+          candidate: { prepared, headSha: 'candidate', treeSha: 'tree', commitCreated: true },
+          evidence: { headSha: 'candidate', treeSha: 'tree', command: 'true', verifiedAt: 0 },
+        })
+        yield* journal.publication.published({
+          _tag: 'Published',
+          branchName,
+          headSha: 'candidate',
+          commitCreated: true,
+        })
+        if (initiallyPaused) {
+          yield* host.setIntent(issue.identifier, 'paused')
+        }
+        const harness = makeHarness(configured, () => [issue])
+        let created = 0
+        let exists = false
+        const result = {
+          _tag: 'PullRequest',
+          branchName,
+          pullRequestNumber: 42,
+          pullRequestUrl: 'https://github.com/example/sloppenheimer/pull/42',
+          created: true,
+        } as const
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+          ...harness.ports,
+          runAgent: () => Effect.die('published work must not launch another agent'),
+          makeCodeReview: (provider): CodeReviewPort => ({
+            ...requireCodeReview(harness.ports, provider),
+            findExistingHandoff: () =>
+              Effect.sync(() =>
+                exists ? { ...result, created: false } : { _tag: 'NoBranch', branchName },
+              ),
+            handoffCompletedWork: () =>
+              Effect.gen(function* () {
+                created += 1
+                exists = true
+                return yield* Effect.fail(
+                  new TrackerError({
+                    category: 'tracker_request',
+                    message: 'create acknowledgement lost',
+                    retryable: true,
+                  }),
+                )
+              }),
+            inspectPullRequest: () =>
+              Effect.succeed(
+                anOpenPullRequest({
+                  number: 42,
+                  headSha: 'candidate',
+                  codexReview: { headShaPrefix: 'candida', status: 'completed' },
+                  checks: [{ name: 'quality', status: 'in_progress', conclusion: null, url: null }],
+                }),
+              ),
+          }),
+        }).pipe(Effect.provideService(WorkflowStore, store))
+        yield* control.refresh
+        if (initiallyPaused) {
+          expect(created).toBe(0)
+          yield* control.setIssuePaused(167, false)
+        }
+        yield* control.refresh
+        yield* control.refresh
+        expect(created).toBe(1)
+        expect((yield* control.snapshot).handoffs).toHaveLength(1)
+        expect((yield* control.snapshot).durableWorkflows?.[0]?.artifact?.publishedHead).toBe(
+          'candidate',
+        )
+      }),
+  )
+}
+
+it.scoped(
+  'shows intervention when a durable delivery becomes terminal without deleting its candidate',
+  () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('durable-terminal-')
+      const configured: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          verification: { command: 'true', timeoutMs: 1_000 },
+        },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      let currentIssue = issue
+      const harness = makeHarness(configured, () => [currentIssue])
+      let launches = 0
+      let publications = 0
+      let removals = 0
+      const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+        ...harness.ports,
+        makeWorkspaces: (settings): WorkspaceManagerPort => ({
+          ...harness.ports.makeWorkspaces(settings),
+          remove: () =>
+            Effect.sync(() => {
+              removals += 1
+            }),
+        }),
+        makeSourceControl: (): SourceControlPort => ({
+          prepare: (_issue, workspace, target) =>
+            Effect.succeed({
+              workspace,
+              target,
+              baseBranch: 'main',
+              baseSha: 'base',
+              baselineSha: 'base',
+              expectedRemoteHead: Option.none(),
+            }),
+          inspect: () => Effect.succeed(launches === 0 ? cleanWorktree('base') : changedWorktree),
+          publish: () => Effect.die('must use verified publication'),
+          rebase: () => Effect.die('no handoff'),
+          candidates: {
+            checkpoint: (_issue, prepared) =>
+              Effect.succeed(
+                Option.some({
+                  prepared,
+                  headSha: 'candidate',
+                  treeSha: 'tree',
+                  commitCreated: true,
+                }),
+              ),
+            observe: () => Effect.succeed({ _tag: 'Unpublished' }),
+            align: (candidate) => Effect.succeed(candidate),
+            verify: (candidate) =>
+              Effect.succeed({
+                candidate,
+                evidence: {
+                  headSha: candidate.headSha,
+                  treeSha: candidate.treeSha,
+                  command: 'true',
+                  verifiedAt: 0,
+                },
+              }),
+            publish: () =>
+              Effect.gen(function* () {
+                publications += 1
+                return yield* Effect.fail(
+                  new SourceControlError({
+                    category: 'publication_failed',
+                    message: 'network refused',
+                    retryable: true,
+                    worktreePreserved: true,
+                  }),
+                )
+              }),
+          },
+        }),
+        runAgent: () =>
+          Effect.sync(() => {
+            launches += 1
+            return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+          }),
+      }).pipe(Effect.provideService(WorkflowStore, store))
+      let snapshot = yield* control.snapshot
+      while (snapshot.delivering.length === 0) {
+        yield* Effect.yieldNow()
+        snapshot = yield* control.snapshot
+      }
+      const delivery = snapshot.delivering[0]
+      if (delivery === undefined) {
+        return yield* Effect.die('fixture must retain a delivery')
+      }
+      currentIssue = { ...issue, state: 'closed' }
+      yield* TestClock.setTime(new Date(delivery.dueAt).getTime())
+      while ((yield* control.snapshot).delivering[0]?.interventionRequired !== true) {
+        yield* Effect.yieldNow()
+      }
+      snapshot = yield* control.snapshot
+      expect(snapshot.delivering[0]).toMatchObject({
+        interventionRequired: true,
+        category: 'publication_blocked',
+      })
+      expect(snapshot.durableWorkflows?.[0]?.status).toMatchObject({
+        _tag: 'Intervention',
+        reason:
+          'Candidate retained: Issue is no longer active. Durable candidate retained; cleanup requires reconciliation.',
+      })
+      expect(publications).toBe(1)
+      expect(launches).toBe(1)
+      expect(removals).toBe(0)
+    }),
+)

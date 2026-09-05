@@ -14,9 +14,17 @@ polling:
 workspace:
   root: .sloppenheimer/workspaces
 hooks:
+  after_create: >-
+    git -c credential.helper='!gh auth git-credential' clone
+    https://github.com/Underzenith85/symphony-ts.git . &&
+    git config credential.helper '!gh auth git-credential'
+  before_run: pnpm install --frozen-lockfile
   timeout_ms: 120000
+verification:
+  command: pnpm check
+  timeout_ms: 900000
 agent:
-  max_concurrent_agents: 1
+  max_concurrent_agents: 4
   max_turns: 1
   max_retry_backoff_ms: 300000
 codex:

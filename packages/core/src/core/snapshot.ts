@@ -74,12 +74,11 @@ const runningSnapshot = (entry: RunningEntry): RunningSnapshot => ({
   tokens: entry.tokens,
   lastReportedTokens: entry.lastReportedTokens,
   workerHost: 'local',
-  // No deadline once the host's postflight has taken over: the stall sweep exempts such a run, and
-  // publishing a deadline it will never act on is what has the console calling it a stalled agent.
+  // Only a live agent owns this deadline; preparation and publication have their own bounds.
   stallDeadline:
-    entry.postflightStartedAt !== null
+    entry.phase._tag !== 'Agent'
       ? null
-      : stallDeadlineOf(entry.lastEventAt ?? entry.startedAt, entry.execution.stallTimeoutMs),
+      : stallDeadlineOf(entry.lastEventAt ?? entry.phase.startedAt, entry.execution.stallTimeoutMs),
   detailUrl: agentDetailPath(entry.issue.identifier),
 })
 
@@ -108,6 +107,7 @@ const deliverySnapshot = (entry: DeliveryEntry): DeliverySnapshot => ({
   branchName: entry.prepared.target.branchName,
   attempt: entry.attempt,
   dueAt: new Date(entry.dueAt).toISOString(),
+  interventionRequired: !entry.failure.retryable,
   category: entry.failure.category,
   reason: entry.failure.message,
   changedFileCount: entry.changedFileCount,

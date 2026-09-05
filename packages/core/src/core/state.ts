@@ -147,6 +147,11 @@ export type RuntimeState = Readonly<{
 /** The ports a session reaches its provider through, as they stand at the moment of the call. */
 export type SessionPorts = Pick<ExecutionSnapshot, 'tracker' | 'codeReview' | 'sourceControl'>
 
+export type RunPhase =
+  | Readonly<{ _tag: 'Preparing' }>
+  | Readonly<{ _tag: 'Agent'; startedAt: Date }>
+  | Readonly<{ _tag: 'Postflight'; startedAt: Date }>
+
 export type RunningEntry = Readonly<{
   runId: number
   issue: Issue
@@ -161,15 +166,7 @@ export type RunningEntry = Readonly<{
   /** Whether this worker was dispatched to repair an existing pull request. */
   repairRun: boolean
   startedAt: Date
-  /**
-   * When the host's own postflight took over from the agent, if it has.
-   *
-   * The stall timer measures silence on the agent protocol, and a postflight is silent on it by
-   * construction: no agent is running. Without this, an inspection or a push that outlasts the
-   * timeout reads as a stalled agent and is retired as one — turning a slow delivery into another
-   * coding turn, which is the exact confusion the postflight exists to end.
-   */
-  postflightStartedAt: Date | null
+  phase: RunPhase
   lastEventAt: Date | null
   lastEvent: string | null
   lastMessage: string | null
@@ -337,6 +334,7 @@ export type EffectiveWorkflow = Readonly<{
 }>
 
 export type ExecutionSnapshot = Readonly<{
+  journal?: import('./durable/live-journal.js').RunJournal
   workflow: Workflow
   tracker: TrackerPort
   codeReview: Option.Option<CodeReviewPort>

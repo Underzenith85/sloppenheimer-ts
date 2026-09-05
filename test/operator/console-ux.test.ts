@@ -233,7 +233,7 @@ describe('operator console information architecture', (): void => {
 
     const card = console_.card(readyTopIdentifier)
     expect([...card.querySelectorAll('.chip')].map((chip) => chip.textContent)).toContain('Paused')
-    expect(card.querySelector('.action')?.textContent).toBe('Start agent')
+    expect(card.querySelector('.action')?.textContent).toBe('Resume delivery')
   })
 
   it('keeps the resume on a paused delivering row whose issue has left the backlog', async (): Promise<void> => {
@@ -274,7 +274,43 @@ describe('operator console information architecture', (): void => {
 
     const card = console_.card(readyTopIdentifier)
     expect([...card.querySelectorAll('.chip')].map((chip) => chip.textContent)).toContain('Paused')
-    expect(card.querySelector('.action')?.textContent).toBe('Start agent')
+    expect(card.querySelector('.action')?.textContent).toBe('Resume delivery')
+  })
+
+  it('shows a failed verification as attention with a delivery resume', async (): Promise<void> => {
+    const state = consoleState()
+    const console_ = await boot({
+      state: {
+        ...state,
+        // Paused while delivering. The change is retained and its timer called off, so the only
+        // thing that re-arms it is a resume — which has to be reachable from this row.
+        pausedIssueNumbers: [],
+        counts: { ...state.counts, delivering: 1 },
+        delivering: [
+          {
+            issueId: issueId('50'),
+            identifier: readyTopIdentifier,
+            title: 'Publish the retained change',
+            url: null,
+            branchName: 'sloppenheimer/issue-50',
+            attempt: 1,
+            dueAt: new Date(Date.now() + 20_000).toISOString(),
+            category: 'verification_failed',
+            interventionRequired: true,
+            reason: 'the verification gate failed',
+            changedFileCount: 4,
+            repairRun: false,
+            observedAt: new Date(Date.now() - 5_000).toISOString(),
+            workerHost: 'local',
+            detailUrl: '/api/v1/agents/example%2Fsloppenheimer%2350',
+          },
+        ],
+      },
+    })
+
+    const card = console_.card(readyTopIdentifier)
+    expect(identifiersIn(console_, '#attention-list')).toContain(readyTopIdentifier)
+    expect(card.querySelector('.action')?.textContent).toBe('Resume delivery')
   })
 
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {
@@ -1018,4 +1054,41 @@ describe('operator console workflows', (): void => {
       `/api/v1/agents/${encodeURIComponent(retryingIdentifier)}`,
     )
   })
+})
+
+it('shows interrupted durable work as attention without offering a second coder', async (): Promise<void> => {
+  const console_ = await boot({
+    state: {
+      ...consoleState(),
+      durableWorkflows: [
+        {
+          version: 1,
+          issueId: '50',
+          identifier: readyTopIdentifier,
+          objective: 'Recover retained work',
+          revision: 2,
+          intent: 'active',
+          status: {
+            _tag: 'Intervention',
+            reason: 'Confirm the previous command has stopped before recovery.',
+          },
+          artifact: null,
+          codingAttempts: 1,
+          repairAttempts: 0,
+          maximumCodingAttempts: 3,
+          maximumRepairAttempts: 3,
+          budgetDeadline: 100_000,
+          lastProgressAt: 0,
+          lastFailureSignature: null,
+          repeatedFailures: 0,
+          updatedAt: 10,
+        },
+      ],
+    },
+  })
+  expect(identifiersIn(console_, '#attention-list')).toContain(readyTopIdentifier)
+  expect(identifiersIn(console_, '#ready-list')).not.toContain(readyTopIdentifier)
+  const card = console_.card(readyTopIdentifier)
+  expect(card.textContent).toContain('Confirm the previous command has stopped')
+  expect(card.querySelector('.action')).toBe(null)
 })

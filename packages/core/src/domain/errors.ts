@@ -64,6 +64,10 @@ export class SourceControlError extends Data.TaggedError('SourceControlError')<{
     | 'invalid_repository'
     | 'prepare_failed'
     | 'publication_failed'
+    | 'verification_failed'
+    | 'candidate_changed'
+    | 'candidate_partial'
+    | 'publication_blocked'
     | 'rebase_conflict'
     | 'lease_conflict'
     | 'authentication_failed'
@@ -91,6 +95,20 @@ export class AgentError extends Data.TaggedError('AgentError')<{
 
 export class ServerError extends Data.TaggedError('ServerError')<{
   readonly category: 'listen_failed' | 'close_failed'
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
+/** Failure of the host command port, before a caller applies Git or hook policy. */
+export class SubprocessError extends Data.TaggedError('SubprocessError')<{
+  readonly category: 'spawn_failed' | 'timed_out' | 'invalid_request'
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
+/** Failure of a durable workflow transaction, including stale-writer rejection. */
+export class WorkflowStoreError extends Data.TaggedError('WorkflowStoreError')<{
+  readonly category: 'conflict' | 'storage' | 'decode' | 'closed'
   readonly message: string
   readonly cause?: unknown
 }> {}
