@@ -120,30 +120,38 @@ export class CodexConnection {
   }
 }
 
-export const initializeSession = (
+/**
+ * Rate limits are operator telemetry. An App Server that omits `account/rateLimits/read`, or that
+ * returns no snapshot, must not fail the session: nothing in the run depends on them, and
+ * `admitRateLimits` already withholds sparse notifications until a full snapshot is adopted.
+ */
+const readOptionalRateLimitSnapshot = (
   session: SessionRuntime,
-  config: AgentRunnerConfig,
-  cwd: string,
-): Effect.Effect<string, AgentError> =>
+): Effect.Effect<Option.Option<JsonObject>> =>
+  sendRequest(session, 'account/rateLimits/read', {}).pipe(
+    Effect.flatMap((result) => {
+      if (isJsonObject(result) && isJsonObject(result['rateLimits'])) {
+        return Effect.succeed(Option.some(result['rateLimits']))
+      }
+      return emitEvent(
+        session,
+        'malformed',
+        'account/rateLimits/read returned no rate-limit snapshot',
+      ).pipe(Effect.as(Option.none<JsonObject>()))
+    }),
+    Effect.catchAll((error) =>
+      emitEvent(session, 'malformed', `account/rateLimits/read failed: ${error.message}`).pipe(
+        Effect.as(Option.none<JsonObject>()),
+      ),
+    ),
+  )
+
+const publishStartupRateLimits = (
+  session: SessionRuntime,
+  snapshot: JsonObject,
+): Effect.Effect<void> =>
   Effect.gen(function* () {
-    yield* sendRequest(session, 'initialize', {
-      clientInfo: { name: 'sloppenheimer_ts', title: 'Sloppenheimer TypeScript', version: '0.1.0' },
-      capabilities: { experimentalApi: true },
-    })
-    yield* notifySession(session, 'initialized', {})
-    const rateLimitsResult = yield* sendRequest(session, 'account/rateLimits/read', {})
-    if (!isJsonObject(rateLimitsResult) || !isJsonObject(rateLimitsResult['rateLimits'])) {
-      return yield* Effect.fail(
-        new AgentError({
-          category: 'protocol_error',
-          message: 'account/rateLimits/read returned no rate-limit snapshot',
-        }),
-      )
-    }
-    const rateLimits = yield* adoptRateLimitSnapshot(
-      session.state,
-      rateLimitsResult['rateLimits'] as JsonObject,
-    )
+    const rateLimits = yield* adoptRateLimitSnapshot(session.state, snapshot)
     session.onEvent({
       event: 'account/rateLimits/read',
       timestamp: yield* currentInstant,
@@ -159,6 +167,23 @@ export const initializeSession = (
       turnStatus: null,
       lifecycle: null,
     })
+  })
+
+export const initializeSession = (
+  session: SessionRuntime,
+  config: AgentRunnerConfig,
+  cwd: string,
+): Effect.Effect<string, AgentError> =>
+  Effect.gen(function* () {
+    yield* sendRequest(session, 'initialize', {
+      clientInfo: { name: 'sloppenheimer_ts', title: 'Sloppenheimer TypeScript', version: '0.1.0' },
+      capabilities: { experimentalApi: true },
+    })
+    yield* notifySession(session, 'initialized', {})
+    const snapshot = yield* readOptionalRateLimitSnapshot(session)
+    if (Option.isSome(snapshot)) {
+      yield* publishStartupRateLimits(session, snapshot.value)
+    }
     const settings = codexSettingsFrom(config.settings)
     const baseThreadParams: JsonObject = {
       cwd,
