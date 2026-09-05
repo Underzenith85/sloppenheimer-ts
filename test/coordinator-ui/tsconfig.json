@@ -1,0 +1,12 @@
+{
+  "extends": "../../packages/coordinator-ui/tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": [
+    "./**/*.ts",
+    "./**/*.tsx",
+    "../../packages/coordinator-ui/src/**/*.ts",
+    "../../packages/coordinator-ui/src/**/*.tsx"
+  ]
+}

@@ -14,6 +14,13 @@ const repoRoot = resolve(import.meta.dirname, '..')
  * The targets need not exist: `no-restricted-imports` matches the specifier as written.
  */
 const fixtures: Readonly<Record<string, string>> = {
+  'packages/coordinator-ui/src/violates-host.tsx': "import '@sloppenheimer/adapter-node'\n",
+  'packages/coordinator-ui/src/violates-node.ts': "import 'node:fs'\n",
+  'packages/coordinator-ui/src/permitted.tsx': "import 'react'\nimport './app.js'\n",
+  'src/violates-coordinator.ts': "import '../packages/coordinator-ui/src/app.js'\n",
+  'src/violates-react.ts': "import 'react'\n",
+  'packages/adapter-node/src/violates-react.ts': "import 'react-dom/client'\n",
+
   // support/ is the bottom layer and may reach nothing above it.
   'packages/core/src/support/violates-domain.ts': "import '../domain/domain.js'\n",
   'packages/core/src/support/violates-package-root.ts': "import '../telemetry.js'\n",

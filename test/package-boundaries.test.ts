@@ -19,6 +19,7 @@ const repoRoot = resolve(import.meta.dirname, '..')
  */
 const permittedWorkspaceDependencies: Readonly<Record<string, readonly string[]>> = {
   '@sloppenheimer/core': [],
+  '@sloppenheimer/coordinator-ui': [],
   '@sloppenheimer/adapter-node': ['@sloppenheimer/core'],
   '@sloppenheimer/adapter-github': ['@sloppenheimer/adapter-node', '@sloppenheimer/core'],
   '@sloppenheimer/adapter-codex': ['@sloppenheimer/adapter-node', '@sloppenheimer/core'],
@@ -52,7 +53,7 @@ const importedPackagesOf = (directory: string): ReadonlySet<string> => {
   const imported = new Set<string>()
   const sources = readdirSync(join(directory, 'src'), { recursive: true, withFileTypes: true })
   for (const entry of sources) {
-    if (!entry.isFile() || !entry.name.endsWith('.ts')) {
+    if (!entry.isFile() || !/\.tsx?$/u.test(entry.name)) {
       continue
     }
     const contents = readFileSync(join(entry.parentPath, entry.name), 'utf8')
@@ -110,7 +111,9 @@ describe('workspace package dependency direction', () => {
     const root = readManifest(repoRoot)
     expect(root.name).toBe('sloppenheimer-ts')
     expect(root.private).toBe(true)
-    expect(workspaceDependenciesOf(root)).toStrictEqual([...manifests.keys()].sort())
+    expect(workspaceDependenciesOf(root)).toStrictEqual(
+      [...manifests.keys()].filter((name) => name !== '@sloppenheimer/coordinator-ui').sort(),
+    )
   })
 
   /*

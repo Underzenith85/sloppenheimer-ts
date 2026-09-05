@@ -6,10 +6,10 @@ export default defineConfig({
   resolve: { alias: workspaceSourceAliases },
   test: {
     coverage: {
-      include: ['src/**/*.ts', 'packages/*/src/**/*.ts'],
+      include: ['src/**/*.ts', 'packages/*/src/**/*.{ts,tsx}'],
       provider: 'v8',
     },
-    include: ['test/**/*.test.ts'],
+    include: ['test/**/*.test.{ts,tsx}'],
     exclude: ['test/real-integration/**'],
   },
 })

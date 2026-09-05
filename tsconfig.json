@@ -24,5 +24,5 @@
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts", "vitest*.ts"],
-  "exclude": ["src/operator/ui/*.ts"]
+  "exclude": ["src/operator/ui/*.ts", "packages/coordinator-ui/**", "test/coordinator-ui/**"]
 }
