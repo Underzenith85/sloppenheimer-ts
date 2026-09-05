@@ -9976,3 +9976,181 @@ it.scoped(
       expect(removals).toBe(0)
     }),
 )
+
+const retryTestSource = (): SourceControlPort => ({
+  prepare: (_issue, workspace, target) =>
+    Effect.succeed({
+      workspace,
+      target,
+      baseBranch: 'main',
+      baseSha: 'base',
+      baselineSha: 'base',
+      expectedRemoteHead: Option.none(),
+    }),
+  inspect: () => Effect.succeed(cleanWorktree('base')),
+  publish: () => Effect.die('retry test must not publish'),
+  rebase: () => Effect.die('retry test must not rebase'),
+})
+
+for (const failureStage of ['prepare', 'before_run', 'agent']) {
+  it.scoped('durably admits the scheduled retry after a clean ' + failureStage + ' failure', () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('durable-failure-retry-')
+      const configured: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          verification: { command: 'true', timeoutMs: 1_000 },
+        },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(configured, () => [issue])
+      const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+      const retried = yield* Deferred.make<void>()
+      let preparations = 0
+      let hooks = 0
+      let launches = 0
+      const source = retryTestSource()
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+        ...harness.ports,
+        makeSourceControl: (): SourceControlPort => ({
+          ...source,
+          prepare: (issue, workspace, target) =>
+            Effect.gen(function* () {
+              preparations += 1
+              if (failureStage === 'prepare' && preparations === 1) {
+                return yield* Effect.fail(
+                  new SourceControlError({
+                    category: 'prepare_failed',
+                    message: 'temporary failure',
+                    retryable: true,
+                    worktreePreserved: true,
+                  }),
+                )
+              }
+              return yield* source.prepare(issue, workspace, target)
+            }),
+        }),
+        makeWorkspaces: (settings): WorkspaceManagerPort => ({
+          ...harness.ports.makeWorkspaces(settings),
+          beforeRun: () =>
+            Effect.gen(function* () {
+              hooks += 1
+              if (failureStage === 'before_run' && hooks === 1) {
+                return yield* Effect.fail(
+                  new WorkspaceError({
+                    category: 'hook_failed',
+                    message: 'temporary hook failure',
+                  }),
+                )
+              }
+            }),
+        }),
+        runAgent: () =>
+          Effect.gen(function* () {
+            launches += 1
+            if (failureStage === 'agent' && launches === 1) {
+              return yield* Effect.fail(
+                new AgentError({ category: 'turn_timeout', message: 'clean agent timeout' }),
+              )
+            }
+            yield* Deferred.succeed(retried, undefined)
+            return yield* Effect.never
+          }),
+      }).pipe(Effect.provideService(WorkflowStore, store))
+      let snapshot = yield* control.snapshot
+      while (snapshot.retrying.length === 0) {
+        yield* Effect.yieldNow()
+        snapshot = yield* control.snapshot
+      }
+      expect(snapshot.durableWorkflows?.[0]?.status).toMatchObject({
+        _tag: 'Waiting',
+        condition: 'retry',
+      })
+      const retry = snapshot.retrying[0]
+      if (retry === undefined) {
+        return yield* Effect.die('fixture must schedule retry')
+      }
+      yield* TestClock.setTime(new Date(retry.dueAt).getTime())
+      yield* Deferred.await(retried)
+      expect(preparations).toBe(2)
+      expect((yield* control.snapshot).durableWorkflows?.[0]?.codingAttempts).toBe(2)
+    }),
+  )
+}
+
+for (const partial of [false, true]) {
+  it.scoped(
+    'settles a paused worker after cleanup and before resume, partial=' + String(partial),
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* isolatedWorkspaceRoot('durable-pause-resume-')
+        const configured: Workflow = {
+          ...workflow,
+          config: {
+            ...workflow.config,
+            workspaceRoot,
+            verification: { command: 'true', timeoutMs: 1_000 },
+          },
+        }
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const harness = makeHarness(configured, () => [issue])
+        const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+        const started = yield* Deferred.make<void>()
+        const restarted = yield* Deferred.make<void>()
+        let launches = 0
+        let cleaned = false
+        const source = retryTestSource()
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+          ...harness.ports,
+          makeSourceControl: (): SourceControlPort => ({
+            ...source,
+            inspect: () =>
+              Effect.sync(() => {
+                if (launches > 0) {
+                  expect(cleaned).toBe(true)
+                }
+                return partial && launches > 0 ? changedWorktree : cleanWorktree('base')
+              }),
+          }),
+          makeWorkspaces: (settings): WorkspaceManagerPort => ({
+            ...harness.ports.makeWorkspaces(settings),
+            afterRun: () =>
+              Effect.sync(() => {
+                cleaned = true
+              }),
+          }),
+          runAgent: () =>
+            Effect.gen(function* () {
+              launches += 1
+              cleaned = false
+              yield* Deferred.succeed(launches === 1 ? started : restarted, undefined)
+              return yield* Effect.never
+            }),
+        }).pipe(Effect.provideService(WorkflowStore, store))
+        yield* Deferred.await(started)
+        yield* control.setIssuePaused(167, true)
+        const paused = yield* control.snapshot
+        expect(cleaned).toBe(true)
+        expect(paused.running).toEqual([])
+        expect(paused.durableWorkflows?.[0]?.intent).toBe('paused')
+        expect(paused.durableWorkflows?.[0]?.status._tag).toBe(partial ? 'Intervention' : 'Waiting')
+        yield* control.setIssuePaused(167, false)
+        yield* control.refresh
+        if (partial) {
+          expect(launches).toBe(1)
+          expect((yield* control.snapshot).durableWorkflows?.[0]?.artifact).not.toBeNull()
+        } else {
+          yield* Deferred.await(restarted)
+          expect(launches).toBe(2)
+        }
+      }),
+  )
+}

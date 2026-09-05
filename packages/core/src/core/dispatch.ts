@@ -1,3 +1,4 @@
+import { settleCancelledCandidate } from './cancelled-candidate.js'
 import { journalExecution } from './durable/journal-execution.js'
 import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
 
@@ -132,6 +133,7 @@ const runWithSourceControl = (
                   prepared,
                   session.left,
                   launch.execution.journal?.publication,
+                  launch.execution.journal?.stopped(true) ?? Effect.void,
                 )
           }
           return Effect.void.pipe(
@@ -172,6 +174,9 @@ const runWithSourceControl = (
             Effect.map((postflight): RunResult => ({ outcome: 'normal', error: null, postflight })),
           )
         }),
+        Effect.onInterrupt(() =>
+          settleCancelledCandidate(sourceControl, prepared, launch.execution.journal),
+        ),
         Effect.tap(({ postflight: outcome }) =>
           (outcome._tag === 'DeliveryFailed' ? logError : logInfo)(
             'host source-control postflight settled',
@@ -225,6 +230,7 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             )
           : Effect.void,
       ),
+      Effect.onInterrupt(() => execution.journal?.stopped(false) ?? Effect.void),
       Effect.tapError(() => execution.journal?.failed ?? Effect.void),
       Effect.tap((result) => execution.journal?.settled(result.postflight) ?? Effect.void),
       Effect.matchEffect({

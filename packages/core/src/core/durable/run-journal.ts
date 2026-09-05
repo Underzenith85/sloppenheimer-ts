@@ -1,3 +1,4 @@
+import { settleStoppedRun } from './retry-settlement.js'
 import { settleRun } from './settlement.js'
 import { Clock, Effect, Option } from 'effect'
 import type { Artifact, DurableWorkflow } from '../../domain/durable-workflow.js'
@@ -9,6 +10,7 @@ export type RunJournal = Readonly<{
   prepared: (prepared: PreparedRepository) => Effect.Effect<void>
   publication: CandidateJournal
   settled: (outcome: PostflightOutcome) => Effect.Effect<void>
+  stopped: (clean: boolean) => Effect.Effect<void>
   failed: Effect.Effect<void>
 }>
 
@@ -107,12 +109,7 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
       published: settled,
     },
     settled,
-    failed: owned((current) => ({
-      ...current,
-      status: {
-        _tag: 'Intervention',
-        reason: 'Execution ended before durable settlement; inspect retained work',
-      },
-    })),
+    stopped: (clean) => owned((current) => settleStoppedRun(current, clean)),
+    failed: owned((current) => settleStoppedRun(current, false, true)),
   }
 }

@@ -398,3 +398,92 @@ it.effect(
       expect(Exit.isInterrupted(yield* Fiber.await(mutation))).toBe(true)
     }),
 )
+
+it.effect('retries known pre-preparation failures across restart without resetting budgets', () =>
+  Effect.gen(function* () {
+    const store = yield* memoryStore
+    let host = yield* makeDurableHost(store)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.failed
+      expect((yield* host.snapshot)[0]?.status).toMatchObject({
+        _tag: 'Waiting',
+        condition: 'retry',
+      })
+      host = yield* makeDurableHost(store)
+    }
+    expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+    expect((yield* host.snapshot)[0]?.codingAttempts).toBe(3)
+    expect((yield* host.snapshot)[0]?.status._tag).toBe('Intervention')
+  }),
+)
+
+it.effect(
+  'resumes a clean cancelled run only after restoring intent and fences the previous owner',
+  () =>
+    Effect.gen(function* () {
+      const store = yield* memoryStore
+      const host = yield* makeDurableHost(store)
+      const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.prepared(prepared)
+      yield* host.setIntent(issue.identifier, 'paused')
+      yield* journal.stopped(true)
+      yield* journal.stopped(false)
+      const restored = yield* makeDurableHost(store)
+      expect((yield* restored.snapshot)[0]?.status).toMatchObject({
+        _tag: 'Waiting',
+        condition: 'retry',
+      })
+      expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+      yield* host.setIntent(issue.identifier, 'active')
+      expect(Option.isNone(yield* host.start(issue, { ...target, branchName: 'different' }))).toBe(
+        true,
+      )
+      expect(Option.isSome(yield* host.start(issue, target))).toBe(true)
+      const stale = yield* Effect.fork(journal.stopped(true))
+      expect(Exit.isInterrupted(yield* Fiber.await(stale))).toBe(true)
+      expect((yield* store.list)[0]?.codingAttempts).toBe(2)
+    }),
+)
+
+it.effect(
+  'holds cancelled partial and verified candidates rather than admitting fresh coding',
+  () =>
+    Effect.gen(function* () {
+      for (const verifiedWork of [false, true]) {
+        const host = yield* memoryStore.pipe(Effect.flatMap(makeDurableHost))
+        const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+        yield* journal.prepared(prepared)
+        if (verifiedWork) {
+          yield* journal.publication.verified(verified)
+        }
+        yield* journal.stopped(verifiedWork)
+        expect((yield* host.snapshot)[0]?.status._tag).toBe('Intervention')
+        expect((yield* host.snapshot)[0]?.artifact).not.toBeNull()
+        expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+      }
+    }),
+)
+
+it.effect('binds repair retries to the original branch and head lease', () =>
+  Effect.gen(function* () {
+    const host = yield* memoryStore.pipe(Effect.flatMap(makeDurableHost))
+    const first = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+    yield* first.prepared(prepared)
+    yield* first.publication.verified(verified)
+    yield* first.settled(published)
+    const repair = {
+      _tag: 'Repair',
+      branchName: target.branchName,
+      expectedHeadSha: 'candidate',
+    } as const
+    const journal = yield* host.start(issue, repair).pipe(Effect.map(Option.getOrThrow))
+    yield* journal.failed
+    expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+    expect(Option.isNone(yield* host.start(issue, { ...repair, expectedHeadSha: 'other' }))).toBe(
+      true,
+    )
+    expect(Option.isSome(yield* host.start(issue, repair))).toBe(true)
+    expect((yield* host.snapshot)[0]?.repairAttempts).toBe(2)
+  }),
+)

@@ -1114,3 +1114,17 @@ The stacked recovery slice for #291 adds an optional source-control recovery cap
   divergence, and transport failure remain distinct from confirmation. The original workspace
   remains held, and neither publication confirmation nor intent restoration authorizes another
   coder, workspace adoption, or a remote write before process ownership is resolved.
+
+### Known run settlement and retry admission
+
+A known failure before preparation, or a failed/cancelled session whose workspace inspection
+proves it still matches its baseline, settles as Waiting(retry). The durable record retains the
+original normal or repair target; admission requires the same branch and repair head lease and
+continues the original coding/repair counters and total deadline.
+
+Cancellation inspects only after the session and command finalizers have completed and while
+the run still holds its workspace lease. This settlement is awaited by the worker cancellation
+before pause returns. A dirty workspace, failed inspection, interrupted preparation, or candidate
+with verification/publication evidence remains an explicit intervention hold. Pausing or restarting
+does not turn uncertain work into a safe fresh attempt. Startup preserves known retry settlements;
+records left executing by a host crash still require reconciliation.
