@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Effect, Option, type Fiber } from 'effect'
 
 import type { JsonObject } from '@sloppenheimer/core/domain/domain.js'
@@ -26,7 +26,6 @@ import {
   type SessionRuntime,
 } from './session-runtime.js'
 import { receiveLine } from './inbound.js'
-import { makeCodexEnvironment } from './session.js'
 import { codexSettingsFrom } from './settings.js'
 import { stopSession } from './shutdown.js'
 import { awaitTurn } from './turns.js'
@@ -46,10 +45,8 @@ export class CodexConnection {
   readonly #stderr: Fiber.RuntimeFiber<void>
 
   constructor(
-    command: string,
-    cwd: string,
+    child: ChildProcessWithoutNullStreams,
     config: AgentRunnerConfig,
-    secretEnvironmentNames: readonly string[],
     knownSecretValues: readonly string[],
     hostTools: HostToolSession | null,
     onEvent: (event: AgentEvent) => void,
@@ -57,17 +54,6 @@ export class CodexConnection {
     state: ConnectionStateRef,
     lifecycle: Effect.Semaphore,
   ) {
-    // The full host environment, minus the names this session must not hand down. It is read here
-    // rather than described as a `Config`, because what the child inherits is every remaining
-    // variable, not a set of values named in advance.
-    const environment = makeCodexEnvironment(process.env, secretEnvironmentNames)
-    const child: ChildProcessWithoutNullStreams = spawn('bash', ['-lc', command], {
-      cwd,
-      env: environment,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // Its own process group, so shutdown reaches tools the App Server itself started.
-      detached: true,
-    })
     this.#session = {
       process: child,
       state,

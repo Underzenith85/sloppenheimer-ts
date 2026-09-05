@@ -28,6 +28,7 @@ const knownSections = new Set([
   'codex',
   'server',
   'handoff',
+  'verification',
 ])
 
 /**
@@ -204,6 +205,13 @@ const handoffSection = Schema.Struct({
  * A section the document omits is absent rather than empty, so the defaults stay in one place
  * instead of being spread across the schema.
  */
+const verificationSection = Schema.Struct({
+  command: commandString('verification.command'),
+  timeout_ms: positiveInteger('verification.timeout_ms').pipe(
+    Schema.filter((value) => Number.isSafeInteger(value) && value <= 2_147_483_647),
+  ),
+}).annotations({ message: () => 'verification requires a command and a bounded timeout_ms' })
+
 const workflowSections = Schema.Struct({
   tracker: Schema.propertySignature(trackerSection).annotations({
     missingMessage: () => 'tracker must be a map',
@@ -211,6 +219,7 @@ const workflowSections = Schema.Struct({
   polling: Schema.optional(pollingSection),
   workspace: Schema.optional(workspaceSection),
   hooks: Schema.optional(hooksSection),
+  verification: Schema.optional(verificationSection),
   agent: Schema.optional(agentSection),
   runner: Schema.optional(runnerSection),
   codex: Schema.optional(codexSection),

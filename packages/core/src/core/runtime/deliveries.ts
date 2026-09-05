@@ -8,6 +8,7 @@ import { logContext } from '../policy.js'
 import { agentRetryDelay, deliveryAttemptLimit } from '../retry.js'
 import type { DeliveryEntry } from '../postflight.js'
 import * as Transitions from '../transitions.js'
+import { holdDelivery } from './held-delivery.js'
 import { ownIssueFiber, releaseIssueFiber, releaseIssueFiberFork } from './execution.js'
 import type { DeliveryRequest, RuntimeCells } from './types.js'
 
@@ -48,6 +49,23 @@ export const scheduleDelivery = (
   request: DeliveryRequest,
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {
+    if (!request.failure.retryable && request.failure.worktreePreserved) {
+      return yield* holdDelivery(cells, request)
+    }
+    if (
+      request.execution.workflow.config.verification !== undefined &&
+      request.failure.worktreePreserved &&
+      request.attempt >= deliveryAttemptLimit
+    ) {
+      return yield* holdDelivery(cells, {
+        ...request,
+        failure: {
+          ...request.failure,
+          retryable: false,
+          message: `${request.failure.message}; delivery retry budget exhausted`,
+        },
+      })
+    }
     const branchName = request.prepared.target.branchName
     const refusal = !request.failure.worktreePreserved
       ? 'the failure did not preserve the worktree'
@@ -183,9 +201,9 @@ export const resumeDelivery = (cells: RuntimeCells, entry: DeliveryEntry): Effec
       issue: entry.issue,
       execution: entry.execution,
       prepared: entry.prepared,
-      attempt: entry.attempt,
+      attempt: entry.failure.retryable ? entry.attempt : 1,
       workerAttempt: entry.workerAttempt,
-      failure: entry.failure,
+      failure: { ...entry.failure, retryable: true },
       changedFileCount: entry.changedFileCount,
       repairRun: entry.repairRun,
     }),

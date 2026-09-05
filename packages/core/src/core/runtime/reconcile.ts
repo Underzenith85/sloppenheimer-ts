@@ -1,25 +1,22 @@
-import { Clock, Effect, Option, Ref } from 'effect'
+import { Effect, Ref } from 'effect'
 
 import { logWarning } from '../../support/logging.js'
 import { asSettled } from '../../support/settled.js'
 import { issueIsActive, logContext, stateIsIn } from '../policy.js'
 import * as Transitions from '../transitions.js'
 import { cancelRunning } from './runs.js'
-import { scheduleRetry } from './scheduling.js'
 import type { RuntimeCells } from './types.js'
 
 /**
- * Brings the live runs back into agreement with the tracker: a run that has stopped reporting
- * protocol activity is stalled and retried, and a run whose issue no longer qualifies is cancelled.
+ * Brings live runs back into agreement with tracker eligibility. Agent silence is supervised
+ * independently in the session scope, so slow tracker I/O cannot postpone its deadline.
  */
 export const reconcile = (
   cells: RuntimeCells,
   retryDispatchAllowed: boolean,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    if (retryDispatchAllowed) {
-      yield* retireStalledRuns(cells)
-    }
+    void retryDispatchAllowed
     const refreshing = yield* Ref.get(cells.state)
     if (refreshing.running.size === 0) {
       return
@@ -61,50 +58,6 @@ export const reconcile = (
       } else {
         yield* Ref.update(cells.state, (current) =>
           Transitions.updateRun(current, id, (live) => ({ ...live, issue })),
-        )
-      }
-    }
-  })
-
-/** Cancels every run that has gone quiet past its stall timeout, and queues its continuation. */
-const retireStalledRuns = (cells: RuntimeCells): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const stalling = yield* Ref.get(cells.state)
-    if (stalling.running.size === 0) {
-      return
-    }
-    const now = yield* Clock.currentTimeMillis
-    for (const [id, entry] of stalling.running) {
-      const stallTimeout = entry.execution.stallTimeoutMs
-      const activeAt = entry.lastEventAt?.getTime() ?? entry.startedAt.getTime()
-      // A postflight is silent on the agent protocol by construction, because no agent is running.
-      // Retiring one as a stalled agent would turn a slow inspection or push into another coding
-      // turn — a publication problem read as an agent failure, which is what the postflight exists
-      // to stop. A publication that cannot finish is the source control's to fail, and it fails as
-      // a delivery.
-      if (entry.postflightStartedAt !== null) {
-        continue
-      }
-      if (stallTimeout <= 0 || now - activeAt <= stallTimeout) {
-        continue
-      }
-      const ended = yield* cancelRunning(
-        cells,
-        id,
-        false,
-        `the agent stalled after ${String(stallTimeout)}ms without protocol activity`,
-        // The retry scheduled just below continues this repair from the same baseline.
-        'retain',
-        'stalled',
-      )
-      if (Option.isSome(ended)) {
-        yield* scheduleRetry(
-          cells,
-          ended.value.issue,
-          (ended.value.attempt ?? 0) + 1,
-          'agent stalled',
-          false,
-          ended.value.repairRun,
         )
       }
     }

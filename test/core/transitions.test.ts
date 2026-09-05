@@ -159,7 +159,7 @@ const runningEntry = (issue: Issue, runId = 1): RunningEntry => ({
   attempt: null,
   repairRun: false,
   startedAt: new Date('2026-01-01T00:00:00.000Z'),
-  postflightStartedAt: null,
+  phase: { _tag: 'Agent', startedAt: new Date(0) },
   lastEventAt: null,
   lastEvent: null,
   lastMessage: null,

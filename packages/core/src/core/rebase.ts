@@ -29,6 +29,7 @@ export type RebaseOutcome =
   /** The branch already sat on the base as the remote has it now; the observation was stale. */
   | Readonly<{ _tag: 'NoChanges' }>
   | Readonly<{ _tag: 'Conflicted'; message: string }>
+  | Readonly<{ _tag: 'Blocked'; message: string }>
   | Readonly<{ _tag: 'Failed'; message: string }>
 
 /**
@@ -99,6 +100,13 @@ export const rebaseSettled = (handoff: HandoffEntry, outcome: RebaseOutcome): Ha
         ...released,
         state: 'intervention_required',
         reason: `The pull request branch is behind protected main and could not be rebased onto it: ${outcome.message}`,
+      }
+    }
+    case 'Blocked': {
+      return {
+        ...released,
+        state: 'intervention_required',
+        reason: `Rebased candidate is held before publication: ${outcome.message}`,
       }
     }
     case 'Failed': {

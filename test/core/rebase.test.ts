@@ -89,6 +89,18 @@ describe('a host rebase', (): void => {
     expect(Option.isNone(settled.rebase)).toBe(true)
   })
 
+  it('holds a rebase that cannot be verified without marking it a content conflict', (): void => {
+    const settled = rebaseSettled(rebaseStarted(behind, 'head-1'), {
+      _tag: 'Blocked',
+      message: 'host verification failed',
+    })
+    expect(settled.state).toBe('intervention_required')
+    expect(settled.headSha).toBe('head-1')
+    expect(settled.reason).toBe(
+      'Rebased candidate is held before publication: host verification failed',
+    )
+  })
+
   it('leaves any other failure for the next observation to retry', (): void => {
     const settled = rebaseSettled(rebaseStarted(behind, 'head-1'), {
       _tag: 'Failed',

@@ -90,6 +90,7 @@ const publishedDeliveringSchema: Schema.Schema<PublishedDelivering> = Schema.Str
   due_at: Schema.String,
   category: Schema.String,
   reason: Schema.String,
+  intervention_required: Schema.optionalWith(Schema.Boolean, { exact: true }),
   changed_file_count: Schema.NullOr(Schema.Number),
   repair_run: Schema.Boolean,
   observed_at: Schema.String,
@@ -145,6 +146,22 @@ const publishedHandoffSchema: Schema.Schema<PublishedHandoff> = Schema.Struct({
 })
 
 export const publishedStateSchema: Schema.Schema<PublishedState> = Schema.Struct({
+  durable_workflows: Schema.optionalWith(
+    Schema.Array(
+      Schema.Struct({
+        issue_id: Schema.String,
+        issue_identifier: Schema.String,
+        title: Schema.String,
+        status: Schema.String,
+        intent: Schema.String,
+        reason: Schema.NullOr(Schema.String),
+        workspace_path: Schema.NullOr(Schema.String),
+        candidate_head: Schema.NullOr(Schema.String),
+        published_head: Schema.NullOr(Schema.String),
+      }),
+    ),
+    { exact: true },
+  ),
   generated_at: Schema.String,
   workflow_path: Schema.String,
   effective_workflow: Schema.Struct({
