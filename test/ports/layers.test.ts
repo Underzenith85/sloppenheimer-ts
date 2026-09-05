@@ -60,6 +60,7 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
         remove: () => Effect.void,
+        prune: () => Effect.succeed({ count: 0, bytes: 0, evicted: 0 }),
       }),
   }),
   layerAgentRunner({
@@ -125,7 +126,10 @@ describe('port layer composition', (): void => {
         }
       }).pipe(
         Effect.provide(
-          layerPorts({ tracker: validated, workspaces: { root: '/workspaces', hooks } }, adapters),
+          layerPorts(
+            { tracker: validated, workspaces: { root: '/workspaces', hooks, retainedLimit: 3 } },
+            adapters,
+          ),
         ),
       )
 
@@ -143,7 +147,10 @@ describe('port layer composition', (): void => {
       expect(absent).toBeNull()
     }).pipe(
       Effect.provide(
-        layerCodeReviewPorts({ tracker: validated, workspaces: { root: '/workspaces', hooks } }),
+        layerCodeReviewPorts({
+          tracker: validated,
+          workspaces: { root: '/workspaces', hooks, retainedLimit: 3 },
+        }),
       ),
     ),
   )
@@ -155,7 +162,7 @@ describe('port layer composition', (): void => {
         Effect.provide(
           layerSourceControlPorts({
             tracker: validated,
-            workspaces: { root: '/workspaces', hooks },
+            workspaces: { root: '/workspaces', hooks, retainedLimit: 3 },
           }),
         ),
       )
@@ -165,7 +172,7 @@ describe('port layer composition', (): void => {
         Effect.scoped,
         Effect.provide(
           layerSourceControlPorts(
-            { tracker: validated, workspaces: { root: '/workspaces', hooks } },
+            { tracker: validated, workspaces: { root: '/workspaces', hooks, retainedLimit: 3 } },
             Layer.succeed(SourceControlFactory, {
               make: () =>
                 Effect.succeed({
@@ -209,7 +216,7 @@ describe('port layer composition', (): void => {
     }).pipe(
       Effect.provide(
         layerCodeReviewPorts(
-          { tracker: validated, workspaces: { root: '/workspaces', hooks } },
+          { tracker: validated, workspaces: { root: '/workspaces', hooks, retainedLimit: 3 } },
           Layer.succeed(CodeReviewFactory, {
             make: () =>
               Effect.succeed({

@@ -17,8 +17,16 @@ import type { IssueId } from '../../domain/domain.js'
  * never this.
  */
 
-/** What a keyed fiber is doing for its issue. */
-export type ExecutionPurpose = 'worker' | 'retry' | 'delivery' | 'rebase'
+/**
+ * What a keyed fiber is doing for its issue.
+ *
+ * `prune` is the pass that bounds what an issue keeps on disk, and it is a key of its own rather
+ * than the tail of the `worker` that starts it: a continuation is dispatched one second after a
+ * turn ends, and a pass sharing the worker's key would be interrupted by it on every attempt —
+ * which is exactly the run of repeated attempts the cap exists for. Unlike every other key here,
+ * it is never superseded; `run-workspace.ts` says why.
+ */
+export type ExecutionPurpose = 'worker' | 'retry' | 'delivery' | 'rebase' | 'prune'
 
 /** The fibers one orchestrator owns, keyed by purpose and issue. */
 export type ExecutionOwner = FiberMap.FiberMap<string, void>

@@ -81,6 +81,8 @@ const snapshot: OrchestratorSnapshot = {
   retrying: [],
   delivering: [],
   completed: [],
+  retainedWorkspaceLimit: 3,
+  retainedWorkspaces: [],
   saturatedStates: [],
   inspectableAgents: [],
   totals: { inputTokens: 10, outputTokens: 5, totalTokens: 15, secondsRunning: 60 },

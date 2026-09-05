@@ -20,7 +20,13 @@ import {
   reportedAs,
 } from './filesystem.js'
 import { leaseIsLive } from './workspace-lease.js'
-import { discardStagedLease, readLease, returnLease, takeLease } from './workspace-lease-store.js'
+import {
+  discardStagedLease,
+  readLease,
+  returnLease,
+  takeLease,
+  type TakenLease,
+} from './workspace-lease-store.js'
 import { runHook } from './workspace-hooks.js'
 
 /**
@@ -96,7 +102,7 @@ export const removeRunWorkspace = (
  * still the record that was decided on. A lease that stands again goes back where it was, and the
  * run keeps its workspace.
  */
-const removeFreeRunWorkspace = (
+export const removeFreeRunWorkspace = (
   fileSystem: FileSystem.FileSystem,
   hooks: HooksConfig,
   runPath: string,
@@ -146,25 +152,43 @@ const removeFreeRunWorkspace = (
               // Committed, so there is nothing to put back: the workspace and its record are gone.
               Exit.isSuccess(exit) && exit.value
                 ? Effect.void
-                : returnLease(fileSystem, held, leasePath).pipe(
-                    Effect.flatMap((restored) =>
-                      restored
-                        ? Effect.void
-                        : // An acquisition found the name free while it was aside and claimed it.
-                          // Its record stands, and this one is gone: the workspace belongs to the
-                          // run that took the name.
-                          logWarning('workspace lease was claimed while cleanup held it aside', {
-                            action: 'workspace_cleanup',
-                            outcome: 'skipped',
-                            path: runPath,
-                          }),
-                    ),
-                    Effect.ignore,
-                  ),
+                : restoreTakenLease(fileSystem, held, runPath, leasePath),
           ),
       })
     }),
   )
+
+/**
+ * Puts a taken record back where it came from, unless the workspace it names has gone in the
+ * meantime.
+ *
+ * Two removals can be walking the same issue directory — the retention pass and a terminal
+ * cleanup, which signals the pass's interruption rather than waiting out the operator's hook it
+ * may be inside. Whichever loses the race must not restore a lease standing over nothing: that
+ * record would keep the issue directory from going with its workspaces, and only a later terminal
+ * cleanup would take it.
+ */
+const restoreTakenLease = (
+  fileSystem: FileSystem.FileSystem,
+  held: TakenLease,
+  runPath: string,
+  leasePath: string,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    if (!(yield* realDirectoryExists(fileSystem, runPath))) {
+      yield* discardStagedLease(fileSystem, held.path)
+      return
+    }
+    if (!(yield* returnLease(fileSystem, held, leasePath))) {
+      // An acquisition found the name free while it was aside and claimed it. Its record stands,
+      // and this one is gone: the workspace belongs to the run that took the name.
+      yield* logWarning('workspace lease was claimed while cleanup held it aside', {
+        action: 'workspace_cleanup',
+        outcome: 'skipped',
+        path: runPath,
+      })
+    }
+  }).pipe(Effect.ignore)
 
 /** The directory and the operator's last look at it, each against ground confirmed for it. */
 const removeFreeRunDirectory = (

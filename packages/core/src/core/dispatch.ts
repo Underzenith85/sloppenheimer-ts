@@ -1,10 +1,9 @@
-import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
+import { Deferred, Effect, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { renderPrompt } from '../config/workflow.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import { issueBranchName } from '../domain/handoff.js'
 import { AgentError, type SourceControlError, type WorkspaceError } from '../domain/errors.js'
-import type { WorkspaceRelease } from '../domain/workspace-lease.js'
 import { unsupportedHostTool, type HostToolSession } from '../domain/host-tools.js'
 import { currentInstant } from '../support/clock.js'
 import { logError, logInfo, logWarning, withLogAnnotations } from '../support/logging.js'
@@ -25,6 +24,7 @@ import {
   logContext,
 } from './policy.js'
 import { postflightLogOutcome, runPostflight, type PostflightOutcome } from './postflight.js'
+import { pruneRetainedWorkspaces, workspaceRelease } from './run-workspace.js'
 import { ownIssueFiber, releaseIssueFiber } from './runtime/execution.js'
 import type { OrchestratorContext } from './runtime.js'
 import type {
@@ -239,54 +239,13 @@ const runWithSourceControl = (
 }
 
 /**
- * What becomes of the run's workspace once the run has ended.
- *
- * A postflight that published, or that found nothing to publish, has read the whole worktree and
- * put everything it found into the repository, so the directory holds nothing that is not in it.
- * Every other ending — a delivery that failed, a composition with no source control to publish
- * through, a failure, a cancellation, an interrupted shutdown — leaves work that only the directory
- * holds, so the workspace stays as a recovery artifact under the reason it is being kept for. A
- * retained delivery republishes from exactly that directory, which is why a failed delivery's
- * reason names the failure.
- */
-const workspaceRelease = (
-  exit: Exit.Exit<PostflightOutcome, AgentError | WorkspaceError | SourceControlError>,
-): WorkspaceRelease =>
-  Exit.match(exit, {
-    onSuccess: (postflight): WorkspaceRelease => {
-      switch (postflight._tag) {
-        case 'Published':
-        case 'NoChanges':
-          return { _tag: 'Completed' }
-        case 'DeliveryFailed':
-          // The category, never the message: a lease record is a file on disk rather than a log
-          // the redaction rules pass over.
-          return { _tag: 'Retained', reason: `delivery failed: ${postflight.failure.category}` }
-        case 'NotPerformed':
-          return { _tag: 'Retained', reason: 'run ended without publishing its work' }
-      }
-    },
-    onFailure: (cause): WorkspaceRelease => ({
-      _tag: 'Retained',
-      reason: Option.match(Cause.failureOption(cause), {
-        onNone: () =>
-          Cause.isInterrupted(cause)
-            ? 'run cancelled before publication'
-            : 'run ended abnormally before publication',
-        // What failed, never what the failure said: an agent or hook failure carries an excerpt of
-        // what the process wrote, and a lease record is a file on disk rather than a log the
-        // redaction rules pass over.
-        onSome: (error) => `run failed before publication: ${error._tag} ${error.category}`,
-      }),
-    }),
-  })
-
-/**
  * The whole of one run as a fiber body: the workspace this run leases for itself, the host-owned
  * preparation and postflight that bracket the session when the host owns the repository, and the
  * `WorkerExited` that reports how it ended. Every exit path offers that event, so a run can never
  * end unobserved, and every exit path releases the lease — including the interruption that a
- * cancellation or a shutdown ends the run with.
+ * cancellation or a shutdown ends the run with. A run that ended rather than being interrupted
+ * then bounds what the issue keeps of its earlier attempts; a cancellation skips that, because
+ * what follows it may be removing the issue's workspaces altogether.
  */
 const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
   const { context, issue, attempt, runId, execution } = launch
@@ -307,7 +266,7 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             outcome: 'failed',
             error: error.message,
             postflight: { _tag: 'NotPerformed' },
-          }).pipe(Effect.asVoid),
+          }),
         onSuccess: (postflight) =>
           Queue.offer(context.mailbox, {
             _tag: 'WorkerExited',
@@ -317,8 +276,13 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
             outcome: 'normal',
             error: null,
             postflight,
-          }).pipe(Effect.asVoid),
+          }),
       }),
+      // Once the exit is on its way: the run is over, so what the issue keeps of its earlier
+      // attempts is bounded. The pass owns its own fiber; this only starts it. An interruption
+      // never reaches here, which is why a cancellation that keeps the workspace starts one of
+      // its own — see `cancelRunning`.
+      Effect.zipRight(pruneRetainedWorkspaces(context, issue, execution, runId)),
     )
   return observeDuration(agentDuration, worker).pipe(
     withOperationalSpan('agent.run', { run_id: runId }),

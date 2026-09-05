@@ -20,6 +20,7 @@
  * - `transitions/details.ts` — the detail records and the index consumers read them through.
  * - `transitions/scheduling.ts` — the tick debounce, refresh waiters, and the workflow in force.
  * - `transitions/ports.ts` — retiring replaced port instances and adopting live work onto new ones.
+ * - `transitions/workspaces.ts` — what each issue is known to keep on disk.
  *
  * The groups are a reading order rather than a layering: `retries`, `deliveries` and `handoffs`
  * claim through `claims`, and nothing else here imports a sibling.
@@ -33,3 +34,4 @@ export * from './transitions/ports.js'
 export * from './transitions/retries.js'
 export * from './transitions/runs.js'
 export * from './transitions/scheduling.js'
+export * from './transitions/workspaces.js'

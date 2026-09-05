@@ -17,6 +17,7 @@ import type {
   PublishedDelivering,
   PublishedHandoff,
   PublishedRefresh,
+  PublishedRetainedWorkspaces,
   PublishedRetrying,
   PublishedRunning,
   PublishedState,
@@ -96,6 +97,16 @@ const publishedDeliveringSchema: Schema.Schema<PublishedDelivering> = Schema.Str
   detail_url: Schema.String,
 })
 
+const publishedRetainedWorkspacesSchema: Schema.Schema<PublishedRetainedWorkspaces> = Schema.Struct(
+  {
+    issue_id: Schema.String,
+    issue_identifier: Schema.String,
+    count: Schema.Number,
+    bytes: Schema.Number,
+    observed_at: Schema.String,
+  },
+)
+
 const publishedCompletedSchema: Schema.Schema<PublishedCompleted> = Schema.Struct({
   issue_id: Schema.String,
   issue_identifier: Schema.String,
@@ -159,6 +170,7 @@ export const publishedStateSchema: Schema.Schema<PublishedState> = Schema.Struct
   }),
   polling_interval_ms: Schema.Number,
   max_concurrent_agents: Schema.Number,
+  retained_workspace_limit: Schema.Number,
   counts: Schema.Struct({
     running: Schema.Number,
     retrying: Schema.Number,
@@ -171,6 +183,7 @@ export const publishedStateSchema: Schema.Schema<PublishedState> = Schema.Struct
   retrying: Schema.Array(publishedRetryingSchema),
   delivering: Schema.Array(publishedDeliveringSchema),
   completed: Schema.Array(publishedCompletedSchema),
+  retained_workspaces: Schema.Array(publishedRetainedWorkspacesSchema),
   saturated_states: Schema.Array(Schema.String),
   inspectable_agents: Schema.Array(Schema.String),
   codex_totals: publishedTotalsSchema,

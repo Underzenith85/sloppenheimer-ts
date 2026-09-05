@@ -620,6 +620,43 @@ repair agent that had achieved nothing.
   on `prepare` preserving a dirty worktree and on a workspace belonging to an issue, and both were
   removed by #166. Republishing retained artifacts on restart is a revision of that decision and a
   new port surface, not something to reintroduce here.
+- Retained workspaces of an issue that is still open are capped
+  ([#273](https://github.com/Underzenith85/sloppenheimer-ts/issues/273)). Once a run has let go of
+  its workspace the worker's own fiber — off the loop, because a pass over whole checkouts has no
+  bounded size — asks the workspace manager to `prune` the issue to the newest
+  `workspace.retained_limit` retained workspaces, and reports what stayed through the mailbox as a
+  `RetainedWorkspacesObserved` event, which is what the snapshot's `retainedWorkspaces` rows are.
+  Which workspaces go is `domain/workspace-retention.ts`'s rule: never a protected key — the
+  retained delivery's workspace read from the state, and the workspace of the run being pruned
+  for, which the manager names from the run identity rather than the caller from the lease, so an
+  ending that never reached the session keeps its directory too — never one a lease still holds,
+  and never a retained workspace of a host that is running or unobservable, because a live peer's retained delivery is in-memory intent nothing
+  here can see; gone is read as `ownerIsGone` reads it for a held lease, so a process that
+  inherited the owner's id is a successor rather than the owner. A cancellation that removes the
+  issue's workspaces runs no pass and interrupts one already running; a cancellation that keeps
+  them runs one, because the worker's own tail never runs — an interruption does not reach it —
+  and that is the stall loop, where every attempt would otherwise leave one more whole checkout. Every removal site
+  forgets the issue's row and records the run counter, and the loop refuses an observation from a
+  run older than that removal: the count is taken off the loop, so a terminal cleanup can overtake
+  it and the count would otherwise re-add a row for directories that are gone; those records are
+  bounded oldest-first, because a removal is worth remembering only while a pass that began before
+  it could still report. The pass is owned under a `prune` key of its own rather than the worker's:
+  a continuation is dispatched a second after a turn ends, and a pass sharing that key would be
+  interrupted by it on every attempt — the very run of repeated attempts the cap exists for. It is
+  the one key that never supersedes: arming a key only signals the interruption, and a pass holds
+  an eviction candidate's lease aside in staging while it runs the operator's `before_remove` hook,
+  so a replacement enumerating in that window would neither evict nor count that workspace. A pass
+  already running enforces the same cap over the same directory, so a second is declined — and
+  owed rather than dropped, because that pass read the directory before the asking run's workspace
+  existed: it runs again for the newest asker when it finishes. Which issues have a pass is
+  `RuntimeState`'s to say, like everything else that is running, and admitting one is the same
+  transition that records what a refusal is owed: reading the fiber collection instead would be a
+  read at one instant and a write at another, with a lost wakeup in between. For the
+  same reason every terminal removal stops the issue's pass first, through `stopRetentionPass` —
+  which also forgets the admission, because a pass that has taken its last request is already out
+  of the running set and a handler on its own fiber could forget a successor's admission instead. There is no age-based sweep: a lease's reason is a string written for a human,
+  and a failed run's directory may still hold edits no inspection ever read, so the cap is the only
+  rule that deletes.
 - A delivery's publication runs off the event loop. Everything else a handler does is memory and a
   bounded call; a publication is git, and a push waits on a child process that may never close — so
   running it inside the loop let one hung delivery stop every issue the host was running, ticks,

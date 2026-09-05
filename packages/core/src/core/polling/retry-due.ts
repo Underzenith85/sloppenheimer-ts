@@ -18,6 +18,7 @@ import { rebaseInFlight } from '../rebase.js'
 import { settleRepair } from '../repair.js'
 import { repairPermission } from '../handoff-eligibility.js'
 import { applyHandoffObservation, reconcileHandoffs } from '../handoff-reconciliation.js'
+import { stopRetentionPass } from '../run-workspace.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import type { EffectiveWorkflow, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -79,7 +80,13 @@ const resumeRepair = (
       stateIsIn(record.state, entry.execution.workflow.config.tracker.terminalStates),
     )
     if (Option.isSome(terminalIssue)) {
+      yield* stopRetentionPass(context, event.issueId)
       yield* entry.execution.workspaces.remove(terminalIssue.value.identifier).pipe(
+        Effect.zipRight(
+          Ref.update(context.state, (pending) =>
+            Transitions.forgetRetainedWorkspaces(pending, event.issueId),
+          ),
+        ),
         Effect.catchAll((error) =>
           logWarning('terminal workspace cleanup failed', {
             ...logContext(terminalIssue.value),
@@ -140,7 +147,13 @@ const resumeContinuation = (
       return
     }
     if (stateIsIn(issue.value.state, effective.workflow.config.tracker.terminalStates)) {
+      yield* stopRetentionPass(context, event.issueId)
       yield* effective.workspaces.remove(issue.value.identifier).pipe(
+        Effect.zipRight(
+          Ref.update(context.state, (pending) =>
+            Transitions.forgetRetainedWorkspaces(pending, event.issueId),
+          ),
+        ),
         Effect.catchAll((error) =>
           logWarning('terminal workspace cleanup failed', {
             ...logContext(issue.value),

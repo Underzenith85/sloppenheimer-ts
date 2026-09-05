@@ -152,7 +152,7 @@ export const parseConfig = (
   runner: AuthoredRunner,
   defaultCommand: string,
 ): EffectiveConfig => {
-  const { tracker, polling, hooks, agent, codex, server, handoff } = raw
+  const { tracker, polling, workspace, hooks, agent, codex, server, handoff } = raw
   const declared = raw.runner ?? codex
   const runnerConfig: RunnerConfig = {
     command: declared?.command ?? defaultCommand,
@@ -171,6 +171,7 @@ export const parseConfig = (
     },
     pollingIntervalMs: polling?.interval_ms ?? workflowDefaults.pollingIntervalMs,
     workspaceRoot,
+    workspaceRetainedLimit: workspace?.retained_limit ?? workflowDefaults.workspaceRetainedLimit,
     hooks: {
       afterCreate: hooks?.after_create ?? null,
       beforeRun: hooks?.before_run ?? null,

@@ -328,6 +328,7 @@ describe('workflow defaults and extension keys', (): void => {
       expect(workflow.config.tracker.terminalStates).toEqual(['closed'])
       expect(workflow.config.tracker.requiredLabels).toEqual([])
       expect(workflow.config.serverPort).toBeNull()
+      expect(workflow.config.workspaceRetainedLimit).toBe(workflowDefaults.workspaceRetainedLimit)
       expect(workflow.config.handoffEnabled).toBe(workflowDefaults.handoffEnabled)
       expect(workflow.config.handoffEnabled).toBe(true)
       expect(githubProviderOf(workflow.tracker).apiBaseUrl).toBe('https://api.github.com')
@@ -506,6 +507,14 @@ describe('front-matter decoding messages', (): void => {
     ],
     [`${minimalTracker}\nworkspace:\n  root: ""`, 'workspace.root must be a non-empty string'],
     [`${minimalTracker}\nworkspace:\n  root: 5`, 'workspace.root must be a non-empty string'],
+    [
+      `${minimalTracker}\nworkspace:\n  retained_limit: 0`,
+      'workspace.retained_limit must be a positive integer',
+    ],
+    [
+      `${minimalTracker}\nworkspace:\n  retained_limit: two`,
+      'workspace.retained_limit must be an integer',
+    ],
     [`${minimalTracker}\nhooks: 5`, 'hooks must be a map'],
     [`${minimalTracker}\nhooks:\n  before_run: 5`, 'hooks.before_run must be a non-empty string'],
     [`${minimalTracker}\nhooks:\n  after_run: ""`, 'hooks.after_run must be a non-empty string'],

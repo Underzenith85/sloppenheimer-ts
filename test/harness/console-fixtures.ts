@@ -150,6 +150,8 @@ export const consoleState = (): OrchestratorSnapshot => ({
       pullRequestUrl: 'https://example.test/pull/41',
     },
   ],
+  retainedWorkspaceLimit: 3,
+  retainedWorkspaces: [],
   saturatedStates: [],
   inspectableAgents: [runningIdentifier, stalledIdentifier, retryingIdentifier],
   totals: { inputTokens: 20, outputTokens: 10, totalTokens: 30, secondsRunning: 120 },

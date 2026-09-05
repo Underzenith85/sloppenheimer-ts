@@ -14,6 +14,7 @@ export type RetryingRow = Snapshot['retrying'][number]
 export type CompletedRow = Snapshot['completed'][number]
 export type HandoffRow = Snapshot['handoffs'][number]
 export type DeliveringRow = Snapshot['delivering'][number]
+export type RetainedWorkspaceRow = Snapshot['retainedWorkspaces'][number]
 
 export type PublishedRunning = Readonly<{
   issue_id: string
@@ -74,6 +75,19 @@ export type PublishedDelivering = Readonly<{
   detail_url: string
 }>
 
+/**
+ * What one issue keeps on disk: its retained run workspaces, counted and measured after the last
+ * run of it ended. An issue whose attempts keep leaving whole checkouts behind shows up here before
+ * it shows up as a full disk.
+ */
+export type PublishedRetainedWorkspaces = Readonly<{
+  issue_id: string
+  issue_identifier: string
+  count: number
+  bytes: number
+  observed_at: string
+}>
+
 export type PublishedCompleted = Readonly<{
   issue_id: string
   issue_identifier: string
@@ -115,6 +129,8 @@ export type PublishedState = Readonly<{
   }>
   polling_interval_ms: number
   max_concurrent_agents: number
+  /** How many retained run workspaces one issue keeps, as the workflow in force sets it. */
+  retained_workspace_limit: number
   counts: Readonly<{ running: number; retrying: number; delivering: number; completed: number }>
   paused_issue_numbers: readonly number[]
   handoffs: readonly PublishedHandoff[]
@@ -122,6 +138,7 @@ export type PublishedState = Readonly<{
   retrying: readonly PublishedRetrying[]
   delivering: readonly PublishedDelivering[]
   completed: readonly PublishedCompleted[]
+  retained_workspaces: readonly PublishedRetainedWorkspaces[]
   saturated_states: readonly string[]
   inspectable_agents: readonly string[]
   codex_totals: PublishedTotals
@@ -206,6 +223,14 @@ const publishCompleted = (entry: CompletedRow): PublishedCompleted => ({
   pull_request_url: entry.pullRequestUrl,
 })
 
+const publishRetainedWorkspaces = (entry: RetainedWorkspaceRow): PublishedRetainedWorkspaces => ({
+  issue_id: entry.issueId,
+  issue_identifier: entry.identifier,
+  count: entry.count,
+  bytes: entry.bytes,
+  observed_at: entry.observedAt,
+})
+
 const publishHandoff = (entry: HandoffRow): PublishedHandoff => ({
   issue_id: entry.issueId,
   issue_identifier: entry.identifier,
@@ -249,6 +274,7 @@ export const publishState = (snapshot: Snapshot): PublishedState => ({
   },
   polling_interval_ms: snapshot.pollingIntervalMs,
   max_concurrent_agents: snapshot.maxConcurrentAgents,
+  retained_workspace_limit: snapshot.retainedWorkspaceLimit,
   counts: snapshot.counts,
   paused_issue_numbers: snapshot.pausedIssueNumbers,
   handoffs: snapshot.handoffs.map(publishHandoff),
@@ -256,6 +282,7 @@ export const publishState = (snapshot: Snapshot): PublishedState => ({
   retrying: snapshot.retrying.map(publishRetrying),
   delivering: snapshot.delivering.map(publishDelivering),
   completed: snapshot.completed.map(publishCompleted),
+  retained_workspaces: snapshot.retainedWorkspaces.map(publishRetainedWorkspaces),
   saturated_states: snapshot.saturatedStates,
   inspectable_agents: snapshot.inspectableAgents,
   codex_totals: {

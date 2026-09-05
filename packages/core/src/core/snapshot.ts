@@ -13,7 +13,11 @@ import {
 } from './runtime.js'
 import type { DeliveryEntry } from './postflight.js'
 import type { RetryEntry, RunningEntry, RuntimeState } from './state.js'
-import { handoffSnapshots, publishedCompletions } from './transitions.js'
+import {
+  handoffSnapshots,
+  publishedCompletions,
+  retainedWorkspaceSnapshots,
+} from './transitions.js'
 
 /**
  * When an agent is considered stalled, as an absolute instant. A zero timeout means stall
@@ -173,6 +177,7 @@ export const createSnapshot = (
     },
     pollingIntervalMs: effective.workflow.config.pollingIntervalMs,
     maxConcurrentAgents: effective.workflow.config.agent.maxConcurrentAgents,
+    retainedWorkspaceLimit: effective.workflow.config.workspaceRetainedLimit,
     counts: {
       running: state.running.size,
       retrying: state.retries.size,
@@ -187,6 +192,7 @@ export const createSnapshot = (
     retrying: [...state.retries.values()].map(retrySnapshot),
     delivering: [...state.deliveries.values()].map(deliverySnapshot),
     completed,
+    retainedWorkspaces: retainedWorkspaceSnapshots(state),
     saturatedStates: saturatedStatesOf(state),
     inspectableAgents: inspectableAgentsOf(state),
     totals: {

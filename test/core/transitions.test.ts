@@ -18,6 +18,7 @@ import {
   type ExecutionSnapshot,
   type CompletedEntry,
   type CompletedSnapshot,
+  type RetainedWorkspaceEntry,
   type RetryEntry,
   type RunningEntry,
   type RuntimeState,
@@ -58,6 +59,7 @@ const workflow: Workflow = {
     },
     pollingIntervalMs: 30_000,
     workspaceRoot: '/tmp/sloppenheimer',
+    workspaceRetainedLimit: 3,
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -666,6 +668,122 @@ describe('run lifecycle', (): void => {
       totalTokens: 16,
     })
     expect(drained.pendingUsage.has(issue.id)).toBe(false)
+  })
+})
+
+describe('retained workspaces', (): void => {
+  const issue = makeIssue('example/sloppenheimer#273')
+  const observed = (count: number, bytes: number): RetainedWorkspaceEntry => ({
+    issueId: issue.id,
+    identifier: issue.identifier,
+    count,
+    bytes,
+    observedAt: new Date('2026-09-02T15:19:15.000Z'),
+  })
+
+  it('records what a pass over the issue directory counted, and replaces the last count', (): void => {
+    const first = Transitions.recordRetainedWorkspaces(emptyState(), observed(4, 4_096), 1)
+    const second = Transitions.recordRetainedWorkspaces(first, observed(3, 3_072), 2)
+
+    expect(first.retainedWorkspaces.get(issue.id)).toEqual(observed(4, 4_096))
+    expect(second.retainedWorkspaces.get(issue.id)).toEqual(observed(3, 3_072))
+  })
+
+  it('holds no row for an issue that keeps nothing', (): void => {
+    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048), 1)
+
+    const emptied = Transitions.recordRetainedWorkspaces(recorded, observed(0, 0), 2)
+
+    expect(emptied.retainedWorkspaces.has(issue.id)).toBe(false)
+  })
+
+  it('forgets an issue whose workspaces were removed', (): void => {
+    const recorded = Transitions.recordRetainedWorkspaces(emptyState(), observed(2, 2_048), 1)
+
+    const forgotten = Transitions.forgetRetainedWorkspaces(recorded, issue.id)
+
+    expect(forgotten.retainedWorkspaces.has(issue.id)).toBe(false)
+  })
+
+  it('admits one pass per issue and records what a refused one is owed', (): void => {
+    const [first, admitted] = Transitions.admitPrune(emptyState(), issue.id, 1)
+    const [second, recorded] = Transitions.admitPrune(admitted, issue.id, 2)
+    const [third, superseded] = Transitions.admitPrune(recorded, issue.id, 3)
+
+    expect(first).toBe(true)
+    expect(second).toBe(false)
+    expect(third).toBe(false)
+    // The newest asker wins: its workspace is the one the next round has to protect.
+    expect(superseded.pruneRuns.get(issue.id)).toBe(3)
+  })
+
+  it('hands a finishing pass what it is owed, and lets the next caller in when it is done', (): void => {
+    const [, running] = Transitions.admitPrune(emptyState(), issue.id, 1)
+    const [, owed] = Transitions.admitPrune(running, issue.id, 2)
+
+    const [taken, continuing] = Transitions.takePruneRequest(owed, issue.id)
+    const [none, ended] = Transitions.takePruneRequest(continuing, issue.id)
+    const [next] = Transitions.admitPrune(ended, issue.id, 3)
+
+    // Taking is the other half of the handoff: nothing owed takes the issue out of the running
+    // set in the same step, so a request cannot be written against a pass that has ended.
+    expect(taken).toEqual(Option.some(2))
+    expect(Option.isNone(none)).toBe(true)
+    expect(ended.pruneRuns.has(issue.id)).toBe(false)
+    expect(next).toBe(true)
+  })
+
+  it('forgets a pass whose fiber ended without taking what it was owed', (): void => {
+    const [, running] = Transitions.admitPrune(emptyState(), issue.id, 1)
+
+    const released = Transitions.releasePruneRun(running, issue.id)
+
+    expect(released.pruneRuns.has(issue.id)).toBe(false)
+    expect(Transitions.admitPrune(released, issue.id, 2)[0]).toBe(true)
+  })
+
+  it('bounds the removals it remembers, dropping the oldest', (): void => {
+    const limit = Transitions.recordedWorkspaceRemovals
+    const oldest = issueId('example/sloppenheimer#0')
+    const newest = issueId(`example/sloppenheimer#${String(limit)}`)
+    const removed = Array.from({ length: limit + 1 }, (_, index) =>
+      issueId(`example/sloppenheimer#${String(index)}`),
+    ).reduce(Transitions.forgetRetainedWorkspaces, emptyState())
+
+    // A record is worth keeping only while a pass that began before it could still report, and a
+    // host sees an unbounded number of terminal issues.
+    expect(removed.workspaceRemovals.size).toBe(limit)
+    expect(removed.workspaceRemovals.has(oldest)).toBe(false)
+    expect(removed.workspaceRemovals.has(newest)).toBe(true)
+  })
+
+  it('keeps a rewritten removal at the newest end rather than its original place', (): void => {
+    const limit = Transitions.recordedWorkspaceRemovals
+    const rewritten = issueId('example/sloppenheimer#0')
+    const filled = Array.from({ length: limit }, (_, index) =>
+      issueId(`example/sloppenheimer#${String(index)}`),
+    ).reduce(Transitions.forgetRetainedWorkspaces, emptyState())
+
+    // The oldest goes terminal a second time, and then one more issue does.
+    const renewed = Transitions.forgetRetainedWorkspaces(filled, rewritten)
+    const full = Transitions.forgetRetainedWorkspaces(renewed, issueId('example/sloppenheimer#x'))
+
+    // A write is what makes a record worth keeping, so the rewritten one is not the first to go.
+    expect(full.workspaceRemovals.has(rewritten)).toBe(true)
+    expect(full.workspaceRemovals.has(issueId('example/sloppenheimer#1'))).toBe(false)
+  })
+
+  it('refuses a count from a run a removal has overtaken, and takes one from a later run', (): void => {
+    // Run 7 is the newest allocated when the removal happens; its count arrives afterwards.
+    const [runId, allocated] = Transitions.takeRunId(emptyState())
+    const removed = Transitions.forgetRetainedWorkspaces(allocated, issue.id)
+    const [later, allocatedAgain] = Transitions.takeRunId(removed)
+
+    const stale = Transitions.recordRetainedWorkspaces(removed, observed(3, 3_072), runId)
+    const fresh = Transitions.recordRetainedWorkspaces(allocatedAgain, observed(1, 1_024), later)
+
+    expect(stale).toBe(removed)
+    expect(fresh.retainedWorkspaces.get(issue.id)).toEqual(observed(1, 1_024))
   })
 })
 

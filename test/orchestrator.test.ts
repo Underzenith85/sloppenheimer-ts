@@ -98,7 +98,8 @@ import {
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
-import type { WorkspaceRelease } from '@sloppenheimer/core/domain/workspace-lease.js'
+import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
+import type { WorkspacePruneReport } from '@sloppenheimer/core/domain/workspace-retention.js'
 import { preflightWorkflow } from '../src/config/workflow.js'
 import type { PreflightResult } from '@sloppenheimer/core/ports/workflow.js'
 import { runWithEnvironment, withEnvironment } from './harness/environment.js'
@@ -202,6 +203,7 @@ const workflow: Workflow = {
     },
     pollingIntervalMs: 30_000,
     workspaceRoot: '/tmp/sloppenheimer',
+    workspaceRetainedLimit: 3,
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -677,6 +679,7 @@ const makeHarness = (
         beforeRun: () => Effect.void,
         afterRun: () => Effect.void,
         remove: () => Effect.void,
+        prune: () => Effect.succeed({ count: 0, bytes: 0, evicted: 0 }),
       }
     },
     runAgent: ({ config, prompt, maxTurns, onEvent }) =>
@@ -6845,6 +6848,342 @@ describe('per-run workspace leases', (): void => {
           reason: 'run failed before publication: AgentError process_exited',
         },
       })
+    }),
+  )
+
+  it.effect('bounds what an issue keeps once a run has let go of its workspace', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const pruned: WorkspaceRun[] = []
+      // No source control to publish through, so the run ends retaining its workspace — the case
+      // that, repeated, is one whole checkout per attempt.
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: (settings) => ({
+          ...recordingWorkspaces(harness, acquired, released)(settings),
+          prune: (run) =>
+            Effect.sync(() => {
+              pruned.push(run)
+              return { count: 2, bytes: 4_096, evicted: 1 }
+            }),
+        }),
+        runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          let current = yield* control.snapshot
+          while (current.retainedWorkspaces.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      // The pass ran once the run had released its workspace, and it names that run — which is
+      // how the manager keeps the directory this exit may be turning into a retained delivery.
+      // What the pass left is what the snapshot publishes, beside the limit the workflow sets.
+      expect(released).toHaveLength(1)
+      expect(pruned).toEqual([{ identifier: issue.identifier, runId: 1 }])
+      expect(snapshot.retainedWorkspaceLimit).toBe(workflow.config.workspaceRetainedLimit)
+      expect(snapshot.retainedWorkspaces).toEqual([
+        {
+          issueId: issue.id,
+          identifier: issue.identifier,
+          count: 2,
+          bytes: 4_096,
+          observedAt: snapshot.retainedWorkspaces[0]?.observedAt,
+        },
+      ])
+    }),
+  )
+
+  it.effect('keeps a pass running when the continuation it scheduled starts the next attempt', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      // The first pass is held open across the next dispatch, which is what used to interrupt it.
+      const release = yield* Deferred.make<void>()
+      let prunes = 0
+      let launches = 0
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          prune: (): Effect.Effect<WorkspacePruneReport> =>
+            Effect.suspend(() => {
+              prunes += 1
+              return prunes === 1
+                ? Deferred.await(release).pipe(
+                    Effect.as<WorkspacePruneReport>({ count: 2, bytes: 2_048, evicted: 1 }),
+                  )
+                : Effect.succeed<WorkspacePruneReport>({ count: 0, bytes: 0, evicted: 0 })
+            }),
+        }),
+        // The second attempt never ends, so the only pass that can report is the first one.
+        runAgent: () =>
+          Effect.suspend(() => {
+            launches += 1
+            return launches === 1
+              ? Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+              : Effect.never
+          }),
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (prunes === 0) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
+          // The continuation this turn scheduled comes due a second later and is dispatched under
+          // the issue's worker key; the pass is under its own, so it is still running.
+          while (launches < 2) {
+            yield* TestClock.adjust('1 second')
+            yield* Effect.yieldNow()
+          }
+          yield* Deferred.succeed(release, undefined)
+          let current = yield* control.snapshot
+          while (current.retainedWorkspaces.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      expect(snapshot.retainedWorkspaces[0]).toMatchObject({
+        identifier: issue.identifier,
+        count: 2,
+        bytes: 2_048,
+      })
+    }),
+  )
+
+  it.effect('leaves a pass in flight to finish rather than starting a second for one issue', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const unpublished: Workflow = {
+        ...workflow,
+        config: { ...workflow.config, handoffEnabled: false },
+      }
+      const harness = makeHarness(unpublished, () => [issue])
+      const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+      const release = yield* Deferred.make<void>()
+      let prunes = 0
+      let launches = 0
+      const ports: TestPorts = {
+        ...withoutHandoff,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          prune: (): Effect.Effect<WorkspacePruneReport> =>
+            Effect.suspend(() => {
+              prunes += 1
+              // Only the first round is held open, inside its hook; the round it is owed runs
+              // through.
+              return (prunes === 1 ? Deferred.await(release) : Effect.void).pipe(
+                Effect.as<WorkspacePruneReport>({ count: 1, bytes: 16, evicted: 0 }),
+              )
+            }),
+        }),
+        // Every attempt ends the same way, so each one would ask for a pass of its own.
+        runAgent: () =>
+          Effect.sync(() => {
+            launches += 1
+          }).pipe(Effect.as({ threadId: 'thread', turnId: 'turn', turnCount: 1 })),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (prunes === 0) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
+          // Two more attempts run to their end while the first pass is still inside its hook.
+          while (launches < 3) {
+            yield* TestClock.adjust('1 second')
+            yield* Effect.yieldNow()
+          }
+          yield* Deferred.succeed(release, undefined)
+          // The declined requests are owed, so the pass runs again for the newest of them once it
+          // is out of its hook — a request dropped instead would leave that workspace outside the
+          // cap and the count until some later run of this issue happened to ask.
+          while (prunes < 2) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
+        }),
+      )
+
+      // Replacing it would only signal the interruption, and a pass holds an eviction candidate's
+      // lease aside while its hook runs: a replacement enumerating in that window would neither
+      // evict nor count that workspace. So the pass in flight is left alone and asked again after.
+      expect(prunes).toBe(2)
+    }),
+  )
+
+  it.effect(
+    'stops the pass before a retry that finds its issue terminal removes the workspaces',
+    () =>
+      Effect.gen(function* () {
+        const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+        const unpublished: Workflow = {
+          ...workflow,
+          config: { ...workflow.config, handoffEnabled: false },
+        }
+        let reported: Issue = issue
+        const harness = makeHarness(unpublished, () => [reported])
+        const { makeCodeReview: _withoutCodeReview, ...withoutHandoff } = harness.ports
+        const held = yield* Deferred.make<void>()
+        // Completed from the pass's own interrupt handler, so the test observes the interruption
+        // while the host is still running rather than the one its shutdown would perform anyway.
+        const sawInterrupt = yield* Deferred.make<void>()
+        let removals = 0
+        const ports: TestPorts = {
+          ...withoutHandoff,
+          makeWorkspaces: (settings) => ({
+            ...harness.ports.makeWorkspaces(settings),
+            prune: (): Effect.Effect<WorkspacePruneReport> =>
+              Deferred.await(held).pipe(
+                Effect.as<WorkspacePruneReport>({ count: 1, bytes: 16, evicted: 0 }),
+                Effect.onInterrupt(() => Deferred.succeed(sawInterrupt, undefined)),
+              ),
+            remove: () => Effect.sync(() => (removals += 1)).pipe(Effect.asVoid),
+          }),
+          runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
+        }
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+            let snapshot = yield* control.snapshot
+            while (snapshot.retrying.length === 0) {
+              yield* Effect.yieldNow()
+              snapshot = yield* control.snapshot
+            }
+            // The issue is finished with by the time its continuation comes due, so the retry
+            // removes the workspaces the pass is still deciding about.
+            reported = { ...issue, state: 'closed' }
+            while (removals === 0) {
+              yield* TestClock.adjust('1 second')
+              yield* Effect.yieldNow()
+            }
+            // A pass holds an eviction candidate's lease aside while its hook runs, so a removal
+            // that walked in would run the same hook again and delete underneath it. Awaited
+            // inside the running host: closing its scope interrupts the pass in any case.
+            yield* Deferred.await(sawInterrupt)
+          }),
+        )
+
+        expect(removals).toBe(1)
+      }),
+  )
+
+  it.effect('bounds the issue after a stall, which keeps the workspace and retries', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const stalling: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          runner: { ...workflow.config.runner, stallTimeoutMs: 1 },
+        },
+      }
+      const harness = makeHarness(stalling, () => [issue])
+      const pruned: WorkspaceRun[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...harness.ports.makeWorkspaces(settings),
+          prune: (run) =>
+            Effect.sync(() => {
+              pruned.push(run)
+              return { count: 2, bytes: 4_096, evicted: 1 }
+            }),
+        }),
+        // The harness's own runner is silent on the agent protocol for good, which is what the
+        // stall sweep retires.
+      }
+
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          yield* harness.awaitAgentRun
+          yield* TestClock.adjust(2)
+          yield* control.refresh
+          let current = yield* control.snapshot
+          while (current.retainedWorkspaces.length === 0) {
+            yield* Effect.yieldNow()
+            current = yield* control.snapshot
+          }
+          return current
+        }),
+      )
+
+      // A stall keeps the workspace and queues the next attempt, so nothing about the cancellation
+      // bounds what the issue holds — and the worker's own tail never runs, because it was
+      // interrupted. Every attempt would otherwise leave one more whole checkout behind.
+      expect(pruned).toEqual([{ identifier: issue.identifier, runId: 1 }])
+      expect(snapshot.retainedWorkspaces[0]).toMatchObject({
+        identifier: issue.identifier,
+        count: 2,
+        bytes: 4_096,
+      })
+    }),
+  )
+
+  it.effect('bounds the issue after a failed run too, naming the run that failed', () =>
+    Effect.gen(function* () {
+      const issue = makeIssue('example/sloppenheimer#1', 1, null, ['sloppenheimer', 'ready'])
+      const harness = makeHarness(workflow, () => [issue])
+      const acquired: Workspace[] = []
+      const released: Readonly<{ path: string; release: WorkspaceRelease }>[] = []
+      const pruned: WorkspaceRun[] = []
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeWorkspaces: (settings) => ({
+          ...recordingWorkspaces(harness, acquired, released)(settings),
+          prune: (run) =>
+            Effect.sync(() => {
+              pruned.push(run)
+              return { count: 1, bytes: 16, evicted: 0 }
+            }),
+        }),
+        runAgent: () =>
+          Effect.fail(new AgentError({ category: 'process_exited', message: 'worker failed' })),
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+          while (pruned.length === 0) {
+            yield* Effect.yieldNow()
+            yield* control.snapshot
+          }
+        }),
+      )
+
+      // A run that failed keeps its workspace, and the pass that follows still runs and still
+      // names that run — which is what keeps the directory it retained out of its own eviction.
+      expect(released[0]?.release._tag).toBe('Retained')
+      expect(pruned).toEqual([{ identifier: issue.identifier, runId: 1 }])
     }),
   )
 })

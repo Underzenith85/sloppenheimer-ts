@@ -1,7 +1,13 @@
 import type { FileSystem } from '@effect/platform'
 import type { Deferred, Effect, Option, Queue, Ref } from 'effect'
 
-import type { Issue, IssueId, JsonObject, TokenTotals } from '../../domain/domain.js'
+import type {
+  Issue,
+  IssueId,
+  IssueIdentifier,
+  JsonObject,
+  TokenTotals,
+} from '../../domain/domain.js'
 import type { TrackerError, WorkflowError } from '../../domain/errors.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
 import type { AgentDetailRecord, AgentDetailSnapshot, AgentEvent } from '../../telemetry.js'
@@ -87,6 +93,19 @@ export type DeliverySnapshot = Readonly<{
   detailUrl: string
 }>
 
+/**
+ * What one issue keeps on disk: its retained run workspaces, counted and measured after the last
+ * run of it ended. Published so an operator sees an issue whose attempts keep leaving whole
+ * checkouts behind before the disk does.
+ */
+export type RetainedWorkspaceSnapshot = Readonly<{
+  issueId: IssueId
+  identifier: string
+  count: number
+  bytes: number
+  observedAt: string
+}>
+
 export type RetrySnapshot = Readonly<{
   issueId: IssueId
   identifier: string
@@ -135,6 +154,8 @@ export type OrchestratorSnapshot = Readonly<{
   }>
   pollingIntervalMs: number
   maxConcurrentAgents: number
+  /** How many retained run workspaces one issue keeps, as the workflow in force sets it. */
+  retainedWorkspaceLimit: number
   counts: Readonly<{ running: number; retrying: number; delivering: number; completed: number }>
   pausedIssueNumbers: readonly number[]
   handoffs: readonly HandoffSnapshot[]
@@ -147,6 +168,8 @@ export type OrchestratorSnapshot = Readonly<{
   delivering: readonly DeliverySnapshot[]
   /** Finished work, newest first and bounded by {@link publishedCompletedWork}. */
   completed: readonly CompletedSnapshot[]
+  /** Issues holding retained run workspaces, largest first. Measured after each run ends. */
+  retainedWorkspaces: readonly RetainedWorkspaceSnapshot[]
   /**
    * Normalized issue states with no dispatch slot left, because the workflow narrows
    * `agent.max_concurrent_agents_by_state` below the global limit and that state has reached its
@@ -242,6 +265,19 @@ export type OrchestratorEvent =
       postflight: PostflightOutcome
     }>
   | Readonly<{ _tag: 'RetryDue'; issueId: IssueId; attempt: number }>
+  /**
+   * What an issue keeps on disk, as the worker that has just ended counted it after bounding it.
+   * Reported from the worker's fiber rather than written there, because the count is the state's;
+   * `runId` names that worker, so a count a terminal cleanup has since overtaken is refused.
+   */
+  | Readonly<{
+      _tag: 'RetainedWorkspacesObserved'
+      issueId: IssueId
+      identifier: IssueIdentifier
+      runId: number
+      count: number
+      bytes: number
+    }>
   /** A retained delivery's next publication attempt is due. No agent runs for this. */
   | Readonly<{ _tag: 'DeliveryDue'; issueId: IssueId; attempt: number }>
   /**

@@ -109,6 +109,8 @@ const orchestratorSnapshot = (
   maxConcurrentAgents: 1,
   counts: { running: 0, retrying: 0, delivering: 0, completed: 0 },
   completed: [],
+  retainedWorkspaceLimit: 3,
+  retainedWorkspaces: [],
   saturatedStates: [],
   inspectableAgents: [],
   pausedIssueNumbers,

@@ -136,6 +136,7 @@ const pollingSection = Schema.Struct({
 
 const workspaceSection = Schema.Struct({
   root: Schema.optional(nonEmptyString('workspace.root')),
+  retained_limit: Schema.optional(positiveInteger('workspace.retained_limit')),
 }).annotations({ message: () => 'workspace must be a map' })
 
 const hooksSection = Schema.Struct({

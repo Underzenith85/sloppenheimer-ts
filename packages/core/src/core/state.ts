@@ -60,6 +60,10 @@ export type RuntimeState = Readonly<{
   deliveries: ReadonlyMap<IssueId, DeliveryEntry>
   /** Finished work, keyed by issue: enough of each to say what Sloppenheimer merged, and when. */
   completed: ReadonlyMap<IssueId, CompletedEntry>
+  /** The retention pass's three slices, all reasoned about in `transitions/workspaces.ts`. */
+  retainedWorkspaces: ReadonlyMap<IssueId, RetainedWorkspaceEntry>
+  workspaceRemovals: ReadonlyMap<IssueId, number>
+  pruneRuns: ReadonlyMap<IssueId, number | null>
   /**
    * Finished work an earlier host recorded, restored from the completion store and already
    * filtered to the Finished window.
@@ -207,6 +211,14 @@ export type CompletedSnapshot = Readonly<{
   outcome: 'merged'
   finishedAt: string
   pullRequestUrl: string | null
+}>
+/** An issue's retained workspaces as the host last counted them. */
+export type RetainedWorkspaceEntry = Readonly<{
+  issueId: IssueId
+  identifier: IssueIdentifier
+  count: number
+  bytes: number
+  observedAt: Date
 }>
 
 export type RetryEntry = Readonly<{
@@ -443,6 +455,9 @@ export const initialState = (
   // A persisted handoff is a claim this orchestrator already holds, before its issue is hydrated.
   claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
+  retainedWorkspaces: new Map(),
+  workspaceRemovals: new Map(),
+  pruneRuns: new Map(),
   deliveries: new Map(),
   completed: new Map(),
   restoredCompletions: restored.completions,

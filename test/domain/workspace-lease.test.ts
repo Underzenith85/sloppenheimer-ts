@@ -7,6 +7,7 @@ import {
   encodeLease,
   heldLease,
   leaseIsClaimed,
+  ownerIsGone,
   retainedLease,
   type OwnerObservation,
   type WorkspaceLeaseRecord,
@@ -161,5 +162,22 @@ describe('who a lease belongs to', (): void => {
         running('554433'),
       ),
     ).toBe(true)
+  })
+})
+
+describe('whether a recorded owner is gone', (): void => {
+  it('is gone when its process is, or when a successor carries its id', (): void => {
+    expect(ownerIsGone(owner, gone)).toBe(true)
+    expect(ownerIsGone(owner, running('554433'))).toBe(true)
+  })
+
+  it('is not gone while its own process runs, or while it cannot be told from one', (): void => {
+    expect(ownerIsGone(owner, running('918273'))).toBe(false)
+    expect(ownerIsGone(owner, running(null))).toBe(false)
+    expect(ownerIsGone({ ...owner, startMarker: null }, running('554433'))).toBe(false)
+  })
+
+  it('is never concluded gone when it cannot be observed', (): void => {
+    expect(ownerIsGone(owner, unobservable)).toBe(false)
   })
 })

@@ -218,15 +218,30 @@ export const leaseIsClaimed = (
   if (lease.owner.hostId === ownHost.hostId) {
     return ownHost.stillHeld
   }
-  if (observation._tag === 'Unobservable') {
-    return true
+  return !ownerIsGone(lease.owner, observation)
+}
+
+/**
+ * Whether an observation shows a recorded owner to be gone: its process is not there, or the
+ * process carrying its id started at a different instant and so is a successor the kernel handed
+ * the id to. A process that cannot be told apart from the owner — either start marker missing — is
+ * taken to be it, and an owner this host cannot observe at all is never concluded to be gone.
+ *
+ * This is the one reading of an observation. `leaseIsClaimed` uses it for a held lease; the
+ * retention cap uses it for a released one, where the question is not who holds the workspace but
+ * whether the host that kept it could still mean to come back for it.
+ */
+export const ownerIsGone = (owner: WorkspaceOwner, observation: OwnerObservation): boolean => {
+  switch (observation._tag) {
+    case 'Unobservable':
+      return false
+    case 'Gone':
+      return true
+    case 'Running':
+      return (
+        observation.startMarker !== null &&
+        owner.startMarker !== null &&
+        observation.startMarker !== owner.startMarker
+      )
   }
-  if (observation._tag === 'Gone') {
-    return false
-  }
-  return (
-    observation.startMarker === null ||
-    lease.owner.startMarker === null ||
-    observation.startMarker === lease.owner.startMarker
-  )
 }

@@ -2,14 +2,16 @@ import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
-import { issueId } from '@sloppenheimer/core/domain/domain.js'
+import { issueId, issueIdentifier } from '@sloppenheimer/core/domain/domain.js'
 import { createSnapshot } from '@sloppenheimer/core/core/snapshot.js'
 import {
   initialState,
   publishedCompletedWork,
   type CompletedSnapshot,
   type EffectiveWorkflow,
+  type RetainedWorkspaceEntry,
 } from '@sloppenheimer/core/core/state.js'
+import * as Transitions from '@sloppenheimer/core/core/transitions.js'
 import { stubProvider } from '../harness/stub-tracker-provider.js'
 import { auroraRunner } from '../harness/alien-agent-runner.js'
 
@@ -33,6 +35,7 @@ const workflow: Workflow = {
     },
     pollingIntervalMs: 30_000,
     workspaceRoot: '/tmp/sloppenheimer',
+    workspaceRetainedLimit: 3,
     hooks: {
       afterCreate: null,
       beforeRun: null,
@@ -97,5 +100,55 @@ describe('operator snapshot counts', (): void => {
 
     expect(snapshot.completed).toHaveLength(publishedCompletedWork)
     expect(snapshot.counts.completed).toBe(snapshot.completed.length)
+  })
+})
+
+describe('operator snapshot retained workspaces', (): void => {
+  const retained = (index: number, count: number, bytes: number): RetainedWorkspaceEntry => ({
+    issueId: issueId(`example/sloppenheimer#${String(index)}`),
+    identifier: issueIdentifier(`example/sloppenheimer#${String(index)}`),
+    count,
+    bytes,
+    observedAt: new Date(Date.UTC(2026, 8, 2, 15, 19, 15)),
+  })
+
+  it('publishes what each issue keeps on disk, largest first, beside the limit in force', (): void => {
+    const state = initialState(effective, {
+      handoffs: [],
+      completions: [],
+      storeReadFailed: false,
+      storeError: null,
+    })
+    const counted = [retained(1, 1, 512), retained(2, 3, 300_000), retained(3, 2, 300_000)].reduce(
+      (current, entry) => Transitions.recordRetainedWorkspaces(current, entry, 1),
+      state,
+    )
+
+    const snapshot = createSnapshot(counted, '/tmp/WORKFLOW.md', Date.UTC(2026, 8, 3))
+
+    expect(snapshot.retainedWorkspaceLimit).toBe(workflow.config.workspaceRetainedLimit)
+    expect(snapshot.retainedWorkspaces).toEqual([
+      {
+        issueId: issueId('example/sloppenheimer#2'),
+        identifier: 'example/sloppenheimer#2',
+        count: 3,
+        bytes: 300_000,
+        observedAt: '2026-09-02T15:19:15.000Z',
+      },
+      {
+        issueId: issueId('example/sloppenheimer#3'),
+        identifier: 'example/sloppenheimer#3',
+        count: 2,
+        bytes: 300_000,
+        observedAt: '2026-09-02T15:19:15.000Z',
+      },
+      {
+        issueId: issueId('example/sloppenheimer#1'),
+        identifier: 'example/sloppenheimer#1',
+        count: 1,
+        bytes: 512,
+        observedAt: '2026-09-02T15:19:15.000Z',
+      },
+    ])
   })
 })
