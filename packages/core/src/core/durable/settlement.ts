@@ -20,16 +20,21 @@ export const settleRun = (
       outcome._tag === 'Published' && artifact !== null
         ? { ...artifact, publishedHead: outcome.headSha }
         : artifact,
-    status: verified
-      ? { _tag: 'Waiting', condition: 'review', deadline: current.budgetDeadline }
-      : {
-          _tag: 'Intervention',
-          reason:
-            outcome._tag === 'Published'
-              ? 'Observed publication does not match durable verification evidence; inspect before repair'
-              : outcome._tag === 'DeliveryFailed'
-                ? 'Candidate retained: ' + outcome.failure.category
-                : 'Run ended without a published candidate; inspect before a new coding attempt',
-        },
+    status:
+      verified || (outcome._tag === 'NoChanges' && current.afterPublication === 'continuation')
+        ? {
+            _tag: 'Waiting',
+            condition: current.afterPublication ?? 'review',
+            deadline: current.budgetDeadline,
+          }
+        : {
+            _tag: 'Intervention',
+            reason:
+              outcome._tag === 'Published'
+                ? 'Observed publication does not match durable verification evidence; inspect before repair'
+                : outcome._tag === 'DeliveryFailed'
+                  ? 'Candidate retained: ' + outcome.failure.category
+                  : 'Run ended without a published candidate; inspect before a new coding attempt',
+          },
   }
 }

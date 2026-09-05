@@ -15,7 +15,11 @@ export const journalExecution = (
     if (context.durable === undefined) {
       return Option.some(execution)
     }
-    const journal = yield* context.durable.start(issue, target)
+    const journal = yield* context.durable.start(
+      issue,
+      target,
+      Option.isNone(execution.codeReview) ? 'continuation' : 'review',
+    )
     if (Option.isNone(journal)) {
       yield* Ref.update(context.state, (current) => Transitions.releaseClaim(current, issue.id))
       return Option.none()

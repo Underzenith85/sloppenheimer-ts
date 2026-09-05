@@ -113,6 +113,18 @@ const reloadWorkflow = (context: OrchestratorContext): Effect.Effect<boolean> =>
     if (reloaded.fingerprint === before.lastKnownGood.workflow.fingerprint) {
       return false
     }
+    if (
+      (reloaded.config.verification === undefined) !==
+      (before.lastKnownGood.workflow.config.verification === undefined)
+    ) {
+      return yield* refuseWorkflow(
+        context,
+        'verification enabled/disabled changed; restart the host to change durable workflow mode',
+        'reload',
+        before.lastKnownGood.workflow.fingerprint,
+        'workflow mode change requires restart; retaining last known good',
+      )
+    }
     const configured = yield* context.makeEffectiveWorkflow(reloaded).pipe(asSettled)
     if (configured._tag === 'Failed') {
       return yield* refuseWorkflow(

@@ -10,7 +10,7 @@ export const admission =
     persist: (next: DurableWorkflow, expected: number | null) => Effect.Effect<void>,
     write: Writer,
   ): DurableHost['start'] =>
-  (issue, target) =>
+  (issue, target, afterPublication = 'review') =>
     semaphore.withPermits(1)(
       Effect.gen(function* () {
         const current = (yield* Ref.get(records)).get(issue.id)
@@ -18,15 +18,22 @@ export const admission =
         if (
           current !== undefined &&
           (current.intent !== 'active' ||
-            !repair ||
-            (current.status._tag !== 'Waiting' && current.status._tag !== 'Completed'))
+            !(repair
+              ? current.status._tag === 'Completed' ||
+                (current.status._tag === 'Waiting' && current.status.condition === 'review')
+              : afterPublication === 'continuation' &&
+                current.status._tag === 'Waiting' &&
+                current.status.condition === 'continuation'))
         ) {
           return Option.none()
         }
         const now = yield* Clock.currentTimeMillis
         if (
           current !== undefined &&
-          (now >= current.budgetDeadline || current.repairAttempts >= current.maximumRepairAttempts)
+          (now >= current.budgetDeadline ||
+            (repair
+              ? current.repairAttempts >= current.maximumRepairAttempts
+              : current.codingAttempts >= current.maximumCodingAttempts))
         ) {
           yield* persist(
             {
@@ -35,7 +42,7 @@ export const admission =
               updatedAt: now,
               status: {
                 _tag: 'Intervention',
-                reason: 'The workflow repair or time budget is exhausted',
+                reason: 'The workflow coding, repair, or time budget is exhausted',
               },
             },
             current.revision,
@@ -52,6 +59,7 @@ export const admission =
           revision,
           owner,
           intent: 'active',
+          afterPublication,
           status: {
             _tag: 'Executing',
             deadline: now + 900_000,

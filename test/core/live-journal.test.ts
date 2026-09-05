@@ -222,3 +222,46 @@ describe('live durable journal', () => {
     ),
   )
 })
+
+it.effect('persists non-handoff continuations across restart and bounds coding attempts', () =>
+  Effect.gen(function* () {
+    const store = yield* memoryStore
+    let host = yield* makeDurableHost(store)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const journal = yield* host
+        .start(issue, target, 'continuation')
+        .pipe(Effect.map(Option.getOrThrow))
+      yield* journal.prepared(prepared)
+      yield* journal.publication.verified(verified)
+      yield* journal.settled(published)
+      expect((yield* host.snapshot)[0]?.status).toMatchObject({
+        _tag: 'Waiting',
+        condition: 'continuation',
+      })
+      host = yield* makeDurableHost(store)
+    }
+    expect(Option.isNone(yield* host.start(issue, target, 'continuation'))).toBe(true)
+    expect((yield* host.snapshot)[0]?.codingAttempts).toBe(3)
+    expect((yield* host.snapshot)[0]?.repairAttempts).toBe(0)
+    expect((yield* host.snapshot)[0]?.status._tag).toBe('Intervention')
+  }),
+)
+
+it.effect('allows a clean non-handoff continuation without inventing publication', () =>
+  Effect.gen(function* () {
+    const store = yield* memoryStore
+    const host = yield* makeDurableHost(store)
+    const journal = yield* host
+      .start(issue, target, 'continuation')
+      .pipe(Effect.map(Option.getOrThrow))
+    yield* journal.prepared(prepared)
+    yield* journal.settled({
+      _tag: 'NoChanges',
+      branchName: target.branchName,
+      baselineSha: prepared.baselineSha,
+    })
+    const restored = yield* makeDurableHost(store)
+    expect((yield* restored.snapshot)[0]?.artifact?.publishedHead).toBeNull()
+    expect(Option.isSome(yield* restored.start(issue, target, 'continuation'))).toBe(true)
+  }),
+)

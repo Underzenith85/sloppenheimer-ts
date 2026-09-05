@@ -1025,7 +1025,9 @@ publication through the migration bridge below; it does not automatically replay
 Tracked by [#291](https://github.com/Underzenith85/sloppenheimer-ts/issues/291).
 Workflows may declare `verification.command` and a positive, bounded `verification.timeout_ms`.
 This repository uses `pnpm check`. The section is optional for existing workflows; declaring it
-requires a source-control adapter with the explicit candidate capability.
+requires a source-control adapter with the explicit candidate capability. Enabling or disabling
+verification requires a host restart because it changes durable-store composition; reload refuses
+the change and retains the last known good workflow. Command and timeout edits remain reloadable.
 
 - The candidate port separates checkpoint, alignment to the protected base, verification, remote
   observation, and publication. A candidate names its commit SHA and tree SHA as well as the
@@ -1068,6 +1070,13 @@ Tracked by [#290](https://github.com/Underzenith85/sloppenheimer-ts/issues/290),
   verification, and push have separate journal barriers. The verified tree and candidate commit
   are persisted before push; an observed publication is persisted before releasing the workspace.
   A published head with missing or mismatched verification cannot authorize another repair.
+- Successful non-handoff runs explicitly wait for a core continuation, never for review. Admission
+  permits those normal targets while enforcing the persisted three-attempt coding limit and the
+  original deadline. Clean non-handoff outcomes may continue without inventing a publication fact.
+  Other holds and review waits never implicitly authorize a fresh normal run.
+- A host rebase whose branch is already current verifies the unchanged candidate and records the
+  observed publication before returning NoChanges. It performs no push, and does not leave an
+  Executing journal or reuse evidence invalidated by checkpoint/alignment.
 - Repairs and host rebases share a persisted limit of three mutations and the original 24-hour
   admission deadline. Restart cannot reset either budget. Publication transport retries reuse
   their existing journal and candidate rather than spending another coding attempt.

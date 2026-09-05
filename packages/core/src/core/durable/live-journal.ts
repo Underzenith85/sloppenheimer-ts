@@ -12,7 +12,11 @@ import type { RunJournal, Writer } from './run-journal.js'
 
 export type { RunJournal } from './run-journal.js'
 export type DurableHost = Readonly<{
-  start: (issue: Issue, target: SourceControlTarget) => Effect.Effect<Option.Option<RunJournal>>
+  start: (
+    issue: Issue,
+    target: SourceControlTarget,
+    afterPublication?: 'review' | 'continuation',
+  ) => Effect.Effect<Option.Option<RunJournal>>
   snapshot: Effect.Effect<readonly DurableWorkflow[]>
   awaitFailure: Effect.Effect<never, WorkflowError>
   setIntent: (identifier: string, intent: DurableWorkflow['intent']) => Effect.Effect<void>
