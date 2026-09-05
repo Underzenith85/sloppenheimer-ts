@@ -275,3 +275,53 @@ it.live('retains the exact pushed candidate across restart when push acknowledge
     )
   }),
 )
+
+it.live('durably settles an already-current host rebase without pushing or stranding repair', () =>
+  Effect.gen(function* () {
+    const { repository, source, issue, prepared } = yield* fixture
+    const path = join(repository.root, 'noop.sqlite')
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* openWorkflowStore(path, true)
+        const host = yield* makeDurableHost(store)
+        const first = yield* host.start(issue, prepared.target).pipe(Effect.map(Option.getOrThrow))
+        yield* first.prepared(prepared)
+        const published = yield* runVerifiedPublication(source, issue, prepared, gate, [], {
+          journal: first.publication,
+        })
+        if (published._tag !== 'Published') {
+          return yield* Effect.die('fixture must publish')
+        }
+        const target = {
+          _tag: 'Repair',
+          branchName: prepared.target.branchName,
+          expectedHeadSha: published.headSha,
+        } as const
+        const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+        const repair = yield* source.prepare(issue, prepared.workspace, target)
+        yield* journal.prepared(repair)
+        if (source.candidates === undefined) {
+          return yield* Effect.die('fixture must have candidate capability')
+        }
+        const observing: typeof source = {
+          ...source,
+          candidates: {
+            ...source.candidates,
+            publish: () => Effect.die('an unchanged rebase must not push'),
+          },
+        }
+        const result = yield* runVerifiedPublication(observing, issue, repair, gate, [], {
+          journal: journal.publication,
+          rebaseOnly: true,
+        })
+        expect(result._tag).toBe('NoChanges')
+        const settled = (yield* host.snapshot)[0]
+        expect(settled?.status).toMatchObject({ _tag: 'Waiting', condition: 'review' })
+        expect(settled?.artifact?.verifiedRevision).toBe(settled?.artifact?.repository?.treeSha)
+        expect(settled?.artifact?.publishedHead).toBe(published.headSha)
+        const restored = yield* makeDurableHost(store)
+        expect(Option.isSome(yield* restored.start(issue, target))).toBe(true)
+      }),
+    )
+  }),
+)

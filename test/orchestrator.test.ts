@@ -466,7 +466,18 @@ const layerTestPorts = (
   )
   const makeCodeReview = ports.makeCodeReview
   if (makeCodeReview === undefined) {
-    return base
+    const makeSourceControl = ports.makeSourceControl
+    return makeSourceControl === undefined
+      ? base
+      : Layer.merge(
+          base,
+          layerSourceControlPorts(
+            ports.configuration,
+            Layer.succeed(SourceControlFactory, {
+              make: (provider) => Effect.sync(() => makeSourceControl(provider)),
+            }),
+          ),
+        )
   }
   const sourceControl: SourceControlPort = {
     prepare: (_issue, workspace, target) =>
@@ -9498,5 +9509,151 @@ it.scoped('restores a durable running claim without launching a replacement agen
     expect(launches).toBe(1)
     expect((yield* control.snapshot).running).toEqual([])
     expect((yield* control.snapshot).durableWorkflows?.[0]?.status._tag).toBe('Intervention')
+  }),
+)
+
+for (const initiallyEnabled of [false, true]) {
+  it.effect(
+    'requires restart when verification mode changes from ' + String(initiallyEnabled),
+    () =>
+      Effect.gen(function* () {
+        const enabled: Workflow = {
+          ...changedWorkflow({ fingerprint: 'verified' }),
+          config: { ...workflow.config, verification: { command: 'pnpm check', timeoutMs: 1_000 } },
+        }
+        const disabled = changedWorkflow({ fingerprint: 'unverified' })
+        const initial = initiallyEnabled ? enabled : disabled
+        const harness = makeHarness(initial)
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+            yield* control.refresh
+            const providers = harness.trackerProviders().length
+            harness.setWorkflow(initiallyEnabled ? disabled : enabled)
+            yield* control.refresh
+            const snapshot = yield* control.snapshot
+            expect(snapshot.effectiveWorkflow.fingerprint).toBe(initial.fingerprint)
+            expect(snapshot.workflowReloadError?.message).toContain('restart the host')
+            expect(harness.trackerProviders().length).toBe(providers)
+          }),
+        )
+      }),
+  )
+}
+
+it.scoped('dispatches a verified continuation when no code-review port is composed', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('durable-continuation-')
+    const configured: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        workspaceRoot,
+        handoffEnabled: false,
+        verification: { command: 'pnpm check', timeoutMs: 1_000 },
+      },
+    }
+    const issue = {
+      ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+      id: issueId('167'),
+    }
+    const harness = makeHarness(configured, () => [issue])
+    const { makeCodeReview, ...corePorts } = harness.ports
+    void makeCodeReview
+    const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+    let launches = 0
+    const second = yield* Deferred.make<void>()
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...corePorts,
+      makeSourceControl: (): SourceControlPort => ({
+        prepare: (_issue, workspace, target) =>
+          Effect.succeed({
+            workspace,
+            target,
+            baseBranch: 'main',
+            baseSha: 'base',
+            baselineSha: 'base',
+            expectedRemoteHead: Option.none(),
+          }),
+        inspect: () => Effect.succeed(changedWorktree),
+        publish: () => Effect.die('must use verified publication'),
+        rebase: () => Effect.die('no handoff to rebase'),
+        candidates: {
+          checkpoint: (_issue, prepared) =>
+            Effect.succeed(
+              Option.some({
+                prepared,
+                headSha: 'candidate',
+                treeSha: 'tree',
+                commitCreated: true,
+              }),
+            ),
+          observe: () => Effect.succeed({ _tag: 'Unpublished' }),
+          align: (candidate) => Effect.succeed(candidate),
+          verify: (candidate) =>
+            Effect.succeed({
+              candidate,
+              evidence: {
+                headSha: candidate.headSha,
+                treeSha: candidate.treeSha,
+                command: 'pnpm check',
+                verifiedAt: 0,
+              },
+            }),
+          publish: (verified) =>
+            Effect.succeed({
+              _tag: 'Published',
+              headSha: verified.candidate.headSha,
+              branchName: verified.candidate.prepared.target.branchName,
+              commitCreated: true,
+            }),
+        },
+      }),
+      runAgent: () =>
+        Effect.gen(function* () {
+          launches += 1
+          if (launches === 2) {
+            yield* Deferred.succeed(second, undefined)
+            return yield* Effect.never
+          }
+          return { threadId: 'thread', turnId: 'turn', turnCount: 1 }
+        }),
+    }).pipe(Effect.provideService(WorkflowStore, store))
+    while ((yield* control.snapshot).retrying.length === 0) {
+      yield* Effect.yieldNow()
+    }
+    expect((yield* store.list)[0]?.status).toMatchObject({
+      _tag: 'Waiting',
+      condition: 'continuation',
+    })
+    yield* TestClock.adjust(1_001)
+    yield* Deferred.await(second)
+    expect(launches).toBe(2)
+    expect((yield* store.list)[0]?.codingAttempts).toBe(2)
+  }),
+)
+
+it.effect('reloads verification command changes without changing durable mode', () =>
+  Effect.gen(function* () {
+    const initial: Workflow = {
+      ...changedWorkflow({ fingerprint: 'first-gate' }),
+      config: { ...workflow.config, verification: { command: 'pnpm check', timeoutMs: 1_000 } },
+    }
+    const reloaded: Workflow = {
+      ...initial,
+      fingerprint: 'new-gate',
+      config: { ...initial.config, verification: { command: 'pnpm test', timeoutMs: 2_000 } },
+    }
+    const harness = makeHarness(initial)
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
+        yield* control.refresh
+        harness.setWorkflow(reloaded)
+        yield* control.refresh
+        expect((yield* control.snapshot).effectiveWorkflow.fingerprint).toBe('new-gate')
+        expect((yield* control.snapshot).workflowReloadError).toBeNull()
+      }),
+    )
   }),
 )

@@ -64,7 +64,7 @@ export const WorkflowStatus = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal('Retrying'), ...active, dueAt: Schema.Number }),
   Schema.Struct({
     _tag: Schema.Literal('Waiting'),
-    condition: Schema.Literal('capacity', 'checks', 'review', 'eligibility'),
+    condition: Schema.Literal('capacity', 'checks', 'review', 'eligibility', 'continuation'),
     deadline: Schema.Number,
   }),
   Schema.Struct({ _tag: Schema.Literal('Intervention'), reason: Schema.NonEmptyString }),
@@ -79,6 +79,7 @@ export const DurableWorkflow = Schema.Struct({
   objective: Schema.String,
   revision: Schema.Int.pipe(Schema.nonNegative()),
   intent: Schema.Literal('active', 'paused', 'cancelled'),
+  afterPublication: Schema.optionalWith(Schema.Literal('review', 'continuation'), { exact: true }),
   owner: Schema.optionalWith(Schema.NonEmptyString, { exact: true }),
   status: WorkflowStatus,
   artifact: Schema.NullOr(Artifact),

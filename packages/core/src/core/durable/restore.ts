@@ -15,8 +15,9 @@ export const restoreWorkflows = (
         record.status._tag === 'Completed' ||
         record.status._tag === 'Intervention' ||
         (record.status._tag === 'Waiting' &&
-          record.artifact?.publishedHead !== null &&
-          record.artifact?.publishedHead !== undefined)
+          (record.status.condition === 'continuation' ||
+            (record.artifact?.publishedHead !== null &&
+              record.artifact?.publishedHead !== undefined)))
       ) {
         return Effect.succeed(record)
       }

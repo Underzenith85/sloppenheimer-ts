@@ -18,7 +18,11 @@ export type DurableHost = Readonly<{
     issueId: string,
     recovery: SourceControlRecoveryPort,
   ) => Effect.Effect<void>
-  start: (issue: Issue, target: SourceControlTarget) => Effect.Effect<Option.Option<RunJournal>>
+  start: (
+    issue: Issue,
+    target: SourceControlTarget,
+    afterPublication?: 'review' | 'continuation',
+  ) => Effect.Effect<Option.Option<RunJournal>>
   snapshot: Effect.Effect<readonly DurableWorkflow[]>
   awaitFailure: Effect.Effect<never, WorkflowError>
   setIntent: (identifier: string, intent: DurableWorkflow['intent']) => Effect.Effect<void>
