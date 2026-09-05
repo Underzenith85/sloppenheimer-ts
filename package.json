@@ -8,7 +8,7 @@
   },
   "type": "module",
   "scripts": {
-    "build": "tsc -b tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs",
+    "build": "tsc -b tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs && pnpm --filter @sloppenheimer/coordinator-ui build",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "dev": "tsx src/cli.ts",
     "format": "oxfmt .",
@@ -19,7 +19,7 @@
     "test:conformance": "vitest run --config vitest.conformance.config.ts",
     "test:real-integration": "vitest run --config vitest.real-integration.config.ts",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json --noEmit && pnpm --filter @sloppenheimer/coordinator-ui typecheck && tsc -p test/coordinator-ui/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@effect/platform": "0.97.1",
@@ -35,11 +35,15 @@
   "devDependencies": {
     "@effect/vitest": "0.30.0",
     "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
     "fast-check": "4.9.0",
     "happy-dom": "20.0.11",
     "oxfmt": "0.65.0",
     "oxlint": "1.80.0",
     "oxlint-tsgolint": "7.0.2001",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "tsx": "4.23.12",
     "typescript": "7.0.2",
     "vitest": "4.1.11"

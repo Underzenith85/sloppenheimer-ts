@@ -19,7 +19,7 @@ thing as a tolerated lint.
 - `pnpm format` rewrites files with Oxfmt. Never hand-format around it.
 - `pnpm lint` is Oxlint with its native type-aware engine.
 - `pnpm typecheck` covers the workspace and, separately, the browser sources under
-  `src/operator/ui/`.
+  `src/operator/ui/` and the coordinator UI and its tests.
 - `pnpm test` is the default Vitest profile. `pnpm test <path>` narrows it; `pnpm test:conformance`
   and `pnpm test:real-integration` are the other two profiles, selected by test path.
   Do not add a dependency, a script, or a lint exemption to make a check pass. If a rule is genuinely
@@ -255,7 +255,8 @@ never through `Date.now()` or `new Date()`.
   `terminateChildProcess` in
   `packages/core/src/support/subprocess.ts`, and the CLI's shutdown watchdog. Each says why. Reach
   for one only when a real process is what you are waiting on.
-- `src/operator/ui/` is browser code with no Effect runtime and is outside this convention.
+- `src/operator/ui/` and `packages/coordinator-ui/src/` are browser code with no Effect runtime
+  and are outside this convention.
 
 Tests therefore drive the whole orchestrator from `TestClock` — the clock `Effect.sleep` and
 `Schedule` already run against — instead of waiting on the wall clock.
@@ -451,6 +452,25 @@ change which tests each profile runs.
 - **Adding an adapter** of an existing kind is one entry in the registry beside the composition root
   — `src/tracker-adapters.ts` or `src/agent-runners.ts` — and no change under `config/` or `core/`.
   Backend-specific settings are validated in that backend's adapter, never in `packages/core`.
+
+### Coordinator UI infrastructure
+
+`packages/coordinator-ui` is a private browser application package, rather than an importable
+architectural library. It has no exports or instance dependency. This is the exception to the
+library manifest and TypeScript project-reference shape above: Vite builds static assets into its
+own `dist/` after the instance build, and separate no-emit configurations check browser sources,
+the Vite configuration, and its tests. There is not yet a coordinator server executable.
+
+React and TanStack Query belong to this browser package. The root also declares React and its types
+as development dependencies because UI tests live in `test/coordinator-ui/`. Those tests run in
+the existing default Vitest profile; the root application and adapters may not import the browser
+package or its runtime dependencies. Browser sources may not import Node or instance implementations.
+The package and import boundary suites enforce these separations.
+
+The UI inherits every strict compiler setting, explicit return types, and source size limits.
+React hooks and JSX accessibility rules supplement the shared lint rules. CSS custom properties
+hold tokens, CSS Modules hold component styles, and the browser entry imports the reset.
+Future UI networking consumes the coordinator API, without instance credentials in browser code.
 
 ## Module and function size
 
