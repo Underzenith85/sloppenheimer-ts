@@ -16,6 +16,12 @@ export type WorkflowStorePort = Readonly<{
   ) => Effect.Effect<void, WorkflowStoreError>
 }>
 
+/** The composition read fixes whether this host acquired durable authority. */
+export class WorkflowComposition extends Context.Tag('sloppenheimer/WorkflowComposition')<
+  WorkflowComposition,
+  Readonly<{ verificationEnabled: boolean }>
+>() {}
+
 export class WorkflowStore extends Context.Tag('sloppenheimer/WorkflowStore')<
   WorkflowStore,
   WorkflowStorePort

@@ -10,6 +10,7 @@ import type { CodeReviewPort } from '../../ports/index.js'
 import { captureExecutionSnapshot, issueIsRoutable, logContext } from '../policy.js'
 import type { EffectiveWorkflow, ExecutionSnapshot, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
+import { findOrResumePublishedHandoff, owesPublishedHandoff } from './published-handoff.js'
 import { persistHandoffs } from './store.js'
 import { openDetailRecord } from './runs.js'
 import type { RuntimeCells } from './types.js'
@@ -144,7 +145,13 @@ const restoredHandoffEntry = (
 export const recoverMissingHandoffs = (cells: RuntimeCells): Effect.Effect<void> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(cells.state)
-    if (opening.startupRecoveryFinished) {
+    const durableRecords = cells.durable === undefined ? [] : yield* cells.durable.snapshot
+    if (
+      opening.startupRecoveryFinished &&
+      !durableRecords.some(
+        (record) => owesPublishedHandoff(record) && !opening.handoffs.has(issueId(record.issueId)),
+      )
+    ) {
       return
     }
     const effective = opening.lastKnownGood
@@ -166,9 +173,7 @@ export const recoverMissingHandoffs = (cells: RuntimeCells): Effect.Effect<void>
     let attemptFailed = false
     for (const issue of fetched.value) {
       if (!issue.dispatchable) {
-        yield* Ref.update(cells.state, (pass) =>
-          Transitions.noteRecovery(Transitions.resolveRecovery(pass, issue.id), { skipped: 1 }),
-        )
+        yield* Ref.update(cells.state, (pass) => Transitions.noteRecovery(pass, { skipped: 1 }))
         continue
       }
       const pass = yield* Ref.get(cells.state)
@@ -220,7 +225,9 @@ const recoverIssueHandoff = (
   requiredLabels: readonly string[],
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {
-    const found = yield* capability.findExistingHandoff(issue).pipe(asSettled)
+    const found = yield* findOrResumePublishedHandoff(cells, effective, capability, issue).pipe(
+      asSettled,
+    )
     if (found._tag === 'Failed') {
       yield* Ref.update(cells.state, (failing) => Transitions.noteRecovery(failing, { failed: 1 }))
       yield* logWarning('startup handoff recovery lookup failed; retrying later', {
@@ -260,9 +267,11 @@ const recoverIssueHandoff = (
         recordHandoff(branchObserved, observedAt, {
           step: 'pull_request',
           status: 'observed',
-          message: 'Recovered an existing pull request during startup',
+          message: foundResult.created
+            ? 'Completed a durable publication handoff'
+            : 'Recovered an existing pull request during startup',
           pullRequest: {
-            status: 'reused',
+            status: foundResult.created ? 'created' : 'reused',
             number: foundResult.pullRequestNumber,
             url: foundResult.pullRequestUrl,
             state: disposition.state,

@@ -1,4 +1,4 @@
-import { Deferred, Effect, Exit, MutableRef, Queue, Ref } from 'effect'
+import { Deferred, Effect, MutableRef, Queue, Ref } from 'effect'
 
 import { AgentError, type WorkspaceError } from '../domain/errors.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -97,11 +97,8 @@ export const runSession = (
         },
       }),
     ),
-    Effect.onExit((exit) =>
-      Exit.isInterrupted(exit)
-        ? Effect.void
-        : Effect.interruptible(execution.workspaces.afterRun(workspace)),
-    ),
+    // The adapter bounds this best-effort hook. Cancellation must wait for cleanup too.
+    Effect.ensuring(execution.workspaces.afterRun(workspace)),
     Effect.asVoid,
   )
 }

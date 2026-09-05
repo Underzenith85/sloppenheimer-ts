@@ -377,3 +377,24 @@ it.effect('allows a clean non-handoff continuation without inventing publication
     expect(Option.isSome(yield* restored.start(issue, target, 'continuation'))).toBe(true)
   }),
 )
+
+it.effect(
+  'records verified publication facts after a pause without authorizing further mutation',
+  () =>
+    Effect.gen(function* () {
+      const host = yield* memoryStore.pipe(Effect.flatMap(makeDurableHost))
+      const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.prepared(prepared)
+      yield* journal.publication.aligned(candidate)
+      yield* host.setIntent(issue.identifier, 'paused')
+      yield* journal.publication.verified(verified)
+      yield* journal.publication.published(published)
+      expect((yield* host.snapshot)[0]).toMatchObject({
+        intent: 'paused',
+        status: { _tag: 'Waiting', condition: 'review' },
+        artifact: { publishedHead: 'candidate', verifiedRevision: 'tree' },
+      })
+      const mutation = yield* Effect.fork(journal.publication.checkpointing)
+      expect(Exit.isInterrupted(yield* Fiber.await(mutation))).toBe(true)
+    }),
+)
