@@ -32,8 +32,16 @@ export const Artifact = Schema.Struct({
   expectedRemoteHead: Schema.NullOr(Schema.String),
   verifiedRevision: Schema.NullOr(Schema.String),
   publishedHead: Schema.NullOr(Schema.String),
+  remoteObservation: Schema.optionalWith(
+    Schema.Struct({
+      headSha: Schema.NullOr(Schema.String),
+      observedAt: Schema.Number,
+    }),
+    { exact: true },
+  ),
   repository: Schema.optionalWith(
     Schema.Struct({
+      identity: Schema.optionalWith(Schema.NonEmptyString, { exact: true }),
       branchName: Schema.NonEmptyString,
       baseBranch: Schema.NonEmptyString,
       baseSha: Schema.NonEmptyString,

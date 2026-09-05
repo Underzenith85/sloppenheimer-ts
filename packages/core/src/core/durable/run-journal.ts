@@ -22,6 +22,7 @@ const preparedArtifact = (prepared: PreparedRepository): Artifact => ({
   verifiedRevision: null,
   publishedHead: null,
   repository: {
+    ...(prepared.repositoryIdentity === undefined ? {} : { identity: prepared.repositoryIdentity }),
     branchName: prepared.target.branchName,
     baseBranch: prepared.baseBranch,
     baseSha: prepared.baseSha,
@@ -34,6 +35,9 @@ const candidateArtifact = (candidate: Candidate): Artifact => ({
   ...preparedArtifact(candidate.prepared),
   candidateRevision: candidate.treeSha,
   repository: {
+    ...(candidate.prepared.repositoryIdentity === undefined
+      ? {}
+      : { identity: candidate.prepared.repositoryIdentity }),
     branchName: candidate.prepared.target.branchName,
     baseBranch: candidate.prepared.baseBranch,
     baseSha: candidate.prepared.baseSha,
