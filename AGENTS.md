@@ -1106,10 +1106,9 @@ Tracked by [#290](https://github.com/Underzenith85/sloppenheimer-ts/issues/290),
 - Startup converts unfinished records into visible intervention holds. It preserves exact
   candidate evidence and refuses a fresh coder, including when a push may have succeeded without
   acknowledgement. Confirmed published records continue through existing handoff reconciliation.
-  Automatic inspection/adoption after proving child termination is still outstanding.
-- Durable candidates are protected from retention pruning. Automatic whole-issue workspace
-  deletion is deferred in durable mode until cleanup has its own durable operation. This
-  conservative migration behavior can retain additional disk usage.
+  Local inspection/adoption after proving child termination is still outstanding.
+- Durable candidates are protected from retention pruning. Captured artifact deletion is a durable cleanup obligation, with bounded retries and
+  an intervention after exhaustion. Older unreferenced workspaces still use retention pruning.
 - The API exposes optional `durable_workflows` summaries. The console puts unresolved recovery
   work in Needs attention and offers no misleading Start action. Existing live delivery holds
   still support explicit re-verification and delivery.
@@ -1143,8 +1142,68 @@ original normal or repair target; admission requires the same branch and repair 
 continues the original coding/repair counters and total deadline.
 
 Cancellation inspects only after the session and command finalizers have completed and while
-the run still holds its workspace lease. This settlement is awaited by the worker cancellation
-before pause returns. A dirty workspace, failed inspection, interrupted preparation, or candidate
+the run still holds its workspace lease. Pause acknowledges persisted intent and signals cancellation immediately. The worker cancellation
+awaits this settlement before releasing its ownership; pause acknowledgement is not cleanup completion. A dirty workspace, failed inspection, interrupted preparation, or candidate
 with verification/publication evidence remains an explicit intervention hold. Pausing or restarting
 does not turn uncertain work into a safe fresh attempt. Startup preserves known retry settlements;
 records left executing by a host crash still require reconciliation.
+
+### Durable review, migration, and captured cleanup
+
+The review and migration integration for
+[#292](https://github.com/Underzenith85/sloppenheimer-ts/issues/292) and
+[#293](https://github.com/Underzenith85/sloppenheimer-ts/issues/293) adds these contracts:
+
+- Review, thread resolution, PR creation, and merge commit exact-head operation intent before the
+  adapter call and commit the observed outcome afterward. Revision/generation fencing refuses a
+  competing action. Pending remote writes become unknown on restart; existing PR/head inspection
+  precedes another action. Unknown is not an exactly-once guarantee. Each action is bounded by a
+  minute and the original issue deadline; repeated same-input failures escalate after three.
+- GitHub resolves a review comment's abbreviated claim through its commit API. Only the full SHA
+  returned by that authority enters the review decision. Prefix equality never authorizes merge.
+- Every new review mutation refreshes eligibility, including the compatibility path. An observed
+  push or merge can be recorded during pause; that fact does not authorize the next mutation.
+- Agent and postflight phase transitions are applied atomically before entering the corresponding
+  operation, with run-ID fencing. Their old mailbox ordering handshakes are removed. Stale crash
+  notifications cannot fault a replacement run. Polling and some teardown still use the legacy
+  mailbox; the pure-kernel scheduler replacement remains outstanding.
+- A process launched inside a leased workspace writes a starting receipt before spawn, then its
+  process group and namespace, then a stopped receipt after finalization. The spawn/receipt crash
+  gap remains an explicit unknown. Startup can resume an exactly verified, remotely confirmed
+  publication only when every captured process is confirmed stopped. Missing receipts, unknown
+  namespaces, and live groups retain the intervention. This permits remote-only recovery; it does
+  not adopt an interrupted local worktree or launch another coder.
+- Receipt syncing can outlast a fast process. Exit status and output failure are retained from
+  spawn time so command readers cannot miss completion while the receipt is written.
+- SQLite imports retained handoffs and visible legacy completions idempotently. Handoffs already
+  in SQLite win; ambiguous legacy repairs remain intervention records. Historical completion can
+  have a null head because the old completion file did not store it. That never creates candidate
+  verification evidence. JSON files remain unchanged in durable mode.
+- A merged head and completion are persisted before removing the live handoff. Cleanup records
+  capture the original workspace path/key, run outside the mailbox, and retain failures after an
+  issue disappears. Five bounded attempts precede intervention. Cleanup never follows a reload to
+  a new workspace root, and never runs a removal hook over unconfirmed process ownership.
+- Expired waits become intervention records. The compatible state API adds a progress projection
+  with operation, deadline, verified revision, budgets, cleanup, and next action. Active handoff and
+  delivery details do not count against the completed-detail retention limit.
+
+### Rollout and rollback constraints
+
+Keep one host/publication authority and use external/manual supervision until the required failure
+matrix passes. Do not enable a second legacy publisher against the same issues. The SQLite host
+lock prevents competing hosts with the same workflow path, not a different host configuration
+pointing at the same repository.
+
+Before switching binaries or authority, quiesce execution, confirm child-process termination, and
+back up the SQLite database with its WAL together with the legacy JSON and retained workspace
+metadata. The unchanged JSON is a migration input, not a current rollback snapshot. An older binary
+cannot understand the added review/cleanup obligations or a historical null completed head; do not
+point it at the new database or resume publishing from the old JSON. Reconcile remote heads and
+open PRs first and explicitly reconstruct the older host's state if rollback is required.
+
+Full completion of [#288](https://github.com/Underzenith85/sloppenheimer-ts/issues/288) still requires
+the authoritative pure-kernel production scheduler and retirement of legacy lifecycle maps,
+supervised local artifact adoption/inspection after crashed execution, complete migration of
+unreferenced legacy workspace metadata, and the full restart/parked-port fault matrix. These
+additions do not constitute that cutover. Required real process-tree and conformance gates must
+pass on a host with functioning process-group visibility before automatic recovery is deployed.

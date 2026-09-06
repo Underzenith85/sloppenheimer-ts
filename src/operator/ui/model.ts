@@ -373,7 +373,11 @@ const buildWorkModel = (
     claim(deliveringItem(entry, issues.get(entry.issue_identifier), paused, inspectable))
   }
   for (const entry of state?.durable_workflows ?? []) {
-    if (entry.status === 'Intervention') {
+    if (
+      entry.status === 'Intervention' ||
+      entry.progress?.cleanup_state === 'retry' ||
+      entry.progress?.cleanup_state === 'intervention'
+    ) {
       claim(durableItem(entry, issues.get(entry.issue_identifier)))
     }
   }

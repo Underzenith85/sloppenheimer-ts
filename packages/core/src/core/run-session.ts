@@ -1,4 +1,5 @@
-import { Deferred, Effect, MutableRef, Queue, Ref } from 'effect'
+import { enterRunPhase } from './run-phase.js'
+import { Effect, MutableRef, Queue, Ref } from 'effect'
 
 import { AgentError, type WorkspaceError } from '../domain/errors.js'
 import type { Issue, Workspace } from '../domain/domain.js'
@@ -35,20 +36,7 @@ export const runSession = (
 ): Effect.Effect<void, AgentError | WorkspaceError> => {
   const { context, issue, execution } = launch
   return execution.workspaces.beforeRun(workspace).pipe(
-    Effect.zipRight(
-      Effect.gen(function* () {
-        const applied = yield* Deferred.make<boolean>()
-        yield* Queue.offer(context.mailbox, {
-          _tag: 'AgentStarted',
-          issueId: issue.id,
-          runId: launch.runId,
-          applied,
-        })
-        if (!(yield* Deferred.await(applied))) {
-          return yield* Effect.interrupt
-        }
-      }),
-    ),
+    Effect.zipRight(enterRunPhase(context, issue.id, launch.runId, 'Agent')),
     Effect.zipRight(
       superviseAgent(context.ports.agentRunner, {
         issue,

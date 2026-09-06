@@ -367,6 +367,9 @@ describe('GitHub pull request monitor', (): void => {
             mergeable_state: 'clean',
           })
         }
+        if (url.endsWith('/commits/abcdef1')) {
+          return Response.json({ sha: 'abcdef1' + '0'.repeat(33) })
+        }
         if (url.includes('/check-runs')) {
           return Response.json({
             check_runs: [
@@ -465,8 +468,11 @@ describe('GitHub pull request monitor', (): void => {
         outdated: true,
         commentHeadSha: null,
       })
-      expect(result.codexReview).toEqual({ headShaPrefix: 'abcdef1', status: 'completed' })
-      expect(fetchMock).toHaveBeenCalledTimes(5)
+      expect(result.codexReview).toEqual({
+        headSha: 'abcdef1' + '0'.repeat(33),
+        status: 'completed',
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(6)
     }),
   )
 
@@ -517,6 +523,9 @@ describe('GitHub pull request monitor', (): void => {
             method: init?.method ?? 'GET',
             body: typeof init?.body === 'string' ? init.body : null,
           })
+          if (url.includes('/comments?')) {
+            return Response.json([])
+          }
           if (url.endsWith('/pulls/41')) {
             return Response.json({ head: { sha: 'head-1' } })
           }
@@ -528,6 +537,11 @@ describe('GitHub pull request monitor', (): void => {
 
       expect(requests).toEqual([
         {
+          url: 'https://api.github.test/repos/example/sloppenheimer/issues/41/comments?per_page=100',
+          method: 'GET',
+          body: null,
+        },
+        {
           url: 'https://api.github.test/repos/example/sloppenheimer/pulls/41',
           method: 'GET',
           body: null,
@@ -535,9 +549,20 @@ describe('GitHub pull request monitor', (): void => {
         {
           url: 'https://api.github.test/repos/example/sloppenheimer/issues/41/comments',
           method: 'POST',
-          body: JSON.stringify({ body: '@codex review' }),
+          body: JSON.stringify({ body: '@codex review\n\n<!-- sloppenheimer:review:head-1 -->' }),
         },
       ])
+    }),
+  )
+
+  it.effect('does not repeat an exact-head review request whose acknowledgement was lost', () =>
+    Effect.gen(function* () {
+      const fetchMock = vi.fn(async (): Promise<Response> =>
+        Response.json([{ body: '@codex review\n\n<!-- sloppenheimer:review:head-1 -->' }]),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      yield* (yield* pullRequests).requestReview(41, 'head-1')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
     }),
   )
 

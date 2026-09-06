@@ -1,3 +1,4 @@
+import { restoreDurableHandoffs } from './runtime/durable-stores.js'
 import { startPublicationRecovery } from './runtime/publication-recovery.js'
 import { Effect, FiberSet, Option, Queue, Ref, Stream, type Scope } from 'effect'
 
@@ -130,11 +131,12 @@ export const startOrchestratorRuntime = (
     }
 
     const opened = yield* openStores(bootstrapWorkflow)
+    const restored = yield* restoreDurableHandoffs(durable, opened.restored)
     const cells: RuntimeCells = {
       ...(durable === undefined ? {} : { durable }),
       state: yield* Ref.make(
         Transitions.holdRetirements(
-          initialState(bootstrapWorkflow, opened.restored),
+          initialState(bootstrapWorkflow, restored),
           bootstrap.retirements,
         ),
       ),

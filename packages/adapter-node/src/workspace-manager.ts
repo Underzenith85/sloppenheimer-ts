@@ -1,3 +1,11 @@
+import { removeCapturedWorkspace } from './captured-cleanup.js'
+import { dirname } from 'node:path'
+import {
+  makeProcessWitness,
+  ProcessWitness,
+  processWitnessDirectory,
+  witnessedProcessesStopped,
+} from './process-witness.js'
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { Cause, Effect, Exit, Option } from 'effect'
@@ -277,6 +285,7 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
         reportedAs('create_failed', 'failed to create workspace'),
       )
       const workspace: Workspace = { path: paths.runPath, key: paths.runKey }
+      const witness = makeProcessWitness(fileSystem, processWitnessDirectory(root, workspace.path))
       // The link that publishes the claim, the run directory, and the `after_create` hook all
       // resolve through the issue directory, so it is held still for the three of them and
       // confirmed to be the one that was inspected before each. A directory swapped for a link
@@ -303,7 +312,9 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
           yield* restore(
             Effect.zipRight(
               stillTheIssueDirectory,
-              provisionRunWorkspace(fileSystem, hooks, workspace, stillTheIssueDirectory),
+              provisionRunWorkspace(fileSystem, hooks, workspace, stillTheIssueDirectory).pipe(
+                Effect.provideService(ProcessWitness, witness),
+              ),
             ),
           ).pipe(
             Effect.onExit((exit) =>
@@ -323,7 +334,9 @@ const leaseRunWorkspace = <Value, Failure, Requirements>(
           )
         }),
       ).pipe(reportedAs('create_failed', 'failed to create workspace'))
-      return yield* restore(use(workspace)).pipe(
+      return yield* restore(
+        use(workspace).pipe(Effect.provideService(ProcessWitness, witness)),
+      ).pipe(
         Effect.onExit((exit) =>
           releaseRunWorkspace(
             fileSystem,
@@ -352,6 +365,12 @@ export const makeWorkspaceManager = (
     // this host can see is gone, so one still on its way to publication is left alone.
     yield* pruneStagedLeases(fileSystem, leaseStagingPath(root))
     return {
+      removeCaptured: (workspace) => removeCapturedWorkspace(fileSystem, hooks, workspace),
+      confirmStopped: (workspace) =>
+        witnessedProcessesStopped(
+          fileSystem,
+          processWitnessDirectory(dirname(dirname(workspace.path)), workspace.path),
+        ),
       withLeasedWorkspace: (run, use, disposition) =>
         leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
       exists: (identifier) => issueHoldsWorkspace(fileSystem, root, identifier),

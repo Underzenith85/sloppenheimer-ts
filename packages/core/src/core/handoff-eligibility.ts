@@ -43,9 +43,8 @@ export type RepairPermission =
 
 /**
  * A handoff keeps the workflow that created its pull request. A freshly fetched issue is evaluated
- * against that same workflow before new agent work starts, while review and merge observation stay
- * independent of issue eligibility. Removing a label therefore stops repairs without stranding a
- * pull request that is already green.
+ * against that same workflow before new agent work starts. Observation stays independent of
+ * eligibility; review and merge mutations independently refresh eligibility through reviewAction.
  */
 export const repairPermission = (
   handoff: HandoffEntry,

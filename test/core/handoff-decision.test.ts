@@ -106,7 +106,7 @@ const open = (
   ...overrides,
 })
 
-const reviewed = { headShaPrefix: 'head-1', status: 'completed' } as const
+const reviewed = { headSha: 'head-1', status: 'completed' } as const
 
 describe('the review gate', (): void => {
   it('asks for a review of a head that has not been reviewed', (): void => {
@@ -130,7 +130,7 @@ describe('the review gate', (): void => {
   it('waits while the review of the current head is still pending', (): void => {
     const decision = observeHandoff(
       handoff({ reviewRequestedHeadSha: 'head-1' }),
-      open({ codexReview: { headShaPrefix: 'head-1', status: 'pending' } }),
+      open({ codexReview: { headSha: 'head-1', status: 'pending' } }),
       observedAt,
     )
 
@@ -859,4 +859,41 @@ describe('folding a call back into the handoff', (): void => {
     )
     expect(afterThreadsResolved(handoff(), 'denied').reason).toBe('denied')
   })
+})
+
+it('never accepts an abbreviated review even when it prefixes the current head', () => {
+  const head = 'abcdef1' + '0'.repeat(33)
+  const decision = observeHandoff(
+    handoff({
+      headSha: head,
+      reviewRequestedHeadSha: head,
+      reviewCompletedHeadSha: head,
+    }),
+    open({
+      headSha: head,
+      codexReview: { headSha: 'abcdef1', status: 'completed' },
+    }),
+    observedAt,
+  )
+  expect(decision.action._tag).toBe('None')
+  expect(decision.handoff.reviewCompletedHeadSha).toBeNull()
+})
+
+it('invalidates a cached review when a different full commit shares its prefix', () => {
+  const reviewedHead = 'abcdef1' + '0'.repeat(33)
+  const head = 'abcdef1' + '1'.repeat(33)
+  const decision = observeHandoff(
+    handoff({
+      headSha: head,
+      reviewRequestedHeadSha: head,
+      reviewCompletedHeadSha: reviewedHead,
+    }),
+    open({
+      headSha: head,
+      codexReview: { headSha: reviewedHead, status: 'completed' },
+    }),
+    observedAt,
+  )
+  expect(decision.action._tag).toBe('None')
+  expect(decision.handoff.reviewCompletedHeadSha).toBeNull()
 })

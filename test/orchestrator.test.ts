@@ -773,7 +773,7 @@ const repairObservation = (number: number, headSha: string): PullRequestObservat
     mergeable: false,
     mergeState: 'dirty',
     checks: [],
-    codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
+    codexReview: { headSha: headSha, status: 'completed' },
   })
 
 /**
@@ -787,7 +787,7 @@ const behindObservation = (number: number, headSha: string): PullRequestObservat
     headSha,
     mergeable: true,
     mergeState: 'behind',
-    codexReview: { headShaPrefix: headSha.slice(0, 7), status: 'completed' },
+    codexReview: { headSha: headSha, status: 'completed' },
   })
 
 /**
@@ -1753,6 +1753,7 @@ describe('agent turn completion separated from work publication', (): void => {
           }
 
           yield* control.setIssuePaused(167, true)
+          yield* control.refresh
           // Well past the delivery backoff. A pause is a decision to stop, so nothing is pushed —
           // and the work is still there, rather than discarded with the attempt that was waiting.
           yield* TestClock.adjust('5 minutes')
@@ -1762,6 +1763,7 @@ describe('agent turn completion separated from work publication', (): void => {
           expect(snapshot.retrying).toEqual([])
 
           yield* control.setIssuePaused(167, false)
+          yield* control.refresh
           yield* TestClock.adjust('30 seconds')
           while (snapshot.handoffs.length === 0) {
             yield* Effect.yieldNow()
@@ -1778,7 +1780,7 @@ describe('agent turn completion separated from work publication', (): void => {
     }),
   )
 
-  it.scoped('ends a continuation that comes due after a pause landed on its publication', () =>
+  it.scoped('holds a publication through pause without creating a pull request', () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-delivery-paused-in-flight-')
       const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
@@ -1811,7 +1813,7 @@ describe('agent turn completion separated from work publication', (): void => {
                 number,
                 headSha: 'delivered-head',
                 checks: [{ name: 'quality', status: 'in_progress', conclusion: null, url: null }],
-                codexReview: { headShaPrefix: 'deliver', status: 'pending' },
+                codexReview: { headSha: 'delivered-head', status: 'pending' },
               }),
             ),
         }),
@@ -1856,45 +1858,26 @@ describe('agent turn completion separated from work publication', (): void => {
           // The pause lands on a publication under way, which it deliberately leaves to finish.
           yield* control.setIssuePaused(167, true)
           yield* Deferred.succeed(release, undefined)
-          // The publication settles as published, the pull request is handed off, and the
-          // continuation that schedules is queued behind a pause that is still standing.
-          snapshot = yield* control.snapshot
-          while (snapshot.retrying.length === 0) {
-            yield* Effect.yieldNow()
-            snapshot = yield* control.snapshot
-          }
-          expect(snapshot.handoffs).toHaveLength(1)
-          expect(snapshot.pausedIssueNumbers).toEqual([167])
-
-          // Well past the continuation's due time, with the pause in force throughout: the retry
-          // is ended the way the pause ends a retry it finds queued, and no agent is dispatched.
-          for (let round = 0; round < 5; round += 1) {
+          yield* control.refresh
+          for (let round = 0; round < 3; round += 1) {
             yield* TestClock.adjust('2 seconds')
             yield* control.refresh
           }
           snapshot = yield* control.snapshot
+          expect(snapshot.handoffs).toEqual([])
+          expect(snapshot.pausedIssueNumbers).toEqual([167])
           expect(launched).toBe(1)
-          expect(snapshot.running).toEqual([])
-          expect(snapshot.retrying).toEqual([])
-          const lookup = readDetail(control, issue.identifier)
-          expect(lookup._tag).toBe('Found')
-          if (lookup._tag === 'Found') {
-            expect(lookup.detail.status).toBe('completed')
-            expect(lookup.detail.retry).toBeNull()
-            expect(lookup.detail.phase.phase).toBe('cancelled')
-            expect(lookup.detail.attempt.attempts.at(-1)).toMatchObject({
-              outcome: 'cancelled',
-              reason: 'the operator paused the issue',
-            })
-          }
-
-          // A pause is a hold rather than a loss: the claim went with the retry, so lifting the
-          // pause lets the poll put an agent back on the issue.
           yield* control.setIssuePaused(167, false)
-          while (launched < 2) {
+          yield* control.refresh
+          for (
+            let round = 0;
+            round < 5 && (yield* control.snapshot).handoffs.length === 0;
+            round += 1
+          ) {
+            yield* TestClock.adjust('30 seconds')
             yield* control.refresh
-            yield* Effect.yieldNow()
           }
+          expect((yield* control.snapshot).handoffs).toHaveLength(1)
         }),
       )
     }),
@@ -2170,7 +2153,7 @@ describe('restored pull request handoffs', (): void => {
                 checks: [],
                 reviewDecision: null,
                 reviewThreads: [],
-                codexReview: { headShaPrefix: 'recovered-head', status: 'pending' as const },
+                codexReview: { headSha: 'recovered-head', status: 'pending' as const },
               }),
           }),
         }
@@ -2298,7 +2281,7 @@ describe('restored pull request handoffs', (): void => {
               reviewDecision: null,
               reviewThreads: [],
               codexReview: {
-                headShaPrefix: number === 65 ? 'first-head' : 'second-head',
+                headSha: number === 65 ? 'first-head' : 'second-head',
                 status: 'pending' as const,
               },
             }),
@@ -2405,7 +2388,7 @@ describe('restored pull request handoffs', (): void => {
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
-              codexReview: { headShaPrefix: 'persisted-head', status: 'pending' as const },
+              codexReview: { headSha: 'persisted-head', status: 'pending' as const },
             }),
         }),
       }
@@ -2697,7 +2680,7 @@ describe('restored pull request handoffs', (): void => {
       const issue = {
         ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
-        dispatchable: false,
+        dispatchable: true,
       }
       const initialHead = 'abcdef1234567890abcdef1234567890abcdef12'
       yield* saveHandoffs(handoffStorePath, [
@@ -2717,13 +2700,17 @@ describe('restored pull request handoffs', (): void => {
       ])
       const harness = makeHarness(isolated, () => [issue])
       let codexReview: CodexReviewObservation = {
-        headShaPrefix: initialHead.slice(0, 7),
+        headSha: initialHead,
         status: 'pending',
       }
       const requestedHeads: string[] = []
       const mergedHeads: string[] = []
       const ports: TestPorts = {
         ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: () => Effect.succeed([]),
+        }),
         makeCodeReview: (provider) => ({
           ...requireCodeReview(harness.ports, provider),
           inspectPullRequest: (number) =>
@@ -2774,7 +2761,7 @@ describe('restored pull request handoffs', (): void => {
             reason: 'Waiting for Codex review of the current head to complete',
           })
 
-          codexReview = { headShaPrefix: initialHead.slice(0, 7), status: 'completed' }
+          codexReview = { headSha: initialHead, status: 'completed' }
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
@@ -2805,7 +2792,7 @@ describe('restored pull request handoffs', (): void => {
       const issue = {
         ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
         id: issueId('20'),
-        dispatchable: false,
+        dispatchable: true,
       }
       const repairedHead = 'abcdef1234567890abcdef1234567890abcdef12'
       yield* saveHandoffs(handoffStorePath, [
@@ -2828,6 +2815,10 @@ describe('restored pull request handoffs', (): void => {
       const mergedHeads: string[] = []
       const ports: TestPorts = {
         ...harness.ports,
+        makeTracker: (provider) => ({
+          ...harness.ports.makeTracker(provider),
+          fetchIssuesByStates: () => Effect.succeed([]),
+        }),
         makeCodeReview: (provider) => ({
           ...requireCodeReview(harness.ports, provider),
           inspectPullRequest: (number) =>
@@ -2876,7 +2867,7 @@ describe('restored pull request handoffs', (): void => {
             reviewRequestedHeadSha: repairedHead,
           })
 
-          codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'pending' }
+          codexReview = { headSha: repairedHead, status: 'pending' }
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
@@ -2884,7 +2875,7 @@ describe('restored pull request handoffs', (): void => {
             'Waiting for Codex review of the current head to complete',
           )
 
-          codexReview = { headShaPrefix: repairedHead.slice(0, 7), status: 'completed' }
+          codexReview = { headSha: repairedHead, status: 'completed' }
           yield* control.refresh
           snapshot = yield* control.snapshot
           expect(mergedHeads).toEqual([])
@@ -2969,7 +2960,7 @@ describe('restored pull request handoffs', (): void => {
                   },
                 ],
                 codexReview: {
-                  headShaPrefix: reviewedHead.slice(0, 7),
+                  headSha: reviewedHead,
                   status: 'completed' as const,
                 },
               }),
@@ -3067,7 +3058,7 @@ describe('restored pull request handoffs', (): void => {
                     ]
                   : [],
               codexReview: {
-                headShaPrefix: currentHead.slice(0, 7),
+                headSha: currentHead,
                 status: 'completed' as const,
               },
             }),
@@ -3153,7 +3144,7 @@ describe('restored pull request handoffs', (): void => {
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
-              codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+              codexReview: { headSha: head, status: 'completed' as const },
             }),
           handoffCompletedWork: () =>
             Effect.succeed({
@@ -3266,7 +3257,7 @@ describe('restored pull request handoffs', (): void => {
                       headSha: observedHead,
                       mergeable: null,
                       mergeState: 'unknown',
-                      codexReview: { headShaPrefix: behindHead.slice(0, 7), status: 'completed' },
+                      codexReview: { headSha: behindHead, status: 'completed' },
                     }),
               ),
             requestPullRequestReview: (_number, expectedHeadSha) =>
@@ -3657,7 +3648,7 @@ describe('restored pull request handoffs', (): void => {
               reviewDecision: null,
               reviewThreads: [],
               codexReview: {
-                headShaPrefix: repairedHead.slice(0, 7),
+                headSha: repairedHead,
                 status: 'completed' as const,
               },
             }),
@@ -3738,7 +3729,7 @@ describe('restored pull request handoffs', (): void => {
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
-              codexReview: { headShaPrefix: initialHead.slice(0, 7), status: 'completed' as const },
+              codexReview: { headSha: initialHead, status: 'completed' as const },
             }),
           handoffCompletedWork: () =>
             Effect.succeed({
@@ -3826,7 +3817,7 @@ describe('restored pull request handoffs', (): void => {
                   commentHeadSha: head,
                 },
               ],
-              codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+              codexReview: { headSha: head, status: 'completed' as const },
             }),
           handoffCompletedWork: () =>
             Effect.succeed({
@@ -3889,6 +3880,8 @@ describe('restored pull request handoffs', (): void => {
           }
           expect(current.handoffs[0]?.repairStartedHeadSha).toBe(head)
           yield* control.setIssuePaused(20, true)
+
+          yield* control.refresh
           return yield* control.snapshot
         }),
       )
@@ -4075,6 +4068,8 @@ describe('restored pull request handoffs', (): void => {
           }
           expect(current.handoffs[0]?.repairStartedHeadSha).toBe(head)
           yield* control.setIssuePaused(20, true)
+
+          yield* control.refresh
           return yield* control.snapshot
         }),
       )
@@ -5381,7 +5376,7 @@ describe('restored pull request handoffs', (): void => {
                     checks: [],
                     reviewDecision: null,
                     reviewThreads: [],
-                    codexReview: { headShaPrefix: head.slice(0, 7), status: 'completed' as const },
+                    codexReview: { headSha: head, status: 'completed' as const },
                   } as const)
                 : ({
                     number,
@@ -5460,7 +5455,7 @@ describe('restored pull request handoffs', (): void => {
               checks: [],
               reviewDecision: null,
               reviewThreads: [],
-              codexReview: { headShaPrefix: head.slice(0, 7), status: 'pending' as const },
+              codexReview: { headSha: head, status: 'pending' as const },
             }),
         }),
         runAgent: () => Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 }),
@@ -5650,7 +5645,7 @@ describe('persisted finished work', (): void => {
                     headSha: openHead,
                     // Its review is already in hand and its checks have not finished, so the
                     // handoff sits at awaiting checks and calls nothing while the reload lands.
-                    codexReview: { headShaPrefix: openHead.slice(0, 7), status: 'completed' },
+                    codexReview: { headSha: openHead, status: 'completed' },
                     checks: [
                       { name: 'quality', status: 'in_progress', conclusion: null, url: null },
                     ],
@@ -6773,6 +6768,8 @@ describe('workflow hot reload', (): void => {
           const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', harness.ports)
           yield* harness.awaitAgentRun
           yield* control.setIssuePaused(1, true)
+
+          yield* control.refresh
           return yield* control.snapshot
         }),
       )
@@ -8391,6 +8388,8 @@ describe('live agent detail', (): void => {
 
           yield* control.setIssuePaused(17, true)
 
+          yield* control.refresh
+
           return readDetail(control, 'example/sloppenheimer#17')
         }),
       )
@@ -8474,7 +8473,7 @@ describe('live agent detail', (): void => {
 
 describe('aged-out agent detail', (): void => {
   it.scoped(
-    'keeps reporting an evicted session as completed on later publications',
+    'retains active review details beyond the completed detail limit',
     () =>
       Effect.gen(function* () {
         const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-aged-out-')
@@ -8523,7 +8522,7 @@ describe('aged-out agent detail', (): void => {
                 checks: [],
                 reviewDecision: null,
                 reviewThreads: [],
-                codexReview: { headShaPrefix: `head-${String(number)}`, status: 'pending' },
+                codexReview: { headSha: `head-${String(number)}`, status: 'pending' },
               }),
           }),
         }
@@ -8545,21 +8544,16 @@ describe('aged-out agent detail', (): void => {
             active = false
             yield* TestClock.adjust('1 second')
             yield* Effect.yieldNow()
-            const evicted = yield* Effect.promise(() =>
-              waitUntil(() => {
-                const aged = issues.filter(
-                  (issue) => readDetail(control, issue.identifier)._tag === 'Completed',
-                )
-                return aged.length === 1 ? (aged[0]?.identifier ?? null) : null
-              }, 'the oldest detail to age out'),
-            )
-            // Any later publication must not downgrade the aged-out answer to "no session".
+            yield* control.refresh
+            expect(
+              issues.every((issue) => readDetail(control, issue.identifier)._tag === 'Found'),
+            ).toBe(true)
             yield* control.setIssuePaused(9_999, true)
-            return { evicted, after: readDetail(control, evicted) }
+            return issues.every((issue) => readDetail(control, issue.identifier)._tag === 'Found')
           }),
         )
 
-        expect(observed.after).toEqual({ _tag: 'Completed', identifier: observed.evicted })
+        expect(observed).toBe(true)
       }),
     // This one drives `retainedCompletedDetails + 1` agents, each through a real temporary
     // workspace, and needs six to eight seconds on an unloaded machine. The 5s default left
@@ -8694,6 +8688,8 @@ describe('session telemetry accounting', (): void => {
             })
 
             yield* control.setIssuePaused(16, true)
+
+            yield* control.refresh
             const cancelled = yield* control.snapshot
             expect(cancelled.running).toEqual([])
             expect(cancelled.totals).toMatchObject({
@@ -8895,7 +8891,7 @@ describe('session telemetry accounting', (): void => {
                 ...repairObservation(number, head),
                 mergeable: null,
                 mergeState: 'unknown',
-                codexReview: { headShaPrefix: head.slice(0, 7), status: 'pending' as const },
+                codexReview: { headSha: head, status: 'pending' as const },
               }
             }),
         }),
@@ -9838,7 +9834,7 @@ for (const initiallyPaused of [false, true]) {
                 anOpenPullRequest({
                   number: 42,
                   headSha: 'candidate',
-                  codexReview: { headShaPrefix: 'candida', status: 'completed' },
+                  codexReview: { headSha: 'candidate', status: 'completed' },
                   checks: [{ name: 'quality', status: 'in_progress', conclusion: null, url: null }],
                 }),
               ),
@@ -10137,12 +10133,16 @@ for (const partial of [false, true]) {
         }).pipe(Effect.provideService(WorkflowStore, store))
         yield* Deferred.await(started)
         yield* control.setIssuePaused(167, true)
+
+        yield* control.refresh
         const paused = yield* control.snapshot
         expect(cleaned).toBe(true)
         expect(paused.running).toEqual([])
         expect(paused.durableWorkflows?.[0]?.intent).toBe('paused')
         expect(paused.durableWorkflows?.[0]?.status._tag).toBe(partial ? 'Intervention' : 'Waiting')
         yield* control.setIssuePaused(167, false)
+
+        yield* control.refresh
         yield* control.refresh
         if (partial) {
           expect(launches).toBe(1)
@@ -10154,3 +10154,46 @@ for (const partial of [false, true]) {
       }),
   )
 }
+
+it.scoped('acknowledges durable intent while a tracker read parks the controller', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('responsive-intent-')
+    const issue = makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready'])
+    const harness = makeHarness(
+      { ...workflow, config: { ...workflow.config, workspaceRoot } },
+      () => [issue],
+    )
+    const entered = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    let parked = false
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...harness.ports,
+      makeTracker: (provider) => {
+        const tracker = harness.ports.makeTracker(provider)
+        return {
+          ...tracker,
+          fetchIssuesByIds: (ids, options): ReturnType<TrackerPort['fetchIssuesByIds']> =>
+            Effect.gen(function* () {
+              if (parked) {
+                yield* Deferred.succeed(entered, undefined)
+                yield* Deferred.await(release)
+              }
+              return yield* tracker.fetchIssuesByIds(ids, options)
+            }),
+        } satisfies TrackerPort
+      },
+    })
+    yield* harness.awaitAgentRun
+    parked = true
+    const refresh = yield* control.refresh.pipe(Effect.fork)
+    yield* Deferred.await(entered)
+    yield* control.setIssuePaused(167, true)
+    yield* control.setIssuePaused(999, true)
+    expect((yield* control.snapshot).pausedIssueNumbers).toEqual([167, 999])
+    parked = false
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(refresh)
+    yield* control.refresh
+    expect((yield* control.snapshot).running).toEqual([])
+  }),
+)

@@ -352,7 +352,9 @@ const durableItem = (
   priority: issue?.priority ?? null,
   labels: issue?.labels ?? [],
   reason:
-    entry.reason ?? 'Published work needs review reconciliation before another coding attempt.',
+    entry.progress?.next_action ??
+    entry.reason ??
+    'Published work needs review reconciliation before another coding attempt.',
   ranking: null,
   blockers: [],
   unlocks: 0,

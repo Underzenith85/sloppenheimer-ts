@@ -181,6 +181,7 @@ const dispatchCandidates = (context: OrchestratorContext): Effect.Effect<void> =
 const runPoll = (context: OrchestratorContext): Effect.Effect<readonly RefreshOperation[]> =>
   Effect.gen(function* () {
     const performed: RefreshOperation[] = []
+    yield* context.durable?.expireWaits ?? Effect.void
     // A worker that ended since the last pass may have been the last holder of a replaced instance.
     yield* drainRetirements(context).pipe(withOperationalSpan('poll.retirements'))
     let dispatchValidationFailed = yield* refreshCredentials(context).pipe(

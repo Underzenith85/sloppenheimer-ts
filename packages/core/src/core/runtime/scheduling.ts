@@ -35,8 +35,13 @@ export const requestRefresh = (cells: RuntimeCells): Effect.Effect<RefreshOutcom
   Effect.gen(function* () {
     const reply = yield* Deferred.make<readonly RefreshOperation[]>()
     const requestedAt = yield* currentInstant
-    yield* Ref.update(cells.state, (current) => Transitions.awaitRefresh(current, reply))
-    const scheduled = yield* offerTick(cells, 'change')
+    const decision = yield* Ref.modify(cells.state, (current) =>
+      Transitions.requestTick(Transitions.awaitRefresh(current, reply), 'change'),
+    )
+    if (decision.enqueue) {
+      yield* Queue.offer(cells.mailbox, { _tag: 'Tick' })
+    }
+    const scheduled = decision.scheduled
     // The pass answers with the stages it reached, so a validation failure that stopped it before
     // dispatch is not acknowledged as a dispatch.
     const operations = yield* Deferred.await(reply)

@@ -1,3 +1,4 @@
+import { reviewAction } from '../durable/review-actions.js'
 import { Effect, Ref } from 'effect'
 
 import type { Issue } from '../../domain/domain.js'
@@ -80,7 +81,14 @@ export const findOrResumePublishedHandoff = (
       return yield* deferredHandoff('Published handoff is waiting for an active, eligible issue')
     }
     // The adapter first finds an existing PR, making a lost create acknowledgement recoverable.
-    const handed = yield* capability.handoffCompletedWork(refreshed)
+    const handed = yield* reviewAction(
+      cells,
+      refreshed,
+      execution,
+      'ensure_pull_request',
+      artifact.publishedHead,
+      capability.handoffCompletedWork(refreshed, artifact.publishedHead),
+    )
     return handed._tag === 'NoBranch'
       ? yield* deferredHandoff(
           'Confirmed publication has no remote branch; reconciliation required',

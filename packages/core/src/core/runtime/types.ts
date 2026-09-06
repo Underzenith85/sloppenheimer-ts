@@ -243,25 +243,8 @@ export type DeliveryAttemptResult =
 
 export type OrchestratorEvent =
   | Readonly<{ _tag: 'Tick' }>
-  | Readonly<{
-      _tag: 'AgentStarted'
-      issueId: IssueId
-      runId: number
-      applied: Deferred.Deferred<boolean>
-    }>
   | Readonly<{ _tag: 'WorkerCrashed'; issueId: IssueId; runId: number }>
   | Readonly<{ _tag: 'AgentUpdate'; issueId: IssueId; runId: number; update: AgentEvent }>
-  // The agent is done and the host has taken the workspace over. Nothing about the run changes
-  // except who is working, which is what the stall timer needs to know.
-  // `applied` is completed once the marker is in the state. The worker waits for it before the
-  // first git call: offering alone only enqueues, and a poll already in flight would still read the
-  // run as an agent that has gone quiet — and retire the publication as a stalled agent.
-  | Readonly<{
-      _tag: 'PostflightStarted'
-      issueId: IssueId
-      runId: number
-      applied: Deferred.Deferred<void>
-    }>
   | Readonly<{
       _tag: 'WorkerExited'
       issueId: IssueId
@@ -319,6 +302,8 @@ export type OrchestratorEvent =
       issueNumber: number
       paused: boolean
       reply: Deferred.Deferred<void>
+      committed?: boolean
+      affectedRuns?: readonly Readonly<{ issueId: IssueId; runId: number }>[]
     }>
 
 /**

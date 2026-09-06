@@ -178,7 +178,10 @@ export const decodeThreadResolution = (
 
 export const decodeCodexReview = (
   value: unknown,
-): Effect.Effect<CodexReviewObservation | null, TrackerError> =>
+): Effect.Effect<
+  Readonly<{ headShaPrefix: string; status: CodexReviewObservation['status'] }> | null,
+  TrackerError
+> =>
   Effect.gen(function* () {
     const comments = yield* decode(
       codexComments,

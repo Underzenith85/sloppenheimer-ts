@@ -22,7 +22,7 @@ import {
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
 import { abandonDelivery } from './deliveries.js'
-import { releaseIssueFiber } from './execution.js'
+import { ownIssueFiber, releaseIssueFiber } from './execution.js'
 import { pruneRetainedWorkspaces, stopRetentionPass } from '../run-workspace.js'
 import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
@@ -174,7 +174,15 @@ export const cancelRunning = (
         error: null,
       })
     }
-    if (cleanupWorkspace && cells.durable === undefined) {
+    if (cleanupWorkspace && cells.durable !== undefined) {
+      yield* cells.durable.queueCleanup(id)
+      yield* ownIssueFiber(
+        cells.execution,
+        'cleanup',
+        id,
+        cells.durable.cleanup(id, settled.execution.workspaces),
+      )
+    } else if (cleanupWorkspace) {
       // Removing the workspace destroys anything unpublished in it, so the delivery that would
       // have republished it goes in the same step rather than coming due against a directory that
       // no longer exists.

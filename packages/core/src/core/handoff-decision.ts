@@ -242,7 +242,7 @@ export const gateReview = (
     if (
       codexReview !== null &&
       codexReview !== undefined &&
-      observedHeadSha.startsWith(codexReview.headShaPrefix)
+      observedHeadSha === codexReview.headSha
     ) {
       // A review for this head already exists: adopt it rather than asking for a second one.
       return Option.some(
@@ -275,10 +275,7 @@ export const gateReview = (
       ),
     )
   }
-  if (
-    codexReview?.status !== 'completed' ||
-    !observedHeadSha.startsWith(codexReview.headShaPrefix)
-  ) {
+  if (codexReview?.status !== 'completed' || observedHeadSha !== codexReview.headSha) {
     return Option.some(
       decided({
         ...handoff,

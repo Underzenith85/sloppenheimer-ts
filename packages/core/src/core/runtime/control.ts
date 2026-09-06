@@ -1,5 +1,6 @@
+import { changeIssueIntent } from './intent.js'
 import type { WorkflowError } from '../../domain/errors.js'
-import { Clock, Deferred, Effect, Fiber, Queue, Ref } from 'effect'
+import { Clock, Effect, Fiber, Ref } from 'effect'
 
 import { agentDetail, createSnapshot } from '../snapshot.js'
 import { requestRefresh } from './scheduling.js'
@@ -26,14 +27,9 @@ export const orchestratorControl = (
       ...(durableWorkflows === undefined ? {} : { durableWorkflows }),
     }),
   ),
-  refresh: requestRefresh(cells),
+  refresh: Effect.raceFirst(requestRefresh(cells), Fiber.join(eventLoopFiber).pipe(Effect.orDie)),
   agentDetail: (identifier) => agentDetail(context, identifier),
-  setIssuePaused: (issueNumber, paused) =>
-    Effect.gen(function* () {
-      const reply = yield* Deferred.make<void>()
-      yield* Queue.offer(cells.mailbox, { _tag: 'SetIssuePaused', issueNumber, paused, reply })
-      yield* Deferred.await(reply)
-    }),
+  setIssuePaused: (issueNumber, paused) => changeIssueIntent(cells, issueNumber, paused),
   awaitTermination: Fiber.join(eventLoopFiber).pipe(
     Effect.zipRight(Effect.dieMessage('orchestrator event loop exited unexpectedly')),
   ),

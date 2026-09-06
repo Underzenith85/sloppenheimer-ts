@@ -38,7 +38,10 @@ export type CodeReviewPort = Readonly<{
     argumentsValue: JsonValue,
     context: HostToolContext,
   ) => Promise<HostToolResult>
-  handoffCompletedWork: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
+  handoffCompletedWork: (
+    issue: Issue,
+    expectedHeadSha?: string,
+  ) => Effect.Effect<HandoffResult, TrackerError>
   findExistingHandoff: (issue: Issue) => Effect.Effect<HandoffResult, TrackerError>
   inspectPullRequest: (
     pullRequestNumber: number,

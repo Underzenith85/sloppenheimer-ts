@@ -1,3 +1,4 @@
+import { reviewAction } from './durable/review-actions.js'
 /**
  * Handing settled work over to the code-review capability.
  *
@@ -177,7 +178,17 @@ const runHandoff = (
       ),
     )
     yield* context.publish
-    const handoff = yield* codeReview.handoffCompletedWork(work.issue).pipe(asSettled)
+    const records = context.durable === undefined ? [] : yield* context.durable.snapshot
+    const head = records.find((record) => record.issueId === work.issue.id)?.artifact?.publishedHead
+    const action = codeReview.handoffCompletedWork(work.issue, head ?? undefined)
+    const handoff = yield* reviewAction(
+      context,
+      work.issue,
+      work.execution,
+      'ensure_pull_request',
+      head ?? 'unknown',
+      action,
+    ).pipe(asSettled)
     if (handoff._tag === 'Failed') {
       yield* recordOutcome(handoffOutcomes, 'failed')
       const failedAt = yield* currentInstant

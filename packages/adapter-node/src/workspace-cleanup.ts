@@ -1,3 +1,5 @@
+import { dirname } from 'node:path'
+import { processWitnessDirectory, witnessedProcessesStopped } from './process-witness.js'
 import { FileSystem } from '@effect/platform'
 import type { PlatformError } from '@effect/platform/Error'
 import { Effect, Exit, Option } from 'effect'
@@ -11,7 +13,7 @@ import {
   leaseStagingPath,
   workspaceKey,
 } from '@sloppenheimer/core/domain/workspace-containment.js'
-import type { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
+import { WorkspaceError } from '@sloppenheimer/core/domain/errors.js'
 import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import {
   pinDirectory,
@@ -62,12 +64,34 @@ const runBeforeRemove = (
     }
   })
 
+const confirmWorkspaceStopped = (
+  fileSystem: FileSystem.FileSystem,
+  runPath: string,
+): Effect.Effect<void, PlatformError | WorkspaceError> =>
+  Effect.gen(function* () {
+    const directory = processWitnessDirectory(dirname(dirname(runPath)), runPath)
+    if (
+      (yield* fileSystem.exists(directory)) &&
+      !(yield* witnessedProcessesStopped(fileSystem, directory))
+    ) {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          category: 'lease_conflict',
+          message: 'Workspace process ownership remains unresolved',
+        }),
+      )
+    }
+  })
+
 /** Takes away one run's directory and the lease record beside it, and nothing else. */
 const removeRunDirectory = (
   fileSystem: FileSystem.FileSystem,
   runPath: string,
-): Effect.Effect<void, PlatformError> =>
-  fileSystem.remove(runPath, { force: true, recursive: true })
+): Effect.Effect<void, PlatformError | WorkspaceError> =>
+  Effect.gen(function* () {
+    yield* confirmWorkspaceStopped(fileSystem, runPath)
+    yield* fileSystem.remove(runPath, { force: true, recursive: true })
+  })
 
 /**
  * Removes one run's directory and the lease record beside it, hook first.
@@ -85,6 +109,7 @@ export const removeRunWorkspace = (
 ): Effect.Effect<void, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     yield* stillTheIssueDirectory
+    yield* confirmWorkspaceStopped(fileSystem, runPath)
     yield* runBeforeRemove(fileSystem, hooks, runPath)
     yield* stillTheIssueDirectory
     yield* removeRunDirectory(fileSystem, runPath)
@@ -199,6 +224,7 @@ const removeFreeRunDirectory = (
 ): Effect.Effect<boolean, WorkspaceError | PlatformError> =>
   Effect.gen(function* () {
     yield* stillTheIssueDirectory
+    yield* confirmWorkspaceStopped(fileSystem, runPath)
     yield* runBeforeRemove(fileSystem, hooks, runPath)
     yield* stillTheIssueDirectory
     yield* removeRunDirectory(fileSystem, runPath)
