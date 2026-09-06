@@ -25,51 +25,58 @@ export const hydrateRestoredHandoffs = (cells: RuntimeCells): Effect.Effect<void
     if (pending.pendingRestoredHandoffs.length === 0) {
       return
     }
-    const fetched = yield* pending.lastKnownGood.tracker
-      .fetchIssuesByIds(pending.pendingRestoredHandoffs.map((handoff) => issueId(handoff.issueId)))
-      .pipe(
-        Effect.matchEffect({
-          onFailure: (error) =>
-            Ref.update(cells.state, (failing) =>
-              Transitions.noteRecovery(failing, { failed: 1 }),
-            ).pipe(
-              Effect.zipRight(
-                logWarning('persisted handoff hydration failed; retrying later', {
-                  action: 'handoff_hydration',
-                  outcome: 'failed',
-                  pending: pending.pendingRestoredHandoffs.length,
-                  error: error.message,
-                }),
+    yield* Effect.forEach(
+      pending.pendingRestoredHandoffs,
+      (restored) =>
+        Effect.gen(function* () {
+          const fetched = yield* pending.lastKnownGood.tracker
+            .fetchIssuesByIds([issueId(restored.issueId)])
+            .pipe(asSettled)
+          if (fetched._tag === 'Failed') {
+            yield* Ref.update(cells.state, (current) =>
+              Transitions.noteRecovery(
+                {
+                  ...current,
+                  pendingRestoredHandoffs: current.pendingRestoredHandoffs.map((entry) =>
+                    entry.issueId === restored.issueId
+                      ? {
+                          ...entry,
+                          reason: `Cannot hydrate retained handoff: ${fetched.error.message}`,
+                        }
+                      : entry,
+                  ),
+                },
+                { failed: 1 },
               ),
-              Effect.as<readonly Issue[] | null>(null),
-            ),
-          onSuccess: (issues) => Effect.succeed<readonly Issue[] | null>(issues),
+            )
+            yield* logWarning('persisted handoff hydration failed; retrying later', {
+              action: 'handoff_hydration',
+              issue_id: restored.issueId,
+              error: fetched.error.message,
+            })
+            return
+          }
+          const issue = fetched.value.find((candidate) => candidate.id === restored.issueId)
+          if (issue === undefined) {
+            return
+          }
+          yield* Ref.update(cells.state, (current) => {
+            const entry = restoredHandoffEntry(
+              issue,
+              restored,
+              captureExecutionSnapshot(current.lastKnownGood, ''),
+            )
+            return entry === null
+              ? current
+              : Transitions.dropRestoredHandoffs(
+                  Transitions.putHandoff(current, entry.issue.id, entry),
+                  new Set([restored.issueId]),
+                )
+          })
+          yield* persistHandoffs(cells)
         }),
-      )
-    if (fetched === null) {
-      return
-    }
-    yield* Ref.update(cells.state, (current) => {
-      const hydrated = new Set<string>()
-      let next = current
-      for (const restored of current.pendingRestoredHandoffs) {
-        const issue = fetched.find((candidate) => candidate.id === restored.issueId)
-        const entry =
-          issue === undefined
-            ? null
-            : restoredHandoffEntry(
-                issue,
-                restored,
-                captureExecutionSnapshot(next.lastKnownGood, ''),
-              )
-        if (entry === null) {
-          continue
-        }
-        next = Transitions.putHandoff(next, entry.issue.id, entry)
-        hydrated.add(restored.issueId)
-      }
-      return Transitions.dropRestoredHandoffs(next, hydrated)
-    })
+      { concurrency: 4, discard: true },
+    )
   })
 
 /**
@@ -299,6 +306,7 @@ const recoverIssueHandoff = (
         recovered: 1,
       })
     })
+    yield* persistHandoffs(cells)
     yield* logInfo('open pull request handoff recovered', {
       ...logContext(issue),
       action: 'handoff_recovery',

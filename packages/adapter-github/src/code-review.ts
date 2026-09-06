@@ -108,13 +108,40 @@ const githubBranchExists = (
   provider: GitHubProviderConfig,
   prefix: string,
   branchName: string,
+  expectedHeadSha?: string,
 ): Effect.Effect<boolean, TrackerError> =>
   githubJson(
     provider,
     `${provider.apiBaseUrl}${prefix}/git/ref/heads/${encodeURIComponent(branchName)}`,
     undefined,
     [404],
-  ).pipe(Effect.map(({ status }) => status !== 404))
+  ).pipe(
+    Effect.flatMap(({ status, body }) => {
+      if (status === 404) {
+        return Effect.succeed(false)
+      }
+      if (expectedHeadSha === undefined) {
+        return Effect.succeed(true)
+      }
+      return decodeTracker(
+        Schema.Struct({ object: Schema.Struct({ sha: Schema.String }) }),
+        body,
+        trackerCause('GitHub branch identity is missing'),
+      ).pipe(
+        Effect.flatMap((ref) =>
+          ref.object.sha === expectedHeadSha
+            ? Effect.succeed(true)
+            : Effect.fail(
+                new TrackerError({
+                  category: 'tracker_status',
+                  message: 'Published branch moved before pull request creation',
+                  retryable: false,
+                }),
+              ),
+        ),
+      )
+    }),
+  )
 
 /**
  * The open pull request for `branchName`, if GitHub has one. Absence decides the next branch in
@@ -186,10 +213,10 @@ export const makeGitHubCodeReview = (
     return {
       toolSpecs: githubCodeReviewToolSpecs,
       executeTool: makeGitHubCodeReviewToolExecutor(provider, prefix, bindClient),
-      handoffCompletedWork: (issue) => {
+      handoffCompletedWork: (issue, expectedHeadSha) => {
         const branchName = issueBranchName(issue)
         return bindClient(
-          githubBranchExists(provider, prefix, branchName).pipe(
+          githubBranchExists(provider, prefix, branchName, expectedHeadSha).pipe(
             Effect.flatMap((exists) => {
               if (!exists) {
                 return Effect.succeed<HandoffResult>({ _tag: 'NoBranch', branchName })

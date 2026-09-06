@@ -20,7 +20,7 @@ export const onIssuePauseChanged = (
   event: Extract<OrchestratorEvent, { _tag: 'SetIssuePaused' }>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    if (context.durable !== undefined) {
+    if (context.durable !== undefined && event.committed !== true) {
       const records = yield* context.durable.snapshot
       for (const record of records) {
         if (Option.contains(identifierIssueNumber(record.identifier), event.issueNumber)) {
@@ -29,12 +29,21 @@ export const onIssuePauseChanged = (
       }
     }
     if (event.paused) {
-      yield* Ref.update(context.state, (current) =>
-        Transitions.pauseIssueNumber(current, event.issueNumber),
-      )
+      if (event.committed !== true) {
+        yield* Ref.update(context.state, (current) =>
+          Transitions.pauseIssueNumber(current, event.issueNumber),
+        )
+      }
       const paused = yield* Ref.get(context.state)
       for (const id of issuesForNumber(paused.running, event.issueNumber)) {
-        yield* context.cancelRunning(id, false, operatorPausedReason)
+        if (
+          event.affectedRuns === undefined ||
+          event.affectedRuns.some(
+            (run) => run.issueId === id && run.runId === paused.running.get(id)?.runId,
+          )
+        ) {
+          yield* context.cancelRunning(id, false, operatorPausedReason)
+        }
       }
       const delivering = yield* Ref.get(context.state)
       for (const id of issuesForNumber(delivering.deliveries, event.issueNumber)) {
@@ -52,9 +61,11 @@ export const onIssuePauseChanged = (
         yield* endRetryForPause(context, id, Option.fromNullable(retrying.handoffs.get(id)))
       }
     } else {
-      yield* Ref.update(context.state, (current) =>
-        Transitions.resumeIssueNumber(current, event.issueNumber),
-      )
+      if (event.committed !== true) {
+        yield* Ref.update(context.state, (current) =>
+          Transitions.resumeIssueNumber(current, event.issueNumber),
+        )
+      }
       const resumed = yield* Ref.get(context.state)
       for (const id of issuesForNumber(resumed.deliveries, event.issueNumber)) {
         const entry = resumed.deliveries.get(id)

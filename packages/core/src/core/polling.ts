@@ -1,7 +1,6 @@
-import { Deferred, Effect, Queue, Ref } from 'effect'
+import { Effect, Queue, Ref } from 'effect'
 
 import { currentInstant } from '../support/clock.js'
-import { recordPostflightStarted } from '../telemetry.js'
 import * as Transitions from './transitions.js'
 import type { OrchestratorContext } from './runtime.js'
 import { onAgentUpdate } from './polling/agent-update.js'
@@ -45,48 +44,13 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
           break
         }
         case 'WorkerCrashed': {
+          if ((yield* Ref.get(context.state)).running.get(event.issueId)?.runId !== event.runId) {
+            break
+          }
           // A defect is a host bug. Fail the supervisor visibly, rather than silently retrying it.
           return yield* Effect.dieMessage(
             `worker ${String(event.runId)} crashed for ${event.issueId}`,
           )
-        }
-        case 'AgentStarted': {
-          const startedAt = yield* currentInstant
-          const accepted = yield* Ref.modify(context.state, (current) => {
-            const entry = current.running.get(event.issueId)
-            if (entry?.runId !== event.runId || entry.phase._tag !== 'Preparing') {
-              return [false, current]
-            }
-            return [
-              true,
-              Transitions.updateRun(current, event.issueId, (run) => ({
-                ...run,
-                phase: { _tag: 'Agent', startedAt },
-              })),
-            ]
-          })
-          yield* Deferred.succeed(event.applied, accepted)
-          break
-        }
-        case 'PostflightStarted': {
-          const startedAt = yield* currentInstant
-          yield* Ref.update(context.state, (current) =>
-            // Both or neither, and neither when the run is gone. A cancellation can reach the loop
-            // while the worker is still waiting to be let past, and the worker it belonged to is
-            // interrupted rather than publishing — so a detail moved to `publishing` here would sit
-            // in a phase no settlement is ever coming to leave.
-            Transitions.postflightTakeoverApplies(current, event.issueId, event.runId)
-              ? Transitions.updateDetail(
-                  Transitions.notePostflightStarted(current, event.issueId, event.runId, startedAt),
-                  event.issueId,
-                  (record) => recordPostflightStarted(record, startedAt),
-                )
-              : current,
-          )
-          // Only now may the publication begin: the worker is waiting on this, and what it is
-          // waiting for is the state, not the message.
-          yield* Deferred.succeed(event.applied, undefined)
-          break
         }
         case 'AgentUpdate': {
           yield* onAgentUpdate(context, event)

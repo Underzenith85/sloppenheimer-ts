@@ -10,16 +10,28 @@ export const restoreWorkflows = (
   Effect.gen(function* () {
     const records = yield* store.list
     const now = yield* Clock.currentTimeMillis
-    return yield* Effect.forEach(records, (record) => {
+    return yield* Effect.forEach(records, (stored) => {
+      const record =
+        stored.externalOperation?.outcome === 'pending'
+          ? {
+              ...stored,
+              externalOperation: { ...stored.externalOperation, outcome: 'unknown' as const },
+            }
+          : stored
       if (
         record.status._tag === 'Completed' ||
         record.status._tag === 'Intervention' ||
         (record.status._tag === 'Waiting' &&
           (record.status.condition === 'continuation' ||
+            (record.status.condition === 'review' && record.handoff !== undefined) ||
             (record.status.condition === 'retry' && record.runTarget !== undefined) ||
             (record.artifact?.publishedHead !== null &&
               record.artifact?.publishedHead !== undefined)))
       ) {
+        if (record !== stored) {
+          const next = { ...record, revision: record.revision + 1, updatedAt: now }
+          return store.commit(next, record.revision).pipe(Effect.as(next))
+        }
         return Effect.succeed(record)
       }
       const restored: DurableWorkflow = {

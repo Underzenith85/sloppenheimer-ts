@@ -56,6 +56,8 @@ export const admission =
         const revision = current === undefined ? 0 : current.revision + 1
         const owner = issue.id + ':run:' + String(revision)
         const next: DurableWorkflow = {
+          ...(current?.completion === undefined ? {} : { completion: current.completion }),
+          ...(current?.handoff === undefined ? {} : { handoff: current.handoff }),
           version: 1,
           issueId: issue.id,
           identifier: issue.identifier,

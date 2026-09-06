@@ -1,3 +1,5 @@
+import { reviewRequestBody, reviewRequestExists } from './review-request.js'
+import { resolveReviewedCommit } from './review-identity.js'
 import { Effect, Schema } from 'effect'
 
 import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
@@ -69,7 +71,7 @@ const fetchCodexReview = (
       const response: GitHubHttpResult = yield* githubJson(provider, requestUrl)
       const decoded = yield* decodeCodexReview(response.body)
       if (decoded !== null) {
-        latest = decoded
+        latest = yield* resolveReviewedCommit(provider, prefix, decoded)
       }
       nextUrl = yield* Effect.try({
         try: (): string | null =>
@@ -274,6 +276,9 @@ const requestCodexReview = (
   expectedHeadSha: string,
 ): Effect.Effect<void, TrackerError> =>
   Effect.gen(function* () {
+    if (yield* reviewRequestExists(provider, prefix, number, expectedHeadSha)) {
+      return
+    }
     yield* assertHeadUnchanged(
       provider,
       prefix,
@@ -283,7 +288,7 @@ const requestCodexReview = (
     )
     yield* json(provider, `${prefix}/issues/${String(number)}/comments`, {
       method: 'POST',
-      body: JSON.stringify({ body: '@codex review' }),
+      body: JSON.stringify({ body: reviewRequestBody(expectedHeadSha) }),
     })
   })
 

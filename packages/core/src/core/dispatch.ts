@@ -1,6 +1,7 @@
+import { enterRunPhase } from './run-phase.js'
 import { settleCancelledCandidate } from './cancelled-candidate.js'
 import { journalExecution } from './durable/journal-execution.js'
-import { Cause, Deferred, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
+import { Cause, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { retainFailedCandidate, type RunResult } from './failed-candidate.js'
 import { publicationEligibility } from './publication-eligibility.js'
@@ -140,19 +141,7 @@ const runWithSourceControl = (
             Effect.zipRight(
               Effect.gen(function* () {
                 const publisher = MutableRef.get(sessionPorts).sourceControl ?? sourceControl
-                // Announced *and applied* before the first git call: from here the run is the host's
-                // work, and the silence on the agent protocol that follows is not a stalled agent.
-                // Offering alone would only enqueue it — a poll already in flight would still read a
-                // run nothing had marked and retire the publication as a stalled agent, which is the
-                // one thing this marker exists to prevent.
-                const applied = yield* Deferred.make<void>()
-                yield* Queue.offer(context.mailbox, {
-                  _tag: 'PostflightStarted' as const,
-                  issueId: issue.id,
-                  runId,
-                  applied,
-                })
-                yield* Deferred.await(applied)
+                yield* enterRunPhase(context, issue.id, runId, 'Postflight')
                 return yield* runPostflight(
                   publisher,
                   issue,
@@ -417,11 +406,11 @@ const runDispatch = (
     }
     // The issue owns one worker, so launching this one is what interrupts a worker the state has
     // already let go of, and the fiber leaves the collection of its own accord when it ends.
-    yield* ownIssueFiber(context.execution, 'worker', issue.id, makeWorker(launch))
     const startedAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
       Transitions.beginRun(current, startingRun(launch, startedAt)),
     )
+    yield* ownIssueFiber(context.execution, 'worker', issue.id, makeWorker(launch))
     yield* logInfo('action=dispatch outcome=started', {
       ...logContext(issue),
       action: 'dispatch',

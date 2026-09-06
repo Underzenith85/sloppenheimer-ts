@@ -1,3 +1,13 @@
+import { expireWaits } from './deadlines.js'
+import { recordCompletions } from './completion-records.js'
+import type { Completion } from '../../domain/completion.js'
+import { queueCleanup, runCleanup } from './cleanup.js'
+import type { WorkspaceManagerPort } from '../../ports/workspace.js'
+import { externalOperation } from './external-operation.js'
+import { recordHandoffs } from './handoff-records.js'
+import type { HandoffSnapshot } from '../../domain/handoff.js'
+import type { ExternalOperationKind } from '../../domain/durable-workflow.js'
+import type { TrackerError } from '../../domain/errors.js'
 import { reconcilePublication } from './publication-recovery.js'
 import type { SourceControlRecoveryPort } from '../../ports/source-control.js'
 import { Clock, Deferred, Effect, Option, Ref } from 'effect'
@@ -14,9 +24,24 @@ import type { RunJournal, Writer } from './run-journal.js'
 
 export type { RunJournal } from './run-journal.js'
 export type DurableHost = Readonly<{
+  expireWaits: Effect.Effect<void>
+  recordCompletions: (completions: readonly Completion[]) => Effect.Effect<void>
+  queueCleanup: (issueId: string) => Effect.Effect<void>
+  cleanup: (
+    issueId: string,
+    workspaces: Pick<WorkspaceManagerPort, 'removeCaptured'>,
+  ) => Effect.Effect<void>
+  recordHandoffs: (handoffs: readonly HandoffSnapshot[]) => Effect.Effect<void>
+  external: <Value>(
+    issueId: string,
+    kind: ExternalOperationKind,
+    headSha: string,
+    action: Effect.Effect<Value, TrackerError>,
+  ) => Effect.Effect<Value, TrackerError>
   reconcilePublication: (
     issueId: string,
     recovery: SourceControlRecoveryPort,
+    stopped?: Effect.Effect<boolean>,
   ) => Effect.Effect<void>
   start: (
     issue: Issue,
@@ -87,7 +112,16 @@ export const makeDurableHost = (
         }),
       )
     return {
-      reconcilePublication: (id, recovery) => reconcilePublication(records, write, id, recovery),
+      expireWaits: expireWaits(records, write),
+      recordCompletions: (completions) =>
+        recordCompletions(records, semaphore, persist, write, completions),
+      queueCleanup: (id) => queueCleanup(write, id),
+      cleanup: (id, workspaces) => runCleanup(records, write, id, workspaces),
+      recordHandoffs: (handoffs) => recordHandoffs(records, semaphore, persist, write, handoffs),
+      external: (id, kind, head, action) =>
+        externalOperation(records, write, id, kind, head, action),
+      reconcilePublication: (id, recovery, stopped) =>
+        reconcilePublication(records, write, id, recovery, stopped),
       snapshot: Effect.map(Ref.get(records), (current) => [...current.values()]),
       awaitFailure: Deferred.await(failure).pipe(
         Effect.flatMap((cause) =>

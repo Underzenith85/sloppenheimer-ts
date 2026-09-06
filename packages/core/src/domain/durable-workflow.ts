@@ -1,4 +1,23 @@
+import { Completion } from './completion.js'
 import { Schema } from 'effect'
+import { handoffSnapshotSchema } from './handoff.js'
+
+export const ExternalOperationKind = Schema.Literal(
+  'ensure_pull_request',
+  'request_review',
+  'resolve_threads',
+  'merge',
+)
+export type ExternalOperationKind = typeof ExternalOperationKind.Type
+
+export const ExternalOperation = Schema.Struct({
+  id: Schema.NonEmptyString,
+  kind: ExternalOperationKind,
+  headSha: Schema.NonEmptyString,
+  generation: Schema.Int,
+  deadline: Schema.Number,
+  outcome: Schema.Literal('pending', 'succeeded', 'failed', 'unknown'),
+})
 
 /** Durable values are JSON-shaped. Runtime resources never enter these records. */
 export const OperationKind = Schema.Literal(
@@ -75,7 +94,10 @@ export const WorkflowStatus = Schema.Union(
     deadline: Schema.Number,
   }),
   Schema.Struct({ _tag: Schema.Literal('Intervention'), reason: Schema.NonEmptyString }),
-  Schema.Struct({ _tag: Schema.Literal('Completed'), headSha: Schema.NonEmptyString }),
+  Schema.Struct({
+    _tag: Schema.Literal('Completed'),
+    headSha: Schema.NullOr(Schema.NonEmptyString),
+  }),
 )
 export type WorkflowStatus = typeof WorkflowStatus.Type
 
@@ -99,6 +121,20 @@ export const DurableWorkflow = Schema.Struct({
     { exact: true },
   ),
   owner: Schema.optionalWith(Schema.NonEmptyString, { exact: true }),
+  completion: Schema.optionalWith(Completion, { exact: true }),
+  handoff: Schema.optionalWith(handoffSnapshotSchema, { exact: true }),
+  externalOperation: Schema.optionalWith(ExternalOperation, { exact: true }),
+  cleanup: Schema.optionalWith(
+    Schema.Struct({
+      workspacePath: Schema.NonEmptyString,
+      workspaceKey: Schema.NonEmptyString,
+      state: Schema.Literal('queued', 'running', 'retry', 'completed', 'intervention'),
+      attempts: Schema.Int.pipe(Schema.nonNegative()),
+      dueAt: Schema.Number,
+      reason: Schema.NullOr(Schema.String),
+    }),
+    { exact: true },
+  ),
   status: WorkflowStatus,
   artifact: Schema.NullOr(Artifact),
   codingAttempts: Schema.Int.pipe(Schema.nonNegative()),

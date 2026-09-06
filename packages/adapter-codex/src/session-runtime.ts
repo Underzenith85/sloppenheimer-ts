@@ -1,3 +1,4 @@
+import { observedProcessError } from '@sloppenheimer/adapter-node/process.js'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Deferred, Effect, Fiber, Option, Queue, Ref } from 'effect'
 
@@ -93,7 +94,7 @@ export const watchProcess = (session: SessionRuntime): void => {
       ),
     )
   })
-  session.process.once('exit', (code, signal) => {
+  const exited = (code: number | null, signal: NodeJS.Signals | null): void => {
     session.fork(
       failUnlessClosed(
         session,
@@ -106,7 +107,24 @@ export const watchProcess = (session: SessionRuntime): void => {
         }),
       ),
     )
-  })
+  }
+  session.process.once('exit', exited)
+  // Receipt persistence can outlast a failed startup; do not wait for an event already emitted.
+  const failure = observedProcessError(session.process)
+  if (failure !== undefined) {
+    session.fork(
+      failSession(
+        session,
+        new AgentError({
+          category: 'spawn_failed',
+          message: 'Codex process failed',
+          cause: failure,
+        }),
+      ),
+    )
+  } else if (session.process.exitCode !== null || session.process.signalCode !== null) {
+    exited(session.process.exitCode, session.process.signalCode)
+  }
 }
 
 /**

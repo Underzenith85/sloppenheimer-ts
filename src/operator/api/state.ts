@@ -1,3 +1,4 @@
+import { workflowProgress } from '@sloppenheimer/core/domain/workflow-progress.js'
 // The baseline document a Sloppenheimer host serves from `/api/v1/state`, and the acknowledgement
 // `POST /api/v1/refresh` returns.
 //
@@ -122,6 +123,7 @@ export type PublishedState = Readonly<{
     workspace_path: string | null
     candidate_head: string | null
     published_head: string | null
+    progress?: ReturnType<typeof workflowProgress>
   }>[]
   generated_at: string
   workflow_path: string
@@ -270,6 +272,7 @@ export const publishState = (snapshot: Snapshot): PublishedState => ({
           workspace_path: record.artifact?.workspacePath ?? null,
           candidate_head: record.artifact?.repository?.headSha ?? null,
           published_head: record.artifact?.publishedHead ?? null,
+          progress: workflowProgress(record),
         })),
       }),
   generated_at: snapshot.generatedAt,

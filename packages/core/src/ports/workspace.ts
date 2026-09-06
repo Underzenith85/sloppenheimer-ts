@@ -37,6 +37,9 @@ import { makeAdapterCell, type AdapterCell } from './cell.js'
  * runs that this host still means to publish from — a retained delivery's above all.
  */
 export type WorkspaceManagerPort = Readonly<{
+  /** Uses captured paths and process evidence, never the manager's current workspace root. */
+  confirmStopped?: (workspace: Workspace) => Effect.Effect<boolean>
+  removeCaptured?: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
   withLeasedWorkspace: <Value, Failure, Requirements>(
     run: WorkspaceRun,
     use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,

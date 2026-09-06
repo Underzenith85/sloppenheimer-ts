@@ -77,7 +77,7 @@ export const outdatedThreadNote = (observation: PullRequestObservation): string 
 }
 
 export type CodexReviewObservation = Readonly<{
-  headShaPrefix: string
+  headSha: string
   status: 'pending' | 'completed'
 }>
 

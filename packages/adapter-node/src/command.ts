@@ -8,7 +8,12 @@ import {
   type CommandRequest,
   type CommandResult,
 } from '@sloppenheimer/core/ports/command.js'
-import { openProcess } from './process.js'
+import {
+  observedOutputInterrupted,
+  observedProcessClose,
+  observedProcessError,
+  openProcess,
+} from './process.js'
 
 type Capture = {
   chunks: Buffer[]
@@ -18,7 +23,12 @@ type Capture = {
 }
 
 const capture = (stream: Readable, limit: number): Capture => {
-  const output: Capture = { chunks: [], bytes: 0, captured: 0, interrupted: false }
+  const output: Capture = {
+    chunks: [],
+    bytes: 0,
+    captured: 0,
+    interrupted: observedOutputInterrupted(stream),
+  }
   stream.on('data', (chunk: Buffer) => {
     output.bytes += chunk.byteLength
     const remaining = limit - output.captured
@@ -34,13 +44,20 @@ const capture = (stream: Readable, limit: number): Capture => {
   return output
 }
 
+// Readers attach at spawn, before receipt I/O: Node drains unread pipes when a child exits.
+const capturedCommands = new WeakMap<
+  ChildProcessWithoutNullStreams,
+  Readonly<{ stdout: Capture; stderr: Capture }>
+>()
+
 const awaitCommand = (
   child: ChildProcessWithoutNullStreams,
   request: CommandRequest,
 ): Effect.Effect<CommandResult, SubprocessError> =>
   Effect.async((resume) => {
-    const stdout = capture(child.stdout, request.captureLimit)
-    const stderr = capture(child.stderr, request.captureLimit)
+    const captured = capturedCommands.get(child)
+    const stdout = captured?.stdout ?? capture(child.stdout, request.captureLimit)
+    const stderr = captured?.stderr ?? capture(child.stderr, request.captureLimit)
     let settled = false
     const settle = (result: Effect.Effect<CommandResult, SubprocessError>): void => {
       if (!settled) {
@@ -73,7 +90,7 @@ const awaitCommand = (
         ),
       ),
     )
-    child.once('close', (code, signal) =>
+    const completed = (code: number | null, signal: NodeJS.Signals | null): void =>
       settle(
         Effect.succeed({
           code,
@@ -86,8 +103,24 @@ const awaitCommand = (
           stderrTruncated: stderr.interrupted || stderr.bytes > stderr.captured,
           outputInterrupted: stdout.interrupted || stderr.interrupted,
         }),
-      ),
-    )
+      )
+    child.once('close', completed)
+    const failed = observedProcessError(child)
+    if (failed !== undefined) {
+      settle(
+        Effect.fail(
+          new SubprocessError({
+            category: 'spawn_failed',
+            message: 'subprocess failed to start',
+            cause: failed,
+          }),
+        ),
+      )
+    }
+    const observed = observedProcessClose(child)
+    if (observed !== undefined) {
+      completed(observed.code, observed.signal)
+    }
     child.stdin.end()
     return Effect.sync(() => {
       settled = true
@@ -114,7 +147,18 @@ export const runCommand = (
     )
   }
   return Effect.scoped(
-    Effect.flatMap(openProcess(request), (child) => awaitCommand(child, request)),
+    Effect.flatMap(
+      openProcess({
+        ...request,
+        onSpawn: (child) => {
+          capturedCommands.set(child, {
+            stdout: capture(child.stdout, request.captureLimit),
+            stderr: capture(child.stderr, request.captureLimit),
+          })
+        },
+      }),
+      (child) => awaitCommand(child, request),
+    ),
   )
 }
 

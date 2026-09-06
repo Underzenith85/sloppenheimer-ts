@@ -1,3 +1,5 @@
+import { ownIssueFiber } from './runtime/execution.js'
+import { reviewAction } from './durable/review-actions.js'
 import { Effect, Option, Ref } from 'effect'
 
 import type { IssueId } from '../domain/domain.js'
@@ -66,9 +68,29 @@ const completeWork = (
   id: IssueId,
   finished: CompletedEntry,
 ): Effect.Effect<void> =>
-  Ref.update(context.state, (current) => Transitions.completeHandoff(current, id, finished)).pipe(
-    Effect.zipRight(context.persistCompletions),
-  )
+  Effect.gen(function* () {
+    if (context.durable !== undefined) {
+      yield* context.durable.recordCompletions([
+        { ...finished, finishedAt: finished.finishedAt.toISOString() },
+      ])
+    }
+    // Preserve the merged head before removing the live handoff; restart must never replay it.
+    yield* context.persistHandoffs
+    yield* Ref.update(context.state, (current) =>
+      Transitions.completeHandoff(current, id, finished),
+    )
+    yield* context.persistCompletions
+    if (context.durable !== undefined) {
+      yield* context.durable.queueCleanup(id)
+      const workspaces = (yield* Ref.get(context.state)).lastKnownGood.workspaces
+      yield* ownIssueFiber(
+        context.execution,
+        'cleanup',
+        id,
+        context.durable.cleanup(id, workspaces),
+      )
+    }
+  })
 
 /**
  * Records one handoff in the state cell without persisting it.
@@ -98,9 +120,15 @@ const performMerge = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     yield* stageHandoff(context, id, handoff)
-    const merged = yield* capability
-      .mergePullRequest(handoff.pullRequestNumber, headSha)
-      .pipe(asSettled)
+    yield* context.persistHandoffs
+    const merged = yield* reviewAction(
+      context,
+      handoff.issue,
+      handoff.execution,
+      'merge',
+      headSha,
+      capability.mergePullRequest(handoff.pullRequestNumber, headSha),
+    ).pipe(asSettled)
     const settled = afterMerge(handoff, merged._tag === 'Failed' ? merged.error.message : null)
     yield* stageHandoff(context, id, settled)
     if (merged._tag === 'Failed') {
@@ -206,9 +234,14 @@ const performReviewRequest = (
   headSha: string,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const requested = yield* capability
-      .requestPullRequestReview(handoff.pullRequestNumber, headSha)
-      .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
+    const requested = yield* reviewAction(
+      context,
+      handoff.issue,
+      handoff.execution,
+      'request_review',
+      headSha,
+      capability.requestPullRequestReview(handoff.pullRequestNumber, headSha),
+    ).pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
     yield* stageHandoff(context, id, afterReviewRequested(handoff, headSha, requested))
     if (requested === null) {
       yield* logInfo('Codex review requested for pull request head', {
@@ -253,9 +286,18 @@ const perform = (
         return
       }
       case 'ResolveThreads': {
-        const resolved = yield* capability
-          .resolveReviewThreads(handoff.pullRequestNumber, action.headSha, action.threadIds)
-          .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
+        const resolved = yield* reviewAction(
+          context,
+          handoff.issue,
+          handoff.execution,
+          'resolve_threads',
+          action.headSha,
+          capability.resolveReviewThreads(
+            handoff.pullRequestNumber,
+            action.headSha,
+            action.threadIds,
+          ),
+        ).pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }))
         yield* stageHandoff(context, id, afterThreadsResolved(handoff, resolved))
         return
       }
@@ -292,6 +334,16 @@ const perform = (
         return
       }
       case 'Rebase': {
+        if (permission._tag === 'Denied' || !repairDispatchAllowed) {
+          yield* stageHandoff(context, id, {
+            ...handoff,
+            reason:
+              permission._tag === 'Denied'
+                ? permission.reason
+                : 'Workflow validation prevents rebase',
+          })
+          return
+        }
         // Not gated on the repair permission or the pass's dispatch flag: no agent is dispatched,
         // and like the merge it is the host acting on a change that already exists.
         yield* performRebase(context, id, handoff, action)

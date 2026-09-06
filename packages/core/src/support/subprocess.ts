@@ -163,8 +163,13 @@ const procGroupHasLiveMember = (pid: number): Option.Option<boolean> => {
 export const processGroupIsAlive = (pid: number): boolean => {
   try {
     process.kill(-pid, 0)
-  } catch {
-    return false
+  } catch (error) {
+    return !(
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ESRCH'
+    )
   }
   return Option.getOrElse(procGroupHasLiveMember(pid), () => true)
 }

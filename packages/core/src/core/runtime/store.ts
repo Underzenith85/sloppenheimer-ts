@@ -162,6 +162,10 @@ export const persistHandoffs = (cells: RuntimeCells): Effect.Effect<void> =>
     if (store.disabled || !current.startupRecoveryFinished || current.storeReadFailed) {
       return
     }
+    if (cells.durable !== undefined) {
+      yield* cells.durable.recordHandoffs(Transitions.handoffSnapshots(current))
+      return
+    }
     const path = storePath(store, rootOf(current))
     yield* store.onHostFileSystem(saveHandoffs(path, Transitions.handoffSnapshots(current))).pipe(
       Effect.catchAll((error) =>
@@ -197,6 +201,10 @@ export const persistCompletions = (cells: RuntimeCells): Effect.Effect<void> =>
       return
     }
     const current = yield* Ref.get(cells.state)
+    if (cells.durable !== undefined) {
+      yield* cells.durable.recordCompletions(Transitions.publishedCompletions(current))
+      return
+    }
     const path = storePath(store, rootOf(current))
     yield* store
       .onHostFileSystem(saveCompletions(path, Transitions.publishedCompletions(current)))

@@ -57,7 +57,13 @@ export const publishDetails = (state: RuntimeState): RuntimeState => {
     const retry = state.retries.get(id)
     const status: AgentDetailStatus =
       running !== undefined ? 'running' : retry !== undefined ? 'retrying' : 'completed'
-    if (status === 'completed') {
+    const handoff = state.handoffs.get(id)
+    const active =
+      state.deliveries.has(id) ||
+      (handoff !== undefined &&
+        handoff.state !== 'merged' &&
+        handoff.state !== 'closed_without_merge')
+    if (status === 'completed' && !active) {
       if (!finishedDetails.includes(id)) {
         finishedDetails = [...finishedDetails, id]
       }
