@@ -4,6 +4,56 @@ import type {
   Operation,
   WorkflowStatus,
 } from '../../domain/durable-workflow.js'
+import type { Issue } from '../../domain/domain.js'
+import type { SourceControlTarget } from '../../ports/source-control.js'
+
+/** Production admission is one pure decision; the caller commits this value before launch. */
+export const admittedWorkflow = (
+  current: DurableWorkflow | undefined,
+  issue: Issue,
+  target: SourceControlTarget,
+  afterPublication: 'review' | 'continuation',
+  now: number,
+): DurableWorkflow & Readonly<{ owner: string }> => {
+  const repair = target._tag === 'Repair'
+  const revision = current === undefined ? 0 : current.revision + 1
+  const owner = `${issue.id}:run:${String(revision)}`
+  return {
+    ...(current?.completion === undefined ? {} : { completion: current.completion }),
+    ...(current?.handoff === undefined ? {} : { handoff: current.handoff }),
+    version: 1,
+    issueId: issue.id,
+    identifier: issue.identifier,
+    objective: issue.title,
+    revision,
+    owner,
+    intent: 'active',
+    afterPublication,
+    runTarget: target,
+    status: {
+      _tag: 'Executing',
+      deadline: now + 900_000,
+      operation: {
+        id: `${owner}:prepare`,
+        generation: revision + 1,
+        kind: 'prepare',
+        inputRevision: repair ? target.expectedHeadSha : owner,
+        attempt: 0,
+        timeoutMs: 900_000,
+      },
+    },
+    artifact: null,
+    codingAttempts: (current?.codingAttempts ?? 0) + (repair ? 0 : 1),
+    repairAttempts: (current?.repairAttempts ?? 0) + (repair ? 1 : 0),
+    maximumCodingAttempts: current?.maximumCodingAttempts ?? 3,
+    maximumRepairAttempts: current?.maximumRepairAttempts ?? 3,
+    budgetDeadline: current?.budgetDeadline ?? now + 86_400_000,
+    lastProgressAt: now,
+    lastFailureSignature: null,
+    repeatedFailures: 0,
+    updatedAt: now,
+  }
+}
 
 export type WorkflowEvent =
   | Readonly<{ _tag: 'IntentChanged'; intent: DurableWorkflow['intent'] }>

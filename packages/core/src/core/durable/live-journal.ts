@@ -9,7 +9,11 @@ import type { HandoffSnapshot } from '../../domain/handoff.js'
 import type { ExternalOperationKind } from '../../domain/durable-workflow.js'
 import type { TrackerError } from '../../domain/errors.js'
 import { reconcilePublication } from './publication-recovery.js'
-import type { SourceControlRecoveryPort } from '../../ports/source-control.js'
+import type {
+  PreparedRepository,
+  SourceControlPort,
+  SourceControlRecoveryPort,
+} from '../../ports/source-control.js'
 import { Clock, Deferred, Effect, Option, Ref } from 'effect'
 
 import type { Issue } from '../../domain/domain.js'
@@ -20,10 +24,12 @@ import type { WorkflowStorePort } from '../../ports/workflow-store.js'
 import { withEntry } from '../../support/collections.js'
 import { admission } from './admission.js'
 import { restoreWorkflows } from './restore.js'
-import type { RunJournal, Writer } from './run-journal.js'
+import { journalFor, type RunJournal, type Writer } from './run-journal.js'
+import { transitionWorkflow } from './transition.js'
 
 export type { RunJournal } from './run-journal.js'
 export type DurableHost = Readonly<{
+  journal: (issueId: string) => Effect.Effect<Option.Option<RunJournal>>
   expireWaits: Effect.Effect<void>
   recordCompletions: (completions: readonly Completion[]) => Effect.Effect<void>
   queueCleanup: (issueId: string) => Effect.Effect<void>
@@ -40,9 +46,9 @@ export type DurableHost = Readonly<{
   ) => Effect.Effect<Value, TrackerError>
   reconcilePublication: (
     issueId: string,
-    recovery: SourceControlRecoveryPort,
+    sourceControl: SourceControlPort | SourceControlRecoveryPort,
     stopped?: Effect.Effect<boolean>,
-  ) => Effect.Effect<void>
+  ) => Effect.Effect<Option.Option<PreparedRepository>>
   start: (
     issue: Issue,
     target: SourceControlTarget,
@@ -52,6 +58,18 @@ export type DurableHost = Readonly<{
   awaitFailure: Effect.Effect<never, WorkflowError>
   setIntent: (identifier: string, intent: DurableWorkflow['intent']) => Effect.Effect<void>
 }>
+
+const readJournal = (
+  records: Ref.Ref<ReadonlyMap<string, DurableWorkflow>>,
+  write: Writer,
+  id: string,
+): Effect.Effect<Option.Option<RunJournal>> =>
+  Effect.map(Ref.get(records), (current) => {
+    const record = current.get(id)
+    return record?.owner === undefined
+      ? Option.none()
+      : Option.some(journalFor(write, id, record.owner))
+  })
 
 /** Store failures are delivered to the host supervisor, then interrupt the mutation that failed. */
 export const makeDurableHost = (
@@ -100,18 +118,18 @@ export const makeDurableHost = (
           }
           const next = update(current)
           if (next !== current) {
+            const now = yield* Clock.currentTimeMillis
             yield* persist(
-              {
-                ...next,
-                revision: current.revision + 1,
-                updatedAt: yield* Clock.currentTimeMillis,
-              },
+              next.revision === current.revision
+                ? { ...next, revision: current.revision + 1, updatedAt: now }
+                : next,
               current.revision,
             )
           }
         }),
       )
     return {
+      journal: (id) => readJournal(records, write, id),
       expireWaits: expireWaits(records, write),
       recordCompletions: (completions) =>
         recordCompletions(records, semaphore, persist, write, completions),
@@ -120,8 +138,8 @@ export const makeDurableHost = (
       recordHandoffs: (handoffs) => recordHandoffs(records, semaphore, persist, write, handoffs),
       external: (id, kind, head, action) =>
         externalOperation(records, write, id, kind, head, action),
-      reconcilePublication: (id, recovery, stopped) =>
-        reconcilePublication(records, write, id, recovery, stopped),
+      reconcilePublication: (id, sourceControl, stopped) =>
+        reconcilePublication(records, write, id, sourceControl, stopped),
       snapshot: Effect.map(Ref.get(records), (current) => [...current.values()]),
       awaitFailure: Deferred.await(failure).pipe(
         Effect.flatMap((cause) =>
@@ -140,7 +158,10 @@ export const makeDurableHost = (
             (entry) => entry.identifier === identifier,
           )
           if (record !== undefined) {
-            yield* write(record.issueId, (current) => ({ ...current, intent }))
+            const now = yield* Clock.currentTimeMillis
+            yield* write(record.issueId, (current) =>
+              transitionWorkflow(current, { _tag: 'IntentChanged', intent }, now),
+            )
           }
         }),
       start: admission(records, semaphore, persist, write),

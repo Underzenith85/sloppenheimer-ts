@@ -20,7 +20,7 @@ export const settleStoppedRun = (
   observedHeadSha: string | null,
   beforePreparation = false,
 ): DurableWorkflow => {
-  if (current.status._tag !== 'Executing') {
+  if (current.status._tag !== 'Executing' && current.status._tag !== 'Stopping') {
     return current
   }
   const artifact = current.artifact

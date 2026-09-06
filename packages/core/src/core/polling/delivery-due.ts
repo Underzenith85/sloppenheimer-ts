@@ -224,7 +224,7 @@ const runDeliveryAttempt = (
       })
       return { _tag: 'Abandoned' } as const
     }
-    const outcome = yield* runPostflight(
+    const publication = runPostflight(
       sourceControl,
       entry.issue,
       entry.prepared,
@@ -233,6 +233,14 @@ const runDeliveryAttempt = (
       publicationEligibility(context.state, entry.issue, entry.execution),
       entry.execution.journal?.publication,
     )
+    const attempted = yield* (
+      entry.execution.workspaces.superviseCaptured?.(entry.prepared.workspace, publication) ??
+      publication
+    ).pipe(asSettled)
+    if (attempted._tag === 'Failed') {
+      return { _tag: 'Intervention', reason: attempted.error.message } as const
+    }
+    const outcome = attempted.value
     yield* logInfo('action=delivery outcome=attempted', {
       ...logContext(entry.issue),
       action: 'delivery',

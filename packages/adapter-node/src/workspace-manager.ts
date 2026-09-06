@@ -1,5 +1,4 @@
-import { removeCapturedWorkspace } from './captured-cleanup.js'
-import { dirname } from 'node:path'
+import { capturedWorkspaceRoot, removeCapturedWorkspace } from './captured-cleanup.js'
 import {
   makeProcessWitness,
   ProcessWitness,
@@ -365,11 +364,30 @@ export const makeWorkspaceManager = (
     // this host can see is gone, so one still on its way to publication is left alone.
     yield* pruneStagedLeases(fileSystem, leaseStagingPath(root))
     return {
+      superviseCaptured: (workspace, operation) =>
+        capturedWorkspaceRoot(workspace).pipe(
+          Effect.flatMap((capturedRoot) =>
+            operation.pipe(
+              Effect.provideService(
+                ProcessWitness,
+                makeProcessWitness(
+                  fileSystem,
+                  processWitnessDirectory(capturedRoot, workspace.path),
+                ),
+              ),
+            ),
+          ),
+        ),
       removeCaptured: (workspace) => removeCapturedWorkspace(fileSystem, hooks, workspace),
       confirmStopped: (workspace) =>
-        witnessedProcessesStopped(
-          fileSystem,
-          processWitnessDirectory(dirname(dirname(workspace.path)), workspace.path),
+        capturedWorkspaceRoot(workspace).pipe(
+          Effect.flatMap((capturedRoot) =>
+            witnessedProcessesStopped(
+              fileSystem,
+              processWitnessDirectory(capturedRoot, workspace.path),
+            ),
+          ),
+          Effect.catchAll(() => Effect.succeed(false)),
         ),
       withLeasedWorkspace: (run, use, disposition) =>
         leaseRunWorkspace(fileSystem, hooks, root, owner, run, use, disposition),
