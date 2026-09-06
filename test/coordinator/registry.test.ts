@@ -61,6 +61,40 @@ describe('coordinator registry', () => {
     }),
   )
 
+  it.effect('uses shared credential validation and preserves typed resolution failures', () =>
+    Effect.gen(function* () {
+      const input = { instances: [{ ...entry, credential: '$INSTANCE_TOKEN' }] }
+      for (const values of [new Map<string, string>(), new Map([['INSTANCE_TOKEN', '']])]) {
+        const error = yield* decodeRegistry(input).pipe(
+          Effect.withConfigProvider(ConfigProvider.fromMap(values)),
+          Effect.flip,
+        )
+        expect(error.category).toBe('configuration')
+        expect(error.message).toBe('Unable to resolve credential environment reference')
+        expect(error.cause).toBeDefined()
+        if (error.cause !== undefined) {
+          expect(Redacted.value(error.cause)).toMatchObject({
+            _tag: 'WorkflowError',
+            category: 'invalid_config',
+            message: 'credential references a missing environment variable',
+          })
+        }
+      }
+      // The shared resolver accepts every nonempty value without trimming secret bytes.
+      for (const secret of ['   ', ' secret-with-padding ']) {
+        const entries = yield* decodeRegistry(input).pipe(
+          Effect.withConfigProvider(ConfigProvider.fromMap(new Map([['INSTANCE_TOKEN', secret]]))),
+        )
+        const credential = entries[0]?.credential
+        expect(Redacted.isRedacted(credential)).toBe(true)
+        if (credential !== undefined && credential !== null) {
+          expect(Redacted.value(credential)).toBe(secret)
+        }
+        expect(JSON.stringify(entries)).not.toContain(secret)
+      }
+    }),
+  )
+
   it.scoped(
     'retains the last registry on failed reload and fences removed and replaced entries',
     () =>

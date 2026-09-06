@@ -1,5 +1,6 @@
 /** Registry configuration is private host data. Validation errors retain only redacted causes. */
-import { Config, Data, Effect, Redacted, Schema } from 'effect'
+import { resolveSecretReference } from '@sloppenheimer/core/config/env-reference.js'
+import { Data, Effect, Redacted, Schema } from 'effect'
 
 export class RegistryError extends Data.TaggedError('RegistryError')<{
   readonly category: 'configuration' | 'resource'
@@ -56,11 +57,8 @@ const resolveEntry = (
     const credential =
       entry.credential === undefined
         ? null
-        : yield* Config.redacted(entry.credential.slice(1)).pipe(
-            Effect.filterOrFail(
-              (value) => Redacted.value(value).trim().length > 0,
-              () => configurationError('Credential environment variable is empty'),
-            ),
+        : yield* resolveSecretReference(entry.credential, 'credential').pipe(
+            Effect.map((resolved) => resolved.value),
             Effect.mapError((cause) =>
               configurationError('Unable to resolve credential environment reference', cause),
             ),
