@@ -10,7 +10,7 @@ export type RunJournal = Readonly<{
   prepared: (prepared: PreparedRepository) => Effect.Effect<void>
   publication: CandidateJournal
   settled: (outcome: PostflightOutcome) => Effect.Effect<void>
-  stopped: (clean: boolean) => Effect.Effect<void>
+  stopped: (observedHeadSha: string | null) => Effect.Effect<void>
   failed: Effect.Effect<void>
 }>
 
@@ -109,7 +109,7 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
       published: settled,
     },
     settled,
-    stopped: (clean) => owned((current) => settleStoppedRun(current, clean)),
-    failed: owned((current) => settleStoppedRun(current, false, true)),
+    stopped: (observedHeadSha) => owned((current) => settleStoppedRun(current, observedHeadSha)),
+    failed: owned((current) => settleStoppedRun(current, null, true)),
   }
 }
