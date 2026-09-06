@@ -4,7 +4,11 @@ import { Identifier, Text, Timestamp, Version, WorkIdentity } from './common.js'
 export const Action = Schema.Literal('start', 'queue', 'pause', 'resume')
 export const Capability = Schema.Union(
   Schema.Struct({ action: Action, available: Schema.Literal(true) }),
-  Schema.Struct({ action: Action, available: Schema.Literal(false), reason: Text }),
+  Schema.Struct({
+    action: Action,
+    available: Schema.Literal(false),
+    reason: Text.pipe(Schema.minLength(1)),
+  }),
 )
 export const RefreshScope = Schema.Union(
   Schema.Struct({ kind: Schema.Literal('aggregate') }),
@@ -28,7 +32,7 @@ export const ActionOutcome = Schema.Union(
     ...request,
     observed_at: Timestamp,
     evidence: Text.pipe(Schema.minLength(1)),
-  }),
+  }).pipe(Schema.filter((value) => value.observed_at > value.submitted_at)),
   Schema.Struct({ status: Schema.Literal('rejected'), ...request, reason: Text }),
   Schema.Struct({ status: Schema.Literal('unknown'), ...request, reason: Text }),
 )

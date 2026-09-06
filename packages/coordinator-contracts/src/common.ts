@@ -38,7 +38,9 @@ export const Observation = Schema.Struct({
       ? value.observed_at === null && value.source_at === null
       : value.condition === 'current' || value.condition === 'stale'
         ? value.observed_at !== null
-        : true,
+        : value.condition === 'unreachable'
+          ? value.observed_at !== null || value.last_attempt_at !== null
+          : true,
   ),
 )
 export type Observation = typeof Observation.Type

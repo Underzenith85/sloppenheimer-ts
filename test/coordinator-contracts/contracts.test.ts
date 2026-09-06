@@ -1,7 +1,16 @@
 import { Effect, Either, Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { ActionFeedback, RefreshScope } from '@sloppenheimer/coordinator-contracts/actions.js'
-import { WorkIdentity, detailRoute, workKey } from '@sloppenheimer/coordinator-contracts/common.js'
+import {
+  ActionFeedback,
+  Capability,
+  RefreshScope,
+} from '@sloppenheimer/coordinator-contracts/actions.js'
+import {
+  Observation,
+  WorkIdentity,
+  detailRoute,
+  workKey,
+} from '@sloppenheimer/coordinator-contracts/common.js'
 import {
   decodeAggregate,
   decodeInstancePayload,
@@ -131,6 +140,44 @@ describe('coordinator wire boundaries', () => {
       expect(decoded._tag).toBe(evidence === 'Observed paused eligibility' ? 'Right' : 'Left')
     },
   )
+  it.each([-1, 0, 1])('requires confirmation after submission: offset %i', (offset) => {
+    const decoded = Schema.decodeUnknownEither(ActionFeedback)({
+      ...unknownActionFixture(),
+      outcome: {
+        status: 'confirmed',
+        request_id: 'pause-request',
+        submitted_at: fixtureInstant,
+        observed_at: fixtureInstant + offset,
+        evidence: 'Observed paused eligibility',
+      },
+    })
+    expect(decoded._tag).toBe(offset > 0 ? 'Right' : 'Left')
+  })
+  it.each([
+    { observed_at: null, last_attempt_at: null, expected: 'Left' },
+    { observed_at: 0, last_attempt_at: null, expected: 'Right' },
+    { observed_at: null, last_attempt_at: 0, expected: 'Right' },
+    { observed_at: 0, last_attempt_at: 0, expected: 'Right' },
+  ])('requires history for unreachable observations: %j', ({ expected, ...history }) => {
+    expect(
+      Schema.decodeUnknownEither(Observation)({
+        ...history,
+        source_at: null,
+        condition: 'unreachable',
+      })._tag,
+    ).toBe(expected)
+  })
+  it.each([
+    { reason: undefined, expected: 'Left' },
+    { reason: '', expected: 'Left' },
+    { reason: 'Retained work requires recovery', expected: 'Right' },
+    { reason: 'x'.repeat(16_384), expected: 'Right' },
+    { reason: 'x'.repeat(16_385), expected: 'Left' },
+  ])('requires non-empty bounded disabled capability reasons', ({ reason, expected }) => {
+    expect(
+      Schema.decodeUnknownEither(Capability)({ action: 'start', available: false, reason })._tag,
+    ).toBe(expected)
+  })
 })
 
 describe('identity, freshness and deterministic ordering', () => {
