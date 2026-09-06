@@ -55,6 +55,10 @@ const adapters: Layer.Layer<AdapterServices> = Layer.mergeAll(
   Layer.succeed(WorkspaceManagerFactory, {
     make: (settings) =>
       Effect.succeed({
+        capturedMetadata: Effect.succeed([]),
+        superviseCaptured: (_workspace, operation) => operation,
+        confirmStopped: () => Effect.succeed(true),
+        removeCaptured: () => Effect.void,
         withLeasedWorkspace: (_run, use) => use({ path: settings.root, key: 'key' }),
         exists: () => Effect.succeed(false),
         beforeRun: () => Effect.void,

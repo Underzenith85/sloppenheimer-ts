@@ -9,7 +9,7 @@ import type { PostflightOutcome } from '../postflight.js'
 export type RunJournal = Readonly<{
   prepared: (prepared: PreparedRepository) => Effect.Effect<void>
   publication: CandidateJournal
-  settled: (outcome: PostflightOutcome) => Effect.Effect<void>
+  settled: (outcome: PostflightOutcome | PublicationOutcome) => Effect.Effect<void>
   stopped: (observedHeadSha: string | boolean | null) => Effect.Effect<void>
   failed: Effect.Effect<void>
 }>

@@ -1,7 +1,7 @@
 import { Either, Schema } from 'effect'
 
 import { WorkspaceError } from './errors.js'
-import type { IssueIdentifier } from './domain.js'
+import type { IssueIdentifier, Workspace } from './domain.js'
 
 /**
  * The exclusive lease that makes one run the only owner of one workspace, and the record that
@@ -60,6 +60,15 @@ export type OwnerObservation =
 export type WorkspaceRun = Readonly<{
   identifier: IssueIdentifier
   runId: number
+}>
+
+/** Retained lease provenance discovered during durable migration; it carries no candidate claim. */
+export type CapturedWorkspaceMetadata = Readonly<{
+  identifier: IssueIdentifier
+  workspace: Workspace
+  runId: number
+  reason: string | null
+  retainedAt: string
 }>
 
 /**

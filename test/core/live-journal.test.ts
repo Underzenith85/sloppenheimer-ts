@@ -516,3 +516,33 @@ it.effect('binds repair retries to the original branch and head lease', () =>
     expect((yield* host.snapshot)[0]?.repairAttempts).toBe(2)
   }),
 )
+
+it.effect('imports legacy workspace provenance once and blocks dispatch by identifier', () =>
+  Effect.gen(function* () {
+    const store = yield* memoryStore
+    const host = yield* makeDurableHost(store)
+    const metadata = {
+      identifier: issue.identifier,
+      workspace: { path: '/legacy/GH-1/run-7-old', key: 'run-7-old' },
+      runId: 7,
+      reason: 'publication failed',
+      retainedAt: new Date(1).toISOString(),
+    }
+    yield* host.recordWorkspaces([metadata, metadata])
+    yield* host.recordWorkspaces([metadata])
+    const records = yield* host.snapshot
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      identifier: issue.identifier,
+      intent: 'paused',
+      artifact: null,
+      status: { _tag: 'Intervention' },
+      cleanup: {
+        workspacePath: metadata.workspace.path,
+        workspaceKey: metadata.workspace.key,
+        state: 'intervention',
+      },
+    })
+    expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+  }),
+)

@@ -161,6 +161,34 @@ const published = (
     () => ({ _tag: 'Completed' }),
   )
 
+describe('captured workspace metadata', (): void => {
+  it.live('discovers released leases and rejects metadata that does not reconstruct its path', () =>
+    Effect.gen(function* () {
+      const root = makeRoot()
+      const manager = yield* workspaceManager(root, hooks())
+      const workspace = yield* retained(manager, 'GH-288', 7)
+      const inventory = manager.capturedMetadata
+      expect(yield* inventory).toEqual([
+        expect.objectContaining({
+          identifier: 'GH-288',
+          workspace,
+          runId: 7,
+          reason: 'the run ended without publishing',
+        }),
+      ])
+
+      const leasePath = `${workspace.path}.lease`
+      const record = JSON.parse(
+        yield* host(() => readFile(leasePath, 'utf8')),
+      ) as WorkspaceLeaseRecord
+      yield* host(() =>
+        writeFile(leasePath, encodeLease({ ...record, identifier: 'GH-289' }), 'utf8'),
+      )
+      expect(yield* inventory).toEqual([])
+    }),
+  )
+})
+
 /** Runs `use` while the run still holds its lease, and keeps the workspace afterwards. */
 const whileLeased = <Value, Failure>(
   manager: WorkspaceManagerPort,

@@ -22,6 +22,7 @@ import {
 } from '@sloppenheimer/core/telemetry.js'
 
 const snapshot: OrchestratorSnapshot = {
+  durableWorkflows: [],
   generatedAt: '2026-08-29T12:00:00.000Z',
   workflowPath: '/tmp/WORKFLOW.md',
   effectiveWorkflow: {

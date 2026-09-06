@@ -17,14 +17,10 @@ export const orchestratorControl = (
   eventLoopFiber: Fiber.RuntimeFiber<never, WorkflowError>,
 ): OrchestratorControl => ({
   snapshot: Effect.map(
-    Effect.all([
-      Ref.get(cells.state),
-      Clock.currentTimeMillis,
-      cells.durable?.snapshot ?? Effect.succeed(undefined),
-    ]),
+    Effect.all([Ref.get(cells.state), Clock.currentTimeMillis, cells.durable.snapshot]),
     ([current, now, durableWorkflows]) => ({
       ...createSnapshot(current, context.selectedWorkflowPath, now),
-      ...(durableWorkflows === undefined ? {} : { durableWorkflows }),
+      durableWorkflows,
     }),
   ),
   refresh: Effect.raceFirst(requestRefresh(cells), Fiber.join(eventLoopFiber).pipe(Effect.orDie)),

@@ -1,4 +1,5 @@
 import type { DurableHost } from '../durable/live-journal.js'
+import type { WorkflowStore } from '../../ports/workflow-store.js'
 import type { DurableWorkflow } from '../../domain/durable-workflow.js'
 import type { FileSystem } from '@effect/platform'
 import type { Deferred, Effect, Option, Queue, Ref } from 'effect'
@@ -133,7 +134,7 @@ export type AgentDetailLookup =
   | Readonly<{ _tag: 'Unknown'; identifier: string }>
 
 export type OrchestratorSnapshot = Readonly<{
-  durableWorkflows?: readonly DurableWorkflow[]
+  durableWorkflows: readonly DurableWorkflow[]
   generatedAt: string
   workflowPath: string
   effectiveWorkflow: Readonly<{
@@ -316,6 +317,7 @@ export type OrchestratorServices =
   | CurrentWorkspaceManager
   /** The handoff store is read and written against the host filesystem the root bound. */
   | FileSystem.FileSystem
+  | WorkflowStore
   | WorkflowLoader
   | WorkflowWatcher
 
@@ -360,7 +362,7 @@ export type RuntimeStores = Readonly<{
  * change as a transition applied to it. A reader sees one coherent value; a writer replaces it.
  */
 export type RuntimeCells = Readonly<{
-  durable?: DurableHost
+  durable: DurableHost
   state: Ref.Ref<RuntimeState>
   mailbox: Queue.Queue<OrchestratorEvent>
   stores: RuntimeStores
@@ -385,7 +387,7 @@ export type DeliveryRequest = Omit<
  * directly: every field is one of the extracted operations, bound to the cells the factory made.
  */
 export type OrchestratorContext = Readonly<{
-  durable?: DurableHost
+  durable: DurableHost
   state: Ref.Ref<RuntimeState>
   ports: RuntimePorts
   selectedWorkflowPath: string

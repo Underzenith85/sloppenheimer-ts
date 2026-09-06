@@ -173,7 +173,7 @@ const pruneOnce = (
   Effect.gen(function* () {
     const state = yield* Ref.get(cells.state)
     const delivery = state.deliveries.get(issue.id)
-    const durable = yield* cells.durable?.snapshot ?? Effect.succeed([])
+    const durable = yield* cells.durable.snapshot
     const protectedKeys = durable.flatMap((record) =>
       record.issueId === issue.id && record.artifact !== null ? [record.artifact.workspaceKey] : [],
     )

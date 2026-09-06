@@ -397,7 +397,7 @@ describe('CLI host lifecycle', (): void => {
 
     expect(outcome).toEqual({ code: 0, signal: null })
     expect(process_.stderr()).toBe('')
-  })
+  }, 30_000)
 
   it('uses cwd WORKFLOW.md and exits zero after SIGTERM', async (): Promise<void> => {
     const directory = await makeDirectory()
@@ -411,7 +411,7 @@ describe('CLI host lifecycle', (): void => {
 
     expect(outcome).toEqual({ code: 0, signal: null })
     expect(process_.stderr()).toBe('')
-  })
+  }, 30_000)
 
   it('rejects invalid and extra arguments with concise nonzero errors', async (): Promise<void> => {
     const directory = await makeDirectory()

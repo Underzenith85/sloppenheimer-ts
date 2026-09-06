@@ -74,6 +74,7 @@ const handoffEntry = (
 })
 
 export const consoleState = (): OrchestratorSnapshot => ({
+  durableWorkflows: [],
   generatedAt: new Date().toISOString(),
   workflowPath: '/tmp/WORKFLOW.md',
   effectiveWorkflow: { fingerprint: 'ui', loadedAt: new Date(Date.now() - 600_000).toISOString() },

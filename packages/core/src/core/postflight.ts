@@ -139,22 +139,6 @@ export const runPostflight = (
 ): Effect.Effect<PostflightOutcome> =>
   Effect.gen(function* () {
     const branchName = prepared.target.branchName
-    if (journal !== undefined && verification === undefined) {
-      return {
-        _tag: 'DeliveryFailed',
-        branchName,
-        changedFileCount: null,
-        prepared,
-        failure: {
-          category: 'verification_failed',
-          message:
-            'Verification was disabled for a durable candidate; restore the gate before delivery',
-          retryable: false,
-          worktreePreserved: true,
-        },
-      }
-    }
-
     const inspected = yield* sourceControl.inspect(prepared).pipe(asSettled)
     if (inspected._tag === 'Failed') {
       return {

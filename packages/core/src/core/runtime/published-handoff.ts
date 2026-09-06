@@ -39,7 +39,7 @@ export const findOrResumePublishedHandoff = (
 ): Effect.Effect<HandoffResult, TrackerError> =>
   Effect.gen(function* () {
     const found = yield* capability.findExistingHandoff(issue)
-    if (found._tag !== 'NoBranch' || cells.durable === undefined) {
+    if (found._tag !== 'NoBranch') {
       return found
     }
     const records = yield* cells.durable.snapshot
@@ -56,8 +56,9 @@ export const findOrResumePublishedHandoff = (
     if (
       artifact?.repository?.branchName !== issueBranchName(issue) ||
       artifact.publishedHead !== artifact.repository.headSha ||
-      artifact.verifiedRevision === null ||
-      artifact.verifiedRevision !== artifact.repository.treeSha
+      (record.verificationRequired &&
+        (artifact.verifiedRevision === null ||
+          artifact.verifiedRevision !== artifact.repository.treeSha))
     ) {
       return yield* deferredHandoff(
         'Published handoff evidence does not match the current issue branch; reconciliation required',

@@ -85,7 +85,7 @@ export type DispatchAdmission =
   | Readonly<{ _tag: 'Admit' }>
   | Readonly<{
       _tag: 'Refuse'
-      reason: 'recovering' | 'claimed' | 'paused' | 'inactive' | 'unroutable' | 'no_slot'
+      reason: 'recovering' | 'paused' | 'inactive' | 'unroutable' | 'no_slot'
     }>
 
 /** The issue number an identifier ends in, when it carries one at all. */
@@ -111,7 +111,7 @@ export const issueIsPaused = (state: RuntimeState, issue: Issue): boolean =>
 /**
  * Whether the poll loop dispatches this candidate, and if not, which rule refused it. The order is
  * the order the event loop applied inline before this was a function, and it is significant:
- * startup recovery gates everything, and a claim is checked before the costlier predicates.
+ * startup recovery gates everything before the remaining routing predicates.
  */
 export const dispatchAdmission = (
   state: RuntimeState,
@@ -120,9 +120,6 @@ export const dispatchAdmission = (
 ): DispatchAdmission => {
   if (!state.startupRecoveryFinished) {
     return { _tag: 'Refuse', reason: 'recovering' }
-  }
-  if (state.claimed.has(issue.id)) {
-    return { _tag: 'Refuse', reason: 'claimed' }
   }
   if (issueIsPaused(state, issue)) {
     return { _tag: 'Refuse', reason: 'paused' }

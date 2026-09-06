@@ -668,14 +668,12 @@ repair agent that had achieved nothing.
   running it inside the loop let one hung delivery stop every issue the host was running, ticks,
   worker exits and the operator pause that would have called it off included. The attempt is forked
   and reports back as an event, because the state it settles is still the loop's to write. The entry
-  stays in the state for the duration rather than being taken out and put back: claimed and
-  published as a `delivering` row, so a poll interleaving with the publication finds an issue
+  stays in the state for the duration rather than being taken out and put back: projected as a
+  `delivering` row, so a poll interleaving with the publication finds an issue
   something is demonstrably doing rather than a workspace nobody owns. A settlement is applied only while the entry is the one that attempt was publishing;
   anything that superseded, held or dropped it meanwhile has already decided what becomes of the
   work. Nothing ever waits on an interrupt of a publication for the same reason nothing runs one on
-  the loop. The same rule is not yet true of every handler — terminal cleanup runs an operator's
-  `before_remove` hook on the loop, and reconciliation re-reads the tracker once per running run —
-  which is [#259](https://github.com/Underzenith85/sloppenheimer-ts/issues/259).
+  the loop. Durable cleanup and retained publication recovery are supervised fibers as well.
 - An operator pause does not interrupt a publication already under way. Cutting off a push mid-flight
   is what leaves the remote in a state nobody can name, and the pause is not lost: the attempt
   settles, and whatever is scheduled next re-reads the pause before publishing anything. That
@@ -1018,8 +1016,10 @@ and when a rule is temporary, name the issue that removes it.
 ## Architecture record: durable workflow kernel foundation
 
 Tracked by [#288](https://github.com/Underzenith85/sloppenheimer-ts/issues/288).
-The pure kernel remains the target scheduler. Production now journals admission and candidate
-publication through the migration bridge below; it does not automatically replay interrupted work.
+The durable workflow is the production lifecycle authority for every workflow. The mailbox remains
+the responsive event transport, while its run, retry, delivery, and handoff collections are
+transient resource and operator projections. They do not grant admission or survive restart.
+Interrupted or uncertain work is reconciled from durable evidence, never automatically replayed.
 
 - `domain/durable-workflow.ts` defines JSON-shaped issue intent, operation generations,
   artifact provenance, explicit execution states, and budgets. Processes and fibers stay outside
@@ -1034,9 +1034,9 @@ publication through the migration bridge below; it does not automatically replay
 - `WorkflowStore` commits the workflow and history atomically with an expected revision.
   The Node adapter uses SQLite on a dedicated worker, with WAL and full synchronization.
   Database errors fail closed. No dependency or independent runtime boundary is added.
-- Full cutover still requires proven workspace ownership, automatic publication reconciliation,
-  exact-head review operations, and retirement of the legacy scheduler. The live bridge below
-  provides durable admission and candidate evidence during that migration.
+- Production requires the SQLite authority, captured-workspace process evidence, exact-head review
+  operations, and durable cleanup. Startup fails closed when any required authority or retained
+  workspace inventory cannot be acquired safely.
 
 ## Architecture record: verified candidates in the production publication path
 
@@ -1044,8 +1044,8 @@ Tracked by [#291](https://github.com/Underzenith85/sloppenheimer-ts/issues/291).
 Workflows may declare `verification.command` and a positive, bounded `verification.timeout_ms`.
 This repository uses `pnpm check`. The section is optional for existing workflows; declaring it
 requires a source-control adapter with the explicit candidate capability. Enabling or disabling
-verification requires a host restart because it changes durable-store composition; reload refuses
-the change and retains the last known good workflow. Command and timeout edits remain reloadable.
+verification is recorded per admitted workflow. Enabling, disabling, or editing the gate is
+reloadable and affects future admissions without changing the policy of an existing record.
 
 - The candidate port separates checkpoint, alignment to the protected base, verification, remote
   observation, and publication. A candidate names its commit SHA and tree SHA as well as the
@@ -1067,16 +1067,16 @@ the change and retains the last known good workflow. Command and timeout edits r
   verification, never the coding session.
 - `before_run` must not replace the repository the host prepared. This repository's hook installs
   dependencies with `pnpm install --frozen-lockfile`; it no longer checks out main over a repair.
-- These operations persist candidate obligations and verification evidence through the live bridge
-  below. Safe adoption of pre-restart workspaces remains required before automatic recovery.
+- These operations persist candidate obligations and verification evidence in the authoritative
+  workflow record. Local recovery requires exact workspace identity and stopped-process proof.
 
-## Architecture record: durable admission and publication bridge
+## Architecture record: durable production authority
 
 Tracked by [#290](https://github.com/Underzenith85/sloppenheimer-ts/issues/290),
 [#291](https://github.com/Underzenith85/sloppenheimer-ts/issues/291), and
 [#293](https://github.com/Underzenith85/sloppenheimer-ts/issues/293).
 
-- At startup, workflows declaring verification compose a SQLite workflow store under
+- At startup, every workflow composes a SQLite workflow store under
   `.sloppenheimer/` beside the workflow file, keyed by its absolute path. A separate SQLite
   ownership database holds an exclusive transaction for the host's scope. A second host using
   that path fails startup. This is host exclusion, not proof that an orphaned child exited.
@@ -1104,14 +1104,16 @@ Tracked by [#290](https://github.com/Underzenith85/sloppenheimer-ts/issues/290),
 - Startup converts unfinished records into visible intervention holds. It preserves exact
   candidate evidence and refuses a fresh coder, including when a push may have succeeded without
   acknowledgement. Confirmed published records continue through existing handoff reconciliation.
-  Local inspection/adoption after proving child termination is still outstanding.
-- Durable candidates are protected from retention pruning. Captured artifact deletion is a durable cleanup obligation, with bounded retries and
-  an intervention after exhaustion. Older unreferenced workspaces still use retention pruning.
-- The API exposes optional `durable_workflows` summaries. The console puts unresolved recovery
+  Local adoption is allowed only after the captured process is proven stopped and the exact
+  candidate, tree, baseline, repository identity, and remote lease are re-inspected.
+- Durable candidates are protected from retention pruning. Captured artifact deletion is a durable
+  cleanup obligation, with bounded retries and an intervention after exhaustion. Retained legacy
+  lease metadata is inventoried and imported idempotently as intervention without invented SHA evidence.
+- The API always exposes `durable_workflows` summaries. The console puts unresolved recovery
   work in Needs attention and offers no misleading Start action. Existing live delivery holds
   still support explicit re-verification and delivery.
-- The legacy mailbox still owns polling, review, delivery timers, and execution fibers. This
-  bridge is a staged production integration, not completion of the durable kernel cutover.
+- The mailbox owns polling and transient fibers/timers. Durable state alone owns lifecycle
+  admission, intent, operation identity, retry input, evidence, budgets, and cleanup obligations.
 
 ### Remote-only publication recovery
 
@@ -1159,17 +1161,17 @@ The review and migration integration for
   minute and the original issue deadline; repeated same-input failures escalate after three.
 - GitHub resolves a review comment's abbreviated claim through its commit API. Only the full SHA
   returned by that authority enters the review decision. Prefix equality never authorizes merge.
-- Every new review mutation refreshes eligibility, including the compatibility path. An observed
+- Every new review mutation refreshes eligibility. An observed
   push or merge can be recorded during pause; that fact does not authorize the next mutation.
 - Agent and postflight phase transitions are applied atomically before entering the corresponding
   operation, with run-ID fencing. Their old mailbox ordering handshakes are removed. Stale crash
-  notifications cannot fault a replacement run. Polling and some teardown still use the legacy
-  mailbox; the pure-kernel scheduler replacement remains outstanding.
+  notifications cannot fault a replacement run. Polling and teardown use the mailbox only to
+  supervise runtime resources and update projections; they cannot override a durable refusal.
 - A process launched inside a leased or safely adopted captured workspace writes a starting receipt before spawn, then its
   process group and namespace, then a stopped receipt after finalization. The spawn/receipt crash
   gap remains an explicit unknown. Startup can resume an exactly verified, remotely confirmed
   publication only when every captured process is confirmed stopped. Missing receipts, unknown
-  namespaces, and live groups retain the intervention. This permits remote-only recovery; it does
+  namespaces, and live groups retain the intervention. This permits remote-only recovery; it
   adopts the exact interrupted local worktree only after stopped-process proof and local inspection;
   it never launches another coder for that candidate.
 - Receipt syncing can outlast a fast process. Exit status and output failure are retained from
@@ -1182,7 +1184,7 @@ The review and migration integration for
   capture the original workspace path/key, run outside the mailbox, and retain failures after an
   issue disappears. Five bounded attempts precede intervention. Cleanup never follows a reload to
   a new workspace root, and never runs a removal hook over unconfirmed process ownership.
-- Expired waits become intervention records. The compatible state API adds a progress projection
+- Expired waits become intervention records. The state API requires a progress projection
   with operation, deadline, verified revision, budgets, cleanup, and next action. Active handoff and
   delivery details do not count against the completed-detail retention limit.
 
@@ -1200,9 +1202,8 @@ cannot understand the added review/cleanup obligations or a historical null comp
 point it at the new database or resume publishing from the old JSON. Reconcile remote heads and
 open PRs first and explicitly reconstruct the older host's state if rollback is required.
 
-Full completion of [#288](https://github.com/Underzenith85/sloppenheimer-ts/issues/288) still requires
-the authoritative pure-kernel production scheduler and retirement of legacy lifecycle maps,
-complete migration of unreferenced legacy workspace metadata, and the full restart/parked-port
-fault matrix. These
-additions do not constitute that cutover. Required real process-tree and conformance gates must
-pass on a host with functioning process-group visibility before automatic recovery is deployed.
+The [#288](https://github.com/Underzenith85/sloppenheimer-ts/issues/288) cutover is intentionally
+breaking: no optional durable store, optional captured-workspace capability, legacy claim map, or
+legacy JSON mutation path remains. Handoff and completion JSON are read-only migration inputs.
+Required real process-tree and conformance gates must pass on a host with functioning process-group
+visibility before automatic recovery is deployed.

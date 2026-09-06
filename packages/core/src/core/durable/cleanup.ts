@@ -61,24 +61,19 @@ export const runCleanup = (
       if ((yield* Ref.get(records)).get(issueId)?.cleanup !== claimed) {
         return
       }
-      const remove = workspaces.removeCaptured
-      const result = yield* (
-        remove === undefined
-          ? Effect.fail(
+      const result = yield* workspaces
+        .removeCaptured({ path: cleanup.workspacePath, key: cleanup.workspaceKey })
+        .pipe(
+          Effect.timeoutFail({
+            duration: 60_000,
+            onTimeout: () =>
               new WorkspaceError({
                 category: 'remove_failed',
-                message: 'Captured cleanup capability is unavailable',
+                message: 'Cleanup deadline expired',
               }),
-            )
-          : remove({ path: cleanup.workspacePath, key: cleanup.workspaceKey })
-      ).pipe(
-        Effect.timeoutFail({
-          duration: 60_000,
-          onTimeout: () =>
-            new WorkspaceError({ category: 'remove_failed', message: 'Cleanup deadline expired' }),
-        }),
-        Effect.either,
-      )
+          }),
+          Effect.either,
+        )
       const now = yield* Clock.currentTimeMillis
       yield* write(issueId, (current) => {
         if (current.cleanup !== claimed) {

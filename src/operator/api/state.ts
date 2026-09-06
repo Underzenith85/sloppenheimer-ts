@@ -113,7 +113,7 @@ export type PublishedHandoff = Readonly<{
 }>
 
 export type PublishedState = Readonly<{
-  durable_workflows?: readonly Readonly<{
+  durable_workflows: readonly Readonly<{
     issue_id: string
     issue_identifier: string
     title: string
@@ -123,7 +123,7 @@ export type PublishedState = Readonly<{
     workspace_path: string | null
     candidate_head: string | null
     published_head: string | null
-    progress?: ReturnType<typeof workflowProgress>
+    progress: ReturnType<typeof workflowProgress>
   }>[]
   generated_at: string
   workflow_path: string
@@ -259,22 +259,18 @@ const publishHandoff = (entry: HandoffRow): PublishedHandoff => ({
 })
 
 export const publishState = (snapshot: Snapshot): PublishedState => ({
-  ...(snapshot.durableWorkflows === undefined
-    ? {}
-    : {
-        durable_workflows: snapshot.durableWorkflows.map((record) => ({
-          issue_id: record.issueId,
-          issue_identifier: record.identifier,
-          title: record.objective,
-          status: record.status._tag,
-          intent: record.intent,
-          reason: record.status._tag === 'Intervention' ? record.status.reason : null,
-          workspace_path: record.artifact?.workspacePath ?? null,
-          candidate_head: record.artifact?.repository?.headSha ?? null,
-          published_head: record.artifact?.publishedHead ?? null,
-          progress: workflowProgress(record),
-        })),
-      }),
+  durable_workflows: snapshot.durableWorkflows.map((record) => ({
+    issue_id: record.issueId,
+    issue_identifier: record.identifier,
+    title: record.objective,
+    status: record.status._tag,
+    intent: record.intent,
+    reason: record.status._tag === 'Intervention' ? record.status.reason : null,
+    workspace_path: record.artifact?.workspacePath ?? null,
+    candidate_head: record.artifact?.repository?.headSha ?? null,
+    published_head: record.artifact?.publishedHead ?? null,
+    progress: workflowProgress(record),
+  })),
   generated_at: snapshot.generatedAt,
   workflow_path: snapshot.workflowPath,
   effective_workflow: {

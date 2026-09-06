@@ -12,7 +12,7 @@
  *
  * This module is the whole surface, grouped by what the transition is about:
  *
- * - `transitions/claims.ts` — taking responsibility for an issue, and giving it up.
+ * - `transitions/claims.ts` — issue identity and completed-work projections.
  * - `transitions/runs.ts` — the live runs and the telemetry their callbacks buffer.
  * - `transitions/retries.ts` — the queued retries, and the operator's pause list.
  * - `transitions/deliveries.ts` — work waiting to reach the remote, and the retries queued for it.
@@ -22,8 +22,7 @@
  * - `transitions/ports.ts` — retiring replaced port instances and adopting live work onto new ones.
  * - `transitions/workspaces.ts` — what each issue is known to keep on disk.
  *
- * The groups are a reading order rather than a layering: `retries`, `deliveries` and `handoffs`
- * claim through `claims`, and nothing else here imports a sibling.
+ * The groups are a reading order rather than a layering; the durable kernel owns admission.
  */
 
 export * from './transitions/claims.js'

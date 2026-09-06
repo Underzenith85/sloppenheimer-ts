@@ -8,7 +8,6 @@ import { settlePostflight } from '../delivery.js'
 import { issueIsActive, issueIsPaused, logContext, stateIsIn } from '../policy.js'
 import { publicationEligibility } from '../publication-eligibility.js'
 import { runPostflight } from '../postflight.js'
-import { stopRetentionPass } from '../run-workspace.js'
 import { holdDelivery as retainIntervention } from '../runtime/held-delivery.js'
 import { ownIssueFiber } from '../runtime/execution.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
@@ -138,7 +137,7 @@ const retryDiscard = (
             : `The issue no longer wants this work, and the workspace holding it could not be removed: ${error}`,
         }),
       )
-      return retrying ? noted : Transitions.releaseClaim(noted, entry.issue.id)
+      return noted
     })
   })
 
@@ -156,17 +155,14 @@ const recordDiscarded = (context: OrchestratorContext, entry: DeliveryEntry): Ef
     // The discard removed the issue's workspaces, retained ones included, so nothing is kept.
     yield* Ref.update(context.state, (current) =>
       Transitions.forgetRetainedWorkspaces(
-        Transitions.releaseClaim(
-          Transitions.updateDetail(current, entry.issue.id, (record) =>
-            recordPublication(record, discardedAt, {
-              status: 'not_performed',
-              branch: entry.prepared.target.branchName,
-              baselineSha: entry.prepared.baselineSha,
-              attempts: entry.attempt,
-              message: 'Unpublished work discarded: the issue no longer wants it',
-            }),
-          ),
-          entry.issue.id,
+        Transitions.updateDetail(current, entry.issue.id, (record) =>
+          recordPublication(record, discardedAt, {
+            status: 'not_performed',
+            branch: entry.prepared.target.branchName,
+            baselineSha: entry.prepared.baselineSha,
+            attempts: entry.attempt,
+            message: 'Unpublished work discarded: the issue no longer wants it',
+          }),
         ),
         entry.issue.id,
       ),
@@ -193,21 +189,12 @@ const runDeliveryAttempt = (
     if (disposition === 'hold') {
       return { _tag: 'Held' } as const
     }
-    if (disposition === 'discard' && context.durable !== undefined) {
+    if (disposition === 'discard') {
       return {
         _tag: 'Intervention',
         reason:
           'Issue is no longer active. Durable candidate retained; cleanup requires reconciliation.',
       } as const
-    }
-    if (disposition === 'discard') {
-      yield* stopRetentionPass(context, entry.issue.id)
-      const removed = yield* entry.execution.workspaces
-        .remove(entry.issue.identifier)
-        .pipe(asSettled)
-      return removed._tag === 'Failed'
-        ? ({ _tag: 'DiscardFailed', error: removed.error.message } as const)
-        : ({ _tag: 'Discarded' } as const)
     }
     // The delivery's own. The execution snapshot is the record of what this work is published
     // under, and a reload that replaces the tracker moves every delivery holding it onto the
@@ -233,10 +220,9 @@ const runDeliveryAttempt = (
       publicationEligibility(context.state, entry.issue, entry.execution),
       entry.execution.journal?.publication,
     )
-    const attempted = yield* (
-      entry.execution.workspaces.superviseCaptured?.(entry.prepared.workspace, publication) ??
-      publication
-    ).pipe(asSettled)
+    const attempted = yield* entry.execution.workspaces
+      .superviseCaptured(entry.prepared.workspace, publication)
+      .pipe(asSettled)
     if (attempted._tag === 'Failed') {
       return { _tag: 'Intervention', reason: attempted.error.message } as const
     }
@@ -260,7 +246,7 @@ const runDeliveryAttempt = (
  * postflight went through.
  *
  * The attempt is forked rather than run here, and the delivery stays in the state while it runs —
- * claimed, published as a `delivering` row, and counted as handled by the recovery sweep — so that
+ * projected as a `delivering` row and counted as handled by the recovery sweep — so that
  * a poll interleaving with the publication finds an issue something is demonstrably doing.
  */
 export const onDeliveryDue = (
@@ -365,11 +351,7 @@ export const onDeliveryAttempted = (
       return
     }
     if (event.result._tag === 'Abandoned') {
-      // Nothing the host holds can publish this. The claim goes; the work stays on disk as the
-      // run's retained workspace, which is what the workspace lifecycle keeps such artifacts as.
-      yield* Ref.update(context.state, (current) =>
-        Transitions.releaseClaim(current, entry.issue.id),
-      )
+      // Nothing the host holds can publish this. Durable intervention retains the artifact.
       return
     }
     yield* entry.execution.journal?.settled(event.result.outcome) ?? Effect.void

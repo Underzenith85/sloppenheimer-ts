@@ -1,4 +1,3 @@
-import { SourceControlError } from '../../domain/errors.js'
 import type { RunJournal } from '../durable/run-journal.js'
 import { publicationEligibility } from '../publication-eligibility.js'
 import { runVerifiedPublication } from '../verified-publication.js'
@@ -66,33 +65,26 @@ const runRebaseAttempt = (
             Effect.tap((prepared) => journal?.prepared(prepared) ?? Effect.void),
             Effect.flatMap((prepared) => {
               const verification = handoff.execution.workflow.config.verification
-              return verification === undefined && journal === undefined
-                ? sourceControl.rebase(handoff.issue, prepared)
-                : verification === undefined
-                  ? Effect.fail(
-                      new SourceControlError({
-                        category: 'verification_failed',
-                        message: 'Restore verification before rebasing durable work',
-                        retryable: false,
-                        worktreePreserved: true,
-                      }),
-                    )
-                  : runVerifiedPublication(
-                      sourceControl,
-                      handoff.issue,
-                      prepared,
-                      verification,
-                      handoff.execution.secretEnvironmentNames,
-                      {
-                        rebaseOnly: true,
-                        ...(journal === undefined ? {} : { journal: journal.publication }),
-                        beforePublish: publicationEligibility(
-                          context.state,
-                          handoff.issue,
-                          handoff.execution,
-                        ),
-                      },
-                    )
+              return verification === undefined
+                ? sourceControl
+                    .rebase(handoff.issue, prepared)
+                    .pipe(Effect.tap((outcome) => journal?.settled(outcome) ?? Effect.void))
+                : runVerifiedPublication(
+                    sourceControl,
+                    handoff.issue,
+                    prepared,
+                    verification,
+                    handoff.execution.secretEnvironmentNames,
+                    {
+                      rebaseOnly: true,
+                      ...(journal === undefined ? {} : { journal: journal.publication }),
+                      beforePublish: publicationEligibility(
+                        context.state,
+                        handoff.issue,
+                        handoff.execution,
+                      ),
+                    },
+                  )
             }),
           ),
       (exit) =>
@@ -144,15 +136,18 @@ export const performRebase = (
       )
       return
     }
-    const journal =
-      context.durable === undefined
-        ? Option.none()
-        : yield* context.durable.start(handoff.issue, {
-            _tag: 'Repair',
-            branchName: handoff.branchName,
-            expectedHeadSha: action.headSha,
-          })
-    if (context.durable !== undefined && Option.isNone(journal)) {
+    const journal = yield* context.durable.start(
+      handoff.issue,
+      {
+        _tag: 'Repair',
+        branchName: handoff.branchName,
+        expectedHeadSha: action.headSha,
+      },
+      'review',
+      handoff.execution.workflow.config.verification !== undefined,
+      'intervene',
+    )
+    if (Option.isNone(journal)) {
       yield* writeHandoff(context, id, {
         ...handoff,
         state: 'intervention_required',

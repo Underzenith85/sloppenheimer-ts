@@ -1,8 +1,7 @@
-import { restoreDurableHandoffs } from './runtime/durable-stores.js'
+import { importCapturedWorkspaces, restoreDurableHandoffs } from './runtime/durable-stores.js'
 import { startPublicationRecovery } from './runtime/publication-recovery.js'
-import { Effect, FiberSet, Option, Queue, Ref, Stream, type Scope } from 'effect'
+import { Effect, FiberSet, Queue, Ref, Stream, type Scope } from 'effect'
 
-import { validateWorkflowComposition } from './runtime/composition.js'
 import { WorkflowStore } from '../ports/workflow-store.js'
 import { makeDurableHost } from './durable/live-journal.js'
 import type { WorkflowError } from '../domain/errors.js'
@@ -114,16 +113,13 @@ export const startOrchestratorRuntime = (
      * The instances the layer built are replaced immediately and retired on the first poll.
      */
     const loaded = yield* ports.workflowLoader.load(selectedWorkflowPath)
-    yield* validateWorkflowComposition(loaded)
     const bootstrap = yield* rebuildEffectiveWorkflow(ports, loaded)
     // A bootstrap that refuses takes the whole host down with it, so whatever it replaced is
     // released by the composition root's own scope rather than by a drain that never runs.
     const bootstrapWorkflow = yield* bootstrap.value
-    const durableStore = yield* Effect.serviceOption(WorkflowStore)
-    const durable = Option.isNone(durableStore)
-      ? undefined
-      : yield* makeDurableHost(durableStore.value)
-    const recovered = durable === undefined ? [] : yield* durable.snapshot
+    const durable = yield* makeDurableHost(yield* WorkflowStore)
+    yield* importCapturedWorkspaces(durable, bootstrapWorkflow.workspaces)
+    const recovered = yield* durable.snapshot
     // An unfinished durable record may name an old workspace root or an orphaned process.
     // Startup cannot delete those artifacts before recovery establishes ownership.
     if (recovered.length === 0) {
@@ -133,7 +129,7 @@ export const startOrchestratorRuntime = (
     const opened = yield* openStores(bootstrapWorkflow)
     const restored = yield* restoreDurableHandoffs(durable, opened.restored)
     const cells: RuntimeCells = {
-      ...(durable === undefined ? {} : { durable }),
+      durable,
       state: yield* Ref.make(
         Transitions.holdRetirements(
           initialState(bootstrapWorkflow, restored),
@@ -176,7 +172,7 @@ export const startOrchestratorRuntime = (
     yield* Effect.forkScoped(Stream.runForEach(workflowChanges, () => requestTick(cells, 'change')))
 
     const eventLoopFiber = yield* Effect.forkScoped(
-      Effect.raceFirst(eventLoop(context), durable?.awaitFailure ?? Effect.never),
+      Effect.raceFirst(eventLoop(context), durable.awaitFailure),
     )
     yield* startPublicationRecovery(cells, bootstrapWorkflow.sourceControl)
     yield* requestTick(cells, 'startup')

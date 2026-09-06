@@ -35,9 +35,6 @@ export const reviewAction = <Value>(
         }),
       )
     }
-    if (context.durable === undefined) {
-      return yield* action
-    }
     const record = (yield* context.durable.snapshot).find((value) => value.issueId === issue.id)
     const identity = record?.artifact?.repository?.identity
     if (

@@ -17,7 +17,6 @@ import {
 } from './handoff-decision.js'
 import { afterRepairDispatched, awaitingSlot, repairIssue } from './repair.js'
 import { performRebase } from './polling/rebase.js'
-import { rebaseInFlight } from './rebase.js'
 import { hasSlot, logContext } from './policy.js'
 import {
   refreshHandoffIssues,
@@ -29,7 +28,7 @@ import {
 import type { CodeReviewPort } from '../ports/index.js'
 import type { CompletedEntry } from './state.js'
 import type { OrchestratorContext } from './runtime.js'
-import type { EffectiveWorkflow, HandoffEntry, RuntimeState } from './state.js'
+import type { EffectiveWorkflow, HandoffEntry } from './state.js'
 import * as Transitions from './transitions.js'
 
 /**
@@ -69,27 +68,18 @@ const completeWork = (
   finished: CompletedEntry,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    if (context.durable !== undefined) {
-      yield* context.durable.recordCompletions([
-        { ...finished, finishedAt: finished.finishedAt.toISOString() },
-      ])
-    }
+    yield* context.durable.recordCompletions([
+      { ...finished, finishedAt: finished.finishedAt.toISOString() },
+    ])
     // Preserve the merged head before removing the live handoff; restart must never replay it.
     yield* context.persistHandoffs
     yield* Ref.update(context.state, (current) =>
       Transitions.completeHandoff(current, id, finished),
     )
     yield* context.persistCompletions
-    if (context.durable !== undefined) {
-      yield* context.durable.queueCleanup(id)
-      const workspaces = (yield* Ref.get(context.state)).lastKnownGood.workspaces
-      yield* ownIssueFiber(
-        context.execution,
-        'cleanup',
-        id,
-        context.durable.cleanup(id, workspaces),
-      )
-    }
+    yield* context.durable.queueCleanup(id)
+    const workspaces = (yield* Ref.get(context.state)).lastKnownGood.workspaces
+    yield* ownIssueFiber(context.execution, 'cleanup', id, context.durable.cleanup(id, workspaces))
   })
 
 /**
@@ -452,35 +442,5 @@ export const reconcileHandoffs = (
         )
       }
     }
-    yield* Ref.update(context.state, (current) => releaseIdleClaims(current, selected))
     yield* context.persistHandoffs
   })
-
-/**
- * Handoffs are observations, not claim owners. A live worker, a queued retry and work waiting to
- * be published each retain their claim; every idle handoff releases one that was restored from an
- * older snapshot or left behind by a completed transition.
- *
- * The delivery belongs in that list for the same reason the other two do: the claim is what
- * `dispatchAdmission` refuses on, and an agent dispatched while a publication is queued would be
- * editing the very worktree that publication is about to push. A rebase in flight is the host
- * moving the branch, and an agent admitted meanwhile would start from the head it is replacing.
- */
-const releaseIdleClaims = (
-  current: RuntimeState,
-  selected: (id: IssueId) => boolean,
-): RuntimeState => {
-  let released = current
-  for (const [id, handoff] of current.handoffs) {
-    if (
-      selected(id) &&
-      !current.running.has(id) &&
-      !current.retries.has(id) &&
-      !current.deliveries.has(id) &&
-      !rebaseInFlight(handoff)
-    ) {
-      released = Transitions.releaseClaim(released, id)
-    }
-  }
-  return released
-}

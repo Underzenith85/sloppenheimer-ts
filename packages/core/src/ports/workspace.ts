@@ -3,7 +3,11 @@ import { Context, Effect, Layer, type Exit, type Scope } from 'effect'
 import type { HooksConfig } from '../config/workflow.js'
 import type { IssueIdentifier, Workspace } from '../domain/domain.js'
 import type { WorkspaceError } from '../domain/errors.js'
-import type { WorkspaceRelease, WorkspaceRun } from '../domain/workspace-lease.js'
+import type {
+  CapturedWorkspaceMetadata,
+  WorkspaceRelease,
+  WorkspaceRun,
+} from '../domain/workspace-lease.js'
 import type { WorkspacePruneReport } from '../domain/workspace-retention.js'
 import { makeAdapterCell, type AdapterCell } from './cell.js'
 
@@ -37,14 +41,16 @@ import { makeAdapterCell, type AdapterCell } from './cell.js'
  * runs that this host still means to publish from — a retained delivery's above all.
  */
 export type WorkspaceManagerPort = Readonly<{
+  /** Enumerates retained lease metadata for one-time durable migration. */
+  capturedMetadata: Effect.Effect<readonly CapturedWorkspaceMetadata[], WorkspaceError>
   /** Installs process receipts for a supervised operation over an already captured workspace. */
-  superviseCaptured?: <Value, Failure, Requirements>(
+  superviseCaptured: <Value, Failure, Requirements>(
     workspace: Workspace,
     operation: Effect.Effect<Value, Failure, Requirements>,
   ) => Effect.Effect<Value, Failure | WorkspaceError, Requirements>
   /** Uses captured paths and process evidence, never the manager's current workspace root. */
-  confirmStopped?: (workspace: Workspace) => Effect.Effect<boolean>
-  removeCaptured?: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
+  confirmStopped: (workspace: Workspace) => Effect.Effect<boolean>
+  removeCaptured: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>
   withLeasedWorkspace: <Value, Failure, Requirements>(
     run: WorkspaceRun,
     use: (workspace: Workspace) => Effect.Effect<Value, Failure, Requirements>,

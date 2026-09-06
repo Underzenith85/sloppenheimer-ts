@@ -5,15 +5,14 @@ import { Clock, Effect, Option, Ref } from 'effect'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
 import { currentInstant } from '../../support/clock.js'
 import { logError } from '../../support/logging.js'
-import { loadCompletions, saveCompletions } from '../completion-store.js'
-import { loadHandoffs, saveHandoffs } from '../handoff-store.js'
+import { loadCompletions } from '../completion-store.js'
+import { loadHandoffs } from '../handoff-store.js'
 import {
   completionWindowMs,
   publishedCompletedWork,
   type CompletedSnapshot,
   type EffectiveWorkflow,
   type HandoffStoreError,
-  type RuntimeState,
 } from '../state.js'
 import * as Transitions from '../transitions.js'
 import type { RuntimeCells, RuntimeStore, RuntimeStores } from './types.js'
@@ -36,8 +35,6 @@ export type RestoredState = Readonly<{
  */
 export const storePath = (store: RuntimeStore, workspaceRoot: string): string =>
   resolve(workspaceRoot, '.sloppenheimer', store.file)
-
-const rootOf = (state: RuntimeState): string => state.lastKnownGood.workflow.config.workspaceRoot
 
 /**
  * Binds both stores to the workflow the orchestrator adopted and reads them, answering with what
@@ -162,31 +159,7 @@ export const persistHandoffs = (cells: RuntimeCells): Effect.Effect<void> =>
     if (store.disabled || !current.startupRecoveryFinished || current.storeReadFailed) {
       return
     }
-    if (cells.durable !== undefined) {
-      yield* cells.durable.recordHandoffs(Transitions.handoffSnapshots(current))
-      return
-    }
-    const path = storePath(store, rootOf(current))
-    yield* store.onHostFileSystem(saveHandoffs(path, Transitions.handoffSnapshots(current))).pipe(
-      Effect.catchAll((error) =>
-        Effect.gen(function* () {
-          const observedAt = yield* currentInstant
-          yield* Ref.update(cells.state, (failing) =>
-            Transitions.setHandoffStoreError(Transitions.noteRecovery(failing, { failed: 1 }), {
-              operation: error.operation,
-              message: error.message,
-              observedAt,
-            }),
-          )
-          yield* logError('handoff store write failed', {
-            action: 'handoff_store_write',
-            outcome: 'failed',
-            path,
-            error: error.message,
-          })
-        }),
-      ),
-    )
+    yield* cells.durable.recordHandoffs(Transitions.handoffSnapshots(current))
   })
 
 /**
@@ -201,21 +174,5 @@ export const persistCompletions = (cells: RuntimeCells): Effect.Effect<void> =>
       return
     }
     const current = yield* Ref.get(cells.state)
-    if (cells.durable !== undefined) {
-      yield* cells.durable.recordCompletions(Transitions.publishedCompletions(current))
-      return
-    }
-    const path = storePath(store, rootOf(current))
-    yield* store
-      .onHostFileSystem(saveCompletions(path, Transitions.publishedCompletions(current)))
-      .pipe(
-        Effect.catchAll((error) =>
-          logError('completion store write failed', {
-            action: 'completion_store_write',
-            outcome: 'failed',
-            path,
-            error: error.message,
-          }),
-        ),
-      )
+    yield* cells.durable.recordCompletions(Transitions.publishedCompletions(current))
   })

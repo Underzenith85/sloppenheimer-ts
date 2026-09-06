@@ -3,11 +3,10 @@ import { Option } from 'effect'
 import type { IssueId } from '../../domain/domain.js'
 import { withEntry, withoutEntry, withMember, withoutMember } from '../../support/collections.js'
 import type { RetryEntry, RuntimeState } from '../state.js'
-import { claimIssue } from './claims.js'
+import { noteIssue } from './claims.js'
 
 /**
- * The queued retries, and the operator's pause list. A retry is a claim that has not been given up:
- * scheduling one claims the issue, and only the attempt that came due may take it back.
+ * The queued retry projections and operator pause list. Durable workflow state owns admission.
  */
 
 /**
@@ -15,8 +14,8 @@ import { claimIssue } from './claims.js'
  * timer it displaces is interrupted by the execution owner the new one is armed under.
  */
 export const scheduleRetry = (state: RuntimeState, entry: RetryEntry): RuntimeState => {
-  const claimed = claimIssue(state, entry.issue)
-  return { ...claimed, retries: withEntry(claimed.retries, entry.issue.id, entry) }
+  const noted = noteIssue(state, entry.issue)
+  return { ...noted, retries: withEntry(noted.retries, entry.issue.id, entry) }
 }
 
 /** Removes a queued retry, returning it so the caller can release its timer. */

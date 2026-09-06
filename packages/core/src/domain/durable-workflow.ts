@@ -108,6 +108,7 @@ export const DurableWorkflow = Schema.Struct({
   objective: Schema.String,
   revision: Schema.Int.pipe(Schema.nonNegative()),
   intent: Schema.Literal('active', 'paused', 'cancelled'),
+  verificationRequired: Schema.Boolean,
   afterPublication: Schema.optionalWith(Schema.Literal('review', 'continuation'), { exact: true }),
   runTarget: Schema.optionalWith(
     Schema.Union(

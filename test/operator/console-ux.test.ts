@@ -1068,6 +1068,7 @@ it('shows interrupted durable work as attention without offering a second coder'
           objective: 'Recover retained work',
           revision: 2,
           intent: 'active',
+          verificationRequired: true,
           status: {
             _tag: 'Intervention',
             reason: 'Confirm the previous command has stopped before recovery.',
