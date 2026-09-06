@@ -14,10 +14,10 @@ export const retryMatches = (current: DurableWorkflow, target: SourceControlTarg
   )
 }
 
-/** Only a known pre-agent failure or an inspected clean workspace permits a fresh attempt. */
+/** Only a known pre-agent failure or an inspected workspace still at its baseline permits a fresh attempt. */
 export const settleStoppedRun = (
   current: DurableWorkflow,
-  clean: boolean,
+  observedHeadSha: string | null,
   beforePreparation = false,
 ): DurableWorkflow => {
   if (current.status._tag !== 'Executing') {
@@ -27,9 +27,9 @@ export const settleStoppedRun = (
   const safe =
     current.runTarget !== undefined &&
     ((beforePreparation && artifact === null) ||
-      (clean &&
+      (observedHeadSha !== null &&
         artifact !== null &&
-        artifact.repository?.headSha === artifact.baselineSha &&
+        observedHeadSha === artifact.baselineSha &&
         artifact.verifiedRevision === null &&
         artifact.publishedHead === null))
   return {
