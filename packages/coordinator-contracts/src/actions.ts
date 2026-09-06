@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { Identifier, Text, Timestamp, Version, WorkIdentity } from './common.js'
+import { Identifier, NonEmptyText, Timestamp, Version, WorkIdentity } from './common.js'
 
 export const Action = Schema.Literal('start', 'queue', 'pause', 'resume')
 export const Capability = Schema.Union(
@@ -7,7 +7,7 @@ export const Capability = Schema.Union(
   Schema.Struct({
     action: Action,
     available: Schema.Literal(false),
-    reason: Text.pipe(Schema.minLength(1)),
+    reason: NonEmptyText,
   }),
 )
 export const RefreshScope = Schema.Union(
@@ -26,15 +26,15 @@ export const ActionOutcome = Schema.Union(
     status: Schema.Literal('accepted-awaiting-observation'),
     ...request,
     accepted_at: Timestamp,
-  }),
+  }).pipe(Schema.filter((value) => value.accepted_at >= value.submitted_at)),
   Schema.Struct({
     status: Schema.Literal('confirmed'),
     ...request,
     observed_at: Timestamp,
-    evidence: Text.pipe(Schema.minLength(1)),
+    evidence: NonEmptyText,
   }).pipe(Schema.filter((value) => value.observed_at > value.submitted_at)),
-  Schema.Struct({ status: Schema.Literal('rejected'), ...request, reason: Text }),
-  Schema.Struct({ status: Schema.Literal('unknown'), ...request, reason: Text }),
+  Schema.Struct({ status: Schema.Literal('rejected'), ...request, reason: NonEmptyText }),
+  Schema.Struct({ status: Schema.Literal('unknown'), ...request, reason: NonEmptyText }),
 )
 export type Capability = typeof Capability.Type
 export type RefreshScope = typeof RefreshScope.Type

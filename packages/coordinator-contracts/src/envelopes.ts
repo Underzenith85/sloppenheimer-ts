@@ -3,6 +3,7 @@ import { Capability } from './actions.js'
 import {
   Count,
   Identifier,
+  NonEmptyText,
   Observation,
   ProcessIdentity,
   ProviderProvenance,
@@ -11,6 +12,7 @@ import {
   Timestamp,
   Version,
   WorkIdentity,
+  workKey,
 } from './common.js'
 
 export const AggregateItem = Schema.Struct({
@@ -35,7 +37,14 @@ export const AggregateItem = Schema.Struct({
   capabilities: Schema.Array(Capability),
   detail_available: Schema.Boolean,
   retained_recovery: Schema.Boolean,
-})
+}).pipe(
+  Schema.filter(
+    (value) =>
+      (value.state_observation.condition !== 'incompatible' &&
+        value.backlog_observation.condition !== 'incompatible') ||
+      value.capabilities.every((capability) => !capability.available),
+  ),
+)
 export type AggregateItem = typeof AggregateItem.Type
 export const InstanceHealth = Schema.Struct({
   version: Version,
@@ -65,7 +74,12 @@ export const Aggregate = Schema.Struct({
   instances: Schema.Array(InstanceHealth),
   items: Schema.Array(AggregateItem),
   alerts: Schema.Array(Alert),
-})
+}).pipe(
+  Schema.filter((value) => {
+    const identities = new Set(value.items.map((item) => workKey(item.identity)))
+    return identities.size === value.items.length
+  }),
+)
 export type Aggregate = typeof Aggregate.Type
 export const Detail = Schema.Struct({
   version: Version,
@@ -80,7 +94,7 @@ export const Detail = Schema.Struct({
     }),
     Schema.Struct({
       status: Schema.Literal('not-retained', 'unreachable', 'incompatible'),
-      reason: Text,
+      reason: NonEmptyText,
     }),
   ),
 })

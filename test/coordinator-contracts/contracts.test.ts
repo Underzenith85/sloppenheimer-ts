@@ -153,6 +153,30 @@ describe('coordinator wire boundaries', () => {
     })
     expect(decoded._tag).toBe(offset > 0 ? 'Right' : 'Left')
   })
+  it.each([-1, 0, 1])('requires acceptance at or after submission: offset %i', (offset) => {
+    const decoded = Schema.decodeUnknownEither(ActionFeedback)({
+      ...unknownActionFixture(),
+      outcome: {
+        status: 'accepted-awaiting-observation',
+        request_id: 'pause-request',
+        submitted_at: fixtureInstant,
+        accepted_at: fixtureInstant + offset,
+      },
+    })
+    expect(decoded._tag).toBe(offset >= 0 ? 'Right' : 'Left')
+  })
+  it.each(['rejected', 'unknown'] as const)('requires a reason for %s actions', (status) => {
+    const decoded = Schema.decodeUnknownEither(ActionFeedback)({
+      ...unknownActionFixture(),
+      outcome: {
+        status,
+        request_id: 'pause-request',
+        submitted_at: fixtureInstant,
+        reason: '',
+      },
+    })
+    expect(decoded._tag).toBe('Left')
+  })
   it.each([
     { observed_at: null, last_attempt_at: null, expected: 'Left' },
     { observed_at: 0, last_attempt_at: null, expected: 'Right' },
@@ -166,6 +190,42 @@ describe('coordinator wire boundaries', () => {
         condition: 'unreachable',
       })._tag,
     ).toBe(expected)
+  })
+  it('rejects source provenance when no observation exists', () => {
+    expect(
+      Schema.decodeUnknownEither(Observation)({
+        observed_at: null,
+        source_at: { at: fixtureInstant, clock: 'instance', calibration: null },
+        last_attempt_at: fixtureInstant,
+        condition: 'unreachable',
+      })._tag,
+    ).toBe('Left')
+  })
+  it('rejects duplicate aggregate work identities', () => {
+    const item = itemFixture()
+    expect(
+      Schema.decodeUnknownEither(Aggregate)(aggregateFixture({ items: [item, item] }))._tag,
+    ).toBe('Left')
+  })
+  it('rejects enabled capabilities on incompatible items', () => {
+    const incompatible = {
+      observed_at: null,
+      source_at: null,
+      last_attempt_at: fixtureInstant,
+      condition: 'incompatible' as const,
+    }
+    expect(
+      Schema.decodeUnknownEither(Aggregate)(
+        aggregateFixture({ items: [itemFixture({ state_observation: incompatible })] }),
+      )._tag,
+    ).toBe('Left')
+  })
+  it('requires an explanation for unavailable detail', () => {
+    expect(
+      Schema.decodeUnknownEither(Detail)(
+        detailFixture({ result: { status: 'not-retained', reason: '' } }),
+      )._tag,
+    ).toBe('Left')
   })
   it.each([
     { reason: undefined, expected: 'Left' },

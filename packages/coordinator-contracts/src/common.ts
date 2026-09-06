@@ -2,6 +2,7 @@ import { Schema } from 'effect'
 
 export const Identifier = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(512))
 export const Text = Schema.String.pipe(Schema.maxLength(16_384))
+export const NonEmptyText = Text.pipe(Schema.minLength(1))
 /** UTC Unix milliseconds, supplied by the named clock, never inferred from serialization time. */
 export const Timestamp = Schema.Number.pipe(Schema.int(), Schema.nonNegative(), Schema.finite())
 export const Count = Schema.Number.pipe(Schema.int(), Schema.nonNegative(), Schema.finite())
@@ -34,13 +35,15 @@ export const Observation = Schema.Struct({
   condition: Schema.Literal('never-observed', 'current', 'stale', 'unreachable', 'incompatible'),
 }).pipe(
   Schema.filter((value) =>
-    value.condition === 'never-observed'
-      ? value.observed_at === null && value.source_at === null
-      : value.condition === 'current' || value.condition === 'stale'
-        ? value.observed_at !== null
-        : value.condition === 'unreachable'
-          ? value.observed_at !== null || value.last_attempt_at !== null
-          : true,
+    value.observed_at === null && value.source_at !== null
+      ? false
+      : value.condition === 'never-observed'
+        ? value.observed_at === null && value.source_at === null
+        : value.condition === 'current' || value.condition === 'stale'
+          ? value.observed_at !== null
+          : value.condition === 'unreachable'
+            ? value.observed_at !== null || value.last_attempt_at !== null
+            : true,
   ),
 )
 export type Observation = typeof Observation.Type
