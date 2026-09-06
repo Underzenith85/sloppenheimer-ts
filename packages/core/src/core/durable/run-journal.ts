@@ -110,16 +110,15 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
     },
     settled,
     stopped: (observedHeadSha) =>
-      owned((current) =>
-        settleStoppedRun(
-          current,
+      owned((current) => {
+        const headSha =
           typeof observedHeadSha === 'string'
             ? observedHeadSha
             : observedHeadSha === true
               ? current.artifact?.baselineSha ?? null
-              : null,
-        ),
-      ),
+              : null
+        return settleStoppedRun(current, headSha)
+      }),
     failed: owned((current) => settleStoppedRun(current, null, true)),
   }
 }
