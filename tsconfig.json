@@ -13,6 +13,8 @@
      * way through each package's `exports`; naming it here makes `tsx` agree.
      */
     "paths": {
+      "@sloppenheimer/coordinator": ["./packages/coordinator/src/index.ts"],
+      "@sloppenheimer/coordinator/*.js": ["./packages/coordinator/src/*.ts"],
       "@sloppenheimer/core": ["./packages/core/src/index.ts"],
       "@sloppenheimer/core/*.js": ["./packages/core/src/*.ts"],
       "@sloppenheimer/adapter-node": ["./packages/adapter-node/src/index.ts"],

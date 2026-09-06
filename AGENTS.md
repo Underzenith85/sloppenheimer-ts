@@ -402,7 +402,7 @@ Sloppenheimer is a private pnpm workspace. `pnpm-workspace.yaml` declares `packa
 - `packages/adapter-codex` (`@sloppenheimer/adapter-codex`) contains the Codex agent-runner
   implementation.
 - The repository root is the composition root: the CLI, the operator server, the workflow-definition
-  loader, and the single `sloppenheimer` executable. It is the only package that names a concrete
+  loader, and the `sloppenheimer` instance executable. It is the only package that names a concrete
   adapter.
 
 The dependency direction is:
@@ -418,11 +418,12 @@ Node's directory walk reaches them from inside every package: the manifests are 
 boundary, and `.oxlintrc.json` denies the import by name beside them.
 
 These packages are architectural units, not independently published products. They stay private and
-share one lockfile, one CI pipeline, one versioning policy, and one deployable Sloppenheimer
-executable. They are not built or released separately.
+share one lockfile, one CI pipeline, one versioning policy, and two deployable Sloppenheimer
+executables. They are not built or released separately.
 
 The build is a TypeScript project graph. Each package emits `dist/` from its own `tsconfig.json`,
-and `tsconfig.build.json` at the root references all four, so `pnpm build` is a single `tsc -b` that
+and `tsconfig.build.json` at the root references the libraries and coordinator host, so the host
+build is a single `tsc -b` that
 orders them and then compiles the composition root into the `dist/` the `sloppenheimer` bin points
 at. A package's `exports` resolves types to its TypeScript sources and the runtime entry to its
 built JavaScript, which is why `pnpm lint`, `pnpm typecheck`, and `pnpm test` need no prior build.
@@ -459,7 +460,7 @@ change which tests each profile runs.
 architectural library. It has no exports or instance dependency. This is the exception to the
 library manifest and TypeScript project-reference shape above: Vite builds static assets into its
 own `dist/` after the instance build, and separate no-emit configurations check browser sources,
-the Vite configuration, and its tests. There is not yet a coordinator server executable.
+the Vite configuration, and its tests. The coordinator server executable serves only its built assets.
 
 React and TanStack Query belong to this browser package. The root also declares React and its types
 as development dependencies because UI tests live in `test/coordinator-ui/`. Those tests run in
@@ -1207,3 +1208,47 @@ breaking: no optional durable store, optional captured-workspace capability, leg
 legacy JSON mutation path remains. Handoff and completion JSON are read-only migration inputs.
 Required real process-tree and conformance gates must pass on a host with functioning process-group
 visibility before automatic recovery is deployed.
+
+## Architecture record: coordinator host and registry
+
+Tracked by [#305](https://github.com/Underzenith85/sloppenheimer-ts/issues/305).
+`packages/coordinator` is the second host composition boundary, depending only on core and Effect
+platform packages. It follows the private library manifest and TypeScript project-reference shape
+so the root build orders its core dependency. The root manifest exposes both `sloppenheimer` and
+`sloppenheimer-coordinator`; the latter runs `packages/coordinator/dist/cli.js`. The instance root
+continues to be the only composition boundary that names concrete instance adapters.
+
+The build compiles both hosts, builds coordinator-ui with Vite, then copies that public output into
+`packages/coordinator/dist/ui`. The coordinator reads those files through FileSystem in its startup
+Effect and serves a fixed in-memory asset map. Neither host imports React or browser source modules.
+`NodeRuntime.runMain` in the coordinator CLI is a second process runtime boundary: it owns SIGINT/
+SIGTERM interruption and waits for scoped listener and registry finalizers. This is the explicit
+exception to the earlier single-process runtime-entry count.
+
+The private JSON registry contains `instances`, each with a stable `id`, display `label`, HTTP(S)
+origin `base_url`, and optional `credential` containing a `$VAR` reference. IDs and canonical origins
+must be unique. URL userinfo, paths, queries, and fragments are refused. Credentials resolve through
+Config as Redacted values on every reload. RegistryError is the new registry service's typed failure;
+its causes are themselves Redacted because decoder failures can contain credential input.
+Public snapshots expose only IDs, labels, generation, and status. The first contract endpoint is
+`GET /api/v1/registry`: it reports `empty_registry` or `configured`, with every initial entry
+`not_connected`. It does not imply any instance was contacted.
+
+SIGHUP reloads the configured file and environment references. Reloads are serialized: decode and
+prepare the entire candidate in a child scope, atomically replace the immutable state, then close the
+previous scope. A failed or interrupted preparation closes its staged resources and retains the
+previous state. Each successful reload replaces all entry resources, including unchanged entries;
+this deliberately favors simple credential rotation semantics before instance contact exists.
+Leases carry a never-reused registry generation and entry ID, checked atomically on publication.
+Failed preparations consume their generation too, so their callbacks cannot match a later reload. Removal and
+re-addition cannot revive an old lease. Resources and their workers belong to the generation scope.
+
+The coordinator binds only `127.0.0.1`. Host must name localhost or 127.0.0.1 at the actual listening
+port; Origin, when supplied, must match it. Cross-site browser requests are refused. Only GET/HEAD
+are served, so browser mutations and a CSRF token are unnecessary at this stage. CSP denies framing,
+inline scripts, foreign connections and forms. No CORS or forwarded-header trust is added. A tunnel
+must preserve this local authority; publishing an unauthenticated public reverse proxy is unsupported.
+
+Run `pnpm check`, then `node --test test/coordinator/executable-smoke.ts` to verify the built second
+executable, its packaged UI, startup failures, signal reload and graceful shutdown. Root tests also
+cover registry rollback, credential rotation, stale-result fencing and browser protections.
