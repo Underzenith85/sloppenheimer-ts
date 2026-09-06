@@ -13,11 +13,9 @@ export const changeIssueIntent = (
 ): Effect.Effect<void> =>
   Effect.uninterruptible(
     Effect.gen(function* () {
-      if (cells.durable !== undefined) {
-        for (const record of yield* cells.durable.snapshot) {
-          if (Option.contains(identifierIssueNumber(record.identifier), issueNumber)) {
-            yield* cells.durable.setIntent(record.identifier, paused ? 'paused' : 'active')
-          }
+      for (const record of yield* cells.durable.snapshot) {
+        if (Option.contains(identifierIssueNumber(record.identifier), issueNumber)) {
+          yield* cells.durable.setIntent(record.identifier, paused ? 'paused' : 'active')
         }
       }
       const affected = yield* Ref.modify(cells.state, (current) => {

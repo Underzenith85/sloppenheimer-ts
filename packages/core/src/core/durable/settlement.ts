@@ -11,15 +11,23 @@ export const settleRun = (
   const verified =
     outcome._tag === 'Published' &&
     artifact !== null &&
-    artifact.repository?.headSha === outcome.headSha &&
-    artifact.verifiedRevision !== null &&
-    artifact.verifiedRevision === artifact.repository.treeSha
+    (!current.verificationRequired ||
+      (artifact.repository?.headSha === outcome.headSha &&
+        artifact.verifiedRevision !== null &&
+        artifact.verifiedRevision === artifact.repository.treeSha))
+  const publishedArtifact =
+    outcome._tag === 'Published' && artifact !== null
+      ? {
+          ...artifact,
+          publishedHead: outcome.headSha,
+          ...(!current.verificationRequired && artifact.repository !== undefined
+            ? { repository: { ...artifact.repository, headSha: outcome.headSha } }
+            : {}),
+        }
+      : artifact
   return {
     ...current,
-    artifact:
-      outcome._tag === 'Published' && artifact !== null
-        ? { ...artifact, publishedHead: outcome.headSha }
-        : artifact,
+    artifact: publishedArtifact,
     status:
       verified || (outcome._tag === 'NoChanges' && current.afterPublication === 'continuation')
         ? {
@@ -38,3 +46,13 @@ export const settleRun = (
           },
   }
 }
+
+/** A confirmed missing pull request turns the published run into an ordinary continuation wait. */
+export const awaitContinuation = (current: DurableWorkflow): DurableWorkflow =>
+  current.status._tag === 'Waiting' && current.status.condition === 'review'
+    ? {
+        ...current,
+        afterPublication: 'continuation',
+        status: { ...current.status, condition: 'continuation' },
+      }
+    : current

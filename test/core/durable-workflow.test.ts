@@ -19,6 +19,7 @@ const initial = (): DurableWorkflow => ({
   objective: 'Implement a change',
   revision: 0,
   intent: 'active',
+  verificationRequired: true,
   status: {
     _tag: 'Queued',
     operation: {

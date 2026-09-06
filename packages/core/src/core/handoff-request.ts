@@ -110,7 +110,7 @@ const adoptOpenedHandoff = (
       }),
     )
     const handedOffAt = yield* currentInstant
-    const completedRepair = yield* Ref.modify(context.state, (current) => {
+    yield* Ref.update(context.state, (current) => {
       // Carried over, not reset: the worker attempt number is not a repair count, and an
       // existing handoff already holds the heads that were actually observed.
       const existing = current.handoffs.get(work.issue.id)
@@ -131,7 +131,7 @@ const adoptOpenedHandoff = (
         reviewCompletedHeadSha: existing?.reviewCompletedHeadSha ?? null,
         observedAt: handedOffAt,
       })
-      return [work.repairRun, next] as const
+      return next
     })
     yield* context.persistHandoffs
     yield* logInfo('worker handed off pull request', {
@@ -143,13 +143,6 @@ const adoptOpenedHandoff = (
       pull_request_url: result.pullRequestUrl,
     })
     yield* recordOutcome(handoffOutcomes, 'completed')
-    if (completedRepair) {
-      yield* Ref.update(context.state, (current) =>
-        Transitions.releaseClaim(current, work.issue.id),
-      )
-    } else {
-      yield* context.scheduleRetry(work.issue, 1, null, true, false)
-    }
   })
 
 /**
@@ -178,7 +171,7 @@ const runHandoff = (
       ),
     )
     yield* context.publish
-    const records = context.durable === undefined ? [] : yield* context.durable.snapshot
+    const records = yield* context.durable.snapshot
     const head = records.find((record) => record.issueId === work.issue.id)?.artifact?.publishedHead
     const action = codeReview.handoffCompletedWork(work.issue, head ?? undefined)
     const handoff = yield* reviewAction(
@@ -208,6 +201,7 @@ const runHandoff = (
         `handoff failed: ${handoff.error.message}`,
         false,
         work.repairRun,
+        handoff.error,
       )
       if (retried && work.repairRun) {
         yield* putRepairBehindRetry(context, work)
@@ -216,6 +210,7 @@ const runHandoff = (
     }
     const result = handoff.value
     if (result._tag === 'NoBranch') {
+      yield* context.durable.continueAfterPublication(work.issue.id)
       yield* recordOutcome(handoffOutcomes, 'no_branch')
       const absentAt = yield* currentInstant
       yield* Ref.update(context.state, (current) =>

@@ -126,7 +126,7 @@ export const createSnapshot = (
   state: RuntimeState,
   workflowPath: string,
   now: number,
-): OrchestratorSnapshot => {
+): Omit<OrchestratorSnapshot, 'durableWorkflows'> => {
   const effective = state.lastKnownGood
   const running = [...state.running.values()]
   const activeSeconds = running.reduce(

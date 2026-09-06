@@ -22,6 +22,13 @@ export type WorkspaceOperation = Readonly<{
  */
 export class FakeWorkspaceProcess implements WorkspaceManagerPort {
   readonly operations: WorkspaceOperation[] = []
+  readonly capturedMetadata = Effect.succeed([])
+  readonly superviseCaptured = <Value, Failure, Requirements>(
+    _workspace: Workspace,
+    operation: Effect.Effect<Value, Failure, Requirements>,
+  ): Effect.Effect<Value, Failure, Requirements> => operation
+  readonly confirmStopped = (_workspace: Workspace): Effect.Effect<boolean> => Effect.succeed(true)
+  readonly removeCaptured = (_workspace: Workspace): Effect.Effect<void> => Effect.void
   readonly #root: string
   /** Run keys currently leased, by issue. */
   readonly #leased = new Map<IssueIdentifier, Set<string>>()

@@ -52,11 +52,7 @@ export const scheduleDelivery = (
     if (!request.failure.retryable && request.failure.worktreePreserved) {
       return yield* holdDelivery(cells, request)
     }
-    if (
-      request.execution.workflow.config.verification !== undefined &&
-      request.failure.worktreePreserved &&
-      request.attempt >= deliveryAttemptLimit
-    ) {
+    if (request.failure.worktreePreserved && request.attempt >= deliveryAttemptLimit) {
       return yield* holdDelivery(cells, {
         ...request,
         failure: {

@@ -13,6 +13,7 @@ import {
 } from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
+import { durableWorkflowFor } from '../durable/admission.js'
 import { reconcileHandoffs } from '../handoff-reconciliation.js'
 import { dispatchAdmission, sortIssues } from '../policy.js'
 import type { OrchestratorContext } from '../runtime.js'
@@ -113,18 +114,6 @@ const reloadWorkflow = (context: OrchestratorContext): Effect.Effect<boolean> =>
     if (reloaded.fingerprint === before.lastKnownGood.workflow.fingerprint) {
       return false
     }
-    if (
-      (reloaded.config.verification === undefined) !==
-      (before.lastKnownGood.workflow.config.verification === undefined)
-    ) {
-      return yield* refuseWorkflow(
-        context,
-        'verification enabled/disabled changed; restart the host to change durable workflow mode',
-        'reload',
-        before.lastKnownGood.workflow.fingerprint,
-        'workflow mode change requires restart; retaining last known good',
-      )
-    }
     const configured = yield* context.makeEffectiveWorkflow(reloaded).pipe(asSettled)
     if (configured._tag === 'Failed') {
       return yield* refuseWorkflow(
@@ -166,6 +155,22 @@ const dispatchCandidates = (context: OrchestratorContext): Effect.Effect<void> =
     for (const issue of sortIssues(candidates)) {
       // Read afresh: a dispatch earlier in this pass may have taken the slot this one wanted.
       const current = yield* Ref.get(context.state)
+      const durable = yield* context.durable.snapshot
+      const record = durableWorkflowFor(durable, issue)
+      if (record !== undefined) {
+        if (
+          record.intent === 'active' &&
+          record.status._tag === 'Waiting' &&
+          record.status.condition === 'retry' &&
+          record.runTarget?._tag === 'Normal' &&
+          !current.running.has(issue.id) &&
+          !current.retries.has(issue.id) &&
+          dispatchAdmission(current, issue, effective.workflow)._tag === 'Admit'
+        ) {
+          yield* dispatch(context, issue, record.codingAttempts, undefined, record.runTarget)
+        }
+        continue
+      }
       if (dispatchAdmission(current, issue, effective.workflow)._tag !== 'Admit') {
         continue
       }
@@ -181,7 +186,7 @@ const dispatchCandidates = (context: OrchestratorContext): Effect.Effect<void> =
 const runPoll = (context: OrchestratorContext): Effect.Effect<readonly RefreshOperation[]> =>
   Effect.gen(function* () {
     const performed: RefreshOperation[] = []
-    yield* context.durable?.expireWaits ?? Effect.void
+    yield* context.durable.expireWaits
     // A worker that ended since the last pass may have been the last holder of a replaced instance.
     yield* drainRetirements(context).pipe(withOperationalSpan('poll.retirements'))
     let dispatchValidationFailed = yield* refreshCredentials(context).pipe(

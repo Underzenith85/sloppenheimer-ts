@@ -21,9 +21,8 @@ import {
 } from '../../telemetry.js'
 import { workspaceKey } from '../../domain/workspace-containment.js'
 import { logContext, sessionLogContext } from '../policy.js'
-import { abandonDelivery } from './deliveries.js'
 import { ownIssueFiber, releaseIssueFiber } from './execution.js'
-import { pruneRetainedWorkspaces, stopRetentionPass } from '../run-workspace.js'
+import { pruneRetainedWorkspaces } from '../run-workspace.js'
 import { releaseRepair, settleRepair } from '../repair.js'
 import type { HandoffEntry, RepairDisposition, RunningEntry, RuntimeState } from '../state.js'
 import * as Transitions from '../transitions.js'
@@ -174,7 +173,7 @@ export const cancelRunning = (
         error: null,
       })
     }
-    if (cleanupWorkspace && cells.durable !== undefined) {
+    if (cleanupWorkspace) {
       yield* cells.durable.queueCleanup(id)
       yield* ownIssueFiber(
         cells.execution,
@@ -182,12 +181,6 @@ export const cancelRunning = (
         id,
         cells.durable.cleanup(id, settled.execution.workspaces),
       )
-    } else if (cleanupWorkspace) {
-      // Removing the workspace destroys anything unpublished in it, so the delivery that would
-      // have republished it goes in the same step rather than coming due against a directory that
-      // no longer exists.
-      yield* abandonDelivery(cells, id, reason)
-      yield* stopRetentionPass(cells, id)
       yield* settled.execution.workspaces.remove(settled.issue.identifier).pipe(
         Effect.zipRight(
           Ref.update(cells.state, (current) => Transitions.forgetRetainedWorkspaces(current, id)),
@@ -238,9 +231,8 @@ const endRunAt = (
           id,
           repairDisposition === 'release' ? releaseRepair(handoff) : settleRepair(handoff),
         )
-  return Transitions.releaseClaim(
-    Transitions.updateDetail(disposed, id, (record) => recordCancellation(record, endedAt, reason)),
-    id,
+  return Transitions.updateDetail(disposed, id, (record) =>
+    recordCancellation(record, endedAt, reason),
   )
 }
 

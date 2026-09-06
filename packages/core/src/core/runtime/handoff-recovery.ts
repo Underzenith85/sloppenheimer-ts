@@ -152,7 +152,7 @@ const restoredHandoffEntry = (
 export const recoverMissingHandoffs = (cells: RuntimeCells): Effect.Effect<void> =>
   Effect.gen(function* () {
     const opening = yield* Ref.get(cells.state)
-    const durableRecords = cells.durable === undefined ? [] : yield* cells.durable.snapshot
+    const durableRecords = yield* cells.durable.snapshot
     if (
       opening.startupRecoveryFinished &&
       !durableRecords.some(
@@ -184,11 +184,14 @@ export const recoverMissingHandoffs = (cells: RuntimeCells): Effect.Effect<void>
         continue
       }
       const pass = yield* Ref.get(cells.state)
+      const owesDurableHandoff = durableRecords.some(
+        (record) => record.issueId === issue.id && owesPublishedHandoff(record),
+      )
       if (
         !issueIsRoutable(issue, { requiredLabels }) ||
         pass.handoffs.has(issue.id) ||
         pass.pendingRestoredHandoffs.some((handoff) => handoff.issueId === issue.id) ||
-        pass.recoveryResolved.has(issue.id)
+        (pass.recoveryResolved.has(issue.id) && !owesDurableHandoff)
       ) {
         continue
       }

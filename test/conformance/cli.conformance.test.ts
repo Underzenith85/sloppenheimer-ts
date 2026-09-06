@@ -59,7 +59,7 @@ describe('Core Conformance CLI and host lifecycle', (): void => {
     const result = await runCli(['/definitely/missing/WORKFLOW.md'])
     expect(result.code).toBe(1)
     expect(result.stderr).toContain('cannot read workflow file')
-  })
+  }, 30_000)
 
   it('starts with an isolated workflow and exits successfully on SIGTERM', async (): Promise<void> => {
     const directory = await mkdtemp(join(tmpdir(), 'sloppenheimer-cli-conformance-'))

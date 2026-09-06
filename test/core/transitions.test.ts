@@ -398,36 +398,33 @@ describe('turn identity', (): void => {
   })
 })
 
-describe('claim lifecycle', (): void => {
-  it('claims an issue and remembers its identifier for later detail requests', (): void => {
+describe('issue lifecycle projection', (): void => {
+  it('remembers an issue identifier for later detail requests', (): void => {
     const issue = makeIssue('example/sloppenheimer#1')
 
-    const claimed = Transitions.claimIssue(emptyState(), issue)
+    const claimed = Transitions.noteIssue(emptyState(), issue)
 
-    expect(claimed.claimed.has(issue.id)).toBe(true)
     expect(claimed.identifiers.get(issue.id)).toBe(issue.identifier)
   })
 
-  it('releases a claim without forgetting the issue or counting it completed', (): void => {
+  it('retains the identifier when transient work releases the issue', (): void => {
     const issue = makeIssue('example/sloppenheimer#1')
 
-    const released = Transitions.releaseClaim(Transitions.claimIssue(emptyState(), issue), issue.id)
+    const released = Transitions.noteIssue(emptyState(), issue)
 
-    expect(released.claimed.has(issue.id)).toBe(false)
     expect(released.completed.has(issue.id)).toBe(false)
     expect(released.identifiers.get(issue.id)).toBe(issue.identifier)
   })
 
-  it('gives up the claim and records completion in one step', (): void => {
+  it('records completion in one step', (): void => {
     const issue = makeIssue('example/sloppenheimer#1')
 
     const completed = Transitions.completeIssue(
-      Transitions.claimIssue(emptyState(), issue),
+      Transitions.noteIssue(emptyState(), issue),
       issue.id,
       finishedWork(issue),
     )
 
-    expect(completed.claimed.has(issue.id)).toBe(false)
     // Filed with what it finished as, not merely counted.
     expect(completed.completed.get(issue.id)).toMatchObject({
       identifier: issue.identifier,
@@ -492,9 +489,8 @@ describe('claim lifecycle', (): void => {
     const issue = makeIssue('example/sloppenheimer#1')
     const before = emptyState()
 
-    Transitions.claimIssue(before, issue)
+    Transitions.noteIssue(before, issue)
 
-    expect(before.claimed.size).toBe(0)
     expect(before.identifiers.size).toBe(0)
   })
 })
@@ -502,7 +498,7 @@ describe('claim lifecycle', (): void => {
 describe('dispatch admission', (): void => {
   const issue = makeIssue('example/sloppenheimer#1')
 
-  it('admits an active, routable, unclaimed issue with a free slot', (): void => {
+  it('admits an active, routable issue with a free slot', (): void => {
     expect(dispatchAdmission(emptyState(), issue, workflow)).toEqual({ _tag: 'Admit' })
   })
 
@@ -517,15 +513,6 @@ describe('dispatch admission', (): void => {
     expect(dispatchAdmission(recovering, issue, workflow)).toEqual({
       _tag: 'Refuse',
       reason: 'recovering',
-    })
-  })
-
-  it('refuses an issue this orchestrator already claimed', (): void => {
-    const claimed = Transitions.claimIssue(emptyState(), issue)
-
-    expect(dispatchAdmission(claimed, issue, workflow)).toEqual({
-      _tag: 'Refuse',
-      reason: 'claimed',
     })
   })
 
@@ -577,10 +564,10 @@ describe('dispatch admission', (): void => {
 describe('retry scheduling', (): void => {
   const issue = makeIssue('example/sloppenheimer#1')
 
-  it('claims the issue and queues the retry together', (): void => {
+  it('remembers the issue and queues the retry together', (): void => {
     const scheduled = Transitions.scheduleRetry(emptyState(), retryEntry(issue, 1))
 
-    expect(scheduled.claimed.has(issue.id)).toBe(true)
+    expect(scheduled.identifiers.get(issue.id)).toBe(issue.identifier)
     expect(scheduled.retries.get(issue.id)?.attempt).toBe(1)
   })
 
@@ -845,7 +832,7 @@ describe('detail publication', (): void => {
 
   it('publishes a live run as running and a finished one as completed', (): void => {
     const withDetail = Transitions.putDetail(
-      Transitions.claimIssue(emptyState(), issue),
+      Transitions.noteIssue(emptyState(), issue),
       issue.id,
       detailFor(issue),
     )
@@ -863,13 +850,10 @@ describe('detail publication', (): void => {
     expect(finished.finishedDetails).toEqual([issue.id])
   })
 
-  it('answers a claimed issue with no session as still starting', (): void => {
-    const published = Transitions.publishDetails(Transitions.claimIssue(emptyState(), issue))
+  it('answers a remembered issue with no session as having no session', (): void => {
+    const published = Transitions.publishDetails(Transitions.noteIssue(emptyState(), issue))
 
-    expect(published.publishedDetails.get(issue.identifier)).toEqual({
-      _tag: 'Unavailable',
-      reason: 'The agent session is still starting',
-    })
+    expect(published.publishedDetails.get(issue.identifier)).toEqual({ _tag: 'NoSession' })
   })
 
   it('keeps an aged-out record answering as completed rather than as never run', (): void => {
@@ -879,7 +863,7 @@ describe('detail publication', (): void => {
     )
     for (const candidate of issues) {
       state = Transitions.putDetail(
-        Transitions.claimIssue(state, candidate),
+        Transitions.noteIssue(state, candidate),
         candidate.id,
         detailFor(candidate),
       )
@@ -928,13 +912,11 @@ describe('handoff bookkeeping', (): void => {
     })
 
     expect(Transitions.handoffSnapshots(held).map((snapshot) => snapshot.issueId)).toEqual([id])
-    expect(held.claimed.has(id)).toBe(true)
 
     const completed = Transitions.completeHandoff(held, id, finishedWork(issue))
 
     expect(completed.handoffs.has(id)).toBe(false)
     expect(completed.completed.get(id)?.outcome).toBe('merged')
-    expect(completed.claimed.has(id)).toBe(false)
     expect(Transitions.handoffSnapshots(completed)).toEqual([])
   })
 })

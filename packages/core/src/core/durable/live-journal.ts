@@ -3,6 +3,7 @@ import { recordCompletions } from './completion-records.js'
 import type { Completion } from '../../domain/completion.js'
 import { queueCleanup, runCleanup } from './cleanup.js'
 import type { WorkspaceManagerPort } from '../../ports/workspace.js'
+import type { CapturedWorkspaceMetadata } from '../../domain/workspace-lease.js'
 import { externalOperation } from './external-operation.js'
 import { recordHandoffs } from './handoff-records.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
@@ -26,13 +27,17 @@ import { admission } from './admission.js'
 import { restoreWorkflows } from './restore.js'
 import { journalFor, type RunJournal, type Writer } from './run-journal.js'
 import { transitionWorkflow } from './transition.js'
+import { awaitContinuation } from './settlement.js'
+import { recordWorkspaces } from './workspace-records.js'
 
 export type { RunJournal } from './run-journal.js'
 export type DurableHost = Readonly<{
   journal: (issueId: string) => Effect.Effect<Option.Option<RunJournal>>
   expireWaits: Effect.Effect<void>
   recordCompletions: (completions: readonly Completion[]) => Effect.Effect<void>
+  recordWorkspaces: (metadata: readonly CapturedWorkspaceMetadata[]) => Effect.Effect<void>
   queueCleanup: (issueId: string) => Effect.Effect<void>
+  continueAfterPublication: (issueId: string) => Effect.Effect<void>
   cleanup: (
     issueId: string,
     workspaces: Pick<WorkspaceManagerPort, 'removeCaptured'>,
@@ -53,6 +58,8 @@ export type DurableHost = Readonly<{
     issue: Issue,
     target: SourceControlTarget,
     afterPublication?: 'review' | 'continuation',
+    verificationRequired?: boolean,
+    retryMismatch?: 'reject' | 'intervene',
   ) => Effect.Effect<Option.Option<RunJournal>>
   snapshot: Effect.Effect<readonly DurableWorkflow[]>
   awaitFailure: Effect.Effect<never, WorkflowError>
@@ -133,7 +140,9 @@ export const makeDurableHost = (
       expireWaits: expireWaits(records, write),
       recordCompletions: (completions) =>
         recordCompletions(records, semaphore, persist, write, completions),
+      recordWorkspaces: (metadata) => recordWorkspaces(records, semaphore, persist, metadata),
       queueCleanup: (id) => queueCleanup(write, id),
+      continueAfterPublication: (id) => write(id, awaitContinuation),
       cleanup: (id, workspaces) => runCleanup(records, write, id, workspaces),
       recordHandoffs: (handoffs) => recordHandoffs(records, semaphore, persist, write, handoffs),
       external: (id, kind, head, action) =>

@@ -12,6 +12,7 @@ export const migratedHandoff = (handoff: HandoffSnapshot, now: number): DurableW
   objective: `Follow retained pull request ${handoff.pullRequestUrl}`,
   revision: 0,
   intent: 'active',
+  verificationRequired: false,
   afterPublication: 'review',
   handoff,
   status:

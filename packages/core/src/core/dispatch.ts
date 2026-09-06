@@ -1,6 +1,7 @@
 import { enterRunPhase } from './run-phase.js'
 import { settleCancelledCandidate } from './cancelled-candidate.js'
 import { journalExecution } from './durable/journal-execution.js'
+import type { RunJournal } from './durable/run-journal.js'
 import { Cause, Effect, Exit, MutableRef, Option, Queue, Ref } from 'effect'
 
 import { retainFailedCandidate, type RunResult } from './failed-candidate.js'
@@ -127,7 +128,9 @@ const runWithSourceControl = (
         Effect.flatMap((session) => {
           if (session._tag === 'Left') {
             return launch.execution.workflow.config.verification === undefined
-              ? Effect.fail(session.left)
+              ? settleCancelledCandidate(sourceControl, prepared, launch.execution.journal).pipe(
+                  Effect.zipRight(Effect.fail(session.left)),
+                )
               : retainFailedCandidate(
                   sourceControl,
                   issue,
@@ -306,17 +309,38 @@ const refusedBeforeClaim = (state: RuntimeState, issue: Issue): Effect.Effect<bo
   }).pipe(Effect.zipRight(recordOutcome(dispatchOutcomes, 'paused')), Effect.as(true))
 }
 
-const claimDispatch = (context: OrchestratorContext, issue: Issue): Effect.Effect<void> =>
+const prepareDispatch = (context: OrchestratorContext, issue: Issue): Effect.Effect<void> =>
   Effect.gen(function* () {
-    // Claiming and taking the queued retry are one transition: the issue must never be seen as
-    // claimed-but-still-retrying, and the timer that would fire is interrupted here.
+    // Taking the queued retry and remembering the issue are one transition. Durable admission is
+    // the ownership decision; this state only projects the timer and operator detail.
     const displacedRetry = yield* Ref.modify(context.state, (current) =>
-      Transitions.takeRetry(Transitions.claimIssue(current, issue), issue.id),
+      Transitions.takeRetry(Transitions.noteIssue(current, issue), issue.id),
     )
     if (Option.isSome(displacedRetry)) {
       yield* releaseIssueFiber(context.execution, 'retry', issue.id)
     }
   })
+
+/** Settles an admitted pre-worker failure before projecting its durable retry timer. */
+const scheduleAdmittedRetry = (
+  context: OrchestratorContext,
+  journal: RunJournal,
+  issue: Issue,
+  attempt: number | null,
+  message: string,
+  repairRun: boolean,
+  outcome: 'preflight_failed' | 'prompt_failed',
+): Effect.Effect<void> =>
+  journal.failed.pipe(
+    Effect.zipRight(recordOutcome(dispatchOutcomes, outcome)),
+    Effect.zipRight(context.scheduleRetry(issue, (attempt ?? 0) + 1, message, false, repairRun)),
+    Effect.asVoid,
+  )
+
+const dispatchTarget = (
+  issue: Issue,
+  override: SourceControlTarget | undefined,
+): SourceControlTarget => override ?? { _tag: 'Normal', branchName: issueBranchName(issue) }
 
 /** Resolves to whether a session actually started, so a caller can tie state to a real dispatch. */
 const runDispatch = (
@@ -331,33 +355,36 @@ const runDispatch = (
     if (yield* refusedBeforeClaim(before, issue)) {
       return false
     }
-    yield* claimDispatch(context, issue)
+    yield* prepareDispatch(context, issue)
 
     const base = effectiveOverride ?? before.lastKnownGood
-    const target: SourceControlTarget = sourceTarget ?? {
-      _tag: 'Normal',
-      branchName: issueBranchName(issue),
-    }
+    const target = dispatchTarget(issue, sourceTarget)
     const repairRun = target._tag === 'Repair'
+    const initialExecution = captureExecutionSnapshot(base, '')
+    const admitted = yield* journalExecution(context, issue, target, initialExecution)
+    if (Option.isNone(admitted)) {
+      return false
+    }
     // Opened before preflight, not after the worker starts: a dispatch that fails validation or
     // prompt rendering schedules a retry, and that retry's published link has to resolve to the
     // reason it failed rather than to "no active session".
     yield* context.detailRecord(issue, attempt, base.workflow.config.tracker.requiredLabels)
     const preflight = yield* revalidateCredentials(context, base).pipe(asSettled)
     if (preflight._tag === 'Failed') {
-      yield* recordOutcome(dispatchOutcomes, 'preflight_failed')
       yield* logError('action=dispatch outcome=failed', {
         ...logContext(issue),
         action: 'dispatch',
         outcome: 'failed',
         error: preflight.error.message,
       })
-      yield* context.scheduleRetry(
+      yield* scheduleAdmittedRetry(
+        context,
+        admitted.value.journal,
         issue,
-        (attempt ?? 0) + 1,
+        attempt,
         preflight.error.message,
-        false,
         repairRun,
+        'preflight_failed',
       )
       return false
     }
@@ -367,26 +394,21 @@ const runDispatch = (
     }
     const renderedPrompt = yield* renderPrompt(effective.workflow, issue, attempt).pipe(asSettled)
     if (renderedPrompt._tag === 'Failed') {
-      yield* recordOutcome(dispatchOutcomes, 'prompt_failed')
-      yield* context.scheduleRetry(
+      yield* scheduleAdmittedRetry(
+        context,
+        admitted.value.journal,
         issue,
-        (attempt ?? 0) + 1,
+        attempt,
         renderedPrompt.error.message,
-        false,
         repairRun,
+        'prompt_failed',
       )
       return false
     }
-    const admitted = yield* journalExecution(
-      context,
-      issue,
-      target,
-      captureExecutionSnapshot(effective, renderedPrompt.value),
-    )
-    if (Option.isNone(admitted)) {
-      return false
+    const execution: ExecutionSnapshot = {
+      ...captureExecutionSnapshot(effective, renderedPrompt.value),
+      journal: admitted.value.journal,
     }
-    const execution = admitted.value
     const runId = yield* Ref.modify(context.state, Transitions.takeRunId)
     const sessionPorts = MutableRef.make<SessionPorts>({
       tracker: execution.tracker,

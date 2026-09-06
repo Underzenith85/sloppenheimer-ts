@@ -10,7 +10,7 @@ import {
   issueIsRoutable,
   stateIsIn,
 } from '../policy.js'
-import { logInfo, logWarning } from '../../support/logging.js'
+import { logInfo } from '../../support/logging.js'
 import { recordOutcome, retryOutcomes } from '../../support/observability.js'
 import { asSettled } from '../../support/settled.js'
 import { dispatch } from '../dispatch.js'
@@ -24,6 +24,7 @@ import type { EffectiveWorkflow, HandoffEntry } from '../state.js'
 import * as Transitions from '../transitions.js'
 import { endRetryForPause } from './paused-retry.js'
 import { releaseHandoffRepair, writeHandoff } from './repair-identity.js'
+import { ownIssueFiber } from '../runtime/execution.js'
 
 type RetryDue = Extract<OrchestratorEvent, { _tag: 'RetryDue' }>
 
@@ -71,31 +72,17 @@ const resumeRepair = (
     if (Option.isNone(repair)) {
       return
     }
+    if (
+      Option.exists(issue, (current) => stateIsIn(current.state, entry.execution.terminalStates))
+    ) {
+      yield* context.durable.setIntent(entry.issue.identifier, 'cancelled')
+      yield* releaseHandoffRepair(context, event.issueId, Option.some(entry))
+      return
+    }
     const codeReview = entry.execution.codeReview
     if (Option.isNone(codeReview)) {
       yield* releaseHandoffRepair(context, event.issueId, Option.some(entry))
       return
-    }
-    const terminalIssue = Option.filter(issue, (record) =>
-      stateIsIn(record.state, entry.execution.workflow.config.tracker.terminalStates),
-    )
-    if (Option.isSome(terminalIssue) && context.durable === undefined) {
-      yield* stopRetentionPass(context, event.issueId)
-      yield* entry.execution.workspaces.remove(terminalIssue.value.identifier).pipe(
-        Effect.zipRight(
-          Ref.update(context.state, (pending) =>
-            Transitions.forgetRetainedWorkspaces(pending, event.issueId),
-          ),
-        ),
-        Effect.catchAll((error) =>
-          logWarning('terminal workspace cleanup failed', {
-            ...logContext(terminalIssue.value),
-            action: 'workspace_cleanup',
-            outcome: 'failed',
-            error: error.message,
-          }),
-        ),
-      )
     }
     const inspected = yield* codeReview.value
       .inspectPullRequest(entry.pullRequestNumber)
@@ -141,34 +128,20 @@ const resumeContinuation = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     if (Option.isNone(issue)) {
-      yield* Ref.update(context.state, (pending) =>
-        Transitions.releaseClaim(pending, event.issueId),
-      )
       return
     }
     if (stateIsIn(issue.value.state, effective.workflow.config.tracker.terminalStates)) {
       yield* stopRetentionPass(context, event.issueId)
-      yield* (
-        context.durable === undefined
-          ? effective.workspaces.remove(issue.value.identifier)
-          : Effect.void
-      ).pipe(
-        Effect.zipRight(
-          Ref.update(context.state, (pending) =>
-            Transitions.forgetRetainedWorkspaces(pending, event.issueId),
-          ),
-        ),
-        Effect.catchAll((error) =>
-          logWarning('terminal workspace cleanup failed', {
-            ...logContext(issue.value),
-            action: 'workspace_cleanup',
-            outcome: 'failed',
-            error: error.message,
-          }),
-        ),
+      yield* context.durable.setIntent(issue.value.identifier, 'cancelled')
+      yield* context.durable.queueCleanup(event.issueId)
+      yield* ownIssueFiber(
+        context.execution,
+        'cleanup',
+        event.issueId,
+        context.durable.cleanup(event.issueId, effective.workspaces),
       )
       yield* Ref.update(context.state, (pending) =>
-        Transitions.releaseClaim(pending, event.issueId),
+        Transitions.forgetRetainedWorkspaces(pending, event.issueId),
       )
       return
     }
@@ -176,9 +149,6 @@ const resumeContinuation = (
       !issueIsActive(issue.value, effective.workflow.config.tracker) ||
       !issueIsRoutable(issue.value, effective.workflow.config.tracker)
     ) {
-      yield* Ref.update(context.state, (pending) =>
-        Transitions.releaseClaim(pending, event.issueId),
-      )
       return
     }
     const admitting = yield* Ref.get(context.state)

@@ -4,7 +4,7 @@ import type { IssueId } from '../../domain/domain.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
 import { withEntry, withoutEntry, withMember } from '../../support/collections.js'
 import type { CompletedEntry, HandoffEntry, HandoffRecoveryCounts, RuntimeState } from '../state.js'
-import { claimIssue, completeIssue } from './claims.js'
+import { completeIssue, noteIssue } from './claims.js'
 
 /**
  * The pull requests this orchestrator is still following, what the store is asked to persist for
@@ -12,8 +12,8 @@ import { claimIssue, completeIssue } from './claims.js'
  */
 
 export const putHandoff = (state: RuntimeState, id: IssueId, entry: HandoffEntry): RuntimeState => {
-  const claimed = claimIssue(state, entry.issue)
-  return { ...claimed, handoffs: withEntry(claimed.handoffs, id, entry) }
+  const noted = noteIssue(state, entry.issue)
+  return { ...noted, handoffs: withEntry(noted.handoffs, id, entry) }
 }
 
 export const removeHandoff = (state: RuntimeState, id: IssueId): RuntimeState => ({

@@ -20,7 +20,7 @@ export const onIssuePauseChanged = (
   event: Extract<OrchestratorEvent, { _tag: 'SetIssuePaused' }>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    if (context.durable !== undefined && event.committed !== true) {
+    if (event.committed !== true) {
       const records = yield* context.durable.snapshot
       for (const record of records) {
         if (Option.contains(identifierIssueNumber(record.identifier), event.issueNumber)) {

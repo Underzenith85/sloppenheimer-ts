@@ -27,6 +27,7 @@ export const recordCompletions = (
               objective: completion.title,
               revision: 0,
               intent: 'cancelled',
+              verificationRequired: false,
               status: { _tag: 'Completed', headSha: null },
               completion,
               artifact: null,

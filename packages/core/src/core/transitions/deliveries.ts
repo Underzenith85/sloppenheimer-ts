@@ -4,7 +4,7 @@ import type { IssueId } from '../../domain/domain.js'
 import { withEntry, withoutEntry } from '../../support/collections.js'
 import type { DeliveryEntry } from '../postflight.js'
 import type { RuntimeState } from '../state.js'
-import { claimIssue } from './claims.js'
+import { noteIssue } from './claims.js'
 
 /**
  * Work waiting to reach the remote, and the retries queued for it.
@@ -21,8 +21,8 @@ import { claimIssue } from './claims.js'
  * execution owner it is replaced under.
  */
 export const scheduleDelivery = (state: RuntimeState, entry: DeliveryEntry): RuntimeState => {
-  const claimed = claimIssue(state, entry.issue)
-  return { ...claimed, deliveries: withEntry(claimed.deliveries, entry.issue.id, entry) }
+  const noted = noteIssue(state, entry.issue)
+  return { ...noted, deliveries: withEntry(noted.deliveries, entry.issue.id, entry) }
 }
 
 /**
@@ -95,10 +95,10 @@ export const beginDeliveryAttempt = (
  * operator lifts the pause.
  */
 export const holdDelivery = (state: RuntimeState, entry: DeliveryEntry): RuntimeState => {
-  const claimed = claimIssue(state, entry.issue)
+  const noted = noteIssue(state, entry.issue)
   return {
-    ...claimed,
-    deliveries: withEntry(claimed.deliveries, entry.issue.id, {
+    ...noted,
+    deliveries: withEntry(noted.deliveries, entry.issue.id, {
       ...entry,
       armed: false,
       publishingSince: null,

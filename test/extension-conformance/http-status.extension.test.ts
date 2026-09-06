@@ -11,6 +11,7 @@ import { startOperatorServer } from '../../src/operator/server.js'
 const tokens = { inputTokens: 12, outputTokens: 8, totalTokens: 20 } as const
 
 const snapshot: OrchestratorSnapshot = {
+  durableWorkflows: [],
   generatedAt: '2026-08-29T00:00:00.000Z',
   workflowPath: '/isolated/WORKFLOW.md',
   effectiveWorkflow: { fingerprint: 'extension', loadedAt: '2026-08-29T00:00:00.000Z' },

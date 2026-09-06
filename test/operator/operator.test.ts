@@ -93,6 +93,7 @@ const orchestratorSnapshot = (
   pausedIssueNumbers: readonly number[],
   delivering: OrchestratorSnapshot['delivering'] = [],
 ): OrchestratorSnapshot => ({
+  durableWorkflows: [],
   generatedAt: '2026-08-30T00:00:00.000Z',
   workflowPath: '/isolated/WORKFLOW.md',
   effectiveWorkflow: { fingerprint: 'operator', loadedAt: '2026-08-30T00:00:00.000Z' },

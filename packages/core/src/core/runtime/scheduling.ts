@@ -136,7 +136,7 @@ const abandonRetry = (
     const cancelledAt = yield* currentInstant
     const reason = error ?? 'the tracker rejected the retry'
     yield* Ref.update(cells.state, (pending) =>
-      Transitions.updateDetail(Transitions.releaseClaim(pending, issue.id), issue.id, (record) =>
+      Transitions.updateDetail(pending, issue.id, (record) =>
         recordCancellation(record, cancelledAt, reason, true),
       ),
     )

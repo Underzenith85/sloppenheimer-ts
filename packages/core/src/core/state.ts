@@ -1,7 +1,6 @@
 import type { Deferred, Effect, MutableRef, Option } from 'effect'
 
 import type { Workflow } from '../config/workflow.js'
-import { issueId } from '../domain/domain.js'
 import type { Issue, IssueId, IssueIdentifier, JsonObject, TokenTotals } from '../domain/domain.js'
 import type { HandoffSnapshot, RepairPublication } from '../domain/handoff.js'
 import type {
@@ -50,8 +49,6 @@ export type RuntimeState = Readonly<{
    * by issue: this map is what the host is running, not how it is running it.
    */
   running: ReadonlyMap<IssueId, RunningEntry>
-  /** Issues this orchestrator has taken responsibility for, in any phase. */
-  claimed: ReadonlySet<IssueId>
   retries: ReadonlyMap<IssueId, RetryEntry>
   /**
    * Work an agent produced that is not on the remote yet, keyed by issue. A delivery is a claim
@@ -450,8 +447,6 @@ export const initialState = (
   }>,
 ): RuntimeState => ({
   running: new Map(),
-  // A persisted handoff is a claim this orchestrator already holds, before its issue is hydrated.
-  claimed: new Set(restored.handoffs.map((handoff) => issueId(handoff.issueId))),
   retries: new Map(),
   retainedWorkspaces: new Map(),
   workspaceRemovals: new Map(),

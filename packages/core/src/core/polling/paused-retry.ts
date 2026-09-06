@@ -30,7 +30,7 @@ export const endRetryForPause = (
     yield* releaseHandoffRepair(context, id, handoff)
     const cancelledAt = yield* currentInstant
     yield* Ref.update(context.state, (current) =>
-      Transitions.updateDetail(Transitions.releaseClaim(current, id), id, (record) =>
+      Transitions.updateDetail(current, id, (record) =>
         recordCancellation(record, cancelledAt, operatorPausedReason, true),
       ),
     )

@@ -112,12 +112,7 @@ export const publishDetails = (state: RuntimeState): RuntimeState => {
       published.set(identifier, { _tag: 'Completed' })
       continue
     }
-    published.set(
-      identifier,
-      state.claimed.has(id) && !state.running.has(id) && !state.handoffs.has(id)
-        ? { _tag: 'Unavailable', reason: 'The agent session is still starting' }
-        : { _tag: 'NoSession' },
-    )
+    published.set(identifier, { _tag: 'NoSession' })
   }
   return { ...state, details, finishedDetails, agedOutDetails, publishedDetails: published }
 }

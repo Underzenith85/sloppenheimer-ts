@@ -7,6 +7,17 @@ import type { Writer } from './run-journal.js'
 const refused = (message: string): TrackerError =>
   new TrackerError({ category: 'tracker_status', message, retryable: false })
 
+const permitsPullRequest = (
+  workflow: DurableWorkflow,
+  kind: ExternalOperationKind,
+  headSha: string,
+): boolean =>
+  kind !== 'ensure_pull_request' ||
+  (workflow.artifact?.publishedHead === headSha &&
+    (!workflow.verificationRequired ||
+      (workflow.artifact.verifiedRevision !== null &&
+        workflow.artifact.verifiedRevision === workflow.artifact.repository?.treeSha)))
+
 /** Persist write intent and its exact head before calling the adapter, then preserve every exit. */
 export const externalOperation = <Value>(
   records: Ref.Ref<ReadonlyMap<string, DurableWorkflow>>,
@@ -28,12 +39,7 @@ export const externalOperation = <Value>(
       if (before.externalOperation?.outcome === 'pending') {
         return yield* Effect.fail(refused('Another external operation owns this workflow'))
       }
-      if (
-        kind === 'ensure_pull_request' &&
-        (before.artifact?.publishedHead !== headSha ||
-          before.artifact.verifiedRevision === null ||
-          before.artifact.verifiedRevision !== before.artifact.repository?.treeSha)
-      ) {
+      if (!permitsPullRequest(before, kind, headSha)) {
         return yield* Effect.fail(refused('PR creation requires the exact verified publication'))
       }
       if (before.status._tag === 'Intervention') {

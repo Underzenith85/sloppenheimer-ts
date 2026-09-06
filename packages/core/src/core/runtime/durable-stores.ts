@@ -2,16 +2,34 @@ import { issueId } from '../../domain/domain.js'
 import { Effect } from 'effect'
 import type { DurableHost } from '../durable/live-journal.js'
 import type { RestoredState } from './store.js'
+import type { WorkspaceManagerPort } from '../../ports/workspace.js'
+import { WorkflowError } from '../../domain/errors.js'
+
+/** Legacy lease discovery fails startup closed; imported records never manufacture candidate facts. */
+export const importCapturedWorkspaces = (
+  durable: DurableHost,
+  workspaces: WorkspaceManagerPort,
+): Effect.Effect<void, WorkflowError> => {
+  const inventory = workspaces.capturedMetadata
+  return inventory.pipe(
+    Effect.mapError(
+      (cause) =>
+        new WorkflowError({
+          category: 'invalid_config',
+          message: 'retained workspace metadata could not be imported safely',
+          cause,
+        }),
+    ),
+    Effect.flatMap((metadata) => durable.recordWorkspaces(metadata)),
+  )
+}
 
 /** SQLite wins after migration. The legacy file is retained unchanged for operator rollback. */
 export const restoreDurableHandoffs = (
-  durable: DurableHost | undefined,
+  durable: DurableHost,
   restored: RestoredState,
 ): Effect.Effect<RestoredState> =>
   Effect.gen(function* () {
-    if (durable === undefined) {
-      return restored
-    }
     const known = new Set(
       (yield* durable.snapshot)
         .filter((record) => record.handoff !== undefined)

@@ -13,6 +13,7 @@ export const admittedWorkflow = (
   issue: Issue,
   target: SourceControlTarget,
   afterPublication: 'review' | 'continuation',
+  verificationRequired: boolean,
   now: number,
 ): DurableWorkflow & Readonly<{ owner: string }> => {
   const repair = target._tag === 'Repair'
@@ -28,6 +29,7 @@ export const admittedWorkflow = (
     revision,
     owner,
     intent: 'active',
+    verificationRequired,
     afterPublication,
     runTarget: target,
     status: {

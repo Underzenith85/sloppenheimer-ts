@@ -48,6 +48,7 @@ import {
 } from './workspace-cleanup.js'
 import { runHook } from './workspace-hooks.js'
 import { pruneIssueWorkspaces } from './workspace-retention.js'
+import { capturedWorkspaceMetadata } from './workspace-inventory.js'
 
 /**
  * The Node implementation of `WorkspaceManagerPort`: the per-run directory lifecycle, with the
@@ -364,6 +365,7 @@ export const makeWorkspaceManager = (
     // this host can see is gone, so one still on its way to publication is left alone.
     yield* pruneStagedLeases(fileSystem, leaseStagingPath(root))
     return {
+      capturedMetadata: capturedWorkspaceMetadata(fileSystem, root),
       superviseCaptured: (workspace, operation) =>
         capturedWorkspaceRoot(workspace).pipe(
           Effect.flatMap((capturedRoot) =>

@@ -14,9 +14,6 @@ export const startPublicationRecovery = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const durable = cells.durable
-    if (durable === undefined) {
-      return
-    }
     const records = yield* durable.snapshot
     const workspaces = (yield* Ref.get(cells.state)).lastKnownGood.workspaces
     const concurrency = yield* Effect.makeSemaphore(4)
@@ -41,7 +38,7 @@ export const startPublicationRecovery = (
         const recovery = durable.reconcilePublication(
           record.issueId,
           sourceControl,
-          workspace === null ? Effect.succeed(false) : workspaces.confirmStopped?.(workspace),
+          workspace === null ? Effect.succeed(false) : workspaces.confirmStopped(workspace),
         )
         yield* ownIssueFiber(
           cells.execution,
@@ -51,7 +48,7 @@ export const startPublicationRecovery = (
             Effect.flatMap(
               (workspace === null
                 ? recovery
-                : (workspaces.superviseCaptured?.(workspace, recovery) ?? recovery)
+                : workspaces.superviseCaptured(workspace, recovery)
               ).pipe(Effect.catchAll(() => Effect.succeed(Option.none()))),
               (prepared) =>
                 Option.match(prepared, {
@@ -77,13 +74,11 @@ const resumeRetainedCandidate = (
       .fetchIssuesByIds([issueId(durableIssueId)])
       .pipe(asSettled)
     const issue = fetched._tag === 'Succeeded' ? fetched.value[0] : undefined
-    const record = (yield* cells.durable?.snapshot ?? Effect.succeed([])).find(
-      (entry) => entry.issueId === durableIssueId,
-    )
+    const record = (yield* cells.durable.snapshot).find((entry) => entry.issueId === durableIssueId)
     if (issue === undefined || record?.intent !== 'active') {
       return
     }
-    const journal = yield* cells.durable?.journal(durableIssueId) ?? Effect.succeed(Option.none())
+    const journal = yield* cells.durable.journal(durableIssueId)
     const execution = {
       ...captureExecutionSnapshot(effective, ''),
       ...(Option.isNone(journal) ? {} : { journal: journal.value }),

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
-import { WorkflowComposition } from '@sloppenheimer/core/ports/workflow-store.js'
+import { WorkflowStore } from '@sloppenheimer/core/ports/workflow-store.js'
 import { layerWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import { WorkflowError as WorkflowConfigurationError } from '@sloppenheimer/core/domain/errors.js'
 import { FileSystem } from '@effect/platform'
@@ -153,7 +153,7 @@ const issueControl: Layer.Layer<CurrentIssueControl> = layerCurrentIssueControl.
 export const applicationPorts = (
   workflowPath: string,
 ): Layer.Layer<
-  PortServices | SourceControlServices | CurrentIssueControl,
+  PortServices | SourceControlServices | CurrentIssueControl | WorkflowStore,
   WorkflowError | TrackerError | SourceControlError,
   FileSystem.FileSystem
 > =>
@@ -165,32 +165,26 @@ export const applicationPorts = (
           layerPorts(configuration, adapters(workflow.runner)),
           layerSourceControlPorts(configuration, sourceControl),
           issueControl,
-          Layer.succeed(WorkflowComposition, {
-            verificationEnabled: workflow.config.verification !== undefined,
-          }),
         )
-        const durable =
-          workflow.config.verification === undefined
-            ? base
-            : Layer.merge(
-                base,
-                layerWorkflowStore(
-                  join(
-                    dirname(resolve(workflowPath)),
-                    '.sloppenheimer',
-                    createHash('sha256').update(resolve(workflowPath)).digest('hex') + '.sqlite',
-                  ),
-                ).pipe(
-                  Layer.mapError(
-                    (cause) =>
-                      new WorkflowConfigurationError({
-                        category: 'invalid_config',
-                        message: 'cannot acquire durable workflow authority',
-                        cause,
-                      }),
-                  ),
-                ),
-              )
+        const durable = Layer.merge(
+          base,
+          layerWorkflowStore(
+            join(
+              dirname(resolve(workflowPath)),
+              '.sloppenheimer',
+              createHash('sha256').update(resolve(workflowPath)).digest('hex') + '.sqlite',
+            ),
+          ).pipe(
+            Layer.mapError(
+              (cause) =>
+                new WorkflowConfigurationError({
+                  category: 'invalid_config',
+                  message: 'cannot acquire durable workflow authority',
+                  cause,
+                }),
+            ),
+          ),
+        )
         return workflow.config.handoffEnabled
           ? Layer.merge(durable, layerCodeReviewPorts(configuration, codeReview))
           : durable
