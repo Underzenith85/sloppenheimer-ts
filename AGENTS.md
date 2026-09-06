@@ -470,6 +470,14 @@ The package and import boundary suites enforce these separations.
 The UI inherits every strict compiler setting, explicit return types, and source size limits.
 React hooks and JSX accessibility rules supplement the shared lint rules. CSS custom properties
 hold tokens, CSS Modules hold component styles, and the browser entry imports the reset.
+For #304, semantic CSS tokens define surfaces, text, borders, focus, sizing and motion;
+components consume those roles. Native buttons and static status text need no interaction library.
+The coordinator alone pins `@radix-ui/react-dialog` for modal focus trapping, Escape dismissal,
+label associations and focus restoration, which Effect and Node do not provide in the browser.
+Unavailable buttons remain keyboard-focusable with `aria-disabled`, suppress activation, and
+associate a visible reason with `aria-describedby`. Busy controls retain visible progress text.
+Static chips do not create live regions; compositions own announcements. Fixtures are explicitly
+sample data, not fleet observations. Browser verification and structural tests live in `test/`.
 Future UI networking consumes the coordinator API, without instance credentials in browser code.
 
 ## Module and function size

@@ -1,0 +1,25 @@
+.chip {
+  display: inline-block;
+  max-inline-size: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: var(--font-size-small);
+  font-weight: var(--weight-strong);
+  overflow-wrap: anywhere;
+}
+
+.chip[data-tone='busy'] {
+  color: var(--text-info);
+}
+.chip[data-tone='success'] {
+  color: var(--text-success);
+}
+.chip[data-tone='warning'] {
+  color: var(--text-warning);
+}
+.chip[data-tone='failure'] {
+  color: var(--text-failure);
+}

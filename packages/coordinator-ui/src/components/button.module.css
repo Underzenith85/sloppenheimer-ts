@@ -1,0 +1,43 @@
+.field {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+}
+
+.button {
+  min-inline-size: var(--control-min);
+  min-block-size: var(--control-min);
+  max-inline-size: 100%;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+  background: var(--surface-action);
+  color: var(--text-on-action);
+  font-weight: var(--weight-strong);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: background-color var(--motion-duration) ease;
+}
+
+.button[data-variant='secondary'] {
+  background: var(--surface-control);
+  color: var(--text-primary);
+}
+
+.button:hover {
+  background: var(--surface-action-hover);
+  color: var(--text-on-action-hover);
+}
+
+.button[aria-disabled='true'] {
+  background: var(--surface-control);
+  color: var(--text-secondary);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.reason {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-small);
+}
