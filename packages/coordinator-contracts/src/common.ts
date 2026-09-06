@@ -23,6 +23,10 @@ export const Provenance = Schema.Struct({
   clock: Schema.Literal('instance', 'coordinator', 'provider'),
   calibration: Schema.NullOr(Calibration),
 })
+export const ProviderProvenance = Schema.Struct({
+  ...Provenance.fields,
+  clock: Schema.Literal('provider'),
+})
 export const Observation = Schema.Struct({
   observed_at: Schema.NullOr(Timestamp),
   source_at: Schema.NullOr(Provenance),
@@ -43,5 +47,8 @@ export type Observation = typeof Observation.Type
 export const workKey = (identity: WorkIdentity): string =>
   JSON.stringify([identity.instance_id, identity.issue_identifier])
 
+/** JSON quoting prevents dot segments and escapes lone surrogates before URI encoding. */
+const routeSegment = (identifier: string): string => encodeURIComponent(JSON.stringify(identifier))
+
 export const detailRoute = (identity: WorkIdentity): string =>
-  `/instances/${encodeURIComponent(identity.instance_id)}/issues/${encodeURIComponent(identity.issue_identifier)}`
+  `/instances/${routeSegment(identity.instance_id)}/issues/${routeSegment(identity.issue_identifier)}`

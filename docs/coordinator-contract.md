@@ -5,6 +5,11 @@ All envelopes carry `version: 1`. This package defines transport and presentatio
 classification or dispatch. #302 is not present in this worktree; its operator-model extraction
 will supply classification. No instance API types are copied here and no existing console changes.
 
+Detail routes encode each opaque identifier as `encodeURIComponent(JSON.stringify(identifier))`.
+Route consumers URI-decode each segment once, then JSON-decode and validate it with `Identifier`.
+JSON quoting prevents `.` and `..` from becoming URL dot segments and preserves lone UTF-16
+surrogates without throwing or replacing identity characters.
+
 ## State and interaction table
 
 | Concern                                    | Decision                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -36,7 +41,9 @@ All wire timestamps are finite nonnegative integer UTC Unix milliseconds. `obser
 instants name instance/provider/coordinator provenance. Calibration offset means **coordinator minus
 source**; corrected time is source time plus offset. Sample at the request midpoint and use half
 round-trip duration plus source clock error as uncertainty. Expire calibration after 60s or process
-change. Provider dates remain provider dates; never substitute discovery time for merge time.
+change. `finished_at` accepts only provider provenance or null; never substitute discovery time
+for merge time. Confirmed action evidence must contain at least one character and is bounded by
+the shared text limit.
 
 Browser calibration uses the same midpoint convention between coordinator and browser, with
 monotonic elapsed time after receipt. Snapshot age at receipt includes uncertainty. Without a valid

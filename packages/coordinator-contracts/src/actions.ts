@@ -27,7 +27,7 @@ export const ActionOutcome = Schema.Union(
     status: Schema.Literal('confirmed'),
     ...request,
     observed_at: Timestamp,
-    evidence: Text,
+    evidence: Text.pipe(Schema.minLength(1)),
   }),
   Schema.Struct({ status: Schema.Literal('rejected'), ...request, reason: Text }),
   Schema.Struct({ status: Schema.Literal('unknown'), ...request, reason: Text }),
