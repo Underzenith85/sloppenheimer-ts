@@ -26,6 +26,9 @@ importers:
       '@sloppenheimer/coordinator':
         specifier: workspace:*
         version: link:packages/coordinator
+      '@sloppenheimer/coordinator-contracts':
+        specifier: workspace:*
+        version: link:packages/coordinator-contracts
       '@sloppenheimer/core':
         specifier: workspace:*
         version: link:packages/core
@@ -158,8 +161,21 @@ importers:
         specifier: 24.13.3
         version: 24.13.3
 
+  packages/coordinator-contracts:
+    dependencies:
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+
   packages/coordinator-ui:
     dependencies:
+      '@sloppenheimer/coordinator-contracts':
+        specifier: workspace:*
+        version: link:../coordinator-contracts
       '@tanstack/react-query':
         specifier: 5.102.8
         version: 5.102.8(react@19.2.8)

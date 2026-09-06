@@ -29,6 +29,7 @@
     "@sloppenheimer/adapter-github": "workspace:*",
     "@sloppenheimer/adapter-node": "workspace:*",
     "@sloppenheimer/coordinator": "workspace:*",
+    "@sloppenheimer/coordinator-contracts": "workspace:*",
     "@sloppenheimer/core": "workspace:*",
     "chokidar": "5.0.0",
     "effect": "3.22.1",

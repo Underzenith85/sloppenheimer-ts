@@ -1308,3 +1308,19 @@ Tracked by [#328](https://github.com/Underzenith85/sloppenheimer-ts/issues/328),
   the one this attempt is the sole authority on, so it replaces the record's reason through
   `DurableHost.holdRecovery`; the others are logged and leave the standing reason alone. No path
   answers `Option.none()` without an account of it somewhere an operator looks.
+
+### Coordinator contract boundary (#303)
+
+`packages/coordinator-contracts` is the independent shared wire boundary for the future coordinator
+server and browser. Neither consumer may import the other; core is instance orchestration and is
+also unsuitable for browser transport. This justifies a new bottom-layer package with Effect Schema
+as its only runtime dependency. It has no Node, DOM, React, adapter or orchestration imports and
+sets `types: []` to check browser safety. It follows the private library exports/build convention;
+root and coordinator-ui declare it explicitly. Runtime decoders return Effects without running a
+runtime; inferred schema types and pure fixture/policy subpaths work in browser tests as well.
+
+The package owns coordinator envelopes only. It does not duplicate the instance API or classify
+work. #302's operator-model extraction is not present in the #303 base; its future output supplies
+bucket values. Coordinator wire ordering adds fleet identity ties to the existing presentation
+order, while dispatch remains instance policy. The state/interaction table and compact row budget
+are recorded in `docs/coordinator-contract.md` before UI and polling consumers are implemented.

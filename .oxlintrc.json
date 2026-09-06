@@ -49,6 +49,33 @@
   // a package-root module for never rejecting a compliant one.  Prefer flat layers.
   "overrides": [
     {
+      "files": ["packages/coordinator-contracts/src/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "node:*",
+                  "react",
+                  "react/**",
+                  "react-dom",
+                  "react-dom/**",
+                  "@sloppenheimer/**",
+                  "**/core/**",
+                  "**/adapter-*/**",
+                  "**/coordinator-ui/**",
+                  "**/src/operator/**"
+                ],
+                "message": "Coordinator contracts are independent of host, UI and orchestration implementations."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "files": ["packages/coordinator-ui/src/**"],
       "rules": {
         "react/rules-of-hooks": "error",
@@ -69,6 +96,8 @@
                 "group": [
                   "node:*",
                   "@sloppenheimer/**",
+                  "!@sloppenheimer/coordinator-contracts",
+                  "!@sloppenheimer/coordinator-contracts/**",
                   "**/packages/core/**",
                   "**/packages/adapter-*/**",
                   "**/src/operator/**"
@@ -132,6 +161,7 @@
         "packages/adapter-node/src/**",
         "packages/core/src/**",
         "packages/coordinator-ui/src/**",
+        "packages/coordinator-contracts/src/**",
         "packages/coordinator/src/**",
         "src/**"
       ],

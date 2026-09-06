@@ -6,6 +6,9 @@
   },
   "references": [
     {
+      "path": "./packages/coordinator-contracts"
+    },
+    {
       "path": "./packages/core"
     },
     {

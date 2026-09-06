@@ -16,6 +16,12 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const fixtures: Readonly<Record<string, string>> = {
   'packages/coordinator/src/violates-react.ts': "import 'react'\n",
   'packages/coordinator/src/violates-ui.ts': "import '../../coordinator-ui/src/app.js'\n",
+  'packages/coordinator-contracts/src/violates-host.ts': "import 'node:fs'\n",
+  'packages/coordinator-contracts/src/violates-ui.ts': "import 'react'\n",
+  'packages/coordinator-contracts/src/violates-core.ts': "import '@sloppenheimer/core'\n",
+  'packages/coordinator-contracts/src/permitted.ts': "import { Schema } from 'effect'\n",
+  'packages/coordinator-ui/src/permitted-contract.ts':
+    "import '@sloppenheimer/coordinator-contracts'\nimport '@sloppenheimer/coordinator-contracts/fixtures.js'\n",
   'packages/coordinator-ui/src/violates-host.tsx': "import '@sloppenheimer/adapter-node'\n",
   'packages/coordinator-ui/src/violates-node.ts': "import 'node:fs'\n",
   'packages/coordinator-ui/src/permitted.tsx': "import 'react'\nimport './app.js'\n",

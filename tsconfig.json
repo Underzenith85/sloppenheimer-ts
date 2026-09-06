@@ -15,6 +15,8 @@
     "paths": {
       "@sloppenheimer/coordinator": ["./packages/coordinator/src/index.ts"],
       "@sloppenheimer/coordinator/*.js": ["./packages/coordinator/src/*.ts"],
+      "@sloppenheimer/coordinator-contracts": ["./packages/coordinator-contracts/src/index.ts"],
+      "@sloppenheimer/coordinator-contracts/*.js": ["./packages/coordinator-contracts/src/*.ts"],
       "@sloppenheimer/core": ["./packages/core/src/index.ts"],
       "@sloppenheimer/core/*.js": ["./packages/core/src/*.ts"],
       "@sloppenheimer/adapter-node": ["./packages/adapter-node/src/index.ts"],
