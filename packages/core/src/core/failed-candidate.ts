@@ -26,7 +26,11 @@ export const retainFailedCandidate = (
     yield* journal?.checkpointing ?? Effect.void
     const inspected = yield* sourceControl.inspect(prepared).pipe(asSettled)
     if (inspected._tag === 'Succeeded' && inspected.value._tag === 'Clean') {
-      yield* onCleanFailure
+      // Clean means there is no undelivered diff, but an older ancestor can also be clean.
+      // Only the exact prepared baseline is safe to replace with a fresh workspace.
+      if (inspected.value.headSha === prepared.baselineSha) {
+        yield* onCleanFailure
+      }
       return yield* Effect.fail(failure)
     }
     const candidates = sourceControl.candidates
