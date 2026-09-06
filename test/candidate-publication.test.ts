@@ -258,6 +258,17 @@ it.live('retains the exact pushed candidate across restart when push acknowledge
         expect(record?.artifact?.repository?.headSha).toBe(remoteHead)
         expect(record?.artifact?.verifiedRevision).toBe(record?.artifact?.repository?.treeSha)
         expect(record?.artifact?.publishedHead).toBe(null)
+        // Recovery must succeed even when the old workspace cannot be opened.
+        yield* Effect.promise(() => rm(repository.workspace, { recursive: true, force: true }))
+        if (source.recovery === undefined) {
+          return yield* Effect.die('Git must provide remote-only recovery')
+        }
+        yield* host.reconcilePublication(issue.id, source.recovery)
+        const reconciled = (yield* host.snapshot)[0]
+        expect(reconciled?.artifact?.publishedHead).toBe(remoteHead)
+        expect(reconciled?.artifact?.remoteObservation?.headSha).toBe(remoteHead)
+        expect(reconciled?.status._tag).toBe('Intervention')
+
         expect(record?.status._tag).toBe('Intervention')
         expect(Option.isNone(yield* host.start(issue, prepared.target))).toBe(true)
       }),

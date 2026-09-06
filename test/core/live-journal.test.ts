@@ -1,5 +1,5 @@
 import { it } from '@effect/vitest'
-import { Effect, Exit, Fiber, Option, Ref, TestClock } from 'effect'
+import { Deferred, Effect, Exit, Fiber, Option, Ref, TestClock } from 'effect'
 import { describe, expect } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -7,7 +7,7 @@ import { join } from 'node:path'
 
 import { makeDurableHost } from '@sloppenheimer/core/core/durable/live-journal.js'
 import type { DurableWorkflow } from '@sloppenheimer/core/domain/durable-workflow.js'
-import { WorkflowStoreError } from '@sloppenheimer/core/domain/errors.js'
+import { SourceControlError, WorkflowStoreError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkflowStorePort } from '@sloppenheimer/core/ports/workflow-store.js'
 import { openWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import { anIssue } from '../harness/fixtures.js'
@@ -15,6 +15,7 @@ import { anIssue } from '../harness/fixtures.js'
 const issue = anIssue()
 const target = { _tag: 'Normal', branchName: 'candidate/test' } as const
 const prepared = {
+  repositoryIdentity: 'repository',
   target,
   workspace: { key: 'retained', path: '/retained/work' },
   baselineSha: 'baseline',
@@ -223,6 +224,117 @@ describe('live durable journal', () => {
   )
 })
 
+const pendingPublication = Effect.gen(function* () {
+  const store = yield* memoryStore
+  const host = yield* makeDurableHost(store)
+  const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+  yield* journal.prepared(prepared)
+  yield* journal.publication.verified(verified)
+  return { store, host: yield* makeDurableHost(store) }
+})
+
+it.effect('records a matching remote fact while keeping paused work quarantined', () =>
+  Effect.gen(function* () {
+    const { host } = yield* pendingPublication
+    yield* host.setIntent(issue.identifier, 'paused')
+    yield* host.reconcilePublication(issue.id, {
+      repositoryIdentity: 'repository',
+      observeHead: () => Effect.succeed(Option.some('candidate')),
+    })
+    const record = (yield* host.snapshot)[0]
+    expect(record?.artifact?.publishedHead).toBe('candidate')
+    expect(record?.artifact?.remoteObservation?.headSha).toBe('candidate')
+    expect(record?.status._tag).toBe('Intervention')
+    expect(record?.intent).toBe('paused')
+    expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+  }),
+)
+
+it.effect('does not redirect recovery when the configured repository changed', () =>
+  Effect.gen(function* () {
+    const { host } = yield* pendingPublication
+    yield* host.reconcilePublication(issue.id, {
+      repositoryIdentity: 'another-repository',
+      observeHead: () => Effect.die('a different remote must never be consulted'),
+    })
+    expect((yield* host.snapshot)[0]?.artifact?.remoteObservation).toBeUndefined()
+  }),
+)
+
+it.effect('preserves unknown and divergent remote outcomes without granting publication', () =>
+  Effect.gen(function* () {
+    const { host } = yield* pendingPublication
+    yield* host.reconcilePublication(issue.id, {
+      repositoryIdentity: 'repository',
+      observeHead: () =>
+        Effect.fail(
+          new SourceControlError({
+            category: 'authentication_failed',
+            message: 'provider diagnostic',
+            retryable: true,
+            worktreePreserved: true,
+          }),
+        ),
+    })
+    expect((yield* host.snapshot)[0]?.artifact?.remoteObservation).toBeUndefined()
+    yield* host.reconcilePublication(issue.id, {
+      repositoryIdentity: 'repository',
+      observeHead: () => Effect.succeed(Option.some('different')),
+    })
+    expect((yield* host.snapshot)[0]?.artifact?.publishedHead).toBeNull()
+    expect((yield* host.snapshot)[0]?.artifact?.remoteObservation?.headSha).toBe('different')
+    yield* host.reconcilePublication(issue.id, {
+      repositoryIdentity: 'repository',
+      observeHead: () => Effect.succeed(Option.none()),
+    })
+    expect((yield* host.snapshot)[0]?.artifact?.remoteObservation?.headSha).toBeNull()
+    expect((yield* host.snapshot)[0]?.status._tag).toBe('Intervention')
+  }),
+)
+
+it.effect('refuses a stale remote observation after operator intent changes', () =>
+  Effect.gen(function* () {
+    const { host } = yield* pendingPublication
+    const started = yield* Deferred.make<void>()
+    const answer = yield* Deferred.make<Option.Option<string>>()
+    const reading = yield* Effect.fork(
+      host.reconcilePublication(issue.id, {
+        repositoryIdentity: 'repository',
+        observeHead: () =>
+          Deferred.succeed(started, undefined).pipe(Effect.zipRight(Deferred.await(answer))),
+      }),
+    )
+    yield* Deferred.await(started)
+    yield* host.setIntent(issue.identifier, 'paused')
+    yield* Deferred.succeed(answer, Option.some('candidate'))
+    yield* Fiber.join(reading)
+    expect((yield* host.snapshot)[0]?.intent).toBe('paused')
+    expect((yield* host.snapshot)[0]?.artifact?.remoteObservation).toBeUndefined()
+  }),
+)
+
+it.effect('keeps legacy records without remote provenance held without guessing a repository', () =>
+  Effect.gen(function* () {
+    const { store } = yield* pendingPublication
+    const record = (yield* store.list)[0]
+    if (record === undefined || record.artifact?.repository === undefined) {
+      return yield* Effect.die('fixture must contain repository evidence')
+    }
+    const { identity: ignored, ...repository } = record.artifact.repository
+    void ignored
+    yield* store.commit(
+      { ...record, revision: record.revision + 1, artifact: { ...record.artifact, repository } },
+      record.revision,
+    )
+    const host = yield* makeDurableHost(store)
+    yield* host.reconcilePublication(issue.id, {
+      repositoryIdentity: 'repository',
+      observeHead: () => Effect.die('legacy provenance must not be guessed'),
+    })
+    expect((yield* host.snapshot)[0]?.artifact?.remoteObservation).toBeUndefined()
+  }),
+)
+
 it.effect('persists non-handoff continuations across restart and bounds coding attempts', () =>
   Effect.gen(function* () {
     const store = yield* memoryStore
@@ -285,4 +397,93 @@ it.effect(
       const mutation = yield* Effect.fork(journal.publication.checkpointing)
       expect(Exit.isInterrupted(yield* Fiber.await(mutation))).toBe(true)
     }),
+)
+
+it.effect('retries known pre-preparation failures across restart without resetting budgets', () =>
+  Effect.gen(function* () {
+    const store = yield* memoryStore
+    let host = yield* makeDurableHost(store)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.failed
+      expect((yield* host.snapshot)[0]?.status).toMatchObject({
+        _tag: 'Waiting',
+        condition: 'retry',
+      })
+      host = yield* makeDurableHost(store)
+    }
+    expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+    expect((yield* host.snapshot)[0]?.codingAttempts).toBe(3)
+    expect((yield* host.snapshot)[0]?.status._tag).toBe('Intervention')
+  }),
+)
+
+it.effect(
+  'resumes a clean cancelled run only after restoring intent and fences the previous owner',
+  () =>
+    Effect.gen(function* () {
+      const store = yield* memoryStore
+      const host = yield* makeDurableHost(store)
+      const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.prepared(prepared)
+      yield* host.setIntent(issue.identifier, 'paused')
+      yield* journal.stopped(true)
+      yield* journal.stopped(false)
+      const restored = yield* makeDurableHost(store)
+      expect((yield* restored.snapshot)[0]?.status).toMatchObject({
+        _tag: 'Waiting',
+        condition: 'retry',
+      })
+      expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+      yield* host.setIntent(issue.identifier, 'active')
+      expect(Option.isNone(yield* host.start(issue, { ...target, branchName: 'different' }))).toBe(
+        true,
+      )
+      expect(Option.isSome(yield* host.start(issue, target))).toBe(true)
+      const stale = yield* Effect.fork(journal.stopped(true))
+      expect(Exit.isInterrupted(yield* Fiber.await(stale))).toBe(true)
+      expect((yield* store.list)[0]?.codingAttempts).toBe(2)
+    }),
+)
+
+it.effect(
+  'holds cancelled partial and verified candidates rather than admitting fresh coding',
+  () =>
+    Effect.gen(function* () {
+      for (const verifiedWork of [false, true]) {
+        const host = yield* memoryStore.pipe(Effect.flatMap(makeDurableHost))
+        const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+        yield* journal.prepared(prepared)
+        if (verifiedWork) {
+          yield* journal.publication.verified(verified)
+        }
+        yield* journal.stopped(verifiedWork)
+        expect((yield* host.snapshot)[0]?.status._tag).toBe('Intervention')
+        expect((yield* host.snapshot)[0]?.artifact).not.toBeNull()
+        expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+      }
+    }),
+)
+
+it.effect('binds repair retries to the original branch and head lease', () =>
+  Effect.gen(function* () {
+    const host = yield* memoryStore.pipe(Effect.flatMap(makeDurableHost))
+    const first = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+    yield* first.prepared(prepared)
+    yield* first.publication.verified(verified)
+    yield* first.settled(published)
+    const repair = {
+      _tag: 'Repair',
+      branchName: target.branchName,
+      expectedHeadSha: 'candidate',
+    } as const
+    const journal = yield* host.start(issue, repair).pipe(Effect.map(Option.getOrThrow))
+    yield* journal.failed
+    expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
+    expect(Option.isNone(yield* host.start(issue, { ...repair, expectedHeadSha: 'other' }))).toBe(
+      true,
+    )
+    expect(Option.isSome(yield* host.start(issue, repair))).toBe(true)
+    expect((yield* host.snapshot)[0]?.repairAttempts).toBe(2)
+  }),
 )

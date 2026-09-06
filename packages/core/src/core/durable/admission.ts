@@ -1,6 +1,7 @@
 import { Clock, Effect, Option, Ref } from 'effect'
 import type { DurableWorkflow } from '../../domain/durable-workflow.js'
 import type { DurableHost } from './live-journal.js'
+import { retryMatches } from './retry-settlement.js'
 import { journalFor, type Writer } from './run-journal.js'
 
 export const admission =
@@ -18,12 +19,15 @@ export const admission =
         if (
           current !== undefined &&
           (current.intent !== 'active' ||
-            !(repair
-              ? current.status._tag === 'Completed' ||
-                (current.status._tag === 'Waiting' && current.status.condition === 'review')
-              : afterPublication === 'continuation' &&
-                current.status._tag === 'Waiting' &&
-                current.status.condition === 'continuation'))
+            !(
+              retryMatches(current, target) ||
+              (repair
+                ? current.status._tag === 'Completed' ||
+                  (current.status._tag === 'Waiting' && current.status.condition === 'review')
+                : afterPublication === 'continuation' &&
+                  current.status._tag === 'Waiting' &&
+                  current.status.condition === 'continuation')
+            ))
         ) {
           return Option.none()
         }
@@ -60,6 +64,7 @@ export const admission =
           owner,
           intent: 'active',
           afterPublication,
+          runTarget: target,
           status: {
             _tag: 'Executing',
             deadline: now + 900_000,

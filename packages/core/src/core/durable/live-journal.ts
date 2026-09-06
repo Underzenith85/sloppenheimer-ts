@@ -1,3 +1,5 @@
+import { reconcilePublication } from './publication-recovery.js'
+import type { SourceControlRecoveryPort } from '../../ports/source-control.js'
 import { Clock, Deferred, Effect, Option, Ref } from 'effect'
 
 import type { Issue } from '../../domain/domain.js'
@@ -12,6 +14,10 @@ import type { RunJournal, Writer } from './run-journal.js'
 
 export type { RunJournal } from './run-journal.js'
 export type DurableHost = Readonly<{
+  reconcilePublication: (
+    issueId: string,
+    recovery: SourceControlRecoveryPort,
+  ) => Effect.Effect<void>
   start: (
     issue: Issue,
     target: SourceControlTarget,
@@ -81,6 +87,7 @@ export const makeDurableHost = (
         }),
       )
     return {
+      reconcilePublication: (id, recovery) => reconcilePublication(records, write, id, recovery),
       snapshot: Effect.map(Ref.get(records), (current) => [...current.values()]),
       awaitFailure: Deferred.await(failure).pipe(
         Effect.flatMap((cause) =>

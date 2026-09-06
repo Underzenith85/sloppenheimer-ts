@@ -13,6 +13,7 @@ export type SourceControlTarget =
 /** The host-owned repository state captured before an agent is launched. */
 export type PreparedRepository = Readonly<{
   workspace: Workspace
+  repositoryIdentity?: string
   target: SourceControlTarget
   baseBranch: string
   baseSha: string
@@ -57,7 +58,19 @@ export type PublicationOutcome =
  * Tracker-neutral source-control capability. The host owns repository metadata, credentials and
  * publication; an agent receives only the prepared worktree and edits ordinary files inside it.
  */
+export type SourceControlRecoveryPort = Readonly<{
+  /** Credential-free identity of the configured remote; must match captured provenance. */
+  repositoryIdentity: string
+  /**
+   * Reads only the configured remote, without opening or fetching into a retained workspace.
+   * Each invocation owns its resources: recovery may outlive the publishing adapter's scope.
+   * Implementations capture immutable settings, never resources owned by the parent adapter.
+   */
+  observeHead: (branchName: string) => Effect.Effect<Option.Option<string>, SourceControlError>
+}>
+
 export type SourceControlPort = Readonly<{
+  recovery?: SourceControlRecoveryPort
   /** Explicit candidate operations, required when host verification is configured. */
   candidates?: CandidateSourceControlPort
   prepare: (

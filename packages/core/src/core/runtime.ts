@@ -1,3 +1,4 @@
+import { startPublicationRecovery } from './runtime/publication-recovery.js'
 import { Effect, FiberSet, Option, Queue, Ref, Stream, type Scope } from 'effect'
 
 import { validateWorkflowComposition } from './runtime/composition.js'
@@ -175,6 +176,7 @@ export const startOrchestratorRuntime = (
     const eventLoopFiber = yield* Effect.forkScoped(
       Effect.raceFirst(eventLoop(context), durable?.awaitFailure ?? Effect.never),
     )
+    yield* startPublicationRecovery(cells, bootstrapWorkflow.sourceControl)
     yield* requestTick(cells, 'startup')
     return orchestratorControl(cells, context, eventLoopFiber)
   })
