@@ -3,6 +3,7 @@ import type { DurableWorkflow } from '../../domain/durable-workflow.js'
 import type { DurableHost } from './live-journal.js'
 import { retryMatches } from './retry-settlement.js'
 import { journalFor, type Writer } from './run-journal.js'
+import { admittedWorkflow } from './transition.js'
 
 export const admission =
   (
@@ -53,44 +54,8 @@ export const admission =
           )
           return Option.none()
         }
-        const revision = current === undefined ? 0 : current.revision + 1
-        const owner = issue.id + ':run:' + String(revision)
-        const next: DurableWorkflow = {
-          ...(current?.completion === undefined ? {} : { completion: current.completion }),
-          ...(current?.handoff === undefined ? {} : { handoff: current.handoff }),
-          version: 1,
-          issueId: issue.id,
-          identifier: issue.identifier,
-          objective: issue.title,
-          revision,
-          owner,
-          intent: 'active',
-          afterPublication,
-          runTarget: target,
-          status: {
-            _tag: 'Executing',
-            deadline: now + 900_000,
-            operation: {
-              id: owner + ':prepare',
-              generation: revision + 1,
-              kind: 'prepare',
-              inputRevision: repair ? target.expectedHeadSha : owner,
-              attempt: 0,
-              timeoutMs: 900_000,
-            },
-          },
-          artifact: null,
-          codingAttempts: (current?.codingAttempts ?? 0) + (repair ? 0 : 1),
-          repairAttempts: (current?.repairAttempts ?? 0) + (repair ? 1 : 0),
-          maximumCodingAttempts: current?.maximumCodingAttempts ?? 3,
-          maximumRepairAttempts: current?.maximumRepairAttempts ?? 3,
-          budgetDeadline: current?.budgetDeadline ?? now + 86_400_000,
-          lastProgressAt: now,
-          lastFailureSignature: null,
-          repeatedFailures: 0,
-          updatedAt: now,
-        }
+        const next = admittedWorkflow(current, issue, target, afterPublication, now)
         yield* persist(next, current?.revision ?? null)
-        return Option.some(journalFor(write, issue.id, owner))
+        return Option.some(journalFor(write, issue.id, next.owner))
       }),
     )

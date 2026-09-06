@@ -37,6 +37,11 @@ import { makeAdapterCell, type AdapterCell } from './cell.js'
  * runs that this host still means to publish from — a retained delivery's above all.
  */
 export type WorkspaceManagerPort = Readonly<{
+  /** Installs process receipts for a supervised operation over an already captured workspace. */
+  superviseCaptured?: <Value, Failure, Requirements>(
+    workspace: Workspace,
+    operation: Effect.Effect<Value, Failure, Requirements>,
+  ) => Effect.Effect<Value, Failure | WorkspaceError, Requirements>
   /** Uses captured paths and process evidence, never the manager's current workspace root. */
   confirmStopped?: (workspace: Workspace) => Effect.Effect<boolean>
   removeCaptured?: (workspace: Workspace) => Effect.Effect<void, WorkspaceError>

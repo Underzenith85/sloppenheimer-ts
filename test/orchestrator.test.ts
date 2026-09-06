@@ -9857,6 +9857,110 @@ for (const initiallyPaused of [false, true]) {
 }
 
 it.scoped(
+  're-enrolls a stopped retained verified candidate after restart without another agent',
+  () =>
+    Effect.gen(function* () {
+      const workspaceRoot = yield* isolatedWorkspaceRoot('durable-publication-recovery-')
+      const configured: Workflow = {
+        ...workflow,
+        config: {
+          ...workflow.config,
+          workspaceRoot,
+          verification: { command: 'true', timeoutMs: 1_000 },
+        },
+      }
+      const issue = {
+        ...makeIssue('example/sloppenheimer#288', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('288'),
+      }
+      const target = { _tag: 'Normal', branchName: 'sloppenheimer/issue-288' } as const
+      const prepared = {
+        target,
+        workspace: { path: join(workspaceRoot, 'GH-288', 'run-1-old'), key: 'run-1-old' },
+        repositoryIdentity: 'example/sloppenheimer',
+        baseBranch: 'main',
+        baseSha: 'base',
+        baselineSha: 'base',
+        expectedRemoteHead: Option.none<string>(),
+      }
+      const candidate = { prepared, headSha: 'candidate', treeSha: 'tree', commitCreated: true }
+      const verified = {
+        candidate,
+        evidence: { headSha: 'candidate', treeSha: 'tree', command: 'true', verifiedAt: 0 },
+      }
+      const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+      const previous = yield* makeDurableHost(store)
+      const journal = yield* previous.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.prepared(prepared)
+      yield* journal.publication.verified(verified)
+
+      const harness = makeHarness(configured, () => [issue])
+      let publications = 0
+      let supervised = 0
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+        ...harness.ports,
+        runAgent: () => Effect.die('recovery must not launch a coding agent'),
+        makeWorkspaces: (settings): WorkspaceManagerPort => ({
+          ...harness.ports.makeWorkspaces(settings),
+          confirmStopped: () => Effect.succeed(true),
+          superviseCaptured: (_workspace, operation) =>
+            Effect.sync(() => {
+              supervised += 1
+            }).pipe(Effect.zipRight(operation)),
+        }),
+        makeSourceControl: (): SourceControlPort => ({
+          recovery: {
+            repositoryIdentity: 'example/sloppenheimer',
+            observeHead: () => Effect.succeed(Option.none()),
+          },
+          prepare: () => Effect.die('recovery uses captured preparation'),
+          inspect: () => Effect.succeed(changedWorktree),
+          publish: () => Effect.die('verified recovery uses candidate publication'),
+          rebase: () => Effect.die('recovery must not rebase'),
+          candidates: {
+            checkpoint: () => Effect.succeed(Option.some(candidate)),
+            align: () => Effect.succeed(candidate),
+            verify: () => Effect.succeed(verified),
+            observe: () => Effect.succeed({ _tag: 'Unpublished' }),
+            publish: () =>
+              Effect.sync(() => {
+                publications += 1
+                return {
+                  _tag: 'Published',
+                  branchName: target.branchName,
+                  headSha: candidate.headSha,
+                  commitCreated: true,
+                } as const
+              }),
+          },
+        }),
+      }).pipe(Effect.provideService(WorkflowStore, store))
+
+      let snapshot = yield* control.snapshot
+      while (snapshot.delivering.length === 0) {
+        yield* Effect.yieldNow()
+        snapshot = yield* control.snapshot
+      }
+      const delivery = snapshot.delivering[0]
+      if (delivery === undefined) {
+        return yield* Effect.die('recovery must schedule the retained candidate')
+      }
+      yield* TestClock.setTime(new Date(delivery.dueAt).getTime())
+      while (
+        publications === 0 ||
+        (yield* control.snapshot).durableWorkflows?.[0]?.artifact?.publishedHead !== 'candidate'
+      ) {
+        yield* Effect.yieldNow()
+      }
+      expect(publications).toBe(1)
+      expect(supervised).toBeGreaterThanOrEqual(2)
+      expect((yield* control.snapshot).durableWorkflows?.[0]?.artifact?.publishedHead).toBe(
+        'candidate',
+      )
+    }),
+)
+
+it.scoped(
   'shows intervention when a durable delivery becomes terminal without deleting its candidate',
   () =>
     Effect.gen(function* () {

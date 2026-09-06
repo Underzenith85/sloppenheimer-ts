@@ -10,6 +10,22 @@ import { pinDirectory, realDirectoryExists, reportedAs } from './filesystem.js'
 import { processWitnessDirectory, witnessedProcessesStopped } from './process-witness.js'
 import { removeFreeRunWorkspace } from './workspace-cleanup.js'
 
+/** Validates persisted workspace provenance and returns the root that record captured. */
+export const capturedWorkspaceRoot = (
+  workspace: Workspace,
+): Effect.Effect<string, WorkspaceError> =>
+  !isAbsolute(workspace.path) ||
+  resolve(workspace.path) !== workspace.path ||
+  basename(workspace.path) !== workspace.key ||
+  !workspace.key.startsWith('run-')
+    ? Effect.fail(
+        new WorkspaceError({
+          category: 'invalid_path',
+          message: 'Captured operation requires a canonical run workspace path',
+        }),
+      )
+    : Effect.succeed(dirname(dirname(workspace.path)))
+
 /** Cleanup follows captured provenance; reload never redirects it to the new configured root. */
 export const removeCapturedWorkspace = (
   fileSystem: FileSystem.FileSystem,
@@ -18,21 +34,8 @@ export const removeCapturedWorkspace = (
 ): Effect.Effect<void, WorkspaceError> =>
   Effect.scoped(
     Effect.gen(function* () {
-      if (
-        !isAbsolute(workspace.path) ||
-        resolve(workspace.path) !== workspace.path ||
-        basename(workspace.path) !== workspace.key ||
-        !workspace.key.startsWith('run-')
-      ) {
-        return yield* Effect.fail(
-          new WorkspaceError({
-            category: 'invalid_path',
-            message: 'Captured cleanup requires a canonical run workspace path',
-          }),
-        )
-      }
+      const root = yield* capturedWorkspaceRoot(workspace)
       const issuePath = dirname(workspace.path)
-      const root = dirname(issuePath)
       if (
         !(yield* witnessedProcessesStopped(
           fileSystem,

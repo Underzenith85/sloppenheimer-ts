@@ -9,6 +9,7 @@ import { makeDurableHost } from '@sloppenheimer/core/core/durable/live-journal.j
 import type { DurableWorkflow } from '@sloppenheimer/core/domain/durable-workflow.js'
 import { SourceControlError, WorkflowStoreError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkflowStorePort } from '@sloppenheimer/core/ports/workflow-store.js'
+import type { SourceControlPort } from '@sloppenheimer/core/ports/source-control.js'
 import { openWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import { anIssue } from '../harness/fixtures.js'
 
@@ -248,6 +249,34 @@ it.effect('records a matching remote fact while keeping paused work quarantined'
     expect(record?.intent).toBe('paused')
     expect(Option.isNone(yield* host.start(issue, target))).toBe(true)
   }),
+)
+
+it.effect(
+  'returns a retained candidate only after termination and local inspection are proven',
+  () =>
+    Effect.gen(function* () {
+      const { host } = yield* pendingPublication
+      const source: SourceControlPort = {
+        recovery: {
+          repositoryIdentity: 'repository',
+          observeHead: () => Effect.succeed(Option.none()),
+        },
+        prepare: () => Effect.die('recovery must not prepare a replacement'),
+        inspect: (captured) =>
+          Effect.succeed({
+            _tag: 'Changed' as const,
+            headSha: 'candidate',
+            dirtyFileCount: 0,
+            committedAhead: true,
+          }).pipe(Effect.tap(() => Effect.sync(() => expect(captured).toEqual(prepared)))),
+        publish: () => Effect.die('inspection must precede a later publication command'),
+        rebase: () => Effect.die('recovery must not rebase during inspection'),
+      }
+      expect(Option.isNone(yield* host.reconcilePublication(issue.id, source))).toBe(true)
+      const resumed = yield* host.reconcilePublication(issue.id, source, Effect.succeed(true))
+      expect(Option.getOrThrow(resumed)).toEqual(prepared)
+      expect((yield* host.snapshot)[0]?.status).toMatchObject({ _tag: 'Intervention' })
+    }),
 )
 
 it.effect('does not redirect recovery when the configured repository changed', () =>

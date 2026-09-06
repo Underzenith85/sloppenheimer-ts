@@ -619,15 +619,13 @@ repair agent that had achieved nothing.
 - "Repair agent completed without changing the pull request head" is reachable only when the
   inspected worktree was clean. The repair identity carries the postflight verdict for exactly this
   reason: an unchanged head alone cannot tell a no-op turn from a push that failed.
-- A restart does not recover a retained delivery. A delivery is in-memory intent; the workspace it
-  would republish from is the run's own, and what becomes of that directory once the process is
-  gone is the workspace record's decision ([#166](https://github.com/Underzenith85/sloppenheimer-ts/issues/166),
-  retry continuity (b)): it stays as a retained recovery artifact naming why, no later run adopts
-  it, and it goes when the issue reaches a terminal state. This record once carried an in-process
-  sweep that reopened an issue's workspace on restart and published what it found; that depended
-  on `prepare` preserving a dirty worktree and on a workspace belonging to an issue, and both were
-  removed by #166. Republishing retained artifacts on restart is a revision of that decision and a
-  new port surface, not something to reintroduce here.
+- A restart may recover a retained delivery only from a durable artifact with exact repository,
+  candidate, and verification identity. Recovery first observes the remote without opening the
+  checkout. If publication is still owed, it confirms every captured process stopped, validates
+  the persisted canonical run path, and inspects that exact checkout. Only a changed checkout is
+  re-enrolled for publication, under fresh process receipts; no coding agent is launched. Missing
+  evidence, an unknown process, a clean or unreadable checkout, and remote divergence remain an
+  intervention. Legacy retained workspaces without durable candidate evidence are never adopted.
 - Retained workspaces of an issue that is still open are capped
   ([#273](https://github.com/Underzenith85/sloppenheimer-ts/issues/273)). Once a run has let go of
   its workspace the worker's own fiber — off the loop, because a pass over whole checkouts has no
@@ -709,8 +707,8 @@ repair agent that had achieved nothing.
   the client did not see succeed, and a delivery retry has to be idempotent: rejecting it against a
   tip that is this very commit would spend the delivery budget and hand the agent back work already
   on the remote.
-- Shutdown preserves it as the run's retained workspace, and nothing is deleted. The next process
-  does not rediscover it; see the restart bullet above.
+- Shutdown preserves it as the run's retained workspace, and nothing is deleted. A later process
+  can rediscover it only through the durable verified-candidate recovery contract above.
 - A cancellation that keeps the workspace preserves it: a stall, a workflow reload, a tracker that
   stopped reporting the issue.
 - An operator pause **suspends** a delivery rather than dropping it. A queued retry is dropped on a
@@ -1167,12 +1165,13 @@ The review and migration integration for
   operation, with run-ID fencing. Their old mailbox ordering handshakes are removed. Stale crash
   notifications cannot fault a replacement run. Polling and some teardown still use the legacy
   mailbox; the pure-kernel scheduler replacement remains outstanding.
-- A process launched inside a leased workspace writes a starting receipt before spawn, then its
+- A process launched inside a leased or safely adopted captured workspace writes a starting receipt before spawn, then its
   process group and namespace, then a stopped receipt after finalization. The spawn/receipt crash
   gap remains an explicit unknown. Startup can resume an exactly verified, remotely confirmed
   publication only when every captured process is confirmed stopped. Missing receipts, unknown
   namespaces, and live groups retain the intervention. This permits remote-only recovery; it does
-  not adopt an interrupted local worktree or launch another coder.
+  adopts the exact interrupted local worktree only after stopped-process proof and local inspection;
+  it never launches another coder for that candidate.
 - Receipt syncing can outlast a fast process. Exit status and output failure are retained from
   spawn time so command readers cannot miss completion while the receipt is written.
 - SQLite imports retained handoffs and visible legacy completions idempotently. Handoffs already
@@ -1203,7 +1202,7 @@ open PRs first and explicitly reconstruct the older host's state if rollback is 
 
 Full completion of [#288](https://github.com/Underzenith85/sloppenheimer-ts/issues/288) still requires
 the authoritative pure-kernel production scheduler and retirement of legacy lifecycle maps,
-supervised local artifact adoption/inspection after crashed execution, complete migration of
-unreferenced legacy workspace metadata, and the full restart/parked-port fault matrix. These
+complete migration of unreferenced legacy workspace metadata, and the full restart/parked-port
+fault matrix. These
 additions do not constitute that cutover. Required real process-tree and conformance gates must
 pass on a host with functioning process-group visibility before automatic recovery is deployed.
