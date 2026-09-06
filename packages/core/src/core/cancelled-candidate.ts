@@ -13,7 +13,8 @@ export const settleCancelledCandidate = (
     ? Effect.void
     : sourceControl.inspect(prepared).pipe(
         Effect.matchEffect({
-          onFailure: () => journal.stopped(false),
-          onSuccess: (inspection) => journal.stopped(inspection._tag === 'Clean'),
+          onFailure: () => journal.stopped(null),
+          onSuccess: (inspection) =>
+            journal.stopped(inspection._tag === 'Clean' ? inspection.headSha : null),
         }),
       )
