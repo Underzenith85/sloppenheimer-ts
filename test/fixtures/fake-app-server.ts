@@ -613,6 +613,22 @@ const handle = (message: JsonRecord): void => {
       return
     }
     startupPhase = 'thread'
+    if (scenario.startsWith('unavailable-rate-limits-')) {
+      send({
+        method: 'account/rateLimits/updated',
+        params: { rateLimits: { primary: { usedPercent: 42 } } },
+      })
+      if (scenario === 'unavailable-rate-limits-error') {
+        send({ id, error: { code: -32_601, message: 'Method not found' } })
+      } else if (scenario === 'unavailable-rate-limits-missing') {
+        send({ id, result: {} })
+      } else if (scenario === 'unavailable-rate-limits-malformed') {
+        send({ id, result: { rateLimits: [] } })
+      } else if (scenario === 'unavailable-rate-limits-null') {
+        send({ id, result: null })
+      }
+      return
+    }
     if (scenario === 'sparse-rate-limit-before-read') {
       send({
         method: 'account/rateLimits/updated',
