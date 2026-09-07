@@ -9,8 +9,29 @@
 
 import { boundRedacted } from '../support/redaction.js'
 import type { AgentDetailRecord } from './record.js'
+import type { RateLimitWindow } from './events.js'
 import { timelineEventLimit } from './snapshot.js'
 import type { AgentDetailSnapshot, AgentDetailStatus, AgentPhase } from './snapshot.js'
+
+const rateLimitFreshnessMs = 5 * 60 * 1_000
+
+const currentRateLimits = (
+  windows: readonly RateLimitWindow[],
+  status: AgentDetailStatus,
+  now: number,
+): readonly RateLimitWindow[] =>
+  Object.freeze(
+    windows.map((window) => {
+      const freshnessDeadline = Date.parse(window.observedAt) + rateLimitFreshnessMs
+      const resetDeadline = window.resetAt === null ? freshnessDeadline : Date.parse(window.resetAt)
+      const stale = status !== 'running' || resetDeadline <= now
+      return Object.freeze({
+        ...window,
+        stale,
+        effect: stale ? ('none' as const) : ('informational' as const),
+      })
+    }),
+  )
 
 export type AgentDetailContext = Readonly<{
   self: string
@@ -93,7 +114,7 @@ export const buildAgentDetail = (
       stalled,
     }),
     usage: record.tokens,
-    rateLimits: record.rateLimits,
+    rateLimits: currentRateLimits(record.rateLimits, context.status, now),
     workspace: Object.freeze({
       pathKey: record.workspacePathKey,
       branch: context.branch ?? record.handoff.expectedBranch,

@@ -52,6 +52,9 @@ const post = async (path: string): Promise<void> => {
   await request<unknown>(path, { method: 'POST', headers: { 'X-Sloppenheimer-CSRF': csrf } })
 }
 
+const postResult = async <Value>(path: string): Promise<Value> =>
+  request<Value>(path, { method: 'POST', headers: { 'X-Sloppenheimer-CSRF': csrf } })
+
 const formatDuration = (seconds: number): string => {
   if (seconds < 60) {
     return `${Math.round(seconds)}s runtime`

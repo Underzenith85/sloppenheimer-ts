@@ -82,6 +82,25 @@ const systemAlerts = (state: PublishedState | null): readonly SystemAlert[] => {
         (recovery.store_error === null ? '.' : `: ${recovery.store_error.message}`),
     })
   }
+  for (const limit of state.rate_limits) {
+    if (limit.source === 'github_local_pacing' && limit.effect === 'delaying') {
+      alerts.push({
+        key: `github-local-pacing-${limit.scope}`,
+        title: 'GitHub requests are locally paced',
+        detail: `${limit.queued_requests} queued · maximum expected wait ${limit.maximum_expected_wait_ms} ms. GitHub has not rejected these requests.`,
+      })
+    }
+    if (limit.source === 'github_response' && limit.effect === 'rejected' && !limit.stale) {
+      alerts.push({
+        key: `github-provider-limit-${limit.scope}`,
+        title: `GitHub rejected a request (HTTP ${limit.status})`,
+        detail:
+          limit.reset_at === null
+            ? 'GitHub did not supply a reset instant.'
+            : `Provider reset at ${limit.reset_at}.`,
+      })
+    }
+  }
   return alerts
 }
 
@@ -187,7 +206,7 @@ const deliveringItem = (
     // A pause suspends a delivery rather than dropping it, so the row an operator sees while one is
     // held has to offer the way back: without a resume here the timer is never re-armed and the
     // retained change waits on an API call by hand.
-    action: eligibility === 'paused' || entry.intervention_required ? 'start' : 'pause',
+    action: entry.intervention_required ? 'resume' : eligibility === 'paused' ? 'start' : 'pause',
   }
 }
 
@@ -238,7 +257,7 @@ const handoffItem = (
     queueReason: null,
     finishedAt: merged ? new Date(now).toISOString() : null,
     pullRequestUrl: entry.pull_request_url,
-    action: 'none',
+    action: phase === 'intervention_required' ? 'resume' : 'none',
   }
 }
 

@@ -199,6 +199,9 @@ const inspectRepository = (
   prepared: PreparedRepository,
 ): Effect.Effect<WorktreeInspection, SourceControlError> =>
   Effect.gen(function* () {
+    // Recovery may hand us a checkout retained by a previous host. Reading its files is safe, but
+    // an orphaned sequencer is not candidate state: fail before the caller can adopt the checkout.
+    yield* assertNoRebase(settings, prepared)
     const porcelain = yield* status(settings, 'publish', prepared.workspace)
     const dirtyFileCount = porcelain.split('\n').filter((line) => line.trim().length > 0).length
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')

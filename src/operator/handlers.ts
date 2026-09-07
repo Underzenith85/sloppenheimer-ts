@@ -15,10 +15,16 @@ import { timingSafeEqual } from 'node:crypto'
 import { Effect, Layer, Redacted, Schema } from 'effect'
 
 import type { AgentDetailLookup } from '@sloppenheimer/core'
+import { githubOperationalLimits } from '@sloppenheimer/adapter-github/rate-limit.js'
 
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { PublishedAgentDetail } from './api/agent-detail-schema.js'
-import { issueNumberShape, operatorApi, type PublishedIssueAction } from './api/endpoints.js'
+import {
+  issueNumberShape,
+  operatorApi,
+  type PublishedIssueAction,
+  type PublishedResumeIntervention,
+} from './api/endpoints.js'
 import {
   agentDetailUnavailable,
   agentNotActive,
@@ -157,7 +163,11 @@ export const operatorHandlers = (
 ): Layer.Layer<HttpApiGroup.ApiGroup<'operator', 'operator'>> =>
   HttpApiBuilder.group(operatorApi, 'operator', (handlers) =>
     handlers
-      .handle('state', () => Effect.map(backend.snapshot, publishState))
+      .handle('state', () =>
+        Effect.map(Effect.all([backend.snapshot, githubOperationalLimits]), ([snapshot, limits]) =>
+          publishState(snapshot, limits),
+        ),
+      )
       .handle('backlog', () => runBackend(backend.backlog))
       .handle('refresh', () =>
         Effect.zipRight(requirePageToken(csrfToken), Effect.map(backend.refresh, publishRefresh)),
@@ -176,6 +186,18 @@ export const operatorHandlers = (
           yield* requirePageToken(csrfToken)
           yield* runBackend(backend.setIssueEnabled(issueNumber, false))
           return issueActionAccepted(issueNumber, false)
+        }),
+      )
+      .handle('resumeIntervention', ({ path }) =>
+        Effect.gen(function* () {
+          const issueNumber = yield* decodeIssueNumber(path.issueNumber)
+          yield* requirePageToken(csrfToken)
+          const outcome = yield* backend.resumeIntervention(issueNumber)
+          return {
+            accepted: outcome.status !== 'refused',
+            issueNumber,
+            ...outcome,
+          } satisfies PublishedResumeIntervention
         }),
       )
       // The identifier is not matched against a shape: this route is what a published `detail_url`

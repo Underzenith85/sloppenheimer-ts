@@ -9,7 +9,10 @@ import { makeDurableHost } from '@sloppenheimer/core/core/durable/live-journal.j
 import type { DurableWorkflow } from '@sloppenheimer/core/domain/durable-workflow.js'
 import { SourceControlError, WorkflowStoreError } from '@sloppenheimer/core/domain/errors.js'
 import type { WorkflowStorePort } from '@sloppenheimer/core/ports/workflow-store.js'
-import type { SourceControlPort } from '@sloppenheimer/core/ports/source-control.js'
+import type {
+  PreparedRepository,
+  SourceControlPort,
+} from '@sloppenheimer/core/ports/source-control.js'
 import { openWorkflowStore } from '@sloppenheimer/adapter-node/workflow-store.js'
 import { anIssue } from '../harness/fixtures.js'
 
@@ -37,6 +40,33 @@ const published = {
   commitCreated: true,
 } as const
 
+/** The conflict identity #303 was repairing when its repair budget ran out. */
+const legacyConflict = {
+  originalHeadSha: 'candidate',
+  baseSha: 'stale-base',
+  headSha: 'partial',
+  stoppedCommitSha: 'early-commit',
+  paths: ['README.md'],
+}
+
+const interventionReason = (record: DurableWorkflow | undefined): string =>
+  record?.status._tag === 'Intervention' ? record.status.reason : ''
+
+/** Observes a moved branch and a moved base, and reads the retained checkout however a test says. */
+const legacyRecoverySourceControl = (inspect: SourceControlPort['inspect']): SourceControlPort => ({
+  recovery: {
+    repositoryIdentity: 'repository',
+    observeHead: (branchName) =>
+      Effect.succeed(
+        Option.some(branchName === target.branchName ? 'advanced-head' : 'current-base'),
+      ),
+  },
+  prepare: () => Effect.die('recovery must not prepare a new workspace'),
+  inspect,
+  publish: () => Effect.die('reconciliation must not publish'),
+  rebase: () => Effect.die('reconciliation must not rebase'),
+})
+
 const memoryStore = Effect.gen(function* () {
   const records = yield* Ref.make<ReadonlyMap<string, DurableWorkflow>>(new Map())
   const store: WorkflowStorePort = {
@@ -57,6 +87,28 @@ const memoryStore = Effect.gen(function* () {
       ),
   }
   return store
+})
+
+/**
+ * The persisted shape [#303](https://github.com/Underzenith85/sloppenheimer-ts/issues/303) was left
+ * in: a publication whose rebase conflicted, spent every repair attempt, and never earned
+ * verification evidence, so the retained candidate is real and `verifiedRevision` is null.
+ */
+const exhaustedLegacyConflict = Effect.gen(function* () {
+  const store = yield* memoryStore
+  const original = yield* makeDurableHost(store)
+  const journal = yield* original.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+  yield* journal.prepared(prepared)
+  yield* journal.publication.checkpointed(candidate)
+  const repairing = journal.publication.repairing
+  if (repairing === undefined) {
+    return yield* Effect.die('the fixture requires durable conflict repair admission')
+  }
+  yield* repairing(legacyConflict)
+  yield* repairing(legacyConflict)
+  yield* repairing(legacyConflict)
+  yield* Effect.flip(repairing(legacyConflict))
+  return { store, host: yield* makeDurableHost(store) }
 })
 
 describe('live durable journal', () => {
@@ -167,6 +219,176 @@ describe('live durable journal', () => {
       expect((yield* recovered.snapshot)[0]?.status._tag).toBe('Intervention')
       expect((yield* recovered.snapshot)[0]?.artifact).toEqual(beforePush?.artifact)
       expect(Option.isNone(yield* recovered.start(issue, target))).toBe(true)
+    }),
+  )
+
+  it.effect(
+    'migrates a legacy conflict from fresh base, remote head, and candidate observations',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* memoryStore
+        const original = yield* makeDurableHost(store)
+        const journal = yield* original.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+        yield* journal.prepared(prepared)
+        yield* journal.publication.verified(verified)
+        const legacy = (yield* store.list)[0]
+        if (legacy === undefined) {
+          return yield* Effect.die('fixture must persist a workflow')
+        }
+        yield* store.commit(
+          {
+            ...legacy,
+            revision: legacy.revision + 1,
+            repairAttempts: 3,
+            status: { _tag: 'Intervention', reason: 'old rebase diagnostic' },
+          },
+          legacy.revision,
+        )
+        const restored = yield* makeDurableHost(store)
+        let inspected: PreparedRepository | undefined
+        const sourceControl: SourceControlPort = {
+          recovery: {
+            repositoryIdentity: 'repository',
+            observeHead: (branchName) =>
+              Effect.succeed(
+                Option.some(branchName === target.branchName ? 'advanced-head' : 'current-base'),
+              ),
+          },
+          prepare: () => Effect.die('recovery must not prepare a new workspace'),
+          inspect: (value) =>
+            Effect.sync(() => {
+              inspected = value
+              return {
+                _tag: 'Changed',
+                headSha: 'candidate',
+                dirtyFileCount: 0,
+                committedAhead: true,
+              }
+            }),
+          publish: () => Effect.die('reconciliation must not publish'),
+          rebase: () => Effect.die('reconciliation must not rebase'),
+        }
+        const recovered = yield* restored.reconcilePublication(
+          issue.id,
+          sourceControl,
+          Effect.succeed(true),
+        )
+
+        expect(Option.isSome(recovered)).toBe(true)
+        expect(inspected).toMatchObject({
+          baseSha: 'current-base',
+          expectedRemoteHead: Option.some('advanced-head'),
+          retainedCandidate: { headSha: 'candidate', treeSha: 'tree' },
+        })
+        expect((yield* restored.snapshot)[0]).toMatchObject({
+          repairAttempts: 0,
+          maximumRepairAttempts: 3,
+          publicationRecovery: {
+            kind: 'legacy_publication_conflict',
+            maximumRepairAttempts: 3,
+          },
+        })
+      }),
+  )
+
+  it.effect('recovers a legacy conflict whose verification evidence was never persisted', () =>
+    Effect.gen(function* () {
+      const { host } = yield* exhaustedLegacyConflict
+      expect((yield* host.snapshot)[0]).toMatchObject({
+        repairAttempts: 3,
+        maximumRepairAttempts: 3,
+        status: { _tag: 'Intervention' },
+        artifact: { verifiedRevision: null, publicationConflict: legacyConflict },
+      })
+      yield* TestClock.adjust(1_000)
+      let inspected: PreparedRepository | undefined
+      const recovered = yield* host.reconcilePublication(
+        issue.id,
+        legacyRecoverySourceControl((value) =>
+          Effect.sync(() => {
+            inspected = value
+            return {
+              _tag: 'Changed',
+              headSha: 'candidate',
+              dirtyFileCount: 0,
+              committedAhead: true,
+            }
+          }),
+        ),
+        Effect.succeed(true),
+      )
+
+      // Null evidence is never read as verification, so the recovery carries no candidate
+      // identity: its own checkpoint earns the head, the tree and the baseline ancestry again.
+      expect(Option.getOrThrow(recovered).retainedCandidate).toBeUndefined()
+      expect(inspected).toMatchObject({
+        baseSha: 'current-base',
+        expectedRemoteHead: Option.some('advanced-head'),
+      })
+      const migrated = (yield* host.snapshot)[0]
+      expect(migrated).toMatchObject({
+        repairAttempts: 0,
+        maximumRepairAttempts: 3,
+        budgetDeadline: 1_000 + 86_400_000,
+        publicationRecovery: { kind: 'legacy_publication_conflict', maximumRepairAttempts: 3 },
+        artifact: { verifiedRevision: null },
+      })
+      const resumed = yield* host.journal(issue.id).pipe(Effect.map(Option.getOrThrow))
+      yield* resumed.publication.repairing?.(legacyConflict) ?? Effect.void
+      expect((yield* host.snapshot)[0]).toMatchObject({
+        repairAttempts: 1,
+        status: { _tag: 'Executing', operation: { kind: 'repair' } },
+      })
+    }),
+  )
+
+  it.effect('holds a legacy candidate whose retained workspace cannot be identified', () =>
+    Effect.gen(function* () {
+      const { host } = yield* exhaustedLegacyConflict
+      const dirty = yield* host.reconcilePublication(
+        issue.id,
+        legacyRecoverySourceControl(() =>
+          Effect.succeed({
+            _tag: 'Changed',
+            headSha: 'candidate',
+            dirtyFileCount: 2,
+            committedAhead: true,
+          }),
+        ),
+        Effect.succeed(true),
+      )
+      expect(Option.isNone(dirty)).toBe(true)
+      expect(interventionReason((yield* host.snapshot)[0])).toContain('2 uncommitted path(s)')
+
+      // A repair that was left paused mid-rebase is refused by the inspection itself, and the
+      // reason an operator reads is the adapter's, not an absence.
+      const paused = yield* host.reconcilePublication(
+        issue.id,
+        legacyRecoverySourceControl(() =>
+          Effect.fail(
+            new SourceControlError({
+              category: 'rebase_conflict',
+              message: 'a rebase is in progress in the retained workspace',
+              retryable: false,
+              worktreePreserved: true,
+            }),
+          ),
+        ),
+        Effect.succeed(true),
+      )
+      expect(Option.isNone(paused)).toBe(true)
+      expect(interventionReason((yield* host.snapshot)[0])).toContain('a rebase is in progress')
+
+      const running = yield* host.reconcilePublication(
+        issue.id,
+        legacyRecoverySourceControl(() =>
+          Effect.die('an unstopped workspace must never be inspected'),
+        ),
+      )
+      expect(Option.isNone(running)).toBe(true)
+      expect(interventionReason((yield* host.snapshot)[0])).toContain('not confirmed stopped')
+      expect((yield* host.snapshot)[0]?.publicationRecovery).toBeUndefined()
+      expect((yield* host.snapshot)[0]?.repairAttempts).toBe(3)
     }),
   )
 
@@ -328,7 +550,8 @@ it.effect(
       const source: SourceControlPort = {
         recovery: {
           repositoryIdentity: 'repository',
-          observeHead: () => Effect.succeed(Option.none()),
+          observeHead: (branchName) =>
+            Effect.succeed(branchName === 'main' ? Option.some('baseline') : Option.none()),
         },
         prepare: () => Effect.die('recovery must not prepare a replacement'),
         inspect: (captured) =>

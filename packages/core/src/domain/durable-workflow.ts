@@ -134,6 +134,14 @@ export const DurableWorkflow = Schema.Struct({
   owner: Schema.optionalWith(Schema.NonEmptyString, { exact: true }),
   completion: Schema.optionalWith(Completion, { exact: true }),
   handoff: Schema.optionalWith(handoffSnapshotSchema, { exact: true }),
+  publicationRecovery: Schema.optionalWith(
+    Schema.Struct({
+      kind: Schema.Literal('legacy_publication_conflict'),
+      admittedAt: Schema.Number,
+      maximumRepairAttempts: Schema.Int.pipe(Schema.positive()),
+    }),
+    { exact: true },
+  ),
   externalOperation: Schema.optionalWith(ExternalOperation, { exact: true }),
   cleanup: Schema.optionalWith(
     Schema.Struct({

@@ -44,11 +44,29 @@ export type PublishedIssueAction = Readonly<{
   enabled: boolean
 }>
 
+export type PublishedResumeIntervention = Readonly<{
+  accepted: boolean
+  issueNumber: number
+  status: 'resumed' | 'reconciled' | 'refused'
+  kind: 'delivery' | 'handoff' | null
+  reason: string
+}>
+
 const publishedIssueActionSchema: Schema.Schema<PublishedIssueAction> = Schema.Struct({
   accepted: Schema.Literal(true),
   issueNumber: Schema.Number,
   enabled: Schema.Boolean,
 })
+
+const publishedResumeInterventionSchema: Schema.Schema<PublishedResumeIntervention> = Schema.Struct(
+  {
+    accepted: Schema.Boolean,
+    issueNumber: Schema.Number,
+    status: Schema.Literal('resumed', 'reconciled', 'refused'),
+    kind: Schema.NullOr(Schema.Literal('delivery', 'handoff')),
+    reason: Schema.String,
+  },
+)
 
 /**
  * The path parameter both single-resource endpoints take. It is not matched against a shape:
@@ -169,6 +187,20 @@ const pauseIssue = HttpApiEndpoint.post('pauseIssue', '/api/v1/issues/:issueNumb
   .addError(backendError.schema, { status: backendError.status })
   .annotate(OpenApi.Description, 'Holds an issue back from dispatch.')
 
+const resumeIntervention = HttpApiEndpoint.post(
+  'resumeIntervention',
+  '/api/v1/issues/:issueNumber/resume-intervention',
+)
+  .middleware(PageToken)
+  .setPath(issueNumberPath)
+  .addSuccess(jsonDocument(publishedResumeInterventionSchema), { status: 202 })
+  .addError(notFound.schema, { status: notFound.status })
+  .addError(invalidCsrfToken.schema, { status: invalidCsrfToken.status })
+  .annotate(
+    OpenApi.Description,
+    'Reconciles and retries retained work that explicitly requires operator intervention.',
+  )
+
 const agentDetail = HttpApiEndpoint.get('agentDetail', '/api/v1/agents/:identifier')
   .setPath(identifierPath)
   .addSuccess(jsonDocument(publishedAgentDetailSchema), { status: 200 })
@@ -202,6 +234,7 @@ const operatorGroup = HttpApiGroup.make('operator')
   .add(refresh)
   .add(startIssue)
   .add(pauseIssue)
+  .add(resumeIntervention)
   .add(agentDetail)
   .add(issueResource)
   .annotate(OpenApi.Title, 'Sloppenheimer operator API')

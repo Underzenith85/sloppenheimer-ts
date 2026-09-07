@@ -33,7 +33,12 @@ const tokenCountsSchema: Schema.Schema<TokenCounts> = Schema.Struct({
 })
 
 const rateLimitWindowSchema: Schema.Schema<RateLimitWindow> = Schema.Struct({
+  source: Schema.Literal('agent_telemetry'),
   name: Schema.String,
+  observedAt: Schema.String,
+  resetAt: Schema.NullOr(Schema.String),
+  stale: Schema.Boolean,
+  effect: Schema.Literal('informational', 'none'),
   usedPercent: Schema.NullOr(Schema.Number),
   windowMinutes: Schema.NullOr(Schema.Number),
   resetsInSeconds: Schema.NullOr(Schema.Number),

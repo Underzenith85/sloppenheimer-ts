@@ -10,11 +10,13 @@ import { Clock, Effect, Either, Layer, Option, Redacted, Schema } from 'effect'
 import type { JsonValue } from '@sloppenheimer/core/domain/domain.js'
 import { TrackerError } from '@sloppenheimer/core/domain/errors.js'
 import { isJsonValue } from '@sloppenheimer/core/support/json.js'
+import { logWarning } from '@sloppenheimer/core/support/logging.js'
 import type { GitHubProviderConfig } from './provider.js'
-import { observeGitHubRequest } from './observability.js'
+import { observeGitHubRequest, recordGitHubRateLimitRejection } from './observability.js'
 import {
   CurrentGitHubRateLimit,
   githubRateLimitFor,
+  recordGitHubProviderLimit,
   withGitHubRateLimit,
   type GitHubRateLimit,
 } from './rate-limit.js'
@@ -132,6 +134,36 @@ const parseRateLimitResetMs = (value: string | null, now: number): number | null
     return null
   }
   return Math.max(Number(value.trim()) * 1_000 - now, 0)
+}
+
+const integerHeader = (headers: PlatformHeaders.Headers, name: string): number | null => {
+  const value = header(headers, name)
+  return value !== null && /^\d+$/u.test(value.trim()) ? Number(value) : null
+}
+
+const observeProviderLimit = (
+  provider: GitHubProviderConfig,
+  headers: PlatformHeaders.Headers,
+  status: number,
+  now: number,
+  rejected: boolean,
+): void => {
+  const remaining = integerHeader(headers, 'x-ratelimit-remaining')
+  const limit = integerHeader(headers, 'x-ratelimit-limit')
+  const resetSeconds = integerHeader(headers, 'x-ratelimit-reset')
+  if (!rejected && remaining === null && limit === null && resetSeconds === null) {
+    return
+  }
+  recordGitHubProviderLimit({
+    source: 'github_response',
+    providerScope: `${provider.owner}/${provider.repository}`,
+    observedAt: new Date(now).toISOString(),
+    status,
+    remaining,
+    limit,
+    resetAt: resetSeconds === null ? null : new Date(resetSeconds * 1_000).toISOString(),
+    effect: rejected ? 'rejected' : 'available',
+  })
 }
 
 /**
@@ -284,12 +316,18 @@ export const githubJson = (
     const linkHeader = header(response.headers, 'link')
     // The advertised delay is relative to when the response was read, so the instant comes from
     // the same clock the retry schedule is measured against.
-    const limited = rateLimitError(
-      response.headers,
-      response.status,
-      yield* Clock.currentTimeMillis,
-    )
+    const observedAt = yield* Clock.currentTimeMillis
+    const limited = rateLimitError(response.headers, response.status, observedAt)
+    observeProviderLimit(provider, response.headers, response.status, observedAt, limited !== null)
     if (limited !== null) {
+      yield* recordGitHubRateLimitRejection
+      yield* logWarning('GitHub rejected a request at the provider rate limit', {
+        action: 'github_rate_limit',
+        outcome: 'provider_rejected',
+        provider_scope: `${provider.owner}/${provider.repository}`,
+        http_status: response.status,
+        retry_after_ms: limited.retryAfterMs ?? null,
+      })
       return yield* Effect.fail(limited)
     }
     if (acceptedStatuses.includes(response.status)) {
