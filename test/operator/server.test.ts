@@ -213,7 +213,8 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
     Effect.sync(() => {
       setIssueEnabled(number, enabled)
     }),
-  resumeIntervention: () => Effect.void,
+  resumeIntervention: () =>
+    Effect.succeed({ status: 'refused', kind: null, reason: 'No retained intervention.' }),
 })
 
 /**
@@ -841,6 +842,36 @@ describe('operator server', (): void => {
         })
         expect(escaped.status).toBe(202)
         expect(await escaped.json()).toMatchObject({ issueNumber: 17, enabled: false })
+      })
+    }),
+  )
+
+  it.live('publishes the result of an intervention recovery request', () =>
+    Effect.gen(function* () {
+      const resumeIntervention = vi.fn(() =>
+        Effect.succeed({
+          status: 'resumed' as const,
+          kind: 'handoff' as const,
+          reason: 'A bounded handoff recovery attempt was requested.',
+        }),
+      )
+      yield* withServer({ ...makeBackend(), resumeIntervention }, async (url) => {
+        const page = await (await fetch(url)).text()
+        const token = /name="csrf-token" content="([^"]+)"/u.exec(page)?.[1] ?? ''
+        const response = await fetch(`${url}/api/v1/issues/17/resume-intervention`, {
+          method: 'POST',
+          headers: { 'X-Sloppenheimer-CSRF': token },
+        })
+
+        expect(response.status).toBe(202)
+        expect(await response.json()).toEqual({
+          accepted: true,
+          issueNumber: 17,
+          status: 'resumed',
+          kind: 'handoff',
+          reason: 'A bounded handoff recovery attempt was requested.',
+        })
+        expect(resumeIntervention).toHaveBeenCalledWith(17)
       })
     }),
   )

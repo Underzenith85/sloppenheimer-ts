@@ -44,25 +44,29 @@ export type PublishedIssueAction = Readonly<{
   enabled: boolean
 }>
 
-export type PublishedInterventionAction = Readonly<{
-  accepted: true
+export type PublishedResumeIntervention = Readonly<{
+  accepted: boolean
   issueNumber: number
-  action: 'resume_intervention'
+  status: 'resumed' | 'reconciled' | 'refused'
+  kind: 'delivery' | 'handoff' | null
+  reason: string
 }>
-
-const publishedInterventionActionSchema: Schema.Schema<PublishedInterventionAction> = Schema.Struct(
-  {
-    accepted: Schema.Literal(true),
-    issueNumber: Schema.Number,
-    action: Schema.Literal('resume_intervention'),
-  },
-)
 
 const publishedIssueActionSchema: Schema.Schema<PublishedIssueAction> = Schema.Struct({
   accepted: Schema.Literal(true),
   issueNumber: Schema.Number,
   enabled: Schema.Boolean,
 })
+
+const publishedResumeInterventionSchema: Schema.Schema<PublishedResumeIntervention> = Schema.Struct(
+  {
+    accepted: Schema.Boolean,
+    issueNumber: Schema.Number,
+    status: Schema.Literal('resumed', 'reconciled', 'refused'),
+    kind: Schema.NullOr(Schema.Literal('delivery', 'handoff')),
+    reason: Schema.String,
+  },
+)
 
 /**
  * The path parameter both single-resource endpoints take. It is not matched against a shape:
@@ -189,11 +193,13 @@ const resumeIntervention = HttpApiEndpoint.post(
 )
   .middleware(PageToken)
   .setPath(issueNumberPath)
-  .addSuccess(jsonDocument(publishedInterventionActionSchema), { status: 202 })
+  .addSuccess(jsonDocument(publishedResumeInterventionSchema), { status: 202 })
   .addError(notFound.schema, { status: notFound.status })
   .addError(invalidCsrfToken.schema, { status: invalidCsrfToken.status })
-  .addError(backendError.schema, { status: backendError.status })
-  .annotate(OpenApi.Description, 'Retries retained delivery or handoff intervention work.')
+  .annotate(
+    OpenApi.Description,
+    'Reconciles and retries retained work that explicitly requires operator intervention.',
+  )
 
 const agentDetail = HttpApiEndpoint.get('agentDetail', '/api/v1/agents/:identifier')
   .setPath(identifierPath)

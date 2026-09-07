@@ -411,24 +411,19 @@ const actOnDisposition = (
       )
     }
     case 'repair_needed': {
-      if (settled.repairHeadShas.length >= repairLimit && settled.manualRepairAllowance !== true) {
+      if (settled.repairHeadShas.length >= repairLimit) {
         return decided({
           ...settled,
           state: 'intervention_required',
           reason: `Repair limit reached. ${settled.reason ?? disposition.reason}`,
         })
       }
-      return decided(
-        settled.manualRepairAllowance === true
-          ? { ...settled, manualRepairAllowance: false }
-          : settled,
-        {
-          _tag: 'Repair',
-          reason: disposition.reason,
-          headSha: observation.headSha,
-          attempt: settled.repairHeadShas.length + 1,
-        },
-      )
+      return decided(settled, {
+        _tag: 'Repair',
+        reason: disposition.reason,
+        headSha: observation.headSha,
+        attempt: settled.repairHeadShas.length + 1,
+      })
     }
     case 'rebase_needed': {
       if (observation.state !== 'open') {

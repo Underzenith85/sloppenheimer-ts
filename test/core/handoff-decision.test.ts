@@ -16,6 +16,7 @@ import {
   repairLimit,
 } from '@sloppenheimer/core/core/handoff-decision.js'
 import { afterRepairDispatched, repairIssue } from '@sloppenheimer/core/core/repair.js'
+import { retryHandoffIntervention } from '@sloppenheimer/core/core/polling/resume-intervention.js'
 import type {
   ExecutionSnapshot,
   HandoffEntry,
@@ -88,6 +89,26 @@ const passingCheck: PullRequestCheck = {
   conclusion: 'success',
   url: null,
 }
+
+it('opens a fresh bounded repair window on the retained exact head', (): void => {
+  const retried = retryHandoffIntervention(
+    handoff({
+      state: 'intervention_required',
+      headSha: 'head-1',
+      repairHeadShas: ['head-2', 'head-3'],
+      repairObservedHeadShas: ['head-1', 'head-2', 'head-3'],
+      repair: repairing('head-1'),
+    }),
+  )
+
+  expect(retried).toMatchObject({
+    state: 'repair_needed',
+    headSha: 'head-1',
+    repairHeadShas: [],
+    repairObservedHeadShas: ['head-1'],
+  })
+  expect(Option.isNone(retried.repair)).toBe(true)
+})
 
 const open = (
   overrides: Partial<Extract<PullRequestObservation, Readonly<{ state: 'open' }>>> = {},
@@ -257,44 +278,6 @@ describe('dispositions', (): void => {
     expect(decision.action).toEqual({ _tag: 'None' })
     expect(decision.handoff.state).toBe('intervention_required')
     expect(decision.handoff.reason).toMatch(/^Repair limit reached\./u)
-  })
-
-  it('spends one operator allowance without erasing repair history', (): void => {
-    const spent = handoff({
-      reviewRequestedHeadSha: 'head-1',
-      reviewCompletedHeadSha: 'head-1',
-      repairHeadShas: ['repaired-0', 'repaired-1', 'repaired-2'],
-      manualRepairAllowance: true,
-    })
-
-    const decision = observeHandoff(
-      spent,
-      open({
-        codexReview: reviewed,
-        checks: [{ name: 'quality', status: 'completed', conclusion: 'failure', url: null }],
-      }),
-      observedAt,
-    )
-
-    expect(decision.action).toEqual({
-      _tag: 'Repair',
-      reason: 'Failed CI checks: quality',
-      headSha: 'head-1',
-      attempt: repairLimit + 1,
-    })
-    expect(decision.handoff.repairHeadShas).toEqual(['repaired-0', 'repaired-1', 'repaired-2'])
-    expect(decision.handoff.manualRepairAllowance).toBe(false)
-
-    const repeated = observeHandoff(
-      decision.handoff,
-      open({
-        codexReview: reviewed,
-        checks: [{ name: 'quality', status: 'completed', conclusion: 'failure', url: null }],
-      }),
-      observedAt,
-    )
-    expect(repeated.action).toEqual({ _tag: 'None' })
-    expect(repeated.handoff.state).toBe('intervention_required')
   })
 })
 

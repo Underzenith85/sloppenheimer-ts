@@ -149,7 +149,8 @@ const fakeOrchestrator = (
         }
         setIssuePaused(issueNumber, isPaused)
       }),
-    resumeIntervention: () => Effect.void,
+    resumeIntervention: () =>
+      Effect.succeed({ status: 'refused', kind: null, reason: 'No retained intervention.' }),
     awaitTermination: Effect.never,
   }
 }

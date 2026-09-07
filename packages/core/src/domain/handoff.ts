@@ -261,8 +261,6 @@ export const handoffSnapshotSchema = Schema.Struct({
   reason: nullableString,
   repairAttempts,
   repairHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
-  /** A one-shot operator retry after the automatic repair budget was exhausted. */
-  manualRepairAllowance: Schema.optionalWith(Schema.Boolean, { exact: true }),
   /** Every head this handoff has been observed at, including repair baselines. */
   repairObservedHeadShas: Schema.optionalWith(Schema.Array(Schema.String), { exact: true }),
   repairStartedHeadSha: Schema.optionalWith(nullableString, { exact: true }),

@@ -5,16 +5,6 @@ import * as Transitions from '../transitions.js'
 import { releaseIssueFiberFork } from './execution.js'
 import type { RuntimeCells } from './types.js'
 
-/** Queues the explicit operator recovery operation behind the event loop. */
-export const resumeIntervention = (cells: RuntimeCells, issueNumber: number): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const reply = yield* Deferred.make<void>()
-    yield* Effect.uninterruptible(
-      Queue.offer(cells.mailbox, { _tag: 'ResumeIntervention', issueNumber, reply }),
-    )
-    yield* Deferred.await(reply)
-  })
-
 /** Control acknowledges committed intent and signals execution without waiting for tracker I/O. */
 export const changeIssueIntent = (
   cells: RuntimeCells,

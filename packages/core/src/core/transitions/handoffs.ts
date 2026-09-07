@@ -21,22 +21,6 @@ export const removeHandoff = (state: RuntimeState, id: IssueId): RuntimeState =>
   handoffs: withoutEntry(state.handoffs, id),
 })
 
-/** Reopens one intervention for the explicit operator recovery pass. */
-export const resumeHandoffIntervention = (state: RuntimeState, id: IssueId): RuntimeState => {
-  const handoff = state.handoffs.get(id)
-  if (handoff?.state !== 'intervention_required') {
-    return state
-  }
-  return putHandoff(state, id, {
-    ...handoff,
-    state: 'repair_needed',
-    reason: 'Operator requested intervention recovery',
-    // The automatic repair budget remains part of the audit history, but this explicit operator
-    // action authorizes one more attempt against the unchanged head.
-    manualRepairAllowance: true,
-  })
-}
-
 /** The pull request is finished with: the handoff goes, and the issue is completed and released. */
 export const completeHandoff = (
   state: RuntimeState,
@@ -60,7 +44,6 @@ export const handoffSnapshots = (state: RuntimeState): readonly HandoffSnapshot[
     reason: handoff.reason,
     repairAttempts: handoff.repairHeadShas.length,
     repairHeadShas: [...handoff.repairHeadShas],
-    ...(handoff.manualRepairAllowance === true ? { manualRepairAllowance: true } : {}),
     repairObservedHeadShas: [...handoff.repairObservedHeadShas],
     repairStartedHeadSha: Option.match(handoff.repair, {
       onNone: () => null,

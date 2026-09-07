@@ -124,7 +124,6 @@ const adoptOpenedHandoff = (
         headSha: existing?.headSha ?? null,
         reason: 'Awaiting the first protected-branch observation',
         repairHeadShas: existing?.repairHeadShas ?? [],
-        ...(existing?.manualRepairAllowance === true ? { manualRepairAllowance: true } : {}),
         repairObservedHeadShas: existing?.repairObservedHeadShas ?? [],
         repair: existing === undefined ? Option.none() : existing.repair,
         rebase: existing === undefined ? Option.none() : existing.rebase,

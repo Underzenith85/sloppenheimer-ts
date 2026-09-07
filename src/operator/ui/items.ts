@@ -187,11 +187,7 @@ const deliveringItem = (
     // A pause suspends a delivery rather than dropping it, so the row an operator sees while one is
     // held has to offer the way back: without a resume here the timer is never re-armed and the
     // retained change waits on an API call by hand.
-    action: entry.intervention_required
-      ? 'resume_intervention'
-      : eligibility === 'paused'
-        ? 'start'
-        : 'pause',
+    action: entry.intervention_required ? 'resume' : eligibility === 'paused' ? 'start' : 'pause',
   }
 }
 
@@ -215,13 +211,12 @@ const handoffItem = (
   const phase = handoffPhases[entry.state] ?? 'handing_off'
   const attention = handoffAttention(phase)
   const merged = phase === 'merged'
-  const issueNumber = issueNumberOf(entry.issue_identifier)
   const state: WorkState = attention !== null ? 'attention' : merged ? 'finished' : 'progress'
   const notDispatchable = ineligibilityReason(issue, paused)
   const handoffReason = entry.reason ?? `Head ${entry.head_sha ?? 'pending'}`
   return {
     identifier: entry.issue_identifier,
-    issueNumber,
+    issueNumber: issueNumberOf(entry.issue_identifier),
     title: issue?.title ?? entry.issue_identifier,
     url: issue?.url ?? null,
     state,
@@ -243,15 +238,7 @@ const handoffItem = (
     queueReason: null,
     finishedAt: merged ? new Date(now).toISOString() : null,
     pullRequestUrl: entry.pull_request_url,
-    // A paused handoff remains paused when the operator authorizes its one-shot recovery. Once
-    // that action moves it to repair_needed, keep Start visible so the operator can lift the pause
-    // and let the normal reconciliation dispatch the repair.
-    action:
-      entry.state === 'intervention_required'
-        ? 'resume_intervention'
-        : phase === 'repair_needed' && issueNumber !== null && paused.has(issueNumber)
-          ? 'start'
-          : 'none',
+    action: phase === 'intervention_required' ? 'resume' : 'none',
   }
 }
 
