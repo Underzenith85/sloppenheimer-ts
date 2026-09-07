@@ -20,7 +20,8 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const permittedWorkspaceDependencies: Readonly<Record<string, readonly string[]>> = {
   '@sloppenheimer/core': [],
   '@sloppenheimer/coordinator': ['@sloppenheimer/core'],
-  '@sloppenheimer/coordinator-ui': [],
+  '@sloppenheimer/coordinator-ui': ['@sloppenheimer/coordinator-contracts'],
+  '@sloppenheimer/coordinator-contracts': [],
   '@sloppenheimer/adapter-node': ['@sloppenheimer/core'],
   '@sloppenheimer/adapter-github': ['@sloppenheimer/adapter-node', '@sloppenheimer/core'],
   '@sloppenheimer/adapter-codex': ['@sloppenheimer/adapter-node', '@sloppenheimer/core'],
