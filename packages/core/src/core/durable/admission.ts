@@ -102,6 +102,13 @@ export const admission =
           now,
         )
         yield* persist(next, current?.revision ?? null)
-        return Option.some(journalFor(write, issue.id, next.owner))
+        return Option.some(
+          journalFor(
+            write,
+            issue.id,
+            next.owner,
+            Effect.map(Ref.get(records), (rows) => rows.get(issue.id)),
+          ),
+        )
       }),
     )

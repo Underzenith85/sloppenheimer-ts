@@ -59,6 +59,12 @@ export class WorkspaceError extends Data.TaggedError('WorkspaceError')<{
   readonly cause?: unknown
 }> {}
 
+export type RetainedCandidate = Readonly<{
+  headSha: string
+  treeSha: string
+  commitCreated: boolean
+}>
+
 export class SourceControlError extends Data.TaggedError('SourceControlError')<{
   readonly category:
     | 'invalid_repository'
@@ -69,12 +75,14 @@ export class SourceControlError extends Data.TaggedError('SourceControlError')<{
     | 'candidate_partial'
     | 'publication_blocked'
     | 'rebase_conflict'
+    | 'conflict_repair_failed'
     | 'lease_conflict'
     | 'authentication_failed'
   readonly message: string
   readonly retryable: boolean
   /** Whether the local edits or commit remain available for another publication attempt. */
   readonly worktreePreserved: boolean
+  readonly retainedCandidate?: RetainedCandidate
   readonly cause?: unknown
 }> {}
 

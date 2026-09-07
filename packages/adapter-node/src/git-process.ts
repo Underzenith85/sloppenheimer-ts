@@ -107,7 +107,7 @@ const sourceControlFailure = (failure: GitFailure, operation: GitOperation): Sou
       : rebaseConflict
         ? `source-control publication could not rebase onto the protected base: ${failureText(failure)}`
         : `git ${failure.args[0] ?? operation} failed: ${failureText(failure) || 'no diagnostic'}`,
-    retryable: true,
+    retryable: !rebaseConflict,
     worktreePreserved: operation === 'publish',
     cause: failure,
   })

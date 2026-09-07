@@ -1081,6 +1081,241 @@ describe('agent turn completion separated from work publication', (): void => {
     rebase: () => Effect.die('no test here rebases a pull request'),
   })
 
+  it.scoped('repairs a publication conflict in the same leased worker before publishing', () =>
+    Effect.gen(function* () {
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(workflow, () => [issue])
+      const launches: AgentLaunch[] = []
+      let published = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launches.length > 0,
+            (_issue, _prepared, resolve) => {
+              if (resolve === undefined) {
+                return Effect.die('publication must offer conflict repair')
+              }
+              return resolve({
+                originalHeadSha: 'candidate',
+                baseSha: 'new-base',
+                headSha: 'partial',
+                stoppedCommitSha: 'early-commit',
+                paths: ['README.md'],
+              }).pipe(
+                Effect.map(() => {
+                  published = true
+                  return {
+                    _tag: 'Published' as const,
+                    branchName: 'sloppenheimer/issue-167',
+                    headSha: 'resolved-head',
+                    commitCreated: true,
+                  }
+                }),
+              )
+            },
+          ),
+        runAgent: (launch) => {
+          launches.push(launch)
+          return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+        },
+      }
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+      while (!published) {
+        yield* Effect.yieldNow()
+      }
+      expect(launches).toHaveLength(2)
+      expect(launches[1]?.workspace).toEqual(launches[0]?.workspace)
+      expect(launches[1]?.prompt).toContain('Publication conflict repair')
+      expect(launches[1]?.prompt).toContain('early-commit')
+      expect((yield* control.snapshot).delivering).toEqual([])
+    }),
+  )
+
+  it.scoped(
+    'runs a conflict worker when a later delivery attempt first discovers the conflict',
+    () =>
+      Effect.gen(function* () {
+        const issue = {
+          ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('167'),
+        }
+        const harness = makeHarness(workflow, () => [issue])
+        const launches: AgentLaunch[] = []
+        let attempts = 0
+        let published = false
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeSourceControl: () =>
+            failingSourceControl(
+              () => launches.length > 0,
+              (_issue, _prepared, resolve) => {
+                attempts += 1
+                if (attempts === 1) {
+                  return Effect.fail(deliveryFailure())
+                }
+                if (resolve === undefined) {
+                  return Effect.die('delivery must offer conflict repair')
+                }
+                return resolve({
+                  originalHeadSha: 'candidate',
+                  baseSha: 'new-base',
+                  headSha: 'partial',
+                  stoppedCommitSha: 'early-commit',
+                  paths: ['README.md'],
+                }).pipe(
+                  Effect.map(() => {
+                    published = true
+                    return {
+                      _tag: 'Published' as const,
+                      branchName: 'sloppenheimer/issue-167',
+                      headSha: 'resolved-head',
+                      commitCreated: true,
+                    }
+                  }),
+                )
+              },
+            ),
+          runAgent: (launch) => {
+            launches.push(launch)
+            return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+          },
+        }
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+        while ((yield* control.snapshot).delivering.length === 0) {
+          yield* Effect.yieldNow()
+        }
+        yield* TestClock.adjust(10_000)
+        while (!published) {
+          yield* Effect.yieldNow()
+        }
+        expect(attempts).toBe(2)
+        expect(launches).toHaveLength(2)
+        expect(launches[1]?.workspace).toEqual(launches[0]?.workspace)
+        expect(launches[1]?.prompt).toContain('Publication conflict repair')
+      }),
+  )
+
+  it.scoped('pauses an active conflict repair without publishing or admitting another coder', () =>
+    Effect.gen(function* () {
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(workflow, () => [issue])
+      const repairing = yield* Deferred.make<void>()
+      let launches = 0
+      let published = false
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launches > 0,
+            (_issue, _prepared, resolve) => {
+              if (resolve === undefined) {
+                return Effect.die('publication must offer conflict repair')
+              }
+              return resolve({
+                originalHeadSha: 'candidate',
+                baseSha: 'new-base',
+                headSha: 'partial',
+                stoppedCommitSha: 'early-commit',
+                paths: ['README.md'],
+              }).pipe(
+                Effect.map(() => {
+                  published = true
+                  return {
+                    _tag: 'Published' as const,
+                    branchName: 'sloppenheimer/issue-167',
+                    headSha: 'unexpected',
+                    commitCreated: true,
+                  }
+                }),
+              )
+            },
+          ),
+        runAgent: () => {
+          launches += 1
+          return launches === 1
+            ? Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+            : Deferred.succeed(repairing, undefined).pipe(Effect.zipRight(Effect.never))
+        },
+      }
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+      yield* Deferred.await(repairing)
+      yield* control.setIssuePaused(167, true)
+      yield* TestClock.adjust(60_000)
+      expect(published).toBe(false)
+      expect(launches).toBe(2)
+      const snapshot = yield* control.snapshot
+      expect(snapshot.running).toEqual([])
+      expect(snapshot.durableWorkflows[0]).toMatchObject({
+        intent: 'paused',
+        repairAttempts: 1,
+        artifact: { publicationConflict: { stoppedCommitSha: 'early-commit' } },
+      })
+    }),
+  )
+
+  it.scoped('reports repair agent failure separately and does not retry the same conflict', () =>
+    Effect.gen(function* () {
+      const issue = {
+        ...makeIssue('example/sloppenheimer#167', 1, null, ['sloppenheimer', 'ready']),
+        id: issueId('167'),
+      }
+      const harness = makeHarness(workflow, () => [issue])
+      let launches = 0
+      let attempts = 0
+      const ports: TestPorts = {
+        ...harness.ports,
+        makeSourceControl: () =>
+          failingSourceControl(
+            () => launches > 0,
+            (_issue, _prepared, resolve) => {
+              attempts += 1
+              if (resolve === undefined) {
+                return Effect.die('publication must offer conflict repair')
+              }
+              return resolve({
+                originalHeadSha: 'candidate',
+                baseSha: 'new-base',
+                headSha: 'partial',
+                stoppedCommitSha: 'early-commit',
+                paths: ['README.md'],
+              }).pipe(
+                Effect.as({
+                  _tag: 'Published' as const,
+                  branchName: 'sloppenheimer/issue-167',
+                  headSha: 'unexpected',
+                  commitCreated: true,
+                }),
+              )
+            },
+          ),
+        runAgent: () => {
+          launches += 1
+          return launches === 1
+            ? Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+            : Effect.fail(new AgentError({ category: 'turn_timeout', message: 'repair timed out' }))
+        },
+      }
+      const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+      while ((yield* control.snapshot).delivering.length === 0) {
+        yield* Effect.yieldNow()
+      }
+      yield* TestClock.adjust(60_000)
+      expect(launches).toBe(2)
+      expect(attempts).toBe(1)
+      expect((yield* control.snapshot).delivering[0]).toMatchObject({
+        category: 'conflict_repair_failed',
+        interventionRequired: true,
+      })
+    }),
+  )
+
   it.scoped(
     'holds a failed verification without repeating publication or coding until resumed',
     () =>
@@ -3426,6 +3661,76 @@ describe('restored pull request handoffs', (): void => {
         }),
       )
     }),
+  )
+
+  it.scoped(
+    'repairs an automatic host rebase conflict before publishing under the original lease',
+    () =>
+      Effect.gen(function* () {
+        const workspaceRoot = yield* isolatedWorkspaceRoot('sloppenheimer-host-conflict-repair-')
+        const isolated: Workflow = { ...workflow, config: { ...workflow.config, workspaceRoot } }
+        const issue = {
+          ...makeIssue('example/sloppenheimer#20', 1, null, ['sloppenheimer', 'ready']),
+          id: issueId('20'),
+        }
+        const behindHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        const rebasedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+        yield* saveRepairHandoff(
+          join(workspaceRoot, '.sloppenheimer', 'handoffs.json'),
+          issue,
+          behindHead,
+        )
+        const harness = makeHarness(
+          isolated,
+          () => [issue],
+          () => Effect.succeed([]),
+        )
+        const launches: AgentLaunch[] = []
+        const ports: TestPorts = {
+          ...harness.ports,
+          makeCodeReview: (provider) => ({
+            ...requireCodeReview(harness.ports, provider),
+            inspectPullRequest: (number) => Effect.succeed(behindObservation(number, behindHead)),
+          }),
+          makeSourceControl: () =>
+            behindSourceControl((_issue, prepared, resolve) => {
+              if (resolve === undefined) {
+                return Effect.die('automatic rebase must offer conflict repair')
+              }
+              expect(prepared.expectedRemoteHead).toEqual(Option.some(behindHead))
+              return resolve({
+                originalHeadSha: behindHead,
+                baseSha: 'new-base',
+                headSha: 'partial',
+                stoppedCommitSha: 'early-commit',
+                paths: ['README.md'],
+              }).pipe(
+                Effect.as({
+                  _tag: 'Published' as const,
+                  branchName: prepared.target.branchName,
+                  headSha: rebasedHead,
+                  commitCreated: false,
+                }),
+              )
+            }),
+          runAgent: (launch) => {
+            launches.push(launch)
+            return Effect.succeed({ threadId: 'thread', turnId: 'turn', turnCount: 1 })
+          },
+        }
+        const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', ports)
+        yield* control.refresh
+        let snapshot = yield* control.snapshot
+        while (snapshot.handoffs[0]?.state !== 'awaiting_checks') {
+          yield* Effect.yieldNow()
+          snapshot = yield* control.snapshot
+        }
+        expect(launches).toHaveLength(1)
+        expect(launches[0]?.prompt).toContain('Publication conflict repair')
+        expect(snapshot.handoffs[0]?.headSha).toBe(rebasedHead)
+        expect(snapshot.running).toEqual([])
+        expect(snapshot.durableWorkflows[0]?.repairAttempts).toBe(2)
+      }),
   )
 
   it.scoped('needs a human when the rebase of a behind branch itself conflicts', () =>

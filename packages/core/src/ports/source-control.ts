@@ -3,16 +3,30 @@ import { Context, Effect, Layer, Option, type Scope } from 'effect'
 import type { CandidateSourceControlPort } from './candidate.js'
 import type { Issue, Workspace } from '../domain/domain.js'
 import type { ValidatedTrackerProvider } from '../domain/tracker-provider.js'
-import type { SourceControlError } from '../domain/errors.js'
+import type { SourceControlError, RetainedCandidate } from '../domain/errors.js'
 import { makeAdapterCell, type AdapterCell } from './cell.js'
 
 export type SourceControlTarget =
   | Readonly<{ _tag: 'Normal'; branchName: string }>
   | Readonly<{ _tag: 'Repair'; branchName: string; expectedHeadSha: string }>
 
+/** Exact host-owned rebase state offered to a file-editing repair session. */
+export type PublicationConflict = Readonly<{
+  originalHeadSha: string
+  baseSha: string
+  headSha: string
+  stoppedCommitSha: string
+  paths: readonly string[]
+}>
+
+export type ResolvePublicationConflict = (
+  conflict: PublicationConflict,
+) => Effect.Effect<void, SourceControlError>
+
 /** The host-owned repository state captured before an agent is launched. */
 export type PreparedRepository = Readonly<{
   workspace: Workspace
+  retainedCandidate?: RetainedCandidate
   repositoryIdentity?: string
   target: SourceControlTarget
   baseBranch: string
@@ -87,6 +101,7 @@ export type SourceControlPort = Readonly<{
   publish: (
     issue: Issue,
     prepared: PreparedRepository,
+    resolveConflict?: ResolvePublicationConflict,
   ) => Effect.Effect<PublicationOutcome, SourceControlError>
   /**
    * Puts the prepared branch back on top of the protected base and publishes it under the same
@@ -102,6 +117,7 @@ export type SourceControlPort = Readonly<{
   rebase: (
     issue: Issue,
     prepared: PreparedRepository,
+    resolveConflict?: ResolvePublicationConflict,
   ) => Effect.Effect<PublicationOutcome, SourceControlError>
 }>
 

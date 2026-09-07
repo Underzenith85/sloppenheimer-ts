@@ -1,3 +1,4 @@
+import { assertNoRebase } from './git-conflict.js'
 import { Effect, Option } from 'effect'
 
 import type { Issue } from '@sloppenheimer/core/domain/domain.js'
@@ -10,6 +11,7 @@ import type {
 } from '@sloppenheimer/core/ports/candidate.js'
 import type {
   PreparedRepository,
+  ResolvePublicationConflict,
   PublicationOutcome,
 } from '@sloppenheimer/core/ports/source-control.js'
 import { gitIdentity, runGit, type GitSourceControlSettings } from './git-process.js'
@@ -25,7 +27,13 @@ const checkpoint = (
   includeBaseline: boolean,
 ): Effect.Effect<Option.Option<Candidate>, SourceControlError> =>
   Effect.gen(function* () {
+    yield* assertNoRebase(settings, prepared)
     const workspace = prepared.workspace
+    if (prepared.retainedCandidate !== undefined) {
+      const retained = { prepared, ...prepared.retainedCandidate }
+      yield* assertCandidate(settings, retained)
+      return Option.some(retained)
+    }
     if (!(yield* containedIn(settings, 'publish', workspace, prepared.baselineSha, 'HEAD'))) {
       return yield* Effect.fail(
         candidateFailure(
@@ -66,6 +74,7 @@ const checkpoint = (
 const align = (
   settings: GitSourceControlSettings,
   candidate: Candidate,
+  resolveConflict?: ResolvePublicationConflict,
 ): Effect.Effect<Candidate, SourceControlError> =>
   Effect.gen(function* () {
     yield* assertCandidate(settings, candidate)
@@ -73,11 +82,12 @@ const align = (
     if (
       yield* containedIn(settings, 'publish', candidate.prepared.workspace, base, candidate.headSha)
     ) {
-      return candidate
+      return { ...candidate, prepared: { ...candidate.prepared, baseSha: base } }
     }
-    yield* rebaseOntoBase(settings, candidate.prepared)
+    yield* rebaseOntoBase(settings, candidate.prepared, resolveConflict)
     return {
       ...candidate,
+      prepared: { ...candidate.prepared, baseSha: base },
       headSha: yield* revParse(settings, 'publish', candidate.prepared.workspace, 'HEAD'),
       treeSha: yield* revParse(settings, 'publish', candidate.prepared.workspace, 'HEAD^{tree}'),
     }
@@ -164,7 +174,7 @@ export const makeCandidateSourceControl = (
 ): CandidateSourceControlPort => ({
   checkpoint: (issue, prepared, includeBaseline = false) =>
     checkpoint(settings, issue, prepared, includeBaseline),
-  align: (candidate) => align(settings, candidate),
+  align: (candidate, resolveConflict) => align(settings, candidate, resolveConflict),
   verify: (candidate, configuration, secretEnvironmentNames) =>
     verifyCandidate(settings, candidate, configuration, secretEnvironmentNames),
   observe: (candidate) => observe(settings, candidate),

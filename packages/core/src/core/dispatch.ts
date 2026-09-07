@@ -1,3 +1,4 @@
+import { resolvePublicationConflict } from './publication-conflict.js'
 import { enterRunPhase } from './run-phase.js'
 import { settleCancelledCandidate } from './cancelled-candidate.js'
 import { journalExecution } from './durable/journal-execution.js'
@@ -160,6 +161,7 @@ const runWithSourceControl = (
                     ),
                   ),
                   launch.execution.journal?.publication,
+                  resolvePublicationConflict(launch, workspace),
                 )
               }),
             ),
@@ -266,7 +268,7 @@ const makeWorker = (launch: SessionLaunch): Effect.Effect<void> => {
 }
 
 /** What a started session is before it has reported anything: everything else arrives later. */
-const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
+export const startingRun = (launch: SessionLaunch, startedAt: Date): RunningEntry => ({
   runId: launch.runId,
   issue: launch.issue,
   execution: launch.execution,
