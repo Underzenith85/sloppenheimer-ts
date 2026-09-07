@@ -7,6 +7,7 @@ import { onAgentUpdate } from './polling/agent-update.js'
 import { onDeliveryAttempted, onDeliveryDue } from './polling/delivery-due.js'
 import { onIssuePauseChanged } from './polling/issue-pause.js'
 import { onRebaseAttempted } from './polling/rebase.js'
+import { onResumeIntervention } from './polling/resume-intervention.js'
 import { onRetryDue } from './polling/retry-due.js'
 import { onTick } from './polling/tick.js'
 import { onWorkerExited } from './polling/worker-exited.js'
@@ -85,6 +86,10 @@ export const eventLoop = (context: OrchestratorContext): Effect.Effect<never> =>
         }
         case 'SetIssuePaused': {
           yield* onIssuePauseChanged(context, event)
+          break
+        }
+        case 'ResumeIntervention': {
+          yield* onResumeIntervention(context, event)
           break
         }
       }

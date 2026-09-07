@@ -66,6 +66,7 @@ export {
   type OrchestratorServices,
   type OrchestratorSnapshot,
   type RefreshOutcome,
+  type ResumeInterventionOutcome,
   type RetrySnapshot,
   type RunningSnapshot,
   type RuntimeCells,

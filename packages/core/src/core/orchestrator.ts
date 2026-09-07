@@ -20,6 +20,7 @@ export {
   type OrchestratorSnapshot,
   type RefreshOperation,
   type RefreshOutcome,
+  type ResumeInterventionOutcome,
   type RetrySnapshot,
   type RunningSnapshot,
   type RuntimePorts,
