@@ -10177,7 +10177,8 @@ it.scoped(
         makeSourceControl: (): SourceControlPort => ({
           recovery: {
             repositoryIdentity: 'example/sloppenheimer',
-            observeHead: () => Effect.succeed(Option.none()),
+            observeHead: (branchName) =>
+              Effect.succeed(branchName === 'main' ? Option.some('current-base') : Option.none()),
           },
           prepare: () => Effect.die('recovery uses captured preparation'),
           inspect: () => Effect.succeed(changedWorktree),

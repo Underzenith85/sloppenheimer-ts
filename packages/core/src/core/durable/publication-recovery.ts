@@ -1,4 +1,4 @@
-import { Clock, Effect, Option, Ref } from 'effect'
+import { Clock, Effect, Either, Option, Ref } from 'effect'
 import type { DurableWorkflow } from '../../domain/durable-workflow.js'
 import type {
   PreparedRepository,
@@ -15,6 +15,87 @@ const recoveryOf = (
 const canInspect = (
   sourceControl: SourceControlPort | SourceControlRecoveryPort,
 ): sourceControl is SourceControlPort => 'inspect' in sourceControl
+
+const migrationRepairAttempts = 3
+const migrationBudgetMs = 86_400_000
+
+type RemoteObservation = Either.Either<Option.Option<string>, unknown>
+
+const reconciledRecord = (
+  current: DurableWorkflow,
+  record: DurableWorkflow,
+  observed: RemoteObservation,
+  observedBase: RemoteObservation,
+  stopped: boolean,
+  resumable: Option.Option<PreparedRepository>,
+  now: number,
+): DurableWorkflow => {
+  if (current.revision !== record.revision) {
+    return current
+  }
+  if (observed._tag === 'Left') {
+    return {
+      ...current,
+      status: {
+        _tag: 'Intervention',
+        reason: 'Remote publication could not be observed; candidate retained for recovery.',
+      },
+    }
+  }
+  if (observedBase._tag === 'Left' || Option.isNone(observedBase.right)) {
+    return {
+      ...current,
+      status: {
+        _tag: 'Intervention',
+        reason: 'Protected base could not be observed; no legacy recovery mutation was admitted.',
+      },
+    }
+  }
+  const artifact = record.artifact
+  const repository = artifact?.repository
+  if (artifact === null || artifact === undefined || repository === undefined) {
+    return current
+  }
+  const published = Option.contains(observed.right, repository.headSha)
+  const migrated = Option.isSome(resumable) && artifact.publicationConflict === undefined
+  const reason = Option.isSome(resumable)
+    ? migrated
+      ? 'Legacy publication conflict reconciled from fresh candidate, base, and remote-head observations.'
+      : 'Previous processes stopped and retained candidate inspection found unpublished work.'
+    : published
+      ? 'The verified candidate is published. Confirm the previous command stopped before resuming review or reusing its workspace.'
+      : stopped
+        ? 'Retained candidate inspection failed or found no unpublished candidate; no recovery mutation was admitted.'
+        : 'Previous workspace process is not confirmed stopped; no recovery mutation was admitted.'
+  return {
+    ...current,
+    ...(migrated
+      ? {
+          publicationRecovery: {
+            kind: 'legacy_publication_conflict' as const,
+            admittedAt: now,
+            maximumRepairAttempts: migrationRepairAttempts,
+          },
+          repairAttempts: 0,
+          maximumRepairAttempts: migrationRepairAttempts,
+          budgetDeadline: now + migrationBudgetMs,
+        }
+      : {}),
+    artifact: {
+      ...artifact,
+      remoteObservation: { headSha: Option.getOrNull(observed.right), observedAt: now },
+      publishedHead: published ? repository.headSha : artifact.publishedHead,
+    },
+    status:
+      published && stopped
+        ? {
+            _tag: 'Waiting',
+            condition: current.afterPublication ?? 'review',
+            deadline: current.budgetDeadline,
+          }
+        : { _tag: 'Intervention', reason },
+  }
+}
 
 /** Record remote facts without granting ownership of the old workspace or authorizing another write. */
 export const reconcilePublication = (
@@ -42,12 +123,24 @@ export const reconcilePublication = (
     ) {
       return Option.none()
     }
-    const observed = yield* Effect.either(recovery.observeHead(repository.branchName))
+    // These are independent remote facts. In particular, never reconstruct either one from the
+    // diagnostic or from refs in the retained checkout.
+    const [observed, observedBase] = yield* Effect.all(
+      [
+        Effect.either(recovery.observeHead(repository.branchName)),
+        canInspect(sourceControl)
+          ? Effect.either(recovery.observeHead(repository.baseBranch))
+          : Effect.succeed(Either.right(Option.some(repository.baseSha))),
+      ],
+      { concurrency: 2 },
+    )
     const stopped = yield* confirmStopped
     const now = yield* Clock.currentTimeMillis
     let resumable = Option.none<PreparedRepository>()
     if (
       observed._tag === 'Right' &&
+      observedBase._tag === 'Right' &&
+      Option.isSome(observedBase.right) &&
       stopped &&
       canInspect(sourceControl) &&
       !Option.contains(observed.right, repository.headSha)
@@ -56,14 +149,16 @@ export const reconcilePublication = (
         workspace: { path: artifact.workspacePath, key: artifact.workspaceKey },
         target: record.runTarget ?? { _tag: 'Normal', branchName: repository.branchName },
         baseBranch: repository.baseBranch,
-        baseSha: repository.baseSha,
+        baseSha: observedBase.right.value,
         baselineSha: artifact.baselineSha,
         retainedCandidate: {
           headSha: repository.headSha,
           treeSha: artifact.verifiedRevision,
           commitCreated: false,
         },
-        expectedRemoteHead: Option.fromNullable(artifact.expectedRemoteHead),
+        // The fresh recovery owns the exact head it just observed, not the lease the legacy
+        // publication captured before the host stopped.
+        expectedRemoteHead: observed.right,
         ...(repository.identity === undefined ? {} : { repositoryIdentity: repository.identity }),
       }
       const inspected = yield* Effect.either(sourceControl.inspect(prepared))
@@ -71,43 +166,8 @@ export const reconcilePublication = (
         resumable = Option.some(prepared)
       }
     }
-    yield* write(issueId, (current) => {
-      if (current.revision !== record.revision) {
-        return current
-      }
-      if (observed._tag === 'Left') {
-        return {
-          ...current,
-          status: {
-            _tag: 'Intervention',
-            reason: 'Remote publication could not be observed; candidate retained for recovery.',
-          },
-        }
-      }
-      const published = Option.contains(observed.right, repository.headSha)
-      return {
-        ...current,
-        artifact: {
-          ...artifact,
-          remoteObservation: { headSha: Option.getOrNull(observed.right), observedAt: now },
-          publishedHead: published ? repository.headSha : artifact.publishedHead,
-        },
-        status:
-          published && stopped
-            ? {
-                _tag: 'Waiting',
-                condition: current.afterPublication ?? 'review',
-                deadline: current.budgetDeadline,
-              }
-            : {
-                _tag: 'Intervention',
-                reason: Option.isSome(resumable)
-                  ? 'Previous processes stopped and retained candidate inspection found unpublished work.'
-                  : published
-                    ? 'The verified candidate is published. Confirm the previous command stopped before resuming review or reusing its workspace.'
-                    : 'The remote does not match the verified candidate. Retain the workspace and reconcile before another publication.',
-              },
-      }
-    })
+    yield* write(issueId, (current) =>
+      reconciledRecord(current, record, observed, observedBase, stopped, resumable, now),
+    )
     return resumable
   })

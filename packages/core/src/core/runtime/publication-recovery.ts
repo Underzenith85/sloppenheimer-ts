@@ -2,10 +2,14 @@ import { Effect, Option, Ref } from 'effect'
 import { issueId } from '../../domain/domain.js'
 import type { SourceControlPort } from '../../ports/source-control.js'
 import { asSettled } from '../../support/settled.js'
-import { captureExecutionSnapshot } from '../policy.js'
+import { captureExecutionSnapshot, stateIsIn } from '../policy.js'
 import { scheduleDelivery } from './deliveries.js'
 import type { RuntimeCells } from './types.js'
+import type { DeliveryRequest, OrchestratorContext } from './types.js'
 import { ownIssueFiber } from './execution.js'
+
+type PublicationRecoveryRuntime = Pick<OrchestratorContext, 'durable' | 'state'> &
+  Readonly<{ scheduleDelivery: (request: DeliveryRequest) => Effect.Effect<boolean> }>
 
 /** Remote reads run off the mailbox so one unavailable repository cannot block controls or peers. */
 export const startPublicationRecovery = (
@@ -31,59 +35,92 @@ export const startPublicationRecovery = (
         )
       }
       if (record.status._tag === 'Intervention' && sourceControl !== null) {
-        const workspace =
-          record.artifact === null
-            ? null
-            : { path: record.artifact.workspacePath, key: record.artifact.workspaceKey }
-        const recovery = durable.reconcilePublication(
-          record.issueId,
-          sourceControl,
-          workspace === null ? Effect.succeed(false) : workspaces.confirmStopped(workspace),
-        )
         yield* ownIssueFiber(
           cells.execution,
           'recovery',
           issueId(record.issueId),
           concurrency.withPermits(1)(
-            Effect.flatMap(
-              (workspace === null
-                ? recovery
-                : workspaces.superviseCaptured(workspace, recovery)
-              ).pipe(Effect.catchAll(() => Effect.succeed(Option.none()))),
-              (prepared) =>
-                Option.match(prepared, {
-                  onNone: () => Effect.void,
-                  onSome: (value) => resumeRetainedCandidate(cells, record.issueId, value),
-                }),
-            ),
+            recoverPublicationIntervention(
+              {
+                durable,
+                state: cells.state,
+                scheduleDelivery: (request) => scheduleDelivery(cells, request),
+              },
+              record.issueId,
+              sourceControl,
+            ).pipe(Effect.asVoid),
           ),
         )
       }
     }
   })
 
-const resumeRetainedCandidate = (
-  cells: RuntimeCells,
+/** One reconciliation used by startup and by the operator's explicit attention retry. */
+export const recoverPublicationIntervention = (
+  runtime: PublicationRecoveryRuntime,
   durableIssueId: string,
-  prepared: import('../../ports/source-control.js').PreparedRepository,
-): Effect.Effect<void> =>
+  sourceControl: SourceControlPort,
+): Effect.Effect<boolean> =>
   Effect.gen(function* () {
-    const state = yield* Ref.get(cells.state)
-    const effective = state.lastKnownGood
+    const workspaces = (yield* Ref.get(runtime.state)).lastKnownGood.workspaces
+    const record = (yield* runtime.durable.snapshot).find(
+      (candidate) => candidate.issueId === durableIssueId,
+    )
+    const workspace =
+      record?.artifact === null || record?.artifact === undefined
+        ? null
+        : { path: record.artifact.workspacePath, key: record.artifact.workspaceKey }
+    if (record?.status._tag !== 'Intervention' || workspace === null) {
+      return false
+    }
+    const effective = (yield* Ref.get(runtime.state)).lastKnownGood
     const fetched = yield* effective.tracker
-      .fetchIssuesByIds([issueId(durableIssueId)])
+      .fetchIssuesByIds([issueId(durableIssueId)], { hydrateDependencies: false })
       .pipe(asSettled)
     const issue = fetched._tag === 'Succeeded' ? fetched.value[0] : undefined
-    const record = (yield* cells.durable.snapshot).find((entry) => entry.issueId === durableIssueId)
-    if (issue === undefined || record?.intent !== 'active') {
-      return
+    if (issue === undefined) {
+      return false
     }
-    const journal = yield* cells.durable.journal(durableIssueId)
+    if (stateIsIn(issue.state, effective.workflow.config.tracker.terminalStates)) {
+      yield* runtime.durable.queueCleanup(durableIssueId)
+      yield* runtime.durable.cleanup(durableIssueId, workspaces)
+      return false
+    }
+    const recovery = runtime.durable.reconcilePublication(
+      durableIssueId,
+      sourceControl,
+      workspaces.confirmStopped(workspace),
+    )
+    const prepared = yield* workspaces
+      .superviseCaptured(workspace, recovery)
+      .pipe(Effect.catchAll(() => Effect.succeed(Option.none())))
+    return yield* Option.match(prepared, {
+      onNone: () => Effect.succeed(false),
+      onSome: (value) => resumeRetainedCandidate(runtime, durableIssueId, issue, value),
+    })
+  })
+
+const resumeRetainedCandidate = (
+  runtime: PublicationRecoveryRuntime,
+  durableIssueId: string,
+  issue: import('../../domain/domain.js').Issue,
+  prepared: import('../../ports/source-control.js').PreparedRepository,
+): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const state = yield* Ref.get(runtime.state)
+    const effective = state.lastKnownGood
+    const record = (yield* runtime.durable.snapshot).find(
+      (entry) => entry.issueId === durableIssueId,
+    )
+    if (record?.intent !== 'active') {
+      return false
+    }
+    const journal = yield* runtime.durable.journal(durableIssueId)
     const execution = {
       ...captureExecutionSnapshot(effective, ''),
       ...(Option.isNone(journal) ? {} : { journal: journal.value }),
     }
-    yield* scheduleDelivery(cells, {
+    return yield* runtime.scheduleDelivery({
       issue,
       execution,
       prepared,
