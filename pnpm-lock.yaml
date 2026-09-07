@@ -23,6 +23,9 @@ importers:
       '@sloppenheimer/adapter-node':
         specifier: workspace:*
         version: link:packages/adapter-node
+      '@sloppenheimer/coordinator':
+        specifier: workspace:*
+        version: link:packages/coordinator
       '@sloppenheimer/core':
         specifier: workspace:*
         version: link:packages/core
@@ -125,6 +128,25 @@ importers:
       '@effect/platform':
         specifier: 0.97.1
         version: 0.97.1(effect@3.22.1)
+      '@sloppenheimer/core':
+        specifier: workspace:*
+        version: link:../core
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+
+  packages/coordinator:
+    dependencies:
+      '@effect/platform':
+        specifier: 0.97.1
+        version: 0.97.1(effect@3.22.1)
+      '@effect/platform-node':
+        specifier: 0.108.1
+        version: 0.108.1(@effect/cluster@0.60.2(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
       '@sloppenheimer/core':
         specifier: workspace:*
         version: link:../core
