@@ -205,13 +205,28 @@ const inspectRepository = (
     const porcelain = yield* status(settings, 'publish', prepared.workspace)
     const dirtyFileCount = porcelain.split('\n').filter((line) => line.trim().length > 0).length
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
+    const treeSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD^{tree}')
+    const descendsFromBaseline = yield* containedIn(
+      settings,
+      'publish',
+      prepared.workspace,
+      prepared.baselineSha,
+      headSha,
+    )
     const delivered = Option.getOrElse(prepared.expectedRemoteHead, () => prepared.baselineSha)
     const committedAhead =
       headSha !== delivered &&
       !(yield* containedIn(settings, 'publish', prepared.workspace, headSha, delivered))
     return dirtyFileCount === 0 && !committedAhead
-      ? { _tag: 'Clean', headSha }
-      : { _tag: 'Changed', headSha, dirtyFileCount, committedAhead }
+      ? { _tag: 'Clean', headSha, treeSha, descendsFromBaseline }
+      : {
+          _tag: 'Changed',
+          headSha,
+          treeSha,
+          descendsFromBaseline,
+          dirtyFileCount,
+          committedAhead,
+        }
   })
 
 const publishRepository = (

@@ -2,6 +2,7 @@ import { Effect, Option, Ref } from 'effect'
 import { issueId } from '../../domain/domain.js'
 import type { SourceControlPort } from '../../ports/source-control.js'
 import { asSettled } from '../../support/settled.js'
+import { logWarning } from '../../support/logging.js'
 import { captureExecutionSnapshot, stateIsIn } from '../policy.js'
 import { scheduleDelivery } from './deliveries.js'
 import type { RuntimeCells } from './types.js'
@@ -91,9 +92,17 @@ export const recoverPublicationIntervention = (
       sourceControl,
       workspaces.confirmStopped(workspace),
     )
-    const prepared = yield* workspaces
-      .superviseCaptured(workspace, recovery)
-      .pipe(Effect.catchAll(() => Effect.succeed(Option.none())))
+    const supervised = yield* workspaces.superviseCaptured(workspace, recovery).pipe(Effect.either)
+    if (supervised._tag === 'Left') {
+      yield* logWarning('publication recovery supervision failed', {
+        action: 'publication_recovery',
+        outcome: 'supervision_failed',
+        issue_id: durableIssueId,
+        error: supervised.left.message,
+      })
+      return false
+    }
+    const prepared = supervised.right
     return yield* Option.match(prepared, {
       onNone: () => Effect.succeed(false),
       onSome: (value) => resumeRetainedCandidate(runtime, durableIssueId, issue, value),

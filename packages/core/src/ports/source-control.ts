@@ -44,10 +44,14 @@ export type PreparedRepository = Readonly<{
  * reported any or not.
  */
 export type WorktreeInspection =
-  | Readonly<{ _tag: 'Clean'; headSha: string }>
+  | Readonly<{ _tag: 'Clean'; headSha: string; treeSha?: string; descendsFromBaseline?: boolean }>
   | Readonly<{
       _tag: 'Changed'
       headSha: string
+      /** Actual content identity read from the retained checkout. */
+      treeSha?: string
+      /** Whether HEAD descends from the baseline captured before the agent ran. */
+      descendsFromBaseline?: boolean
       /** Paths differing from the current commit or untracked; zero once the work is committed. */
       dirtyFileCount: number
       /**
