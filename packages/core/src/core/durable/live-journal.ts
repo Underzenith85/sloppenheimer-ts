@@ -9,7 +9,7 @@ import { recordHandoffs } from './handoff-records.js'
 import type { HandoffSnapshot } from '../../domain/handoff.js'
 import type { ExternalOperationKind } from '../../domain/durable-workflow.js'
 import type { TrackerError } from '../../domain/errors.js'
-import { reconcilePublication } from './publication-recovery.js'
+import { holdRecovery, reconcilePublication } from './publication-recovery.js'
 import type {
   PreparedRepository,
   SourceControlPort,
@@ -54,6 +54,8 @@ export type DurableHost = Readonly<{
     sourceControl: SourceControlPort | SourceControlRecoveryPort,
     stopped?: Effect.Effect<boolean>,
   ) => Effect.Effect<Option.Option<PreparedRepository>>
+  /** Replaces an intervention's reason so a refused recovery is never an unexplained absence. */
+  holdRecovery: (issueId: string, reason: string) => Effect.Effect<void>
   start: (
     issue: Issue,
     target: SourceControlTarget,
@@ -156,6 +158,7 @@ export const makeDurableHost = (
         externalOperation(records, write, id, kind, head, action),
       reconcilePublication: (id, sourceControl, stopped) =>
         reconcilePublication(records, write, id, sourceControl, stopped),
+      holdRecovery: (id, reason) => holdRecovery(write, id, reason),
       snapshot: Effect.map(Ref.get(records), (current) => [...current.values()]),
       awaitFailure: Deferred.await(failure).pipe(
         Effect.flatMap((cause) =>

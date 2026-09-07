@@ -1278,3 +1278,33 @@ Tracked by [#319](https://github.com/Underzenith85/sloppenheimer-ts/issues/319).
   commit and tree under the original remote lease. A subsequent delivery failure retains this
   identity explicitly; retry validates it instead of requiring the pre-rebase baseline to remain
   an ancestor. Ordinary first checkpointing retains its original ancestry protection.
+
+### Recovering a legacy conflict with no verification evidence
+
+Tracked by [#328](https://github.com/Underzenith85/sloppenheimer-ts/issues/328), which corrected the
+[#326](https://github.com/Underzenith85/sloppenheimer-ts/issues/326) migration.
+
+- Verification evidence gates the _publication_ claim, never the _recovery_. A record whose
+  `verifiedRevision` is null, or names a tree its recorded candidate no longer carries, is
+  reconcilable; what it stops being is a record that can answer `Waiting(review)` for a head the
+  remote happens to hold. `provenTree` in `core/durable/retained-candidate.ts` is that one test, and
+  nothing else reads `verifiedRevision` as a statement about a working tree.
+- Reconciliation inspects the retained checkout rather than reading the stopped host's diagnostic:
+  the candidate head and the worktree's cleanliness come from `SourceControlPort.inspect`, which is
+  also what refuses an orphaned rebase sequencer. A missing commit ahead of the observed remote
+  head, an uncommitted path, an inspection that fails, and a head that is not the verified
+  candidate the record names are four distinct refusals, each written onto the record as the
+  intervention reason an operator reads.
+- Where the record proves no tree, the recovery is admitted with **no** `retainedCandidate`. The
+  tree and the baseline ancestry are earned again by the delivery's own checkpoint, and the rebased
+  commit — not the pre-conflict one — is what host verification and the leased push then name.
+  An invented candidate identity would fail `assertCandidate` at the first barrier anyway; the
+  point is that it is never asserted.
+- The migration budget is opened once per record, marked by `publicationRecovery`. A repeated
+  operator retry re-observes and re-inspects but buys no further repair attempts, so a structured
+  recovery that spends its three repairs stays bounded.
+- A recovery that stops before reconciliation could write — workspace supervision that failed, a
+  tracker that could not be read, a delivery that was not queued — says so. Supervision failure is
+  the one this attempt is the sole authority on, so it replaces the record's reason through
+  `DurableHost.holdRecovery`; the others are logged and leave the standing reason alone. No path
+  answers `Option.none()` without an account of it somewhere an operator looks.

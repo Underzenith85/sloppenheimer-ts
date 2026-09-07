@@ -103,6 +103,8 @@ import {
   type WorkspaceManagerPort,
   type WorkspaceSettings,
 } from '@sloppenheimer/core'
+import type { Candidate } from '@sloppenheimer/core/ports/candidate.js'
+import type { PreparedRepository } from '@sloppenheimer/core/ports/source-control.js'
 import type { Workflow } from '@sloppenheimer/core/config/workflow.js'
 import type { WorkspaceRelease, WorkspaceRun } from '@sloppenheimer/core/domain/workspace-lease.js'
 import type { WorkspacePruneReport } from '@sloppenheimer/core/domain/workspace-retention.js'
@@ -10181,7 +10183,15 @@ it.scoped(
               Effect.succeed(branchName === 'main' ? Option.some('current-base') : Option.none()),
           },
           prepare: () => Effect.die('recovery uses captured preparation'),
-          inspect: () => Effect.succeed(changedWorktree),
+          // The retained checkout answers for itself: the candidate commit the record names, with
+          // nothing uncommitted beside it and nothing of it on the observed remote head.
+          inspect: () =>
+            Effect.succeed({
+              _tag: 'Changed',
+              headSha: candidate.headSha,
+              dirtyFileCount: 0,
+              committedAhead: true,
+            }),
           publish: () => Effect.die('verified recovery uses candidate publication'),
           rebase: () => Effect.die('recovery must not rebase'),
           candidates: {
@@ -10225,6 +10235,257 @@ it.scoped(
         'candidate',
       )
     }),
+)
+
+/**
+ * The persisted shape [#303](https://github.com/Underzenith85/sloppenheimer-ts/issues/303) was left
+ * in: a publication whose rebase conflicted, spent every repair attempt, and never earned
+ * verification evidence. The retained candidate is real and `verifiedRevision` is null, so nothing
+ * recovering it may read the record as a statement about the checkout.
+ */
+type LegacyPublicationConflict = Readonly<{
+  issue: Issue
+  target: SourceControlTarget
+  prepared: PreparedRepository
+  candidate: Candidate
+}>
+
+const legacyPublicationConflict = (
+  workspaceRoot: string,
+  store: WorkflowStorePort,
+): Effect.Effect<LegacyPublicationConflict, SourceControlError | WorkflowError> =>
+  Effect.gen(function* () {
+    const issue = {
+      ...makeIssue('example/sloppenheimer#303', 1, null, ['sloppenheimer', 'ready']),
+      id: issueId('303'),
+    }
+    const target: SourceControlTarget = { _tag: 'Normal', branchName: 'sloppenheimer/issue-303' }
+    const prepared: PreparedRepository = {
+      target,
+      workspace: { path: join(workspaceRoot, 'GH-303', 'run-1-old'), key: 'run-1-old' },
+      repositoryIdentity: 'example/sloppenheimer',
+      baseBranch: 'main',
+      baseSha: 'stale-base',
+      baselineSha: 'base',
+      expectedRemoteHead: Option.none<string>(),
+    }
+    const candidate: Candidate = {
+      prepared,
+      headSha: 'candidate',
+      treeSha: 'tree',
+      commitCreated: true,
+    }
+    const conflict = {
+      originalHeadSha: 'candidate',
+      baseSha: 'stale-base',
+      headSha: 'partial',
+      stoppedCommitSha: 'early-commit',
+      paths: ['README.md'],
+    }
+    const previous = yield* makeDurableHost(store)
+    const journal = yield* previous.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+    yield* journal.prepared(prepared)
+    yield* journal.publication.checkpointed(candidate)
+    const repairing = journal.publication.repairing
+    if (repairing === undefined) {
+      return yield* Effect.die('the fixture requires durable conflict repair admission')
+    }
+    yield* repairing(conflict)
+    yield* repairing(conflict)
+    yield* repairing(conflict)
+    yield* Effect.ignore(repairing(conflict))
+    return { issue, target, prepared, candidate }
+  })
+
+/** The one transition both startup recovery and the operator's attention retry have to make. */
+const migratedLegacyRecovery = {
+  repairAttempts: 0,
+  maximumRepairAttempts: 3,
+  publicationRecovery: { kind: 'legacy_publication_conflict', maximumRepairAttempts: 3 },
+  artifact: { verifiedRevision: null },
+}
+
+/**
+ * Reads the retained checkout as a stopped host actually left it, and re-earns everything the
+ * legacy record no longer proves: the rebase produces a new candidate, and that candidate is what
+ * verification and the push name.
+ */
+const legacyRecoverySourceControl = (
+  candidate: Candidate,
+  branchName: string,
+  observed: Readonly<{
+    checkpoints: PreparedRepository[]
+    verifications: string[]
+    publications: string[]
+  }>,
+  confirmedStopped: Ref.Ref<boolean>,
+): SourceControlPort => ({
+  recovery: {
+    repositoryIdentity: 'example/sloppenheimer',
+    observeHead: (branch) =>
+      Effect.succeed(Option.some(branch === 'main' ? 'current-base' : 'advanced-head')),
+  },
+  prepare: () => Effect.die('legacy recovery uses the captured preparation'),
+  inspect: (value) =>
+    Ref.get(confirmedStopped).pipe(
+      Effect.flatMap((stopped) =>
+        stopped
+          ? Effect.succeed({
+              _tag: 'Changed' as const,
+              headSha: candidate.headSha,
+              dirtyFileCount: 0,
+              committedAhead: true,
+            })
+          : Effect.die('an unstopped workspace must never be inspected'),
+      ),
+      Effect.tap(() => Effect.sync(() => observed.checkpoints.push(value))),
+    ),
+  publish: () => Effect.die('a verified workflow publishes through its candidate'),
+  rebase: () => Effect.die('legacy recovery rebases through candidate alignment'),
+  candidates: {
+    checkpoint: (_issue, prepared) =>
+      Effect.sync(() => {
+        observed.checkpoints.push(prepared)
+        return Option.some({ ...candidate, prepared })
+      }),
+    align: (value) => Effect.succeed({ ...value, headSha: 'rebased', treeSha: 'rebased-tree' }),
+    verify: (value) =>
+      Effect.sync(() => {
+        observed.verifications.push(value.headSha)
+        return {
+          candidate: value,
+          evidence: {
+            headSha: value.headSha,
+            treeSha: value.treeSha,
+            command: 'true',
+            verifiedAt: 0,
+          },
+        }
+      }),
+    observe: () => Effect.succeed({ _tag: 'Unpublished' }),
+    publish: (verified) =>
+      Effect.sync(() => {
+        observed.publications.push(verified.evidence.headSha)
+        return {
+          _tag: 'Published',
+          branchName,
+          headSha: verified.candidate.headSha,
+          commitCreated: true,
+        } as const
+      }),
+  },
+})
+
+it.scoped('recovers a legacy publication conflict with null evidence at startup', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('durable-legacy-conflict-startup-')
+    const configured: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        workspaceRoot,
+        verification: { command: 'true', timeoutMs: 1_000 },
+      },
+    }
+    const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+    const legacy = yield* legacyPublicationConflict(workspaceRoot, store)
+    expect((yield* store.list)[0]).toMatchObject({
+      repairAttempts: 3,
+      maximumRepairAttempts: 3,
+      status: { _tag: 'Intervention' },
+      artifact: { verifiedRevision: null },
+    })
+    const observed = {
+      checkpoints: [] as PreparedRepository[],
+      verifications: [],
+      publications: [],
+    }
+    const stopped = yield* Ref.make(true)
+    const harness = makeHarness(configured, () => [legacy.issue])
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...harness.ports,
+      runAgent: () => Effect.die('legacy recovery must not launch a coding agent'),
+      makeWorkspaces: (settings): WorkspaceManagerPort => ({
+        ...harness.ports.makeWorkspaces(settings),
+        confirmStopped: () => Ref.get(stopped),
+        superviseCaptured: (_workspace, operation) => operation,
+      }),
+      makeSourceControl: (): SourceControlPort =>
+        legacyRecoverySourceControl(legacy.candidate, legacy.target.branchName, observed, stopped),
+    }).pipe(Effect.provideService(WorkflowStore, store))
+
+    let snapshot = yield* control.snapshot
+    while (snapshot.delivering.length === 0) {
+      yield* Effect.yieldNow()
+      snapshot = yield* control.snapshot
+    }
+    expect(snapshot.durableWorkflows[0]).toMatchObject(migratedLegacyRecovery)
+    const delivery = snapshot.delivering[0]
+    if (delivery === undefined) {
+      return yield* Effect.die('the migration must schedule the retained candidate')
+    }
+    yield* TestClock.setTime(new Date(delivery.dueAt).getTime())
+    while ((yield* control.snapshot).durableWorkflows[0]?.artifact?.publishedHead !== 'rebased') {
+      yield* Effect.yieldNow()
+    }
+    // Nothing carried the old evidence forward: every checkpoint began without a retained
+    // candidate, and the rebased commit is what verification and the push both name.
+    expect(observed.checkpoints.every((entry) => entry.retainedCandidate === undefined)).toBe(true)
+    expect(observed.verifications).toEqual(['rebased'])
+    expect(observed.publications).toEqual(['rebased'])
+    expect((yield* control.snapshot).durableWorkflows[0]?.artifact?.verifiedRevision).toBe(
+      'rebased-tree',
+    )
+  }),
+)
+
+it.scoped('recovers the same legacy conflict on an operator attention retry', () =>
+  Effect.gen(function* () {
+    const workspaceRoot = yield* isolatedWorkspaceRoot('durable-legacy-conflict-retry-')
+    const configured: Workflow = {
+      ...workflow,
+      config: {
+        ...workflow.config,
+        workspaceRoot,
+        verification: { command: 'true', timeoutMs: 1_000 },
+      },
+    }
+    const store = yield* openWorkflowStore(join(workspaceRoot, 'workflow.sqlite'), true)
+    const legacy = yield* legacyPublicationConflict(workspaceRoot, store)
+    const observed = {
+      checkpoints: [] as PreparedRepository[],
+      verifications: [],
+      publications: [],
+    }
+    const stopped = yield* Ref.make(false)
+    const harness = makeHarness(configured, () => [legacy.issue])
+    const control = yield* startTestOrchestrator('/tmp/WORKFLOW.md', {
+      ...harness.ports,
+      runAgent: () => Effect.die('legacy recovery must not launch a coding agent'),
+      makeWorkspaces: (settings): WorkspaceManagerPort => ({
+        ...harness.ports.makeWorkspaces(settings),
+        confirmStopped: () => Ref.get(stopped),
+        superviseCaptured: (_workspace, operation) => operation,
+      }),
+      makeSourceControl: (): SourceControlPort =>
+        legacyRecoverySourceControl(legacy.candidate, legacy.target.branchName, observed, stopped),
+    }).pipe(Effect.provideService(WorkflowStore, store))
+
+    // Startup reconciles what it can observe and refuses the rest with the prerequisite it failed.
+    let held = (yield* control.snapshot).durableWorkflows[0]
+    while (held?.status._tag !== 'Intervention' || !held.status.reason.includes('not confirmed')) {
+      yield* Effect.yieldNow()
+      held = (yield* control.snapshot).durableWorkflows[0]
+    }
+    expect(held.publicationRecovery).toBeUndefined()
+    expect((yield* control.snapshot).delivering).toHaveLength(0)
+
+    yield* Ref.set(stopped, true)
+    const outcome = yield* control.resumeIntervention(303)
+    expect(outcome).toMatchObject({ status: 'resumed', kind: 'delivery' })
+    expect((yield* control.snapshot).durableWorkflows[0]).toMatchObject(migratedLegacyRecovery)
+    expect((yield* control.snapshot).delivering).toHaveLength(1)
+  }),
 )
 
 it.scoped('imports unreferenced workspace metadata before scheduler admission', () =>
