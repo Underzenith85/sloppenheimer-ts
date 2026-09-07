@@ -207,6 +207,12 @@ export type RefreshOutcome = Readonly<{
   operations: readonly RefreshOperation[]
 }>
 
+export type ResumeInterventionOutcome = Readonly<{
+  status: 'resumed' | 'reconciled' | 'refused'
+  kind: 'delivery' | 'handoff' | null
+  reason: string
+}>
+
 export type OrchestratorControl = Readonly<{
   snapshot: Effect.Effect<OrchestratorSnapshot>
   /**
@@ -215,6 +221,7 @@ export type OrchestratorControl = Readonly<{
    */
   refresh: Effect.Effect<RefreshOutcome>
   setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
+  resumeIntervention: (issueNumber: number) => Effect.Effect<ResumeInterventionOutcome>
   /**
    * Reads the published detail for one issue. The published index is built by the actor and is
    * immutable, so a detail request neither observes a partial update nor takes a turn in the
@@ -305,6 +312,11 @@ export type OrchestratorEvent =
       reply: Deferred.Deferred<void>
       committed?: boolean
       affectedRuns?: readonly Readonly<{ issueId: IssueId; runId: number }>[]
+    }>
+  | Readonly<{
+      _tag: 'ResumeIntervention'
+      issueNumber: number
+      reply: Deferred.Deferred<ResumeInterventionOutcome>
     }>
 
 /**

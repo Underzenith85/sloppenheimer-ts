@@ -236,6 +236,21 @@ describe('operator console information architecture', (): void => {
     expect(card.querySelector('.action')?.textContent).toBe('Resume delivery')
   })
 
+  it('retries a handoff intervention through its distinct recovery operation', async (): Promise<void> => {
+    const console_ = await boot()
+    const action = console_.card(interventionIdentifier).querySelector('.action') as unknown as {
+      click: () => void
+    }
+
+    expect(console_.card(interventionIdentifier).querySelector('.action')?.textContent).toBe(
+      'Retry attention',
+    )
+    action.click()
+    await console_.flush()
+
+    expect(console_.postLog).toContain('/api/v1/issues/32/resume-intervention')
+  })
+
   it('keeps the resume on a paused delivering row whose issue has left the backlog', async (): Promise<void> => {
     const state = consoleState()
     const backlog = consoleBacklog()
@@ -310,7 +325,7 @@ describe('operator console information architecture', (): void => {
 
     const card = console_.card(readyTopIdentifier)
     expect(identifiersIn(console_, '#attention-list')).toContain(readyTopIdentifier)
-    expect(card.querySelector('.action')?.textContent).toBe('Resume delivery')
+    expect(card.querySelector('.action')?.textContent).toBe('Retry attention')
   })
 
   it('scopes Finished to a stated window and excludes older work', async (): Promise<void> => {

@@ -18,7 +18,12 @@ import type { AgentDetailLookup } from '@sloppenheimer/core'
 
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { PublishedAgentDetail } from './api/agent-detail-schema.js'
-import { issueNumberShape, operatorApi, type PublishedIssueAction } from './api/endpoints.js'
+import {
+  issueNumberShape,
+  operatorApi,
+  type PublishedIssueAction,
+  type PublishedResumeIntervention,
+} from './api/endpoints.js'
 import {
   agentDetailUnavailable,
   agentNotActive,
@@ -176,6 +181,18 @@ export const operatorHandlers = (
           yield* requirePageToken(csrfToken)
           yield* runBackend(backend.setIssueEnabled(issueNumber, false))
           return issueActionAccepted(issueNumber, false)
+        }),
+      )
+      .handle('resumeIntervention', ({ path }) =>
+        Effect.gen(function* () {
+          const issueNumber = yield* decodeIssueNumber(path.issueNumber)
+          yield* requirePageToken(csrfToken)
+          const outcome = yield* backend.resumeIntervention(issueNumber)
+          return {
+            accepted: outcome.status !== 'refused',
+            issueNumber,
+            ...outcome,
+          } satisfies PublishedResumeIntervention
         }),
       )
       // The identifier is not matched against a shape: this route is what a published `detail_url`

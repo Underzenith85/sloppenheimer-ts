@@ -10,6 +10,11 @@ type RowFeedback = Readonly<{
   retry: (() => void) | null
 }>
 
+type ResumeInterventionResponse = Readonly<{
+  accepted: boolean
+  reason: string
+}>
+
 const rowFeedback = new Map<string, RowFeedback>()
 const inFlight = new Set<string>()
 
@@ -28,6 +33,7 @@ const actionLabels: Readonly<Record<ActionKind, string>> = {
   start: 'Start agent',
   queue: 'Queue issue',
   pause: 'Pause',
+  resume: 'Retry attention',
   blockers: 'View blockers',
   none: '',
 }
@@ -41,6 +47,7 @@ const actionDescriptions: Readonly<Record<ActionKind, string>> = {
   queue: 'Makes the issue eligible. Sloppenheimer starts it as soon as a dispatch slot is free.',
   pause:
     'Removes the issue from orchestration, cancels its running agent, and drops queued retries.',
+  resume: 'Reconciles retained work, then retries publication or opens one bounded repair window.',
   blockers: 'Lists the unresolved dependencies that are holding this issue back.',
   none: '',
 }
@@ -123,7 +130,7 @@ const confirmPause = (item: WorkItem): boolean => {
   )
 }
 
-const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
+const runAction = async (item: WorkItem, action: 'start' | 'pause' | 'resume'): Promise<void> => {
   const issueNumber = item.issueNumber
   if (issueNumber === null || inFlight.has(item.identifier)) {
     return
@@ -131,20 +138,38 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
   inFlight.add(item.identifier)
   setFeedback(item.identifier, {
     tone: 'pending',
-    message: enable ? 'Requesting orchestration…' : 'Pausing…',
+    message:
+      action === 'resume'
+        ? 'Reconciling retained work…'
+        : action === 'start'
+          ? 'Requesting orchestration…'
+          : 'Pausing…',
     retry: null,
   })
   try {
-    await post(`/api/v1/issues/${issueNumber}/${enable ? 'start' : 'pause'}`)
+    const path = action === 'resume' ? 'resume-intervention' : action
+    const resumeResult =
+      action === 'resume'
+        ? await postResult<ResumeInterventionResponse>(`/api/v1/issues/${issueNumber}/${path}`)
+        : null
+    if (resumeResult?.accepted === false) {
+      throw new Error(resumeResult.reason)
+    }
+    if (action !== 'resume') {
+      await post(`/api/v1/issues/${issueNumber}/${path}`)
+    }
     await post('/api/v1/refresh')
     await Promise.all([loadState(), loadBacklog()])
     setFeedback(item.identifier, {
       tone: 'success',
-      message: enable
-        ? item.queueReason === null
-          ? 'Eligible. Sloppenheimer is selecting work and will start it shortly.'
-          : `Queued: ${item.queueReason}. It starts when a slot frees.`
-        : 'Paused. Sloppenheimer will not select this issue.',
+      message:
+        action === 'resume'
+          ? 'Recovery requested. Sloppenheimer reconciled the retained work before retrying it.'
+          : action === 'start'
+            ? item.queueReason === null
+              ? 'Eligible. Sloppenheimer is selecting work and will start it shortly.'
+              : `Queued: ${item.queueReason}. It starts when a slot frees.`
+            : 'Paused. Sloppenheimer will not select this issue.',
       retry: null,
     })
   } catch (error) {
@@ -152,7 +177,7 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
       tone: 'failure',
       message: error instanceof Error ? error.message : 'The action failed.',
       retry: () => {
-        void runAction(item, enable)
+        void runAction(item, action)
       },
     })
   } finally {
@@ -179,13 +204,14 @@ const actionControl = (item: WorkItem, scope: string): HTMLElement | null => {
   button.setAttribute('aria-describedby', describedBy)
   button.setAttribute('aria-label', `${label} for ${item.identifier}: ${item.title}`)
   const busy = inFlight.has(item.identifier)
+  const runnableAction = item.action === 'queue' ? 'start' : item.action
   button.disabled = busy
   button.setAttribute('aria-busy', String(busy))
   button.addEventListener('click', () => {
     if (item.action === 'pause' && !confirmPause(item)) {
       return
     }
-    void runAction(item, item.action !== 'pause')
+    void runAction(item, runnableAction)
   })
   const wrapper = document.createElement('div')
   wrapper.className = 'action-cell'

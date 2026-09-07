@@ -104,6 +104,8 @@ const backend: OperatorBackend = {
     cycles: [],
   }),
   setIssueEnabled: () => Effect.void,
+  resumeIntervention: () =>
+    Effect.succeed({ status: 'refused', kind: null, reason: 'No retained intervention.' }),
 }
 
 describe('Extension Conformance: HTTP status surface', (): void => {
