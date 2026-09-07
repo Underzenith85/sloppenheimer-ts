@@ -4,11 +4,12 @@
   "private": true,
   "description": "A strict TypeScript implementation of the OpenAI Symphony service specification",
   "bin": {
-    "sloppenheimer": "./dist/cli.js"
+    "sloppenheimer": "./dist/cli.js",
+    "sloppenheimer-coordinator": "./packages/coordinator/dist/cli.js"
   },
   "type": "module",
   "scripts": {
-    "build": "tsc -b tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs && pnpm --filter @sloppenheimer/coordinator-ui build",
+    "build": "tsc -b tsconfig.build.json && tsc -p tsconfig.browser.json && node scripts/copy-operator-ui.mjs && pnpm --filter @sloppenheimer/coordinator-ui build && node scripts/copy-coordinator-ui.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "dev": "tsx src/cli.ts",
     "format": "oxfmt .",
@@ -27,6 +28,7 @@
     "@sloppenheimer/adapter-codex": "workspace:*",
     "@sloppenheimer/adapter-github": "workspace:*",
     "@sloppenheimer/adapter-node": "workspace:*",
+    "@sloppenheimer/coordinator": "workspace:*",
     "@sloppenheimer/core": "workspace:*",
     "chokidar": "5.0.0",
     "effect": "3.22.1",
