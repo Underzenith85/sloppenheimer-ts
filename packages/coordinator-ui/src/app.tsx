@@ -3,6 +3,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import type { ReactElement } from 'react'
 
 import styles from './app.module.css'
+import { PrimitiveFixtures } from './primitive-fixtures.js'
 
 type AppProps = Readonly<{ queryClient: QueryClient }>
 
@@ -12,6 +13,7 @@ export const App = ({ queryClient }: AppProps): ReactElement => (
     <main className={styles['shell']}>
       <h1>Sloppenheimer coordinator</h1>
       <p>The coordinator console is being built. Instance data is not connected yet.</p>
+      <PrimitiveFixtures />
     </main>
   </QueryClientProvider>
 )

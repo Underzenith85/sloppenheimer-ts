@@ -1,0 +1,30 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--surface-overlay);
+}
+
+.dialog {
+  position: fixed;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  transform: translate(-50%, -50%);
+  inline-size: min(32rem, calc(100% - 2 * var(--space-4)));
+  max-block-size: calc(100% - 2 * var(--space-4));
+  overflow-y: auto;
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-panel);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+}
+
+.title,
+.description {
+  margin: 0;
+}
+.description {
+  color: var(--text-secondary);
+}

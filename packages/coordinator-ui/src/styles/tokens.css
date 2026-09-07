@@ -11,3 +11,72 @@
   --tap: 44px;
   --page: #0b0c0b;
 }
+
+/* Components consume roles; palette names above remain the source colors. */
+:root {
+  --surface-page: var(--page);
+  --surface-panel: #151615;
+  --surface-control: #262826;
+  --surface-action: var(--acid);
+  --surface-action-hover: #e4ff9b;
+  --surface-overlay: rgb(0 0 0 / 75%);
+  --text-primary: var(--ink);
+  --text-secondary: #b9b7af;
+  --text-on-action: var(--page);
+  --text-on-action-hover: var(--page);
+  --text-info: var(--sky);
+  --text-success: var(--acid);
+  --text-warning: var(--amber);
+  --text-failure: var(--coral);
+  --border-subtle: #62655d;
+  --border-control: #8b9082;
+  --focus-ring: var(--sky);
+  --focus-width: 3px;
+  --focus-offset: 3px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-size-small: 0.875rem;
+  --font-size-body: 1rem;
+  --font-size-heading: 1.5rem;
+  --font-size-title: 2rem;
+  --line-height-body: 1.5;
+  --line-height-heading: 1.25;
+  --weight-strong: 650;
+  --control-min: var(--tap);
+  --radius-control: 0.375rem;
+  --radius-panel: 0.75rem;
+  --motion-duration: 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration: 0ms;
+  }
+}
+
+@media (forced-colors: active) {
+  :root {
+    --surface-page: Canvas;
+    --surface-panel: Canvas;
+    --surface-control: ButtonFace;
+    --surface-action: ButtonFace;
+    --surface-action-hover: Highlight;
+    --surface-overlay: Canvas;
+    --text-primary: CanvasText;
+    --text-secondary: CanvasText;
+    --text-on-action: ButtonText;
+    --text-on-action-hover: HighlightText;
+    --text-info: CanvasText;
+    --text-success: CanvasText;
+    --text-warning: CanvasText;
+    --text-failure: CanvasText;
+    --border-subtle: CanvasText;
+    --border-control: ButtonText;
+    --focus-ring: Highlight;
+  }
+}

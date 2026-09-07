@@ -1,0 +1,18 @@
+.panel {
+  min-inline-size: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  background: var(--surface-panel);
+}
+
+.panel > :first-child {
+  margin-block-start: 0;
+}
+.panel > p {
+  color: var(--text-secondary);
+}
+.content {
+  display: grid;
+  gap: var(--space-4);
+}

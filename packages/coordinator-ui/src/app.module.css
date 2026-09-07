@@ -1,5 +1,11 @@
 .shell {
   max-width: 72rem;
   margin-inline: auto;
-  padding: 2rem;
+  padding: var(--space-5);
+}
+
+.fixtures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: var(--space-5);
 }
