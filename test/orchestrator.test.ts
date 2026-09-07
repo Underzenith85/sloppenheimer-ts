@@ -8262,8 +8262,17 @@ describe('live agent detail', (): void => {
       })
       expect(detail.usage.totalTokens).toBe(18)
       expect(detail.rateLimits).toEqual([
-        { name: 'primary', usedPercent: 40, windowMinutes: 300, resetsInSeconds: 60 },
+        expect.objectContaining({
+          source: 'agent_telemetry',
+          name: 'primary',
+          usedPercent: 40,
+          windowMinutes: 300,
+          resetsInSeconds: 60,
+          stale: false,
+          effect: 'informational',
+        }),
       ])
+      expect(detail.rateLimits[0]?.resetAt).not.toBeNull()
       expect(detail.workspace).toMatchObject({ dirtyFileCount: 1, addedLines: 9, deletedLines: 1 })
       expect(detail.activity.stallTimeoutMs).toBe(30_000)
       // The runtime snapshot keeps the client's own merged rate-limit object; the per-agent detail

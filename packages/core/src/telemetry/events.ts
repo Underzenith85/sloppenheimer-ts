@@ -24,7 +24,12 @@ export type TokenCounts = Readonly<{
 }>
 
 export type RateLimitWindow = Readonly<{
+  source: 'agent_telemetry'
   name: string
+  observedAt: string
+  resetAt: string | null
+  stale: boolean
+  effect: 'informational' | 'none'
   usedPercent: number | null
   windowMinutes: number | null
   resetsInSeconds: number | null
@@ -171,7 +176,10 @@ export const qualityPhaseOf = (command: string): QualityPhase | null => {
   )
 }
 
-export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLimitWindow[] => {
+export const decodeRateLimits = (
+  value: JsonValue | undefined,
+  observedAt: Date,
+): readonly RateLimitWindow[] => {
   const report = decodeRateLimitReport(value)
   if (report === null) {
     return []
@@ -184,7 +192,18 @@ export const decodeRateLimits = (value: JsonValue | undefined): readonly RateLim
     if (decoded === null) {
       continue
     }
-    windows.push({ name: bound(redact(name), 40).text, ...decoded })
+    windows.push({
+      source: 'agent_telemetry',
+      name: bound(redact(name), 40).text,
+      observedAt: observedAt.toISOString(),
+      resetAt:
+        decoded.resetsInSeconds === null
+          ? null
+          : new Date(observedAt.getTime() + decoded.resetsInSeconds * 1_000).toISOString(),
+      stale: false,
+      effect: 'informational',
+      ...decoded,
+    })
   }
   // Frozen on construction, so the copies a timeline event and a published snapshot each hold
   // cannot be edited into the actor's own reading.

@@ -10,8 +10,6 @@
 
 import { Schema } from 'effect'
 
-import type { JsonObject, JsonValue } from '@sloppenheimer/core/support/json.js'
-
 import type {
   PublishedCompleted,
   PublishedDelivering,
@@ -23,27 +21,6 @@ import type {
   PublishedState,
 } from './state.js'
 import { publishedTokensSchema, publishedTotalsSchema } from './tokens.js'
-
-/**
- * The coding agent's rate-limit report, passed through as it arrived. Its keys belong to that
- * protocol rather than to this API, so the schema states only that the report is JSON.
- */
-const jsonValueSchema: Schema.Schema<JsonValue> = Schema.Union(
-  Schema.Null,
-  Schema.String,
-  Schema.Number,
-  Schema.Boolean,
-  Schema.Array(Schema.suspend((): Schema.Schema<JsonValue> => jsonValueSchema)),
-  Schema.Record({
-    key: Schema.String,
-    value: Schema.suspend((): Schema.Schema<JsonValue> => jsonValueSchema),
-  }),
-).annotations({ identifier: 'JsonValue' })
-
-const jsonObjectSchema: Schema.Schema<JsonObject> = Schema.Record({
-  key: Schema.String,
-  value: jsonValueSchema,
-}).annotations({ identifier: 'JsonObject' })
 
 const publishedRunningSchema: Schema.Schema<PublishedRunning> = Schema.Struct({
   issue_id: Schema.String,
@@ -219,7 +196,50 @@ export const publishedStateSchema: Schema.Schema<PublishedState> = Schema.Struct
   saturated_states: Schema.Array(Schema.String),
   inspectable_agents: Schema.Array(Schema.String),
   codex_totals: publishedTotalsSchema,
-  rate_limits: Schema.NullOr(jsonObjectSchema),
+  rate_limits: Schema.Array(
+    Schema.Union(
+      Schema.Struct({
+        source: Schema.Literal('codex_agent'),
+        scope: Schema.Literal('host'),
+        observed_at: Schema.String,
+        stale: Schema.Boolean,
+        effect: Schema.Literal('informational', 'none'),
+        windows: Schema.Array(
+          Schema.Struct({
+            source: Schema.Literal('agent_telemetry'),
+            name: Schema.String,
+            observedAt: Schema.String,
+            resetAt: Schema.NullOr(Schema.String),
+            stale: Schema.Boolean,
+            effect: Schema.Literal('informational', 'none'),
+            usedPercent: Schema.NullOr(Schema.Number),
+            windowMinutes: Schema.NullOr(Schema.Number),
+            resetsInSeconds: Schema.NullOr(Schema.Number),
+          }),
+        ),
+      }),
+      Schema.Struct({
+        source: Schema.Literal('github_local_pacing'),
+        scope: Schema.String,
+        observed_at: Schema.String,
+        queued_requests: Schema.Number,
+        oldest_wait_ms: Schema.Number,
+        maximum_expected_wait_ms: Schema.Number,
+        effect: Schema.Literal('delaying', 'idle'),
+      }),
+      Schema.Struct({
+        source: Schema.Literal('github_response'),
+        scope: Schema.String,
+        observed_at: Schema.String,
+        status: Schema.Number,
+        remaining: Schema.NullOr(Schema.Number),
+        limit: Schema.NullOr(Schema.Number),
+        reset_at: Schema.NullOr(Schema.String),
+        stale: Schema.Boolean,
+        effect: Schema.Literal('rejected', 'available'),
+      }),
+    ),
+  ),
 })
 
 export const publishedRefreshSchema: Schema.Schema<PublishedRefresh> = Schema.Struct({

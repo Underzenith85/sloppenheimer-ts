@@ -6,6 +6,11 @@ import { workflowProgress } from '@sloppenheimer/core/domain/workflow-progress.j
 // row types are the runtime's own record, which the per-issue resource beside it reads too.
 
 import type { OrchestratorSnapshot, RefreshOutcome } from '@sloppenheimer/core'
+import { decodeRateLimits } from '@sloppenheimer/core/telemetry.js'
+import type {
+  GitHubLocalPacingStatus,
+  GitHubProviderLimitStatus,
+} from '@sloppenheimer/adapter-github/rate-limit.js'
 
 import { publishTokens, type PublishedTokens, type PublishedTotals } from './tokens.js'
 
@@ -16,6 +21,39 @@ export type CompletedRow = Snapshot['completed'][number]
 export type HandoffRow = Snapshot['handoffs'][number]
 export type DeliveringRow = Snapshot['delivering'][number]
 export type RetainedWorkspaceRow = Snapshot['retainedWorkspaces'][number]
+
+export type PublishedCodexRateLimit = Readonly<{
+  source: 'codex_agent'
+  scope: 'host'
+  observed_at: string
+  stale: boolean
+  effect: 'informational' | 'none'
+  windows: ReturnType<typeof decodeRateLimits>
+}>
+
+export type PublishedGitHubRateLimit =
+  | Readonly<{
+      source: 'github_local_pacing'
+      scope: string
+      observed_at: string
+      queued_requests: number
+      oldest_wait_ms: number
+      maximum_expected_wait_ms: number
+      effect: 'delaying' | 'idle'
+    }>
+  | Readonly<{
+      source: 'github_response'
+      scope: string
+      observed_at: string
+      status: number
+      remaining: number | null
+      limit: number | null
+      reset_at: string | null
+      stale: boolean
+      effect: 'rejected' | 'available'
+    }>
+
+export type PublishedRateLimit = PublishedCodexRateLimit | PublishedGitHubRateLimit
 
 export type PublishedRunning = Readonly<{
   issue_id: string
@@ -156,11 +194,8 @@ export type PublishedState = Readonly<{
   saturated_states: readonly string[]
   inspectable_agents: readonly string[]
   codex_totals: PublishedTotals
-  /**
-   * The coding agent's own rate-limit report, passed through as it arrived. Its keys belong to that
-   * protocol rather than to this API, so they are not renamed.
-   */
-  rate_limits: Snapshot['rateLimits']
+  /** Sourced operational limits. Local pacing is never represented as a provider rejection. */
+  rate_limits: readonly PublishedRateLimit[]
 }>
 
 /**
@@ -258,7 +293,67 @@ const publishHandoff = (entry: HandoffRow): PublishedHandoff => ({
   observed_at: entry.observedAt,
 })
 
-export const publishState = (snapshot: Snapshot): PublishedState => ({
+const publishGitHubLimit = (
+  limit: GitHubLocalPacingStatus | GitHubProviderLimitStatus,
+): PublishedGitHubRateLimit =>
+  limit.source === 'github_local_pacing'
+    ? {
+        source: limit.source,
+        scope: limit.providerScope,
+        observed_at: limit.observedAt,
+        queued_requests: limit.queuedRequests,
+        oldest_wait_ms: limit.oldestWaitMs,
+        maximum_expected_wait_ms: limit.maximumExpectedWaitMs,
+        effect: limit.effect,
+      }
+    : {
+        source: limit.source,
+        scope: limit.providerScope,
+        observed_at: limit.observedAt,
+        status: limit.status,
+        remaining: limit.remaining,
+        limit: limit.limit,
+        reset_at: limit.resetAt,
+        stale: limit.stale,
+        effect: limit.effect,
+      }
+
+const publishCodexLimit = (snapshot: Snapshot): PublishedCodexRateLimit | null => {
+  if (snapshot.rateLimits === null || snapshot.running.length === 0) {
+    return null
+  }
+  const observedAt = snapshot.running
+    .map((entry) => entry.lastEventAt)
+    .filter((instant): instant is string => instant !== null)
+    .sort()
+    .at(-1)
+  if (observedAt === undefined) {
+    return null
+  }
+  const generatedAt = Date.parse(snapshot.generatedAt)
+  const windows = decodeRateLimits(snapshot.rateLimits, new Date(observedAt)).map((window) => {
+    const staleAt =
+      window.resetAt === null
+        ? Date.parse(window.observedAt) + 5 * 60 * 1_000
+        : Date.parse(window.resetAt)
+    const stale = staleAt <= generatedAt
+    return { ...window, stale, effect: stale ? ('none' as const) : ('informational' as const) }
+  })
+  const stale = windows.every((window) => window.stale)
+  return {
+    source: 'codex_agent',
+    scope: 'host',
+    observed_at: observedAt,
+    stale,
+    effect: stale ? 'none' : 'informational',
+    windows,
+  }
+}
+
+export const publishState = (
+  snapshot: Snapshot,
+  githubLimits: readonly (GitHubLocalPacingStatus | GitHubProviderLimitStatus)[] = [],
+): PublishedState => ({
   durable_workflows: snapshot.durableWorkflows.map((record) => ({
     issue_id: record.issueId,
     issue_identifier: record.identifier,
@@ -316,7 +411,9 @@ export const publishState = (snapshot: Snapshot): PublishedState => ({
     ...publishTokens(snapshot.totals),
     seconds_running: snapshot.totals.secondsRunning,
   },
-  rate_limits: snapshot.rateLimits,
+  rate_limits: [publishCodexLimit(snapshot), ...githubLimits.map(publishGitHubLimit)].filter(
+    (limit): limit is PublishedRateLimit => limit !== null,
+  ),
 })
 
 export const publishRefresh = (outcome: RefreshOutcome): PublishedRefresh => ({

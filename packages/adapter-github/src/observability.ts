@@ -28,6 +28,12 @@ export const githubRateLimitDelay = Metric.timer(
   'Time a GitHub request waited for provider rate-limit capacity before it was issued.',
 )
 
+/** GitHub itself refused a request, distinct from a request this host merely delayed locally. */
+export const githubRateLimitRejections = Metric.counter(
+  'sloppenheimer_github_rate_limit_rejections_total',
+  { description: 'GitHub HTTP 403/429 responses classified as provider rate-limit rejections.' },
+)
+
 export const observeGitHubRequest =
   (method: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
@@ -44,3 +50,7 @@ export const observeGitHubRequest =
  */
 export const recordGitHubRateLimitDelay = (waitedMs: number): Effect.Effect<void> =>
   safelyRecord(Metric.update(githubRateLimitDelay, Duration.millis(Math.max(0, waitedMs))))
+
+export const recordGitHubRateLimitRejection: Effect.Effect<void> = safelyRecord(
+  Metric.increment(githubRateLimitRejections),
+)

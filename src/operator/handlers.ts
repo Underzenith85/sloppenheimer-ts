@@ -15,6 +15,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { Effect, Layer, Redacted, Schema } from 'effect'
 
 import type { AgentDetailLookup } from '@sloppenheimer/core'
+import { githubOperationalLimits } from '@sloppenheimer/adapter-github/rate-limit.js'
 
 import { publishIssueDetail, publishRefresh, publishState } from './api.js'
 import type { PublishedAgentDetail } from './api/agent-detail-schema.js'
@@ -162,7 +163,11 @@ export const operatorHandlers = (
 ): Layer.Layer<HttpApiGroup.ApiGroup<'operator', 'operator'>> =>
   HttpApiBuilder.group(operatorApi, 'operator', (handlers) =>
     handlers
-      .handle('state', () => Effect.map(backend.snapshot, publishState))
+      .handle('state', () =>
+        Effect.map(Effect.all([backend.snapshot, githubOperationalLimits]), ([snapshot, limits]) =>
+          publishState(snapshot, limits),
+        ),
+      )
       .handle('backlog', () => runBackend(backend.backlog))
       .handle('refresh', () =>
         Effect.zipRight(requirePageToken(csrfToken), Effect.map(backend.refresh, publishRefresh)),
