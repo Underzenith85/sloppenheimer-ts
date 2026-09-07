@@ -149,6 +149,7 @@ const fakeOrchestrator = (
         }
         setIssuePaused(issueNumber, isPaused)
       }),
+    resumeIntervention: () => Effect.void,
     awaitTermination: Effect.never,
   }
 }

@@ -68,7 +68,7 @@ type Eligibility = 'eligible' | 'paused' | 'not_eligible'
  * orchestral metaphor: enabling an issue makes it eligible and asks Sloppenheimer to reselect, which is
  * an immediate start only when there is spare capacity.
  */
-type ActionKind = 'start' | 'queue' | 'pause' | 'blockers' | 'none'
+type ActionKind = 'start' | 'queue' | 'pause' | 'resume_intervention' | 'blockers' | 'none'
 
 type Blocker = Readonly<{ identifier: string; url: string | null }>
 

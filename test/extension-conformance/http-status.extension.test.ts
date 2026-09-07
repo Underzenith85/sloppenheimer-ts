@@ -104,6 +104,7 @@ const backend: OperatorBackend = {
     cycles: [],
   }),
   setIssueEnabled: () => Effect.void,
+  resumeIntervention: () => Effect.void,
 }
 
 describe('Extension Conformance: HTTP status surface', (): void => {

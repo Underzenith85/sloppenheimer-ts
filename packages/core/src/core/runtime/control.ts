@@ -1,4 +1,4 @@
-import { changeIssueIntent } from './intent.js'
+import { changeIssueIntent, resumeIntervention } from './intent.js'
 import type { WorkflowError } from '../../domain/errors.js'
 import { Clock, Effect, Fiber, Ref } from 'effect'
 
@@ -26,6 +26,7 @@ export const orchestratorControl = (
   refresh: Effect.raceFirst(requestRefresh(cells), Fiber.join(eventLoopFiber).pipe(Effect.orDie)),
   agentDetail: (identifier) => agentDetail(context, identifier),
   setIssuePaused: (issueNumber, paused) => changeIssueIntent(cells, issueNumber, paused),
+  resumeIntervention: (issueNumber) => resumeIntervention(cells, issueNumber),
   awaitTermination: Fiber.join(eventLoopFiber).pipe(
     Effect.zipRight(Effect.dieMessage('orchestrator event loop exited unexpectedly')),
   ),

@@ -213,6 +213,7 @@ const makeBackend = (setIssueEnabled = vi.fn()): OperatorBackend => ({
     Effect.sync(() => {
       setIssueEnabled(number, enabled)
     }),
+  resumeIntervention: () => Effect.void,
 })
 
 /**

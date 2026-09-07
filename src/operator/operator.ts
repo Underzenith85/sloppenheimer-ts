@@ -86,6 +86,7 @@ export type OperatorBackend = Readonly<{
     issueNumber: number,
     enabled: boolean,
   ) => Effect.Effect<void, OperatorBackendError>
+  resumeIntervention: (issueNumber: number) => Effect.Effect<void, OperatorBackendError>
 }>
 
 const controlLabel = (workflow: Workflow): Effect.Effect<string, WorkflowError> => {
@@ -359,6 +360,7 @@ export const makeOperatorBackend = (
                 Effect.flatMap((control) => enableIssue(orchestrator, control, issueNumber)),
               )
             : orchestrator.setIssuePaused(issueNumber, true),
+        resumeIntervention: (issueNumber) => orchestrator.resumeIntervention(issueNumber),
       }
     },
   )

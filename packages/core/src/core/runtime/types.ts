@@ -215,6 +215,8 @@ export type OrchestratorControl = Readonly<{
    */
   refresh: Effect.Effect<RefreshOutcome>
   setIssuePaused: (issueNumber: number, paused: boolean) => Effect.Effect<void>
+  /** Retries one retained delivery or durable handoff intervention, after reconciliation. */
+  resumeIntervention: (issueNumber: number) => Effect.Effect<void>
   /**
    * Reads the published detail for one issue. The published index is built by the actor and is
    * immutable, so a detail request neither observes a partial update nor takes a turn in the
@@ -305,6 +307,11 @@ export type OrchestratorEvent =
       reply: Deferred.Deferred<void>
       committed?: boolean
       affectedRuns?: readonly Readonly<{ issueId: IssueId; runId: number }>[]
+    }>
+  | Readonly<{
+      _tag: 'ResumeIntervention'
+      issueNumber: number
+      reply: Deferred.Deferred<void>
     }>
 
 /**

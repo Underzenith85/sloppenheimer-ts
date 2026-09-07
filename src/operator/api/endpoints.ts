@@ -44,6 +44,20 @@ export type PublishedIssueAction = Readonly<{
   enabled: boolean
 }>
 
+export type PublishedInterventionAction = Readonly<{
+  accepted: true
+  issueNumber: number
+  action: 'resume_intervention'
+}>
+
+const publishedInterventionActionSchema: Schema.Schema<PublishedInterventionAction> = Schema.Struct(
+  {
+    accepted: Schema.Literal(true),
+    issueNumber: Schema.Number,
+    action: Schema.Literal('resume_intervention'),
+  },
+)
+
 const publishedIssueActionSchema: Schema.Schema<PublishedIssueAction> = Schema.Struct({
   accepted: Schema.Literal(true),
   issueNumber: Schema.Number,
@@ -169,6 +183,18 @@ const pauseIssue = HttpApiEndpoint.post('pauseIssue', '/api/v1/issues/:issueNumb
   .addError(backendError.schema, { status: backendError.status })
   .annotate(OpenApi.Description, 'Holds an issue back from dispatch.')
 
+const resumeIntervention = HttpApiEndpoint.post(
+  'resumeIntervention',
+  '/api/v1/issues/:issueNumber/resume-intervention',
+)
+  .middleware(PageToken)
+  .setPath(issueNumberPath)
+  .addSuccess(jsonDocument(publishedInterventionActionSchema), { status: 202 })
+  .addError(notFound.schema, { status: notFound.status })
+  .addError(invalidCsrfToken.schema, { status: invalidCsrfToken.status })
+  .addError(backendError.schema, { status: backendError.status })
+  .annotate(OpenApi.Description, 'Retries retained delivery or handoff intervention work.')
+
 const agentDetail = HttpApiEndpoint.get('agentDetail', '/api/v1/agents/:identifier')
   .setPath(identifierPath)
   .addSuccess(jsonDocument(publishedAgentDetailSchema), { status: 200 })
@@ -202,6 +228,7 @@ const operatorGroup = HttpApiGroup.make('operator')
   .add(refresh)
   .add(startIssue)
   .add(pauseIssue)
+  .add(resumeIntervention)
   .add(agentDetail)
   .add(issueResource)
   .annotate(OpenApi.Title, 'Sloppenheimer operator API')

@@ -28,6 +28,7 @@ const actionLabels: Readonly<Record<ActionKind, string>> = {
   start: 'Start agent',
   queue: 'Queue issue',
   pause: 'Pause',
+  resume_intervention: 'Retry attention',
   blockers: 'View blockers',
   none: '',
 }
@@ -41,6 +42,8 @@ const actionDescriptions: Readonly<Record<ActionKind, string>> = {
   queue: 'Makes the issue eligible. Sloppenheimer starts it as soon as a dispatch slot is free.',
   pause:
     'Removes the issue from orchestration, cancels its running agent, and drops queued retries.',
+  resume_intervention:
+    'Reconciles the retained work, then retries its protected publication or repair attempt.',
   blockers: 'Lists the unresolved dependencies that are holding this issue back.',
   none: '',
 }
@@ -131,20 +134,30 @@ const runAction = async (item: WorkItem, enable: boolean): Promise<void> => {
   inFlight.add(item.identifier)
   setFeedback(item.identifier, {
     tone: 'pending',
-    message: enable ? 'Requesting orchestration…' : 'Pausing…',
+    message:
+      item.action === 'resume_intervention'
+        ? 'Retrying attention…'
+        : enable
+          ? 'Requesting orchestration…'
+          : 'Pausing…',
     retry: null,
   })
   try {
-    await post(`/api/v1/issues/${issueNumber}/${enable ? 'start' : 'pause'}`)
+    const endpoint =
+      item.action === 'resume_intervention' ? 'resume-intervention' : enable ? 'start' : 'pause'
+    await post(`/api/v1/issues/${issueNumber}/${endpoint}`)
     await post('/api/v1/refresh')
     await Promise.all([loadState(), loadBacklog()])
     setFeedback(item.identifier, {
       tone: 'success',
-      message: enable
-        ? item.queueReason === null
-          ? 'Eligible. Sloppenheimer is selecting work and will start it shortly.'
-          : `Queued: ${item.queueReason}. It starts when a slot frees.`
-        : 'Paused. Sloppenheimer will not select this issue.',
+      message:
+        item.action === 'resume_intervention'
+          ? 'Recovery accepted. Sloppenheimer is rechecking the retained work.'
+          : enable
+            ? item.queueReason === null
+              ? 'Eligible. Sloppenheimer is selecting work and will start it shortly.'
+              : `Queued: ${item.queueReason}. It starts when a slot frees.`
+            : 'Paused. Sloppenheimer will not select this issue.',
       retry: null,
     })
   } catch (error) {
@@ -168,7 +181,8 @@ const actionControl = (item: WorkItem, scope: string): HTMLElement | null => {
     return blockerDisclosure(item)
   }
   const label =
-    item.phase === 'delivering' && item.action === 'start'
+    item.phase === 'delivering' &&
+    (item.action === 'start' || item.action === 'resume_intervention')
       ? 'Resume delivery'
       : actionLabels[item.action]
   const button = text('button', `action action-${item.action}`, label)
@@ -185,7 +199,7 @@ const actionControl = (item: WorkItem, scope: string): HTMLElement | null => {
     if (item.action === 'pause' && !confirmPause(item)) {
       return
     }
-    void runAction(item, item.action !== 'pause')
+    void runAction(item, item.action !== 'pause' && item.action !== 'resume_intervention')
   })
   const wrapper = document.createElement('div')
   wrapper.className = 'action-cell'

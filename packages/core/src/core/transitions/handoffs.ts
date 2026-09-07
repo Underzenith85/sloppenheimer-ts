@@ -21,6 +21,19 @@ export const removeHandoff = (state: RuntimeState, id: IssueId): RuntimeState =>
   handoffs: withoutEntry(state.handoffs, id),
 })
 
+/** Reopens one intervention for the explicit operator recovery pass. */
+export const resumeHandoffIntervention = (state: RuntimeState, id: IssueId): RuntimeState => {
+  const handoff = state.handoffs.get(id)
+  if (handoff?.state !== 'intervention_required') {
+    return state
+  }
+  return putHandoff(state, id, {
+    ...handoff,
+    state: 'repair_needed',
+    reason: 'Operator requested intervention recovery',
+  })
+}
+
 /** The pull request is finished with: the handoff goes, and the issue is completed and released. */
 export const completeHandoff = (
   state: RuntimeState,

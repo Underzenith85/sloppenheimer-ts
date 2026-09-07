@@ -187,7 +187,11 @@ const deliveringItem = (
     // A pause suspends a delivery rather than dropping it, so the row an operator sees while one is
     // held has to offer the way back: without a resume here the timer is never re-armed and the
     // retained change waits on an API call by hand.
-    action: eligibility === 'paused' || entry.intervention_required ? 'start' : 'pause',
+    action: entry.intervention_required
+      ? 'resume_intervention'
+      : eligibility === 'paused'
+        ? 'start'
+        : 'pause',
   }
 }
 
@@ -238,7 +242,7 @@ const handoffItem = (
     queueReason: null,
     finishedAt: merged ? new Date(now).toISOString() : null,
     pullRequestUrl: entry.pull_request_url,
-    action: 'none',
+    action: entry.state === 'intervention_required' ? 'resume_intervention' : 'none',
   }
 }
 
