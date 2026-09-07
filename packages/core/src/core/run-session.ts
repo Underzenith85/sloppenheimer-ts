@@ -33,17 +33,27 @@ const refreshIssueThrough =
 export const runSession = (
   launch: SessionLaunch,
   workspace: Workspace,
+  options: Readonly<{ conflictRepair?: boolean; prompt?: string }> = {},
 ): Effect.Effect<void, AgentError | WorkspaceError> => {
   const { context, issue, execution } = launch
-  return execution.workspaces.beforeRun(workspace).pipe(
-    Effect.zipRight(enterRunPhase(context, issue.id, launch.runId, 'Agent')),
+  return (
+    options.conflictRepair === true ? Effect.void : execution.workspaces.beforeRun(workspace)
+  ).pipe(
+    Effect.zipRight(
+      enterRunPhase(
+        context,
+        issue.id,
+        launch.runId,
+        options.conflictRepair === true ? 'ConflictRepair' : 'Agent',
+      ),
+    ),
     Effect.zipRight(
       superviseAgent(context.ports.agentRunner, {
         issue,
         workspace,
         workspaceRoot: execution.workspaceRoot,
         config: execution.agentRunner,
-        prompt: execution.prompt,
+        prompt: options.prompt ?? execution.prompt,
         maxTurns: execution.maxTurns,
         secretEnvironmentNames: execution.secretEnvironmentNames,
         hostTools: launch.hostTools,
@@ -86,7 +96,9 @@ export const runSession = (
       }),
     ),
     // The adapter bounds this best-effort hook. Cancellation must wait for cleanup too.
-    Effect.ensuring(execution.workspaces.afterRun(workspace)),
+    Effect.ensuring(
+      options.conflictRepair === true ? Effect.void : execution.workspaces.afterRun(workspace),
+    ),
     Effect.asVoid,
   )
 }

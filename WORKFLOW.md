@@ -58,3 +58,7 @@ instead of opening a replacement. Sloppenheimer rebases and publishes the result
 exact expected-head lease, then submits `@codex review` after observing the published head. Do not
 resolve review threads yourself or merge the pull request; Sloppenheimer will do those only after CI
 passes and the latest-head review is verified.
+
+When the host supplies a `Publication conflict repair` section, resolve only the conflicts in the
+current worktree. The host owns the paused rebase and will stage and continue it, potentially replay
+more commits, then run final verification. Do not abort, restart or continue the rebase yourself.

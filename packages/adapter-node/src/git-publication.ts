@@ -1,7 +1,11 @@
 import { Effect, Option } from 'effect'
 
 import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
-import type { PreparedRepository } from '@sloppenheimer/core/ports/source-control.js'
+import { rebaseWithRepair } from './git-conflict.js'
+import type {
+  PreparedRepository,
+  ResolvePublicationConflict,
+} from '@sloppenheimer/core/ports/source-control.js'
 import { containedIn, remoteHead, revParse } from './git-queries.js'
 import { gitIdentity, runGit, type GitSourceControlSettings } from './git-process.js'
 
@@ -42,7 +46,8 @@ const abortRebase = (
   )
 
 /**
- * Puts HEAD on top of the fetched base, leaving no rebase state behind however it ends.
+ * Puts HEAD on top of the fetched base. A repair continuation owns paused sequencer state;
+ * callers without that capability retain the original abort-on-failure behavior.
  *
  * The failure is passed through as the git reader classified it rather than re-wrapped: a content
  * conflict arrives as `rebase_conflict`, and a rebase git refused to start or finish -- a stale
@@ -53,30 +58,33 @@ const abortRebase = (
 export const rebaseOntoBase = (
   settings: GitSourceControlSettings,
   prepared: PreparedRepository,
+  resolveConflict?: ResolvePublicationConflict,
 ): Effect.Effect<void, SourceControlError> =>
-  Effect.catchAll(
-    // An interruption terminates the git process group mid-rebase, which leaves `.git/rebase-merge`
-    // and a detached head behind. `Effect.catchAll` does not see an interruption, and the next
-    // publication's rebase refuses to start on the state this one left, so the abort is also
-    // attached as a finalizer.
-    Effect.onInterrupt(
-      Effect.asVoid(
-        runGit(
-          settings,
-          'publish',
-          prepared.workspace.path,
-          [
-            'rebase',
-            '--committer-date-is-author-date',
-            `refs/remotes/origin/${prepared.baseBranch}`,
-          ],
-          gitIdentity,
+  resolveConflict !== undefined
+    ? rebaseWithRepair(settings, prepared, resolveConflict)
+    : Effect.catchAll(
+        // An interruption terminates the git process group mid-rebase, which leaves `.git/rebase-merge`
+        // and a detached head behind. `Effect.catchAll` does not see an interruption, and the next
+        // publication's rebase refuses to start on the state this one left, so the abort is also
+        // attached as a finalizer.
+        Effect.onInterrupt(
+          Effect.asVoid(
+            runGit(
+              settings,
+              'publish',
+              prepared.workspace.path,
+              [
+                'rebase',
+                '--committer-date-is-author-date',
+                `refs/remotes/origin/${prepared.baseBranch}`,
+              ],
+              gitIdentity,
+            ),
+          ),
+          () => abortRebase(settings, prepared),
         ),
-      ),
-      () => abortRebase(settings, prepared),
-    ),
-    (failure) => Effect.zipRight(abortRebase(settings, prepared), Effect.fail(failure)),
-  )
+        (failure) => Effect.zipRight(abortRebase(settings, prepared), Effect.fail(failure)),
+      )
 
 /**
  * Whether the branch this would publish to already carries the commit in the workspace.

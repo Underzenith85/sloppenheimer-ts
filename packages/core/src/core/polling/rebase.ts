@@ -1,3 +1,4 @@
+import { retainedConflictResolver } from '../retained-conflict-worker.js'
 import type { RunJournal } from '../durable/run-journal.js'
 import { publicationEligibility } from '../publication-eligibility.js'
 import { runVerifiedPublication } from '../verified-publication.js'
@@ -64,10 +65,16 @@ const runRebaseAttempt = (
           .pipe(
             Effect.tap((prepared) => journal?.prepared(prepared) ?? Effect.void),
             Effect.flatMap((prepared) => {
+              const resolveConflict = retainedConflictResolver(
+                context,
+                handoff.issue,
+                { ...handoff.execution, ...(journal === undefined ? {} : { journal }) },
+                prepared,
+              )
               const verification = handoff.execution.workflow.config.verification
               return verification === undefined
                 ? sourceControl
-                    .rebase(handoff.issue, prepared)
+                    .rebase(handoff.issue, prepared, resolveConflict)
                     .pipe(Effect.tap((outcome) => journal?.settled(outcome) ?? Effect.void))
                 : runVerifiedPublication(
                     sourceControl,
@@ -77,6 +84,7 @@ const runRebaseAttempt = (
                     handoff.execution.secretEnvironmentNames,
                     {
                       rebaseOnly: true,
+                      resolveConflict,
                       ...(journal === undefined ? {} : { journal: journal.publication }),
                       beforePublish: publicationEligibility(
                         context.state,
@@ -96,11 +104,13 @@ const runRebaseAttempt = (
       Effect.tapError(() => journal?.failed ?? Effect.void),
       Effect.match({
         onFailure: (error): RebaseOutcome =>
-          error._tag === 'SourceControlError' && error.category === 'rebase_conflict'
-            ? { _tag: 'Conflicted', message: error.message }
-            : error._tag === 'SourceControlError' && !error.retryable
-              ? { _tag: 'Blocked', message: error.message }
-              : { _tag: 'Failed', message: error.message },
+          error._tag === 'SourceControlError' && error.category === 'conflict_repair_failed'
+            ? { _tag: 'RepairFailed', message: error.message }
+            : error._tag === 'SourceControlError' && error.category === 'rebase_conflict'
+              ? { _tag: 'Conflicted', message: error.message }
+              : error._tag === 'SourceControlError' && !error.retryable
+                ? { _tag: 'Blocked', message: error.message }
+                : { _tag: 'Failed', message: error.message },
         onSuccess: (published): RebaseOutcome =>
           published._tag === 'Published'
             ? { _tag: 'Published', headSha: published.headSha }

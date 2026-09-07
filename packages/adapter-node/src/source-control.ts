@@ -1,3 +1,4 @@
+import { assertNoRebase } from './git-conflict.js'
 import { makePublicationRecovery, repositoryIdentity } from './git-recovery.js'
 import { Effect, Option } from 'effect'
 
@@ -5,6 +6,7 @@ import type { Issue, Workspace } from '@sloppenheimer/core/domain/domain.js'
 import { SourceControlError } from '@sloppenheimer/core/domain/errors.js'
 import type {
   PreparedRepository,
+  ResolvePublicationConflict,
   PublicationOutcome,
   SourceControlPort,
   SourceControlTarget,
@@ -213,8 +215,10 @@ const publishRepository = (
   settings: GitSourceControlSettings,
   issue: Issue,
   prepared: PreparedRepository,
+  resolveConflict?: ResolvePublicationConflict,
 ): Effect.Effect<PublicationOutcome, SourceControlError> =>
   Effect.gen(function* () {
+    yield* assertNoRebase(settings, prepared)
     const dirty = (yield* status(settings, 'publish', prepared.workspace)).length > 0
     if (dirty) {
       yield* runGit(settings, 'publish', prepared.workspace.path, ['add', '--all'])
@@ -264,7 +268,7 @@ const publishRepository = (
     }
 
     yield* fetchBase(settings, prepared)
-    yield* rebaseOntoBase(settings, prepared)
+    yield* rebaseOntoBase(settings, prepared, resolveConflict)
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
     yield* pushUnderLease(settings, prepared)
     const published: PublicationOutcome = {
@@ -291,8 +295,12 @@ const publishRepository = (
 const rebaseRepository = (
   settings: GitSourceControlSettings,
   prepared: PreparedRepository,
+  resolveConflict?: ResolvePublicationConflict,
 ): Effect.Effect<PublicationOutcome, SourceControlError> =>
   Effect.gen(function* () {
+    if (resolveConflict !== undefined) {
+      yield* assertNoRebase(settings, prepared)
+    }
     const baseSha = yield* fetchBase(settings, prepared)
     const onBase = yield* containedIn(settings, 'publish', prepared.workspace, baseSha, 'HEAD')
     if (onBase) {
@@ -303,7 +311,7 @@ const rebaseRepository = (
       }
       return unchanged
     }
-    yield* rebaseOntoBase(settings, prepared)
+    yield* rebaseOntoBase(settings, prepared, resolveConflict)
     const headSha = yield* revParse(settings, 'publish', prepared.workspace, 'HEAD')
     yield* pushUnderLease(settings, prepared)
     const published: PublicationOutcome = {
@@ -323,6 +331,8 @@ export const makeGitSourceControl = (settings: GitSourceControlSettings): Source
       Effect.map((prepared) => ({ ...prepared, repositoryIdentity: repositoryIdentity(settings) })),
     ),
   inspect: (prepared) => inspectRepository(settings, prepared),
-  publish: (issue, prepared) => publishRepository(settings, issue, prepared),
-  rebase: (_issue, prepared) => rebaseRepository(settings, prepared),
+  publish: (issue, prepared, resolveConflict) =>
+    publishRepository(settings, issue, prepared, resolveConflict),
+  rebase: (_issue, prepared, resolveConflict) =>
+    rebaseRepository(settings, prepared, resolveConflict),
 })

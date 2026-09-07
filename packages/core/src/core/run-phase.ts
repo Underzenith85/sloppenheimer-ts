@@ -11,7 +11,7 @@ export const enterRunPhase = (
   context: Pick<OrchestratorContext, 'state'>,
   issueId: IssueId,
   runId: number,
-  phase: 'Agent' | 'Postflight',
+  phase: 'Agent' | 'Postflight' | 'ConflictRepair',
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const startedAt = yield* currentInstant
@@ -20,14 +20,16 @@ export const enterRunPhase = (
       if (entry?.runId !== runId) {
         return [false, current]
       }
-      if (phase === 'Agent') {
-        return entry.phase._tag !== 'Preparing'
+      if (phase === 'Agent' || phase === 'ConflictRepair') {
+        return entry.phase._tag !== (phase === 'ConflictRepair' ? 'Postflight' : 'Preparing')
           ? [false, current]
           : [
               true,
               Transitions.updateRun(current, issueId, (run) => ({
                 ...run,
                 phase: { _tag: 'Agent', startedAt },
+                lastEventAt: startedAt,
+                turnActive: false,
               })),
             ]
       }

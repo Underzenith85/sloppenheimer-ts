@@ -241,3 +241,9 @@ documents the published shape.
 Real integration uses a unique `real-integration-<pid>-<timestamp>` workspace identifier, performs
 only a scoped GitHub repository read (so there is no remote tracker artifact to delete), and removes
 the disposable local workspace in `finally`.
+
+Publication conflict repair (#319) is covered by `test/publication-conflict.test.ts` (successive
+real-Git conflicts, exact verified/published identity, transport retry, stale lease, failed gate),
+`test/core/live-journal.test.ts` (durable conflict evidence, restart hold, repair budget), and
+`test/orchestrator.test.ts` (same-workspace repair, delivery worker dispatch, agent failure without
+unchanged delivery retries). Automatic host rebases use the same conflict worker capability.

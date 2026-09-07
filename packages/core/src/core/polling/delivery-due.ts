@@ -1,3 +1,4 @@
+import { retainedConflictResolver } from '../retained-conflict-worker.js'
 import { Effect, Option, Queue, Ref } from 'effect'
 
 import { currentInstant } from '../../support/clock.js'
@@ -219,6 +220,7 @@ const runDeliveryAttempt = (
       entry.execution.secretEnvironmentNames,
       publicationEligibility(context.state, entry.issue, entry.execution),
       entry.execution.journal?.publication,
+      retainedConflictResolver(context, entry.issue, entry.execution, entry.prepared),
     )
     const attempted = yield* entry.execution.workspaces
       .superviseCaptured(entry.prepared.workspace, publication)

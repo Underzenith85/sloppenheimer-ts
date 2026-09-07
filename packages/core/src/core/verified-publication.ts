@@ -2,9 +2,16 @@ import { Effect, Option } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import { SourceControlError } from '../domain/errors.js'
-import type { VerificationConfig, CandidateJournal } from '../ports/candidate.js'
+import type {
+  VerificationConfig,
+  CandidateJournal,
+  Candidate,
+  CandidateObservation,
+  CandidateSourceControlPort,
+} from '../ports/candidate.js'
 import type {
   PreparedRepository,
+  ResolvePublicationConflict,
   PublicationOutcome,
   SourceControlPort,
 } from '../ports/source-control.js'
@@ -27,6 +34,7 @@ export const runVerifiedPublication = (
   verification: VerificationConfig,
   secretEnvironmentNames: readonly string[],
   options: Readonly<{
+    resolveConflict?: ResolvePublicationConflict
     journal?: CandidateJournal
     rebaseOnly?: boolean
     beforePublish?: Effect.Effect<void, SourceControlError>
@@ -70,25 +78,66 @@ export const runVerifiedPublication = (
     const aligned =
       observed._tag === 'Published' && !rebaseOnly
         ? checkpoint.value
-        : yield* candidates.align(checkpoint.value)
+        : yield* candidates.align(checkpoint.value, options.resolveConflict)
+    return yield* finishPublication(
+      candidates,
+      aligned,
+      checkpoint.value,
+      observed,
+      verification,
+      secretEnvironmentNames,
+      options,
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new SourceControlError({
+            category: cause.category,
+            message: cause.message,
+            retryable: cause.retryable,
+            worktreePreserved: cause.worktreePreserved,
+            retainedCandidate: {
+              headSha: aligned.headSha,
+              treeSha: aligned.treeSha,
+              commitCreated: aligned.commitCreated,
+            },
+            cause,
+          }),
+      ),
+    )
+  })
+
+const finishPublication = (
+  candidates: CandidateSourceControlPort,
+  aligned: Candidate,
+  checkpoint: Candidate,
+  observed: CandidateObservation,
+  verification: VerificationConfig,
+  secretEnvironmentNames: readonly string[],
+  options: Readonly<{
+    journal?: CandidateJournal
+    rebaseOnly?: boolean
+    beforePublish?: Effect.Effect<void, SourceControlError>
+  }>,
+): Effect.Effect<PublicationOutcome, SourceControlError> =>
+  Effect.gen(function* () {
     yield* options.journal?.aligned(aligned) ?? Effect.void
     const verified = yield* candidates.verify(aligned, verification, secretEnvironmentNames)
     yield* options.journal?.verified(verified) ?? Effect.void
-    if (observed._tag === 'Published' && aligned.headSha === checkpoint.value.headSha) {
+    if (observed._tag === 'Published' && aligned.headSha === checkpoint.headSha) {
       // A remote fact still needs durable settlement. Reverify because checkpoint/alignment
       // invalidated the previous evidence, then record it without another push.
       const published: PublicationOutcome = {
         _tag: 'Published',
-        branchName: prepared.target.branchName,
+        branchName: aligned.prepared.target.branchName,
         headSha: aligned.headSha,
         commitCreated: aligned.commitCreated,
       }
       yield* options.journal?.published(published) ?? Effect.void
-      return rebaseOnly && aligned.headSha === prepared.baselineSha
+      return options.rebaseOnly === true && aligned.headSha === aligned.prepared.baselineSha
         ? {
             _tag: 'NoChanges',
-            branchName: prepared.target.branchName,
-            baselineSha: prepared.baselineSha,
+            branchName: aligned.prepared.target.branchName,
+            baselineSha: aligned.prepared.baselineSha,
           }
         : published
     }

@@ -785,9 +785,9 @@ publication, and was skipped precisely because there was nothing to publish.
   those instances until the attempt settles, as it holds a run's superseded ports and a retained
   delivery's execution: a reload moves the handoff onto the replacements while the attempt is still
   preparing and pushing through what it captured.
-- A rebase the rebase itself refuses (`rebase_conflict`) is `intervention_required`: the provider
-  said the branch was merely behind, so what refused is the one thing the host can do about it, and
-  a repair agent is given no more than a rebase has. The git reader reserves that category for a
+- A rebase content conflict is offered to a bounded publication repair worker under the existing
+  workspace lease. A repair slot is acquired only when a conflict needs file edits; clean rebases
+  still launch no agent. Failed repair or exhausted budgets retain the conflict for intervention. The git reader reserves that category for a
   content conflict git reports as one; a rebase git refused to start or finish -- a stale
   `rebase-merge` directory, a lock, a spawn failure -- keeps the publication category. That and
   every other failure -- the lease, the remote, the workspace -- is recorded on the handoff and
@@ -1252,3 +1252,29 @@ must preserve this local authority; publishing an unauthenticated public reverse
 Run `pnpm check`, then `node --test test/coordinator/executable-smoke.ts` to verify the built second
 executable, its packaged UI, startup failures, signal reload and graceful shutdown. Root tests also
 cover registry rollback, credential rotation, stale-result fencing and browser protections.
+
+## Architecture record: publication conflict repair
+
+Tracked by [#319](https://github.com/Underzenith85/sloppenheimer-ts/issues/319).
+
+- Publication alignment may pause at a content conflict and request file-only agent repair. The
+  host retains the same sequencer, index and worktree, stages resolved files and continues that
+  exact rebase. Later conflicting commits request further bounded repairs; the original commit
+  sequence is never restarted after a resolution. Dependency hooks do not run over conflicted
+  manifests. The final host gate runs after every commit has replayed.
+- A coding run uses its existing worker slot. Automatic rebases and retained deliveries acquire
+  an ordinary worker slot only for conflict resolution, with normal phase, silence supervision,
+  cancellation and workflow reload handling. The parent publication owns the workspace throughout,
+  and waits for the repair worker's finalizers before continuing Git.
+- Every repair records the original candidate, pinned base, partial head, stopped commit and paths
+  in the durable artifact before agent launch. It consumes the existing durable repair budget and
+  original total deadline. Failed agents have category `conflict_repair_failed`; unresolved content
+  remains `rebase_conflict`. Neither is an unchanged publication transport retry.
+- Failed or interrupted repairs preserve the paused sequencer. Ordinary checkpointing refuses it,
+  including explicit delivery resume, rather than staging unresolved files or aborting the repair.
+  Restart preserves the conflict evidence in intervention; it does not infer orphan termination or
+  grant a new coder. Recovery requires reconciliation of the retained host-owned rebase.
+- A completed alignment produces a new exact candidate. Verification and push name that same
+  commit and tree under the original remote lease. A subsequent delivery failure retains this
+  identity explicitly; retry validates it instead of requiring the pre-rebase baseline to remain
+  an ancestor. Ordinary first checkpointing retains its original ancestry protection.
