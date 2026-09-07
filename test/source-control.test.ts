@@ -70,9 +70,10 @@ describe('host Git source control', (): void => {
         { _tag: 'Normal', branchName: 'sloppenheimer/issue-165' },
       )
 
-      expect(yield* sourceControl.inspect(prepared)).toEqual({
+      expect(yield* sourceControl.inspect(prepared)).toMatchObject({
         _tag: 'Clean',
         headSha: prepared.baselineSha,
+        descendsFromBaseline: true,
       })
 
       yield* host(() =>
@@ -81,6 +82,7 @@ describe('host Git source control', (): void => {
 
       expect(yield* sourceControl.inspect(prepared)).toMatchObject({
         _tag: 'Changed',
+        descendsFromBaseline: true,
         dirtyFileCount: 1,
         committedAhead: false,
       })

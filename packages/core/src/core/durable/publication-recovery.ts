@@ -28,6 +28,7 @@ const reconciledRecord = (
   observedBase: RemoteObservation,
   stopped: boolean,
   resumable: Option.Option<PreparedRepository>,
+  refusal: string | null,
   now: number,
 ): DurableWorkflow => {
   if (current.revision !== record.revision) {
@@ -65,7 +66,8 @@ const reconciledRecord = (
     : published
       ? 'The verified candidate is published. Confirm the previous command stopped before resuming review or reusing its workspace.'
       : stopped
-        ? 'Retained candidate inspection failed or found no unpublished candidate; no recovery mutation was admitted.'
+        ? (refusal ??
+          'Retained candidate inspection found no unpublished candidate; no recovery mutation was admitted.')
         : 'Previous workspace process is not confirmed stopped; no recovery mutation was admitted.'
   return {
     ...current,
@@ -118,8 +120,7 @@ export const reconcilePublication = (
       repository === undefined ||
       recovery === undefined ||
       repository.identity !== recovery.repositoryIdentity ||
-      artifact.verifiedRevision === null ||
-      artifact.verifiedRevision !== repository.treeSha
+      (artifact.verifiedRevision !== null && artifact.verifiedRevision !== repository.treeSha)
     ) {
       return Option.none()
     }
@@ -137,6 +138,7 @@ export const reconcilePublication = (
     const stopped = yield* confirmStopped
     const now = yield* Clock.currentTimeMillis
     let resumable = Option.none<PreparedRepository>()
+    let refusal: string | null = null
     if (
       observed._tag === 'Right' &&
       observedBase._tag === 'Right' &&
@@ -145,29 +147,45 @@ export const reconcilePublication = (
       canInspect(sourceControl) &&
       !Option.contains(observed.right, repository.headSha)
     ) {
-      const prepared: PreparedRepository = {
+      const inspectionPreparation: PreparedRepository = {
         workspace: { path: artifact.workspacePath, key: artifact.workspaceKey },
         target: record.runTarget ?? { _tag: 'Normal', branchName: repository.branchName },
         baseBranch: repository.baseBranch,
         baseSha: observedBase.right.value,
         baselineSha: artifact.baselineSha,
-        retainedCandidate: {
-          headSha: repository.headSha,
-          treeSha: artifact.verifiedRevision,
-          commitCreated: false,
-        },
         // The fresh recovery owns the exact head it just observed, not the lease the legacy
         // publication captured before the host stopped.
         expectedRemoteHead: observed.right,
         ...(repository.identity === undefined ? {} : { repositoryIdentity: repository.identity }),
       }
-      const inspected = yield* Effect.either(sourceControl.inspect(prepared))
-      if (inspected._tag === 'Right' && inspected.right._tag === 'Changed') {
-        resumable = Option.some(prepared)
+      const inspected = yield* Effect.either(sourceControl.inspect(inspectionPreparation))
+      if (inspected._tag === 'Left') {
+        refusal = `Retained candidate inspection failed: ${inspected.left.message}`
+      } else if (inspected.right._tag !== 'Changed') {
+        refusal = 'Retained workspace contains no unpublished candidate.'
+      } else if (inspected.right.dirtyFileCount !== 0) {
+        refusal = 'Retained workspace is dirty; candidate identity cannot be established safely.'
+      } else if (!inspected.right.committedAhead) {
+        refusal = 'Retained workspace head is not ahead of the recorded remote baseline.'
+      } else if (inspected.right.headSha !== repository.headSha) {
+        refusal = 'Retained workspace head does not match the recorded candidate head.'
+      } else if (inspected.right.descendsFromBaseline !== true) {
+        refusal = 'Retained candidate does not descend from its recorded baseline.'
+      } else if (inspected.right.treeSha === undefined) {
+        refusal = 'Retained candidate tree identity could not be established.'
+      } else {
+        resumable = Option.some({
+          ...inspectionPreparation,
+          retainedCandidate: {
+            headSha: inspected.right.headSha,
+            treeSha: inspected.right.treeSha,
+            commitCreated: false,
+          },
+        })
       }
     }
     yield* write(issueId, (current) =>
-      reconciledRecord(current, record, observed, observedBase, stopped, resumable, now),
+      reconciledRecord(current, record, observed, observedBase, stopped, resumable, refusal, now),
     )
     return resumable
   })

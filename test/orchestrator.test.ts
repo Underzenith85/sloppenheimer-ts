@@ -10123,7 +10123,7 @@ for (const initiallyPaused of [false, true]) {
 }
 
 it.scoped(
-  're-enrolls a stopped retained verified candidate after restart without another agent',
+  'migrates a stopped legacy candidate without verification evidence after restart and publishes it',
   () =>
     Effect.gen(function* () {
       const workspaceRoot = yield* isolatedWorkspaceRoot('durable-publication-recovery-')
@@ -10159,6 +10159,20 @@ it.scoped(
       const journal = yield* previous.start(issue, target).pipe(Effect.map(Option.getOrThrow))
       yield* journal.prepared(prepared)
       yield* journal.publication.verified(verified)
+      const legacy = (yield* store.list)[0]
+      if (legacy === undefined || legacy.artifact === null) {
+        return yield* Effect.die('legacy fixture must persist an artifact')
+      }
+      yield* store.commit(
+        {
+          ...legacy,
+          revision: legacy.revision + 1,
+          repairAttempts: 3,
+          artifact: { ...legacy.artifact, verifiedRevision: null },
+          status: { _tag: 'Intervention', reason: 'old publication failure' },
+        },
+        legacy.revision,
+      )
 
       const harness = makeHarness(configured, () => [issue])
       let publications = 0
@@ -10181,13 +10195,22 @@ it.scoped(
               Effect.succeed(branchName === 'main' ? Option.some('current-base') : Option.none()),
           },
           prepare: () => Effect.die('recovery uses captured preparation'),
-          inspect: () => Effect.succeed(changedWorktree),
+          inspect: () =>
+            Effect.succeed({
+              _tag: 'Changed',
+              headSha: 'candidate',
+              treeSha: 'tree',
+              descendsFromBaseline: true,
+              dirtyFileCount: 0,
+              committedAhead: true,
+            }),
           publish: () => Effect.die('verified recovery uses candidate publication'),
           rebase: () => Effect.die('recovery must not rebase'),
           candidates: {
-            checkpoint: () => Effect.succeed(Option.some(candidate)),
-            align: () => Effect.succeed(candidate),
-            verify: () => Effect.succeed(verified),
+            checkpoint: (_issue, recovered) =>
+              Effect.succeed(Option.some({ ...candidate, prepared: recovered })),
+            align: (recovered) => Effect.succeed(recovered),
+            verify: (recovered) => Effect.succeed({ ...verified, candidate: recovered }),
             observe: () => Effect.succeed({ _tag: 'Unpublished' }),
             publish: () =>
               Effect.sync(() => {

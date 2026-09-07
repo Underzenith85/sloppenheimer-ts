@@ -191,6 +191,8 @@ describe('live durable journal', () => {
             ...legacy,
             revision: legacy.revision + 1,
             repairAttempts: 3,
+            artifact:
+              legacy.artifact === null ? null : { ...legacy.artifact, verifiedRevision: null },
             status: { _tag: 'Intervention', reason: 'old rebase diagnostic' },
           },
           legacy.revision,
@@ -212,6 +214,8 @@ describe('live durable journal', () => {
               return {
                 _tag: 'Changed',
                 headSha: 'candidate',
+                treeSha: 'tree',
+                descendsFromBaseline: true,
                 dirtyFileCount: 0,
                 committedAhead: true,
               }
@@ -229,6 +233,8 @@ describe('live durable journal', () => {
         expect(inspected).toMatchObject({
           baseSha: 'current-base',
           expectedRemoteHead: Option.some('advanced-head'),
+        })
+        expect(Option.getOrThrow(recovered)).toMatchObject({
           retainedCandidate: { headSha: 'candidate', treeSha: 'tree' },
         })
         expect((yield* restored.snapshot)[0]).toMatchObject({
@@ -408,6 +414,8 @@ it.effect(
           Effect.succeed({
             _tag: 'Changed' as const,
             headSha: 'candidate',
+            treeSha: 'tree',
+            descendsFromBaseline: true,
             dirtyFileCount: 0,
             committedAhead: true,
           }).pipe(Effect.tap(() => Effect.sync(() => expect(captured).toMatchObject(prepared)))),
