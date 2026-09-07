@@ -680,6 +680,21 @@ describe('App Server timeouts and shutdown', (): void => {
     }),
   )
 
+  for (const response of ['error', 'missing', 'malformed', 'null', 'timeout']) {
+    it.live(`completes a turn when optional rate-limit telemetry returns ${response}`, () =>
+      Effect.gen(function* () {
+        const outcome = yield* runScenario(`unavailable-rate-limits-${response}`, {
+          readTimeoutMs: 500,
+        })
+
+        expect(outcome.error).toBeNull()
+        expect(outcome.result).not.toBeNull()
+        expect(outcome.events.some((event) => event.event === 'turn/completed')).toBe(true)
+        expect(outcome.events.every((event) => event.rateLimits === null)).toBe(true)
+      }),
+    )
+  }
+
   it.live('merges sparse rate-limit notifications into the initial full snapshot', () =>
     Effect.gen(function* () {
       const outcome = yield* runScenario('sparse-rate-limit-before-read')
