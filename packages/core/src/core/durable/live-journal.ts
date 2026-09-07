@@ -75,7 +75,14 @@ const readJournal = (
     const record = current.get(id)
     return record?.owner === undefined
       ? Option.none()
-      : Option.some(journalFor(write, id, record.owner))
+      : Option.some(
+          journalFor(
+            write,
+            id,
+            record.owner,
+            Effect.map(Ref.get(records), (rows) => rows.get(id)),
+          ),
+        )
   })
 
 /** Store failures are delivered to the host supervisor, then interrupt the mutation that failed. */

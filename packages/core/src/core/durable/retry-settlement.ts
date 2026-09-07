@@ -30,6 +30,7 @@ export const settleStoppedRun = (
       (observedHeadSha !== null &&
         artifact !== null &&
         observedHeadSha === artifact.baselineSha &&
+        artifact.publicationConflict === undefined &&
         artifact.verifiedRevision === null &&
         artifact.publishedHead === null))
   return {

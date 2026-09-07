@@ -19,7 +19,11 @@ import { runVerifiedPublication } from './verified-publication.js'
 
 import type { Issue } from '../domain/domain.js'
 import type { SourceControlError } from '../domain/errors.js'
-import type { PreparedRepository, SourceControlPort } from '../ports/index.js'
+import type {
+  PreparedRepository,
+  SourceControlPort,
+  ResolvePublicationConflict,
+} from '../ports/source-control.js'
 import { asSettled } from '../support/settled.js'
 import type { ExecutionSnapshot } from './state.js'
 
@@ -136,6 +140,7 @@ export const runPostflight = (
   secretEnvironmentNames: readonly string[] = [],
   beforePublish: Effect.Effect<void, SourceControlError> = Effect.void,
   journal?: CandidateJournal,
+  resolveConflict?: ResolvePublicationConflict,
 ): Effect.Effect<PostflightOutcome> =>
   Effect.gen(function* () {
     const branchName = prepared.target.branchName
@@ -155,14 +160,18 @@ export const runPostflight = (
     const changedFileCount = inspected.value.dirtyFileCount
     const published = yield* (
       verification === undefined
-        ? sourceControl.publish(issue, prepared)
+        ? sourceControl.publish(issue, prepared, resolveConflict)
         : runVerifiedPublication(
             sourceControl,
             issue,
             prepared,
             verification,
             secretEnvironmentNames,
-            { beforePublish, ...(journal === undefined ? {} : { journal }) },
+            {
+              beforePublish,
+              ...(journal === undefined ? {} : { journal }),
+              ...(resolveConflict === undefined ? {} : { resolveConflict }),
+            },
           )
     ).pipe(asSettled)
     if (published._tag === 'Failed') {
@@ -171,7 +180,10 @@ export const runPostflight = (
         branchName,
         changedFileCount,
         failure: failureOf(published.error),
-        prepared,
+        prepared:
+          published.error.retainedCandidate === undefined
+            ? prepared
+            : { ...prepared, retainedCandidate: published.error.retainedCandidate },
       }
     }
     // A publication that answers `NoChanges` after an inspection that found work is reporting the

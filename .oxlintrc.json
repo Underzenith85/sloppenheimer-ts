@@ -81,7 +81,7 @@
       }
     },
     {
-      "files": ["src/**", "packages/adapter-*/src/**"],
+      "files": ["src/**", "packages/adapter-*/src/**", "packages/coordinator/src/**"],
       "rules": {
         "no-restricted-imports": [
           "error",
@@ -132,6 +132,7 @@
         "packages/adapter-node/src/**",
         "packages/core/src/**",
         "packages/coordinator-ui/src/**",
+        "packages/coordinator/src/**",
         "src/**"
       ],
       "rules": {

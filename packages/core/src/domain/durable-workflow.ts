@@ -58,6 +58,16 @@ export const Artifact = Schema.Struct({
     }),
     { exact: true },
   ),
+  publicationConflict: Schema.optionalWith(
+    Schema.Struct({
+      originalHeadSha: Schema.NonEmptyString,
+      baseSha: Schema.NonEmptyString,
+      headSha: Schema.NonEmptyString,
+      stoppedCommitSha: Schema.NonEmptyString,
+      paths: Schema.Array(Schema.String),
+    }),
+    { exact: true },
+  ),
   repository: Schema.optionalWith(
     Schema.Struct({
       identity: Schema.optionalWith(Schema.NonEmptyString, { exact: true }),

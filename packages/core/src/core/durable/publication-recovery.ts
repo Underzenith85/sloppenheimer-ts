@@ -58,6 +58,11 @@ export const reconcilePublication = (
         baseBranch: repository.baseBranch,
         baseSha: repository.baseSha,
         baselineSha: artifact.baselineSha,
+        retainedCandidate: {
+          headSha: repository.headSha,
+          treeSha: artifact.verifiedRevision,
+          commitCreated: false,
+        },
         expectedRemoteHead: Option.fromNullable(artifact.expectedRemoteHead),
         ...(repository.identity === undefined ? {} : { repositoryIdentity: repository.identity }),
       }

@@ -60,6 +60,75 @@ const memoryStore = Effect.gen(function* () {
 })
 
 describe('live durable journal', () => {
+  it.effect(
+    'persists conflict identity and bounds repairs across restart without new coding admission',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* memoryStore
+        const host = yield* makeDurableHost(store)
+        const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+        yield* journal.prepared(prepared)
+        yield* journal.publication.checkpointed(candidate)
+        const conflict = {
+          originalHeadSha: 'candidate',
+          baseSha: 'new-base',
+          headSha: 'partial',
+          stoppedCommitSha: 'early-commit',
+          paths: ['README.md'],
+        }
+        const repairing = journal.publication.repairing
+        expect(repairing).toBeDefined()
+        if (repairing === undefined) {
+          return
+        }
+        yield* repairing(conflict)
+        expect((yield* store.list)[0]).toMatchObject({
+          repairAttempts: 1,
+          codingAttempts: 1,
+          artifact: { publicationConflict: conflict, verifiedRevision: null },
+          status: { _tag: 'Executing', operation: { kind: 'repair' } },
+        })
+        const restored = yield* makeDurableHost(store)
+        expect((yield* restored.snapshot)[0]).toMatchObject({
+          repairAttempts: 1,
+          artifact: { publicationConflict: conflict },
+          status: { _tag: 'Intervention' },
+        })
+        expect(Option.isNone(yield* restored.start(issue, target))).toBe(true)
+      }),
+  )
+
+  it.effect('holds an exhausted conflict repair budget before another agent starts', () =>
+    Effect.gen(function* () {
+      const store = yield* memoryStore
+      const host = yield* makeDurableHost(store)
+      const journal = yield* host.start(issue, target).pipe(Effect.map(Option.getOrThrow))
+      yield* journal.prepared(prepared)
+      const repairing = journal.publication.repairing
+      if (repairing === undefined) {
+        return
+      }
+      const conflict = {
+        originalHeadSha: 'candidate',
+        baseSha: 'new-base',
+        headSha: 'partial',
+        stoppedCommitSha: 'early-commit',
+        paths: ['README.md'],
+      }
+      yield* repairing(conflict)
+      yield* repairing(conflict)
+      yield* repairing(conflict)
+      expect(yield* Effect.flip(repairing(conflict))).toMatchObject({
+        category: 'rebase_conflict',
+        retryable: false,
+      })
+      expect((yield* host.snapshot)[0]).toMatchObject({
+        repairAttempts: 3,
+        status: { _tag: 'Intervention' },
+      })
+    }),
+  )
+
   it.effect('commits admission before returning a run and refuses duplicate dispatch', () =>
     Effect.gen(function* () {
       const store = yield* memoryStore
@@ -268,13 +337,16 @@ it.effect(
             headSha: 'candidate',
             dirtyFileCount: 0,
             committedAhead: true,
-          }).pipe(Effect.tap(() => Effect.sync(() => expect(captured).toEqual(prepared)))),
+          }).pipe(Effect.tap(() => Effect.sync(() => expect(captured).toMatchObject(prepared)))),
         publish: () => Effect.die('inspection must precede a later publication command'),
         rebase: () => Effect.die('recovery must not rebase during inspection'),
       }
       expect(Option.isNone(yield* host.reconcilePublication(issue.id, source))).toBe(true)
       const resumed = yield* host.reconcilePublication(issue.id, source, Effect.succeed(true))
-      expect(Option.getOrThrow(resumed)).toEqual(prepared)
+      expect(Option.getOrThrow(resumed)).toEqual({
+        ...prepared,
+        retainedCandidate: { headSha: 'candidate', treeSha: 'tree', commitCreated: false },
+      })
       expect((yield* host.snapshot)[0]?.status).toMatchObject({ _tag: 'Intervention' })
     }),
 )

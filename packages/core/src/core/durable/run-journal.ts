@@ -1,3 +1,4 @@
+import { beginConflictRepair } from './conflict-repair.js'
 import { settleStoppedRun } from './retry-settlement.js'
 import { settleRun } from './settlement.js'
 import { Clock, Effect, Option } from 'effect'
@@ -55,7 +56,12 @@ export type Writer = (
   requireActive?: boolean,
 ) => Effect.Effect<void>
 
-export const journalFor = (write: Writer, issueId: string, owner: string): RunJournal => {
+export const journalFor = (
+  write: Writer,
+  issueId: string,
+  owner: string,
+  read: Effect.Effect<DurableWorkflow | undefined>,
+): RunJournal => {
   const owned = (update: (current: DurableWorkflow) => DurableWorkflow): Effect.Effect<void> =>
     write(issueId, update, owner)
   const phase = (
@@ -94,6 +100,15 @@ export const journalFor = (write: Writer, issueId: string, owner: string): RunJo
   return {
     prepared: (prepared) => phase('implement', preparedArtifact(prepared)),
     publication: {
+      conflicted: (conflict) =>
+        owned((current) => ({
+          ...current,
+          artifact:
+            current.artifact === null
+              ? null
+              : { ...current.artifact, verifiedRevision: null, publicationConflict: conflict },
+        })),
+      repairing: (conflict) => beginConflictRepair(write, read, issueId, owner, conflict),
       checkpointing: phase('inspect'),
       checkpointed: (candidate) => phase('inspect', candidateArtifact(candidate)),
       aligned: (candidate) => phase('verify', candidateArtifact(candidate)),

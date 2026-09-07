@@ -2,7 +2,12 @@ import type { Effect, Option } from 'effect'
 
 import type { Issue } from '../domain/domain.js'
 import type { SourceControlError } from '../domain/errors.js'
-import type { PreparedRepository, PublicationOutcome } from './source-control.js'
+import type {
+  PreparedRepository,
+  PublicationOutcome,
+  PublicationConflict,
+  ResolvePublicationConflict,
+} from './source-control.js'
 
 export type VerificationConfig = Readonly<{
   command: string
@@ -32,14 +37,17 @@ export type CandidateObservation =
   | Readonly<{ _tag: 'Unpublished' }>
   | Readonly<{ _tag: 'Diverged'; remoteHead: string | null }>
 
-/** Each operation is independently supervisable and never launches a coding agent. */
+/** Operations are independently supervised; alignment may request file repair through its caller. */
 export type CandidateSourceControlPort = Readonly<{
   checkpoint: (
     issue: Issue,
     prepared: PreparedRepository,
     includeBaseline?: boolean,
   ) => Effect.Effect<Option.Option<Candidate>, SourceControlError>
-  align: (candidate: Candidate) => Effect.Effect<Candidate, SourceControlError>
+  align: (
+    candidate: Candidate,
+    resolveConflict?: ResolvePublicationConflict,
+  ) => Effect.Effect<Candidate, SourceControlError>
   verify: (
     candidate: Candidate,
     configuration: VerificationConfig,
@@ -51,6 +59,8 @@ export type CandidateSourceControlPort = Readonly<{
 
 /** Persistence barriers used by the live scheduler; no remote mutation precedes its barrier. */
 export type CandidateJournal = Readonly<{
+  conflicted?: (conflict: PublicationConflict) => Effect.Effect<void>
+  repairing?: (conflict: PublicationConflict) => Effect.Effect<void, SourceControlError>
   checkpointing: Effect.Effect<void>
   checkpointed: (candidate: Candidate) => Effect.Effect<void>
   aligned: (candidate: Candidate) => Effect.Effect<void>

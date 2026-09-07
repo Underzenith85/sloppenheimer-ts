@@ -29,6 +29,7 @@ export type RebaseOutcome =
   /** The branch already sat on the base as the remote has it now; the observation was stale. */
   | Readonly<{ _tag: 'NoChanges' }>
   | Readonly<{ _tag: 'Conflicted'; message: string }>
+  | Readonly<{ _tag: 'RepairFailed'; message: string }>
   | Readonly<{ _tag: 'Blocked'; message: string }>
   | Readonly<{ _tag: 'Failed'; message: string }>
 
@@ -67,9 +68,9 @@ export const inFlightRebaseExecutions = (
  * A published rebase keeps its identity, with the head it pushed, until the provider reports that
  * head: the next observation may still carry the head the rebase replaced, and acting on that
  * would rebase the branch a second time against a lease the push already moved. Every other
- * outcome ends the identity. A conflict needs a human -- the provider said the branch was merely
- * behind, so what refused is the rebase itself, and a repair agent is given no more than a rebase
- * has. Anything else is retried from wherever the next observation finds the branch.
+ * outcome ends the identity. A conflict that reached settlement was not resolved by the bounded publication repair
+ * capability. It retains the paused workspace for intervention. Agent repair failure is reported
+ * separately from a host alignment failure. Anything else is retried from wherever the next observation finds the branch.
  */
 export const rebaseSettled = (handoff: HandoffEntry, outcome: RebaseOutcome): HandoffEntry => {
   const released: HandoffEntry = { ...handoff, rebase: Option.none() }
@@ -100,6 +101,13 @@ export const rebaseSettled = (handoff: HandoffEntry, outcome: RebaseOutcome): Ha
         ...released,
         state: 'intervention_required',
         reason: `The pull request branch is behind protected main and could not be rebased onto it: ${outcome.message}`,
+      }
+    }
+    case 'RepairFailed': {
+      return {
+        ...released,
+        state: 'intervention_required',
+        reason: `Publication conflict repair failed; conflicted workspace retained: ${outcome.message}`,
       }
     }
     case 'Blocked': {
