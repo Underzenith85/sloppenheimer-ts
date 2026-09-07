@@ -5,6 +5,7 @@ import { identifierIssueNumber } from '../policy.js'
 import type { HandoffEntry } from '../state.js'
 import type { OrchestratorContext, OrchestratorEvent } from '../runtime.js'
 import * as Transitions from '../transitions.js'
+import { recoverPublicationIntervention } from '../runtime/publication-recovery.js'
 
 const matchesIssueNumber = (identifier: string, issueNumber: number): boolean =>
   Option.contains(identifierIssueNumber(identifier), issueNumber)
@@ -36,6 +37,46 @@ export const onResumeIntervention = (
         status: 'resumed',
         kind: 'delivery',
         reason: 'Retained publication recovery was resumed.',
+      })
+      return
+    }
+
+    const durable = (yield* context.durable.snapshot).find(
+      (record) =>
+        matchesIssueNumber(record.identifier, event.issueNumber) &&
+        record.intent === 'active' &&
+        record.status._tag === 'Intervention',
+    )
+    if (durable !== undefined) {
+      const current = yield* Ref.get(context.state)
+      const sourceControl = current.lastKnownGood.sourceControl
+      if (sourceControl !== null) {
+        const recovered = yield* recoverPublicationIntervention(
+          context,
+          durable.issueId,
+          sourceControl,
+        )
+        if (recovered) {
+          yield* Deferred.succeed(event.reply, {
+            status: 'resumed',
+            kind: 'delivery',
+            reason: 'Legacy publication conflict was reconciled and scheduled for recovery.',
+          })
+          return
+        }
+      }
+      const reconciled = (yield* context.durable.snapshot).find(
+        (record) => record.issueId === durable.issueId,
+      )
+      const retired = reconciled?.intent !== 'active'
+      yield* Deferred.succeed(event.reply, {
+        status: retired ? 'reconciled' : 'refused',
+        kind: 'delivery',
+        reason: retired
+          ? 'The terminal legacy intervention was retired through retained-workspace cleanup.'
+          : reconciled?.status._tag === 'Intervention'
+            ? reconciled.status.reason
+            : 'Legacy publication recovery prerequisites were not satisfied.',
       })
       return
     }
