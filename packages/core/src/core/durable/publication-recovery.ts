@@ -57,18 +57,24 @@ const reconciledRecord = (
   if (artifact === null || artifact === undefined || repository === undefined) {
     return current
   }
-  const published = Option.contains(observed.right, repository.headSha)
+  const remoteMatchesCandidate = Option.contains(observed.right, repository.headSha)
+  const published =
+    artifact.verifiedRevision !== null &&
+    artifact.verifiedRevision === repository.treeSha &&
+    remoteMatchesCandidate
   const migrated = Option.isSome(resumable) && artifact.publicationConflict === undefined
   const reason = Option.isSome(resumable)
     ? migrated
       ? 'Legacy publication conflict reconciled from fresh candidate, base, and remote-head observations.'
       : 'Previous processes stopped and retained candidate inspection found unpublished work.'
-    : published
-      ? 'The verified candidate is published. Confirm the previous command stopped before resuming review or reusing its workspace.'
-      : stopped
-        ? (refusal ??
-          'Retained candidate inspection found no unpublished candidate; no recovery mutation was admitted.')
-        : 'Previous workspace process is not confirmed stopped; no recovery mutation was admitted.'
+    : remoteMatchesCandidate && artifact.verifiedRevision === null
+      ? 'Remote head matches the retained candidate, but verification evidence is missing; publication cannot be recorded.'
+      : published
+        ? 'The verified candidate is published. Confirm the previous command stopped before resuming review or reusing its workspace.'
+        : stopped
+          ? (refusal ??
+            'Retained candidate inspection found no unpublished candidate; no recovery mutation was admitted.')
+          : 'Previous workspace process is not confirmed stopped; no recovery mutation was admitted.'
   return {
     ...current,
     ...(migrated

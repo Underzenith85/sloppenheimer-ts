@@ -398,6 +398,42 @@ it.effect('records a matching remote fact while keeping paused work quarantined'
   }),
 )
 
+it.effect('does not record a remote-matching candidate as published without verification', () =>
+  Effect.gen(function* () {
+    const { store } = yield* pendingPublication
+    const legacy = (yield* store.list)[0]
+    if (legacy === undefined || legacy.artifact === null) {
+      return yield* Effect.die('fixture must persist an artifact')
+    }
+    yield* store.commit(
+      {
+        ...legacy,
+        revision: legacy.revision + 1,
+        artifact: { ...legacy.artifact, verifiedRevision: null },
+        status: { _tag: 'Intervention', reason: 'old publication failure' },
+      },
+      legacy.revision,
+    )
+    const host = yield* makeDurableHost(store)
+    yield* host.reconcilePublication(
+      issue.id,
+      {
+        repositoryIdentity: 'repository',
+        observeHead: () => Effect.succeed(Option.some('candidate')),
+      },
+      Effect.succeed(true),
+    )
+    const record = (yield* host.snapshot)[0]
+    expect(record?.artifact?.remoteObservation?.headSha).toBe('candidate')
+    expect(record?.artifact?.publishedHead).toBeNull()
+    expect(record?.status).toEqual({
+      _tag: 'Intervention',
+      reason:
+        'Remote head matches the retained candidate, but verification evidence is missing; publication cannot be recorded.',
+    })
+  }),
+)
+
 it.effect(
   'returns a retained candidate only after termination and local inspection are proven',
   () =>
