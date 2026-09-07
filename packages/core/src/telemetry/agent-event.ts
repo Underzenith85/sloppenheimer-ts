@@ -304,7 +304,10 @@ export const recordAgentEvent = (
     threadId: event.threadId ?? record.threadId,
     ...foldTurnIdentity(record, event),
     tokens: event.usage === null ? record.tokens : Object.freeze({ ...event.usage }),
-    rateLimits: event.rateLimits === null ? record.rateLimits : decodeRateLimits(event.rateLimits),
+    rateLimits:
+      event.rateLimits === null
+        ? record.rateLimits
+        : decodeRateLimits(event.rateLimits, event.timestamp),
   }
   // Every event, not only a session-scoped one: whichever event first reports a turn's identity
   // is the one the retained history has to follow, or the summaries drift from `identity`.

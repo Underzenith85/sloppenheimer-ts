@@ -21,6 +21,7 @@ import { makeGitHubCodeReview } from '@sloppenheimer/adapter-github/code-review.
 import { makeGitHubTracker } from '@sloppenheimer/adapter-github/issues.js'
 import { githubRateLimitDelay } from '@sloppenheimer/adapter-github/observability.js'
 import {
+  githubOperationalLimits,
   githubRateLimitDefaults,
   githubRateLimitFor,
   makeGitHubRateLimit,
@@ -61,6 +62,30 @@ const stubClient = (
   )
 
 describe('GitHub transport pacing', (): void => {
+  it.effect('publishes queued local pacing without calling it a provider rejection', () =>
+    Effect.gen(function* () {
+      const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, strictSettings)
+      const held = yield* Deferred.make<void>()
+      const holder = yield* Effect.fork(limiter.limit(Deferred.await(held)))
+      yield* TestClock.adjust(Duration.zero)
+      const waiting = yield* Effect.fork(limiter.limit(Effect.void))
+      yield* TestClock.adjust(Duration.millis(250))
+
+      expect(yield* limiter.status).toMatchObject({
+        source: 'github_local_pacing',
+        providerScope: 'example/sloppenheimer',
+        queuedRequests: 1,
+        oldestWaitMs: 250,
+        effect: 'delaying',
+      })
+
+      yield* Deferred.succeed(held, undefined)
+      yield* Fiber.join(holder)
+      yield* TestClock.adjust(Duration.millis(1_000))
+      yield* Fiber.join(waiting)
+      expect(yield* limiter.status).toMatchObject({ queuedRequests: 0, effect: 'idle' })
+    }),
+  )
   it.effect('spends the burst allowance, then admits one request per emission interval', () =>
     Effect.gen(function* () {
       const limiter = makeGitHubRateLimit(yield* Effect.clock, provider, pacedSettings)
@@ -420,6 +445,18 @@ describe('GitHub rate-limit rejection handling', (): void => {
         retryable: true,
         retryAfterMs: 30_000,
       })
+      yield* Effect.map(githubOperationalLimits, (operationalLimits): void =>
+        expect(operationalLimits).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              source: 'github_response',
+              providerScope: 'example/sloppenheimer',
+              status: 429,
+              effect: 'rejected',
+            }),
+          ]),
+        ),
+      )
     }),
   )
 })

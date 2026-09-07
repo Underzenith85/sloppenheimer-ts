@@ -145,7 +145,13 @@ const renderDetailDiagnostics = (): void => {
     'Rate limits',
     detail.rateLimits.length === 0
       ? 'none reported'
-      : detail.rateLimits.map((window) => `${window.name} ${window.usedPercent ?? 0}%`).join(' · '),
+      : detail.rateLimits
+          .map((window) => {
+            const state = window.stale ? 'historical' : 'current'
+            const reset = window.resetAt === null ? '' : ` · resets ${window.resetAt}`
+            return `Agent ${window.name} ${window.usedPercent ?? 0}% · ${state}${reset}`
+          })
+          .join(' · '),
   )
   fact(list, 'Workspace', detail.workspace.pathKey)
   fact(

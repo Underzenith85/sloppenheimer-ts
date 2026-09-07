@@ -50,7 +50,63 @@ export type GitHubRateLimit = Readonly<{
   limit: <Value, Failure, Requirements>(
     request: Effect.Effect<Value, Failure, Requirements>,
   ) => Effect.Effect<Value, Failure, Requirements>
+  status: Effect.Effect<GitHubLocalPacingStatus>
 }>
+
+export type GitHubLocalPacingStatus = Readonly<{
+  source: 'github_local_pacing'
+  providerScope: string
+  observedAt: string
+  queuedRequests: number
+  oldestWaitMs: number
+  maximumExpectedWaitMs: number
+  effect: 'delaying' | 'idle'
+}>
+
+export type GitHubProviderLimitStatus = Readonly<{
+  source: 'github_response'
+  providerScope: string
+  observedAt: string
+  status: number
+  remaining: number | null
+  limit: number | null
+  resetAt: string | null
+  stale: boolean
+  effect: 'rejected' | 'available'
+}>
+
+export type GitHubOperationalLimit = GitHubLocalPacingStatus | GitHubProviderLimitStatus
+
+const activeLimiters = new Set<GitHubRateLimit>()
+const providerLimits = new Map<string, Omit<GitHubProviderLimitStatus, 'stale'>>()
+const providerLimitFreshnessMs = 5 * 60 * 1_000
+
+export const recordGitHubProviderLimit = (
+  status: Omit<GitHubProviderLimitStatus, 'stale'>,
+): void => {
+  providerLimits.set(status.providerScope, Object.freeze(status))
+}
+
+export const githubOperationalLimits: Effect.Effect<readonly GitHubOperationalLimit[]> = Effect.gen(
+  function* () {
+    const now = yield* Clock.currentTimeMillis
+    const local = yield* Effect.all([...activeLimiters].map((limiter) => limiter.status))
+    const remote = [...providerLimits.values()].map((limit) => {
+      const staleAt =
+        limit.resetAt === null
+          ? Date.parse(limit.observedAt) + providerLimitFreshnessMs
+          : Date.parse(limit.resetAt)
+      const stale = staleAt <= now
+      return {
+        ...limit,
+        stale,
+        effect:
+          limit.effect === 'rejected' && !stale ? ('rejected' as const) : ('available' as const),
+      }
+    })
+    return Object.freeze([...local, ...remote])
+  },
+)
 
 /**
  * The limiter the transport paces against, read as an optional service exactly as the HTTP client
@@ -75,6 +131,29 @@ type Reservation = Readonly<{
   /** The bucket instant this reservation booked, which is what a surrender gives back. */
   bookedUntil: number
 }>
+
+const localPacingStatus = (
+  clock: Clock.Clock,
+  providerScope: string,
+  queued: Ref.Ref<ReadonlyMap<number, number>>,
+  bookedUntil: Ref.Ref<number>,
+  toleranceMs: number,
+): Effect.Effect<GitHubLocalPacingStatus> =>
+  Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis
+    const waiting = yield* Ref.get(queued)
+    const oldest = Math.min(...waiting.values(), now)
+    const booked = yield* Ref.get(bookedUntil)
+    return Object.freeze({
+      source: 'github_local_pacing' as const,
+      providerScope,
+      observedAt: new Date(now).toISOString(),
+      queuedRequests: waiting.size,
+      oldestWaitMs: waiting.size === 0 ? 0 : Math.max(now - oldest, 0),
+      maximumExpectedWaitMs: waiting.size === 0 ? 0 : Math.max(booked - toleranceMs - now, 0),
+      effect: waiting.size === 0 ? ('idle' as const) : ('delaying' as const),
+    })
+  }).pipe(Effect.withClock(clock))
 
 /**
  * Builds a limiter for one provider generation, against the clock it will book its admissions on.
@@ -108,6 +187,8 @@ export const makeGitHubRateLimit = (
   const providerScope = `${provider.owner}/${provider.repository}`
   const inFlight = Effect.unsafeMakeSemaphore(settings.concurrency)
   const bookedUntil = Ref.unsafeMake(0)
+  const queued = Ref.unsafeMake<ReadonlyMap<number, number>>(new Map())
+  const nextQueueId = Ref.unsafeMake(0)
 
   const reserve: Effect.Effect<Reservation> = Effect.flatMap(
     Clock.currentTimeMillis,
@@ -154,7 +235,7 @@ export const makeGitHubRateLimit = (
       }
     }).pipe(Effect.withClock(clock))
 
-  return {
+  const limiter: GitHubRateLimit = {
     /**
      * The permit is taken before the slot is booked, so that pacing stays adjacent to issuance.
      * The other order lets a request spend its emission slot and then sit on the semaphore behind
@@ -166,10 +247,23 @@ export const makeGitHubRateLimit = (
     limit: <Value, Failure, Requirements>(
       request: Effect.Effect<Value, Failure, Requirements>,
     ): Effect.Effect<Value, Failure, Requirements> =>
-      Effect.flatMap(clock.currentTimeMillis, (queuedAt: number) =>
-        inFlight.withPermits(1)(Effect.zipRight(admit(queuedAt), request)),
-      ),
+      Effect.gen(function* () {
+        const queuedAt = yield* clock.currentTimeMillis
+        const queueId = yield* Ref.modify(nextQueueId, (value) => [value, value + 1])
+        yield* Ref.update(queued, (entries) => new Map(entries).set(queueId, queuedAt))
+        const leaveQueue = Ref.update(queued, (entries) => {
+          const next = new Map(entries)
+          next.delete(queueId)
+          return next
+        })
+        return yield* inFlight.withPermits(1)(
+          admit(queuedAt).pipe(Effect.ensuring(leaveQueue), Effect.zipRight(request)),
+        )
+      }),
+    status: localPacingStatus(clock, providerScope, queued, bookedUntil, toleranceMs),
   }
+  activeLimiters.add(limiter)
+  return limiter
 }
 
 /**
