@@ -31,6 +31,9 @@ export const resumeHandoffIntervention = (state: RuntimeState, id: IssueId): Run
     ...handoff,
     state: 'repair_needed',
     reason: 'Operator requested intervention recovery',
+    // The automatic repair budget remains part of the audit history, but this explicit operator
+    // action authorizes one more attempt against the unchanged head.
+    manualRepairAllowance: true,
   })
 }
 
