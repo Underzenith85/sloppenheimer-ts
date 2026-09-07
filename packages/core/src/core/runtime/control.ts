@@ -26,7 +26,11 @@ export const orchestratorControl = (
   refresh: Effect.raceFirst(requestRefresh(cells), Fiber.join(eventLoopFiber).pipe(Effect.orDie)),
   agentDetail: (identifier) => agentDetail(context, identifier),
   setIssuePaused: (issueNumber, paused) => changeIssueIntent(cells, issueNumber, paused),
-  resumeIntervention: (issueNumber) => resumeIntervention(cells, issueNumber),
+  resumeIntervention: (issueNumber) =>
+    Effect.raceFirst(
+      resumeIntervention(cells, issueNumber),
+      Fiber.join(eventLoopFiber).pipe(Effect.orDie),
+    ),
   awaitTermination: Fiber.join(eventLoopFiber).pipe(
     Effect.zipRight(Effect.dieMessage('orchestrator event loop exited unexpectedly')),
   ),

@@ -57,6 +57,7 @@ export const handoffSnapshots = (state: RuntimeState): readonly HandoffSnapshot[
     reason: handoff.reason,
     repairAttempts: handoff.repairHeadShas.length,
     repairHeadShas: [...handoff.repairHeadShas],
+    ...(handoff.manualRepairAllowance === true ? { manualRepairAllowance: true } : {}),
     repairObservedHeadShas: [...handoff.repairObservedHeadShas],
     repairStartedHeadSha: Option.match(handoff.repair, {
       onNone: () => null,

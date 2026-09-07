@@ -112,6 +112,7 @@ const restoredHandoffEntry = (
     // Legacy snapshots conflated worker retries with repairs. An absent head list migrates to zero
     // verified repairs rather than preserving a contaminated counter.
     repairHeadShas: [...(restored.repairHeadShas ?? [])],
+    ...(restored.manualRepairAllowance === true ? { manualRepairAllowance: true } : {}),
     // A legacy snapshot has no observed set; its post-repair heads plus any in-flight baseline are
     // the most it can honestly contribute.
     repairObservedHeadShas: [

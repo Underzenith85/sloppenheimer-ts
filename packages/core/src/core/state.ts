@@ -306,6 +306,8 @@ export type HandoffEntry = Readonly<{
   reason: string | null
   /** Distinct heads observed after a repair agent finished; its length is the verified repair count. */
   repairHeadShas: readonly string[]
+  /** A one-shot operator retry after the automatic repair budget was exhausted. */
+  manualRepairAllowance?: boolean
   /**
    * Every head this handoff has been observed at, baselines included. Cycle detection reads this
    * rather than repairHeadShas, which counts only post-repair heads and so never holds the head a
