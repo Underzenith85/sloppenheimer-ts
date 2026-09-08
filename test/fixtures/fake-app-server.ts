@@ -613,6 +613,18 @@ const handle = (message: JsonRecord): void => {
       return
     }
     startupPhase = 'thread'
+    if (scenario === 'rate-limits-unsupported') {
+      send({
+        method: 'account/rateLimits/updated',
+        params: { rateLimits: { primary: { usedPercent: 42 } } },
+      })
+      send({ id, error: { code: -32601, message: 'Method not found' } })
+      return
+    }
+    if (scenario === 'rate-limits-empty') {
+      send({ id, result: {} })
+      return
+    }
     if (scenario === 'sparse-rate-limit-before-read') {
       send({
         method: 'account/rateLimits/updated',

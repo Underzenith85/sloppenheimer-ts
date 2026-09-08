@@ -699,6 +699,46 @@ describe('App Server timeouts and shutdown', (): void => {
     }),
   )
 
+  it.live('starts a session when account/rateLimits/read is unimplemented', () =>
+    Effect.gen(function* () {
+      const outcome = yield* runScenario('rate-limits-unsupported')
+
+      expect(outcome.error).toBeNull()
+      expect(outcome.result).toEqual({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
+      expect(outcome.events.some((event) => event.event === 'account/rateLimits/read')).toBe(false)
+      expect(
+        outcome.events.filter(
+          (event) => event.event === 'account/rateLimits/updated' && event.rateLimits !== null,
+        ),
+      ).toEqual([])
+      expect(
+        outcome.events.some(
+          (event) =>
+            event.event === 'malformed' &&
+            event.message !== null &&
+            event.message.includes('account/rateLimits/read failed'),
+        ),
+      ).toBe(true)
+    }),
+  )
+
+  it.live('starts a session when account/rateLimits/read returns no snapshot', () =>
+    Effect.gen(function* () {
+      const outcome = yield* runScenario('rate-limits-empty')
+
+      expect(outcome.error).toBeNull()
+      expect(outcome.result).toEqual({ threadId: 'thread-1', turnId: 'turn-1', turnCount: 1 })
+      expect(outcome.events.some((event) => event.event === 'account/rateLimits/read')).toBe(false)
+      expect(
+        outcome.events.some(
+          (event) =>
+            event.event === 'malformed' &&
+            event.message === 'account/rateLimits/read returned no rate-limit snapshot',
+        ),
+      ).toBe(true)
+    }),
+  )
+
   it.live(
     'terminates the whole App Server process tree on shutdown',
     () =>
